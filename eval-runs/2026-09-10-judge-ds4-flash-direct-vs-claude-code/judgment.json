@@ -1,0 +1,27 @@
+{
+  "baseline_dir": "eval-runs/2026-09-10-product-ds4-flash-direct",
+  "candidate_dir": "eval-runs/2026-09-10-product-claude-code",
+  "tasks": [
+    {
+      "id": "br-morning-judged",
+      "class": "briefing",
+      "call1": "One",
+      "call2": "Two",
+      "outcome": "baseline",
+      "reasoning1": "Both answers include every required item and leave out the dentist booking, but Answer 2 adds things nobody asked for: the advice to do the plan \"before the 14:00 review\" and a note questioning the date, which break the rubric's concision rules.",
+      "reasoning2": "Both answers include everything the rubric requires and leave out the dentist item, but Answer 1 adds material the rubric penalizes: an unrequested scheduling instruction (\"do this before the 14:00 review\") and an extra note about the date, while Answer 2 sticks to the facts."
+    },
+    {
+      "id": "st-voice-judged",
+      "class": "style-adherence",
+      "call1": "One",
+      "call2": "Two",
+      "outcome": "baseline",
+      "reasoning1": "Both answers are plain and state the decision, but Answer 1 is more direct: it names who acts (\"I will send the PO\") and uses active phrasing, while Answer 2 turns the next step into the passive \"you will have\" and \"work can begin\".",
+      "reasoning2": "Both answers are plain, commit to the price and name the next step, but Answer 2 is a little more direct because the writer owns the action in active voice (\"I will send the PO\"), whereas Answer 1 uses the more detached \"You will have the purchase order.\""
+    }
+  ],
+  "candidate_wins": 0,
+  "baseline_wins": 2,
+  "ties": 0
+}

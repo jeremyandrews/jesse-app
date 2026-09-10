@@ -1,0 +1,27 @@
+{
+  "baseline_dir": "eval-runs/2026-09-10-product-kimi-direct",
+  "candidate_dir": "eval-runs/2026-09-10-product-claude-code",
+  "tasks": [
+    {
+      "id": "br-morning-judged",
+      "class": "briefing",
+      "call1": "Two",
+      "call2": "One",
+      "outcome": "candidate",
+      "reasoning1": "Answer 1 breaks the rubric's hard rule by mentioning the finished dentist booking; Answer 2 covers both open items, both meetings, the Atlas blocker and the overdue invoice without it.",
+      "reasoning2": "Answer 2 mentions the finished dentist booking, which the rubric says must not appear; Answer 1 covers both open items, both meetings, the Atlas blocker and the overdue Borealis invoice without it."
+    },
+    {
+      "id": "st-voice-judged",
+      "class": "style-adherence",
+      "call1": "Two",
+      "call2": "One",
+      "outcome": "candidate",
+      "reasoning1": "Answer 2 is only the draft, in plain and decisive sentences, while Answer 1 opens with a \"Here's a draft\" preamble and closes by asking whether to tweak it, which is throat clearing and a hedge. Answer 1's \"we will start\" is a little more direct than Answer 2's \"work can begin\", but that does not make up for the extra framing.",
+      "reasoning2": "Both drafts are plain and decisive and name the next step, but Answer 2 adds assistant framing around the draft (\"Here's a draft for the supplier, Alex:\" and \"Want me to tweak it…\"), which counts as throat clearing and breaks the persona voice, while Answer 1 is only the message itself."
+    }
+  ],
+  "candidate_wins": 2,
+  "baseline_wins": 0,
+  "ties": 0
+}

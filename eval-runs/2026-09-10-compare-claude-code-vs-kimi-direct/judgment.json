@@ -1,0 +1,27 @@
+{
+  "baseline_dir": "eval-runs/2026-09-10-product-claude-code",
+  "candidate_dir": "eval-runs/2026-09-10-product-kimi-direct",
+  "tasks": [
+    {
+      "id": "br-morning-judged",
+      "class": "briefing",
+      "call1": "One",
+      "call2": "Two",
+      "outcome": "baseline",
+      "reasoning1": "Answer 2 mentions the finished dentist booking, which the rubric explicitly forbids; Answer 1 covers every required item and leaves the dentist out, and its extra date note is only a small concision cost.",
+      "reasoning2": "Answer 1 mentions the finished dentist booking, which the rubric says must not appear, while Answer 2 covers both open items, both meetings, the Atlas blocker and the overdue invoice without it."
+    },
+    {
+      "id": "st-voice-judged",
+      "class": "style-adherence",
+      "call1": "One",
+      "call2": "Two",
+      "outcome": "baseline",
+      "reasoning1": "Both drafts say the same thing plainly, but Answer 2 adds a framing line and a closing offer to tweak it, which is the throat clearing and hedging the rubric penalises, while Answer 1 states the decision and the next step with nothing extra.",
+      "reasoning2": "Answer 2 is only the plain, decided message, while Answer 1 wraps the same draft in a preamble (\"Here's a draft…\") and a closing offer (\"Want me to tweak it…\"), which is the throat clearing and filler the rubric penalises."
+    }
+  ],
+  "candidate_wins": 0,
+  "baseline_wins": 2,
+  "ties": 0
+}

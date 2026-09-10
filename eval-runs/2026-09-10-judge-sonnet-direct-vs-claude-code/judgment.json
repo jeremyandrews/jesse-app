@@ -1,0 +1,27 @@
+{
+  "baseline_dir": "eval-runs/2026-09-10-product-sonnet-direct",
+  "candidate_dir": "eval-runs/2026-09-10-product-claude-code",
+  "tasks": [
+    {
+      "id": "br-morning-judged",
+      "class": "briefing",
+      "call1": "Two",
+      "call2": "One",
+      "outcome": "candidate",
+      "reasoning1": "Both answers include every required item, but Answer 1 mentions the finished dentist booking, which the rubric explicitly forbids; Answer 2's extra date note and \"do this before the review\" advice are only minor concision lapses.",
+      "reasoning2": "Both answers include every required item. Answer 2 mentions the finished dentist booking, which the rubric says must not appear, while Answer 1's only extra is a short date note."
+    },
+    {
+      "id": "st-voice-judged",
+      "class": "style-adherence",
+      "call1": "One",
+      "call2": "Two",
+      "outcome": "baseline",
+      "reasoning1": "Both answers accept the price and name the same next step with no filler or salesmanship, but Answer 1 states the decision more plainly (\"works\") and says who acts (\"We will send\"), while Answer 2 softens it (\"is fine with us\") and slips into indirect and passive phrasing (\"You will have\", \"work can begin\").",
+      "reasoning2": "Both answers accept the quote and name the next step, but Answer 2 says it more directly (\"4200 EUR works\", \"We will send the PO... and start\") where Answer 1 is slightly softer (\"is fine with us\") and passive (\"work can begin\")."
+    }
+  ],
+  "candidate_wins": 1,
+  "baseline_wins": 1,
+  "ties": 0
+}

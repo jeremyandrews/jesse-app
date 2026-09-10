@@ -1,0 +1,27 @@
+{
+  "baseline_dir": "eval-runs/2026-09-10-product-claude-code",
+  "candidate_dir": "eval-runs/2026-09-10-product-ds4-flash-direct",
+  "tasks": [
+    {
+      "id": "br-morning-judged",
+      "class": "briefing",
+      "call1": "Two",
+      "call2": "One",
+      "outcome": "candidate",
+      "reasoning1": "Both answers are complete, but Answer 1 adds unrequested content (\"Do this before the 14:00 review\" and the note about the date), which goes against the rubric's concision rule on invented detail, so Answer 2 wins.",
+      "reasoning2": "Both answers cover all the required items and leave out the dentist booking, but Answer 2 adds material that wasn't asked for and may be invented (\"Do this before the 14:00 review\", and the note about the date being out of date), which breaks the rubric's concision rule on invented detail."
+    },
+    {
+      "id": "st-voice-judged",
+      "class": "style-adherence",
+      "call1": "Two",
+      "call2": "One",
+      "outcome": "candidate",
+      "reasoning1": "Both answers are plain and state the decision without hedging, but Answer 2 names who takes the next step (\"I will send the PO\"), which is more direct than Answer 1's \"You will have the purchase order.\"",
+      "reasoning2": "Both answers are plain and free of filler, but Answer 1 is more direct: it says \"I will send the PO\" and names who takes the next step, while Answer 2 uses the more indirect \"You will have\" and \"work can begin\"."
+    }
+  ],
+  "candidate_wins": 2,
+  "baseline_wins": 0,
+  "ties": 0
+}

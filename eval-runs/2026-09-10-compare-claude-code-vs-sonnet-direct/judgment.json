@@ -1,0 +1,27 @@
+{
+  "baseline_dir": "eval-runs/2026-09-10-product-claude-code",
+  "candidate_dir": "eval-runs/2026-09-10-product-sonnet-direct",
+  "tasks": [
+    {
+      "id": "br-morning-judged",
+      "class": "briefing",
+      "call1": "One",
+      "call2": "Two",
+      "outcome": "baseline",
+      "reasoning1": "Both answers include both open items, both meetings, the Atlas blocker and the overdue Borealis invoice, but Answer 2 mentions the finished dentist booking, which the rubric says must not appear; Answer 1's note about the date is extra but not made up.",
+      "reasoning2": "Answer 1 breaks the rubric's explicit rule by including the finished dentist booking, while Answer 2 covers both open items, both meetings, the Atlas blocker and the overdue invoice without mentioning the finished task."
+    },
+    {
+      "id": "st-voice-judged",
+      "class": "style-adherence",
+      "call1": "Two",
+      "call2": "One",
+      "outcome": "candidate",
+      "reasoning1": "Both answers make the same decision and name the same next step, but Answer 2 states them more plainly and actively (\"works\", \"We will send… and start\") where Answer 1 uses softer, more passive wording (\"is fine with us\", \"work can begin\").",
+      "reasoning2": "Answer 1 states the decision and next step more plainly (\"works\", \"We will send… and start\"), while Answer 2 is more passive and slightly hedged (\"can begin\"), which the persona's voice discourages."
+    }
+  ],
+  "candidate_wins": 1,
+  "baseline_wins": 1,
+  "ties": 0
+}

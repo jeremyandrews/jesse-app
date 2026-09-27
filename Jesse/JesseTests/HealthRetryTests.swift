@@ -30,7 +30,7 @@ final class HealthRetryTests: XCTestCase {
                   conversationId: String, voice: Bool,
                   instructions: String?, floorOverride: String?,
                   attachments: [JesseAttachment], requestId: UUID,
-                  model: String?, effort: String?) async throws -> JesseSendResult {
+                  model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
             sendCalls += 1
             return .running(jobId: "job-sentinel", conversationId: nil)
         }

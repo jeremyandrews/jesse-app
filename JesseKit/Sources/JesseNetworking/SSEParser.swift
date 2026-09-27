@@ -56,7 +56,14 @@ public struct SSEParser: Sendable {
     public static func decodeStreamFrame(event: String, data: String) -> JesseStreamEvent? {
         let obj = try? JSONDecoder().decode(JesseStreamFrameData.self, from: Data(data.utf8))
         switch event {
-        case "reset": return .reset(obj?.text ?? "")
+        case "reset":
+            // A newer bridge names where the narration ends once there is some; the plain `text`
+            // is then the whole buffer, for an older app. Nothing narrated: the plain reset.
+            if let narration = obj?.narration, !narration.isEmpty {
+                return .resetSplit(narration: narration, answer: obj?.answer ?? "")
+            }
+            return .reset(obj?.text ?? "")
+        case "narration": return .narration(obj?.text ?? "")
         case "delta": return .delta(obj?.text ?? "")
         case "activity":
             return .activity(ToolActivity(name: obj?.name ?? "", refused: obj?.refused ?? false))
@@ -66,7 +73,8 @@ public struct SSEParser: Sendable {
             return .done(JesseReply(text: obj?.response ?? "", sessionId: obj?.sessionId,
                                     directives: obj?.directives, provenance: obj?.provenance,
                                     artifacts: obj?.artifacts ?? [],
-                                    lastReplyMs: obj?.lastReplyMs ?? 0))
+                                    lastReplyMs: obj?.lastReplyMs ?? 0,
+                                    narration: obj?.narration))
         case "error": return .failed(obj?.error ?? "Jesse couldn't complete that.")
         case "cancelled": return .cancelled
         default: return nil

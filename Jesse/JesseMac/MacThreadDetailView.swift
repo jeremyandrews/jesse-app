@@ -18,6 +18,10 @@ struct MacThreadDetailView: View {
 
     @Bindable var thread: JesseThread
 
+    // Which folds (Prompt and Thinking rows) are open, by turn id. View state on purpose: it
+    // lasts while this conversation is open and is gone when it is reopened. Mirrors iOS.
+    @State private var openFolds: Set<UUID> = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft: String = ""
     @State private var mode: JesseMode = .ask
 
@@ -207,9 +211,12 @@ struct MacThreadDetailView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(thread.orderedTurns) { turn in
-                        MacTurnBubble(turn: turn)
-                            .id(turn.id)
+                    // The transcript as it renders, grouped by JesseKit's `TranscriptItem` exactly as
+                    // the phone groups it: an untyped prompt folds under a Prompt row, narration
+                    // into a Thinking row above its answer.
+                    ForEach(TranscriptItem.items(thread.orderedTurns)) { item in
+                        transcriptRow(item)
+                            .id(item.id)
                     }
                     // Delivery caption under the last user bubble, the Mac's counterpart to the
                     // phone's: "Sending…" is the pre-ACK window, "Received" means the bridge has
@@ -220,7 +227,9 @@ struct MacThreadDetailView: View {
                     }
                     if running {
                         MacStreamingBubble(text: coordinator.streamingText(for: thread.id),
-                                           activity: coordinator.activity(for: thread.id))
+                                           thinking: coordinator.thinkingText(for: thread.id),
+                                           activity: coordinator.activity(for: thread.id),
+                                           thinkingExpanded: fold(thread.id))
                             .id(Self.streamAnchor)
                     }
                     Color.clear.frame(height: 1).id(Self.bottomAnchor)
@@ -232,6 +241,36 @@ struct MacThreadDetailView: View {
             .onChange(of: coordinator.streamingText(for: thread.id)) { scrollToBottom(proxy) }
             .onAppear { scrollToBottom(proxy) }
         }
+    }
+
+    /// One rendered transcript row.
+    @ViewBuilder
+    private func transcriptRow(_ item: TranscriptItem) -> some View {
+        switch item {
+        case .user(let turn):
+            MacTurnBubble(turn: turn)
+        case .prompt(let turn, let hint):
+            MacPromptFold(turn: turn, hint: hint, isExpanded: fold(turn.id))
+        case .reply(let answer, let thinking, let id):
+            VStack(alignment: .leading, spacing: 6) {
+                if let thinking {
+                    MacThinkingFold(text: thinking, isLive: false, isExpanded: fold(id))
+                }
+                if let answer { MacTurnBubble(turn: answer) }
+            }
+        }
+    }
+
+    /// Whether one fold is open, as a binding its row toggles: the system default animation,
+    /// none under Reduce Motion.
+    private func fold(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { openFolds.contains(id) },
+            set: { open in
+                withAnimation(reduceMotion ? nil : .default) {
+                    if open { openFolds.insert(id) } else { openFolds.remove(id) }
+                }
+            })
     }
 
     private static let bottomAnchor = "bottom"
@@ -715,21 +754,139 @@ struct MacTurnBubble: View {
     }
 }
 
-/// The in-flight assistant reply while a turn streams.
+/// A user turn the owner did not type, folded: one compact trailing row where the bubble
+/// would be (document symbol, "Prompt", what sent it, chevron); expanded, the full prompt as a
+/// selectable bubble. Mirrors the iOS `PromptFoldView`.
+struct MacPromptFold: View {
+    let turn: Turn
+    let hint: String
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: 60)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button { isExpanded.toggle() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: FoldCopy.promptSymbol)
+                        Text(FoldCopy.promptTitle).fontWeight(.semibold)
+                        Text(hint).foregroundStyle(.secondary).lineLimit(1)
+                        Image(systemName: FoldCopy.chevron(expanded: isExpanded))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.tint.opacity(0.15), in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(FoldCopy.promptAccessibilityLabel(hint: hint))
+                .accessibilityValue(FoldCopy.accessibilityValue(expanded: isExpanded))
+                .accessibilityHint(FoldCopy.promptAccessibilityHint(expanded: isExpanded))
+                .accessibilityAddTraits(.isButton)
+                if isExpanded {
+                    // The WHOLE prompt, context included.
+                    Text(turn.text)
+                        .textSelection(.enabled)
+                        .padding(10)
+                        .background(.tint.opacity(0.85), in: .rect(cornerRadius: 12))
+                        .foregroundStyle(.white)
+                        .transition(.opacity)
+                }
+            }
+        }
+    }
+}
+
+/// The model's working narration, folded above its answer: a small, dim, leading line with its
+/// own symbol and no bubble, so it reads as metadata rather than content; expanded, secondary
+/// text set off by a thin leading rule and capped in height. Mirrors the iOS `ThinkingFold`.
+struct MacThinkingFold: View {
+    let text: String
+    let isLive: Bool
+    @Binding var isExpanded: Bool
+    /// How far in the row sits: under a reply's text, past the Jesse glyph, in the transcript;
+    /// zero inside the streaming bubble, which already sits past it.
+    var indent: CGFloat = 26
+
+    static let expandedMaxHeight: CGFloat = 260
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { isExpanded.toggle() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: FoldCopy.thinkingSymbol)
+                    Text(isLive ? FoldCopy.thinkingLiveTitle : FoldCopy.thinkingTitle)
+                    Image(systemName: FoldCopy.chevron(expanded: isExpanded))
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(FoldCopy.thinkingAccessibilityLabel)
+            .accessibilityValue(FoldCopy.accessibilityValue(expanded: isExpanded))
+            .accessibilityHint(FoldCopy.thinkingAccessibilityHint(expanded: isExpanded))
+            .accessibilityAddTraits(.isButton)
+            if isExpanded {
+                ViewThatFits(in: .vertical) {
+                    narration
+                    ScrollView { narration }
+                }
+                .frame(maxHeight: Self.expandedMaxHeight)
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(.tertiary).frame(width: 2)
+                }
+                .padding(.bottom, 4)
+                .transition(.opacity)
+            }
+        }
+        .padding(.leading, indent)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var narration: some View {
+        Text((try? AttributedString(markdown: text, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text))
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The in-flight assistant reply while a turn streams: the live narration folded into a
+/// Thinking row in its "Thinking…" state, then the answer as it arrives. Never the narration
+/// as if it were the answer.
 struct MacStreamingBubble: View {
     let text: String
+    /// The live narration (`LiveReply`), empty until the turn has said something on its way to
+    /// a tool call.
+    var thinking: String = ""
     /// Already a human line with its own ellipsis (`ToolActivity.displayLabel`), so
     /// nothing here appends punctuation to it.
     let activity: String
+    var thinkingExpanded: Binding<Bool> = .constant(false)
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "sparkle").font(.callout).foregroundStyle(.tint).padding(.top, 2)
             VStack(alignment: .leading, spacing: 6) {
+                if !thinking.isEmpty {
+                    MacThinkingFold(text: thinking, isLive: true, isExpanded: thinkingExpanded,
+                                    indent: 0)
+                }
                 if text.isEmpty {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(activity.isEmpty ? "Thinking…" : activity)
+                        // With a live Thinking row above, this line must not say it a second time.
+                        Text(activity.isEmpty ? (thinking.isEmpty ? "Thinking…" : "Working…") : activity)
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } else {

@@ -383,7 +383,7 @@ private final class MacLivenessFakeClient: BridgeClientProtocol, @unchecked Send
                           conversationId: String, voice: Bool, instructions: String?,
                           floorOverride: String?, attachments: [JesseRequest.Attachment],
                           requestId: String, model: String?,
-                          effort: String?) async throws -> JesseSendResult {
+                          effort: String?, sentFor: String?) async throws -> JesseSendResult {
         .running(jobId: jobId, conversationId: conversationId)
     }
     nonisolated func sendPrepared(_ request: JesseRequest) async throws -> JesseSendResult {

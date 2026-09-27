@@ -107,8 +107,9 @@ final class CoordinatorTellSender: IntentTellSending {
             // fires BEFORE the turn's answer — which is the point. Waiting for the reply
             // would put minutes between a day's meals; waiting for the ACK puts a round
             // trip between them, which is exactly enough to keep them in order.
-            coordinator.send(thread: thread, text: text, voice: false,
-                             context: modelContext) { accepted in
+            // A turn the phone fired by itself was composed, not typed; a held quick log was typed.
+            coordinator.send(thread: thread, text: text, voice: false, context: modelContext,
+                             sentFor: origin == .automatic ? PromptSender.automatic : nil) { accepted in
                 continuation.resume(returning: accepted)
             }
         }

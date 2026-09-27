@@ -28,10 +28,15 @@ import JesseVault
 public struct TodayTurn: Equatable, Sendable {
     public let mode: JesseMode
     public let text: String
+    /// The label this turn folds away under when it is fired: it is composed from the item, not
+    /// typed. (A DISCUSS turn is attached to the owner's own first message instead, and that
+    /// message is his.)
+    public let sentFor: String
 
-    public init(mode: JesseMode, text: String) {
+    public init(mode: JesseMode, text: String, sentFor: String = PromptSender.todayAction) {
         self.mode = mode
         self.text = text
+        self.sentFor = sentFor
     }
 
     /// "Discuss this item with me."
@@ -69,7 +74,8 @@ public struct TodayTurn: Equatable, Sendable {
     /// how the agent finds each home and the `(Added …)` trailers are how it tells two
     /// similarly-worded lines apart.
     public static func processUpdates(items: [TodayItem]) -> TodayTurn {
-        TodayTurn(mode: .tell, text: TodayProcessUpdates.prompt(items: items.map(\.text)))
+        TodayTurn(mode: .tell, text: TodayProcessUpdates.prompt(items: items.map(\.text)),
+                  sentFor: PromptSender.processUpdates)
     }
 
     /// "Discuss this strand with me."

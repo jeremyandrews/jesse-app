@@ -35,6 +35,18 @@ final class ThreadMatchingTests: XCTestCase {
         XCTAssertTrue(threadMatches(t, query: "Thursday"))
     }
 
+    /// Folding hides text from the screen, never from search: a word only in a reply's folded
+    /// narration, or only in a folded prompt, still finds the conversation.
+    func testMatchesTextInsideFoldedParts() {
+        let t = thread(title: "Archive box", turns: [
+            (.user, "Process every checked archive footer."),
+            (.jesse, "Moved 3 notes."),
+        ])
+        t.turns[1].thinkingText = "Checking the footer format first."
+        XCTAssertTrue(threadMatches(t, query: "format"), "narration is searched")
+        XCTAssertTrue(threadMatches(t, query: "checked footer"), "a folded prompt is searched")
+    }
+
     func testCaseAndDiacriticInsensitive() {
         let t = thread(title: "Trip notes", turns: [
             (.jesse, "We stopped at a café in Málaga."),

@@ -34,7 +34,7 @@ final class OfflineReviewTests: XCTestCase {
                   conversationId: String, voice: Bool,
                   instructions: String?, floorOverride: String?,
                   attachments: [JesseAttachment], requestId: UUID,
-                  model: String?, effort: String?) async throws -> JesseSendResult {
+                  model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
             attempted.append(text)
             guard online else { throw JesseError.timedOut("laptop") }
             accepted.append(text)

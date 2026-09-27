@@ -45,7 +45,7 @@ final class SessionFlagSyncTests: XCTestCase {
                   conversationId: String, voice: Bool,
                   instructions: String?, floorOverride: String?,
                   attachments: [JesseAttachment], requestId: UUID,
-                  model: String?, effort: String?) async throws -> JesseSendResult {
+                  model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
             .reply(JesseReply(text: "", sessionId: nil), jobId: nil, conversationId: nil)
         }
         func result(jobId: String) async throws -> JesseResultState { .done(JesseReply(text: "", sessionId: nil)) }

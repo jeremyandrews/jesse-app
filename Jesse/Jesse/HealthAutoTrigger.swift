@@ -106,7 +106,8 @@ enum HealthTurn {
         let thread = JesseThread(mode: .tell)
         thread.origin = origin.rawValue
         context.insert(thread)
-        return coordinator.send(thread: thread, text: turn.prompt, voice: false, context: context)
+        return coordinator.send(thread: thread, text: turn.prompt, voice: false, context: context,
+                                sentFor: turn.sentFor)
     }
 }
 

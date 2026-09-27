@@ -32,7 +32,7 @@ public protocol BridgeClientProtocol: FlagSyncing, Sendable {
     func send(mode: JesseMode, text: String, sessionId: String?, conversationId: String,
               voice: Bool, instructions: String?, floorOverride: String?,
               attachments: [JesseRequest.Attachment], requestId: String,
-              model: String?, effort: String?) async throws -> JesseSendResult
+              model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult
     func result(jobId: String) async throws -> JesseResultState
     /// Fetch ONE returned file's bytes. The reply carries only metadata, so this is the
     /// one call content moves on. A `404` is an `ArtifactFetchError.expired` or
@@ -273,12 +273,13 @@ public struct JesseBridgeClient: BridgeClientProtocol {
                      voice: Bool, instructions: String?, floorOverride: String?,
                      attachments: [JesseRequest.Attachment],
                      requestId: String, model: String?,
-                     effort: String?) async throws -> JesseSendResult {
+                     effort: String?, sentFor: String?) async throws -> JesseSendResult {
         let request = Self.makeRequest(mode: mode, text: text, sessionId: sessionId,
                                        conversationId: conversationId,
                                        voice: voice, instructions: instructions,
                                        floorOverride: floorOverride, attachments: attachments,
-                                       requestId: requestId, model: model, effort: effort)
+                                       requestId: requestId, model: model, effort: effort,
+                                       sentFor: sentFor)
         return try await sendPrepared(request)
     }
 
@@ -837,12 +838,13 @@ public struct JesseBridgeClient: BridgeClientProtocol {
                                    mealCorrectionsAck: Int? = nil,
                                    requestId: String? = nil,
                                    model: String? = nil,
-                                   effort: String? = nil) -> JesseRequest {
+                                   effort: String? = nil,
+                                   sentFor: String? = nil) -> JesseRequest {
         func nonBlank(_ s: String?) -> String? {
             guard let s, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return s
         }
-        return JesseRequest(
+        var request = JesseRequest(
             mode: mode.rawValue,
             text: text,
             sessionId: sessionId,
@@ -881,6 +883,9 @@ public struct JesseBridgeClient: BridgeClientProtocol {
             // The per-turn effort, only ever one the model declares; blank collapses to nil and
             // the model's default runs.
             effort: nonBlank(effort))
+        // Who sent this turn when the owner did not type it; blank collapses to nil (typed).
+        request.sentFor = nonBlank(sentFor)
+        return request
     }
 
     /// Encode a wire body. Optional fields omit when nil. `sortedKeys` makes the byte
@@ -930,7 +935,8 @@ public struct JesseBridgeClient: BridgeClientProtocol {
             return .done(JesseReply(text: text, sessionId: obj.sessionId,
                                     directives: obj.directives, provenance: obj.provenance,
                                     artifacts: obj.artifacts ?? [],
-                                    lastReplyMs: obj.lastReplyMs ?? 0))
+                                    lastReplyMs: obj.lastReplyMs ?? 0,
+                                    narration: obj.narration))
         case "failed":
             return .failed(obj.error ?? "Jesse couldn't complete that.")
         case "cancelled":

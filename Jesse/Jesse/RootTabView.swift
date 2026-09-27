@@ -255,6 +255,8 @@ struct RootTabView: View {
             // conversation and posts the tap that must land on it. Here because this is the
             // first moment the shell exists, which is what a tapped notification meets.
             ThreadLandingUITestSeam.arm(context: context)
+            // The same, for the transcript folds' screenshots (see `TranscriptFoldUITestSeam`).
+            TranscriptFoldUITestSeam.arm(context: context)
             buildTheReplayer()
             todayModel.refreshPending()
             healthModel.refreshPending()
@@ -328,7 +330,8 @@ struct RootTabView: View {
     private func startReview(_ sentence: String) {
         let thread = JesseThread(mode: .tell)
         context.insert(thread)
-        coordinator.send(thread: thread, text: sentence, voice: false, context: context)
+        coordinator.send(thread: thread, text: sentence, voice: false, context: context,
+                         sentFor: PromptSender.annotationReview)
     }
 
     /// **Show one strand's record in the Vault tab**, optionally at one section.

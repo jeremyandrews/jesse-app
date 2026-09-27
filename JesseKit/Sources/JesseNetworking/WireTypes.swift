@@ -84,16 +84,23 @@ public struct JesseReply: Equatable, Sendable {
     // the degradation being that two devices' unread marks can then disagree by their
     // skew, which is strictly better than not marking anything at all.
     public var lastReplyMs: UInt64
+    // The model's working narration (bridge `narration`): what it said on its way to a tool
+    // call, kept apart from `text` so the thread can fold it away above the answer. Nil for a
+    // reply with none, and against a bridge that predates the field, whose `text` is the
+    // whole answer either way.
+    public var narration: String?
 
     public init(text: String, sessionId: String?,
                 directives: JesseDirectives? = nil, provenance: JesseProvenance? = nil,
-                artifacts: [JesseArtifact] = [], lastReplyMs: UInt64 = 0) {
+                artifacts: [JesseArtifact] = [], lastReplyMs: UInt64 = 0,
+                narration: String? = nil) {
         self.text = text
         self.sessionId = sessionId
         self.directives = directives
         self.provenance = provenance
         self.artifacts = artifacts
         self.lastReplyMs = lastReplyMs
+        self.narration = narration
     }
 
     private static let marker = "SPOKEN:"
@@ -108,6 +115,15 @@ public struct JesseReply: Equatable, Sendable {
             .filter { !$0.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix(Self.marker) }
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The narration a Jesse turn stores beside this answer: trimmed, nil when blank. The
+    /// phone and the Mac persist exactly this, so a reply folds the same way on both.
+    public var storedNarration: String? {
+        guard let n = narration?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty else {
+            return nil
+        }
+        return n
     }
 
     /// What to read aloud: the SPOKEN: line if present, else a short fallback.
@@ -327,7 +343,14 @@ public struct ToolActivity: Equatable, Sendable {
 /// whole-answer one it is the entire difference between a turn the user can see working
 /// and one indistinguishable from a turn that has silently hung.
 public enum JesseStreamEvent: Equatable, Sendable {
+    /// Replace the shown text. Against a bridge that knows no narration, or before anything
+    /// was narrated, this is the whole reply so far.
     case reset(String)
+    /// Replace the shown text, already split: the narration so far and the answer since the
+    /// last tool call. What a newer bridge sends once the turn has narrated something.
+    case resetSplit(narration: String, answer: String)
+    /// One whole block of narration reported on the harness's own channel (Codex commentary).
+    case narration(String)
     case delta(String)
     case activity(ToolActivity)
     case done(JesseReply)
@@ -423,18 +446,23 @@ public struct HydratedTurn: Decodable, Sendable, Equatable {
     /// of silently losing it. Empty on a user turn, on a turn that returned nothing, and
     /// against a bridge that predates the field.
     public let artifacts: [JesseArtifact]
+    /// An assistant turn the model said on its way to a tool call: narration, not the answer.
+    /// The bridge takes this from the harness's own record of the boundary. False on every
+    /// other turn and against a bridge that predates the field.
+    public let narration: Bool
     public init(role: String, text: String, timestamp: String?, turnKey: String = "",
-                artifacts: [JesseArtifact] = []) {
+                artifacts: [JesseArtifact] = [], narration: Bool = false) {
         self.role = role
         self.text = text
         self.timestamp = timestamp
         self.turnKey = turnKey
         self.artifacts = artifacts
+        self.narration = narration
     }
     enum CodingKeys: String, CodingKey {
         case role, text, timestamp
         case turnKey = "turn_key"
-        case artifacts
+        case artifacts, narration
     }
     // Custom decode so `turn_key` DEFAULTS rather than failing the whole hydrate against
     // the deprecated route (which omits it), the same additive-forward-compatible pattern
@@ -446,6 +474,7 @@ public struct HydratedTurn: Decodable, Sendable, Equatable {
         timestamp = try c.decodeIfPresent(String.self, forKey: .timestamp)
         turnKey = try c.decodeIfPresent(String.self, forKey: .turnKey) ?? ""
         artifacts = try c.decodeIfPresent([JesseArtifact].self, forKey: .artifacts) ?? []
+        narration = try c.decodeIfPresent(Bool.self, forKey: .narration) ?? false
     }
 }
 
@@ -508,13 +537,17 @@ public struct ConversationSummary: Decodable, Sendable, Equatable {
     public let readThroughMs: UInt64
     public let readUpdatedMs: UInt64
     public let registeredMs: UInt64
+    /// What sent the conversation's opening turn when the owner did not type it ("Scheduled:
+    /// archive box", "Morning routine"). Nil for a typed conversation and against a bridge
+    /// that predates the field.
+    public let sentFor: String?
 
     public init(conversationId: String, sessionId: String? = nil, sessionIds: [String] = [],
                 lastModified: UInt64 = 0, firstMessage: String? = nil, title: String? = nil,
                 favorite: Bool = false, favoriteUpdatedMs: UInt64 = 0,
                 archived: Bool = false, archivedUpdatedMs: UInt64 = 0,
                 lastReplyMs: UInt64 = 0, readThroughMs: UInt64 = 0, readUpdatedMs: UInt64 = 0,
-                registeredMs: UInt64 = 0) {
+                registeredMs: UInt64 = 0, sentFor: String? = nil) {
         self.conversationId = conversationId
         self.sessionId = sessionId
         self.sessionIds = sessionIds
@@ -529,6 +562,7 @@ public struct ConversationSummary: Decodable, Sendable, Equatable {
         self.readThroughMs = readThroughMs
         self.readUpdatedMs = readUpdatedMs
         self.registeredMs = registeredMs
+        self.sentFor = sentFor
     }
 
     enum CodingKeys: String, CodingKey {
@@ -545,6 +579,7 @@ public struct ConversationSummary: Decodable, Sendable, Equatable {
         case readThroughMs = "read_through_ms"
         case readUpdatedMs = "read_updated_ms"
         case registeredMs = "registered_ms"
+        case sentFor = "sent_for"
     }
 
     // Only `conversation_id` is required; every other field defaults, so an added or
@@ -565,6 +600,7 @@ public struct ConversationSummary: Decodable, Sendable, Equatable {
         readThroughMs = try c.decodeIfPresent(UInt64.self, forKey: .readThroughMs) ?? 0
         readUpdatedMs = try c.decodeIfPresent(UInt64.self, forKey: .readUpdatedMs) ?? 0
         registeredMs = try c.decodeIfPresent(UInt64.self, forKey: .registeredMs) ?? 0
+        sentFor = try c.decodeIfPresent(String.self, forKey: .sentFor)
     }
 }
 
@@ -675,6 +711,11 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
     // dated from whenever it happened to arrive. Omitted (nil) is the bridge's own clock,
     // which is byte-for-byte what every build before this one did.
     public private(set) var sentAt: String?
+    // Who sent this turn when the owner did NOT type it: the label his threads show on the
+    // folded prompt ("Morning routine", "Health ask"). Nil for a typed turn, and omitted from
+    // the body then. The bridge records it on the conversation this turn opens, so every
+    // device folds that opening turn away; a later turn's value is ignored.
+    public var sentFor: String?
 
     public init(mode: String, text: String, sessionId: String?, conversationId: String? = nil,
                 voice: Bool?,
@@ -707,6 +748,7 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
         self.effort = effort
         self.clientTz = nil
         self.sentAt = nil
+        self.sentFor = nil
     }
 
     /// The same request, carrying the two facts only the DEVICE knows: the zone it is
@@ -758,6 +800,7 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
         case model, effort
         case clientTz = "client_tz"
         case sentAt = "sent_at"
+        case sentFor = "sent_for"
     }
 }
 
@@ -794,11 +837,14 @@ public struct JesseResultResponse: Decodable {
     /// When the bridge finalized this reply, on its own clock. Absent against a bridge
     /// that predates the field, which decodes to nil and is read as "no bridge value".
     public let lastReplyMs: UInt64?
+    /// The reply's narration, apart from `response`. Absent or null when there was none and
+    /// against a bridge that predates the field.
+    public let narration: String?
     public let error: String?
     enum CodingKeys: String, CodingKey {
         case status, response
         case sessionId = "session_id"
-        case directives, provenance, artifacts, error
+        case directives, provenance, artifacts, error, narration
         case lastReplyMs = "last_reply_ms"
     }
 }
@@ -1001,11 +1047,16 @@ public struct JesseStreamFrameData: Decodable {
     /// identical value the poll result carries, so a streaming client and a polling one
     /// time the reply the same way. Absent from a bridge that predates the field.
     public let lastReplyMs: UInt64?
+    /// On a `done` frame, the reply's narration apart from `response`; on a live `reset`, the
+    /// narration so far (with `answer` the text since the last tool call). Absent when nothing
+    /// was narrated and from a bridge that predates the field.
+    public let narration: String?
+    public let answer: String?
     public let error: String?
     enum CodingKeys: String, CodingKey {
         case text, name, refused, response
         case sessionId = "session_id"
-        case directives, provenance, artifacts, error
+        case directives, provenance, artifacts, error, narration, answer
         case lastReplyMs = "last_reply_ms"
     }
 }

@@ -38,7 +38,8 @@ func searchSnippet(for thread: JesseThread,
 
     // Prefer the title as the source if any token matches there, else the first
     // turn body with a match (turns in chronological order).
-    let sources = [thread.title] + thread.orderedTurns.map(\.text)
+    // Folded text included: a match inside a prompt or a reply's narration still shows.
+    let sources = [thread.title] + thread.orderedTurns.flatMap(\.searchableTexts)
     for source in sources {
         guard let first = firstMatchRange(in: source, tokens: tokens) else { continue }
         return windowedSnippet(from: source, around: first, tokens: tokens,

@@ -43,7 +43,7 @@ final class LocationRetryTests: XCTestCase {
                   conversationId: String, voice: Bool,
                   instructions: String?, floorOverride: String?,
                   attachments: [JesseAttachment], requestId: UUID,
-                  model: String?, effort: String?) async throws -> JesseSendResult {
+                  model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
             sendCalls += 1
             return .running(jobId: "job-sentinel", conversationId: nil)
         }
@@ -171,7 +171,7 @@ final class LocationRetryTests: XCTestCase {
                   conversationId: String, voice: Bool,
                   instructions: String?, floorOverride: String?,
                   attachments: [JesseAttachment], requestId: UUID,
-                  model: String?, effort: String?) async throws -> JesseSendResult {
+                  model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
             .running(jobId: "job-sentinel", conversationId: nil)
         }
         func sendFulfilling(_ request: DeviceContextRequest, mode: JesseMode, text: String,

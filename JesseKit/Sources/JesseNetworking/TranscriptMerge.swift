@@ -121,4 +121,29 @@ public enum TranscriptMerge {
         iso.formatOptions = [.withInternetDateTime]
         return iso.date(from: s) ?? fallback
     }
+
+    /// The `Turn` a hydrated transcript turn inserts as: role, text, date, key, and whether it
+    /// is narration (folded into the next answer's Thinking row). Shared so the phone and the
+    /// Mac store a hydrated turn identically; each attaches the artifacts itself.
+    @MainActor
+    public static func newTurn(from t: HydratedTurn) -> Turn {
+        let turn = Turn(role: role(for: t.role), text: t.text, createdAt: timestamp(t.timestamp))
+        turn.sourceKey = t.turnKey.isEmpty ? nil : t.turnKey
+        turn.isNarration = t.narration && turn.roleValue == .jesse
+        return turn
+    }
+}
+
+extension JesseThread {
+    /// Take the bridge's `sent_for` for this conversation from a list row: what sent its
+    /// opening turn when the owner did not type it. Set once it is known and never cleared
+    /// (the bridge never un-sends a turn); a row with none leaves a local value alone, since an
+    /// older bridge simply omits the key. Returns whether anything changed. Shared so the phone
+    /// and the Mac adopt it identically.
+    @MainActor @discardableResult
+    public func adoptSentFor(from summary: ConversationSummary) -> Bool {
+        guard let label = summary.sentFor, !label.isEmpty, sentFor != label else { return false }
+        sentFor = label
+        return true
+    }
 }

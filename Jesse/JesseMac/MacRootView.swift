@@ -407,7 +407,10 @@ struct MacRootView: View {
         try? context.save()
         selection = thread.id
         let text = MorningRoutine.prompt(now: .now, includeHealthNewDay: includeHealth)
-        Task { await coordinator.send(text: text, mode: .tell, thread: thread, context: context) }
+        Task {
+            await coordinator.send(text: text, mode: .tell, thread: thread, context: context,
+                                   sentFor: PromptSender.morningRoutine)
+        }
         morningRoutineLastFiredDay = MorningRoutine.dayStamp(.now)
     }
 
@@ -639,8 +642,9 @@ struct MacThreadRow: View {
                     }
                     Spacer(minLength: 0)
                 }
-                if let last = thread.orderedTurns.last {
-                    Text(last.text)
+                // The latest ANSWER, never a prompt the owner did not type and never narration.
+                if let last = thread.lastAnswerText {
+                    Text(last)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

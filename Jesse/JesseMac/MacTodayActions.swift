@@ -35,7 +35,7 @@ enum MacTodayThreadOpener {
         try? context.save()
         Task {
             await coordinator.send(text: turn.text, mode: turn.mode,
-                                   thread: thread, context: context)
+                                   thread: thread, context: context, sentFor: turn.sentFor)
         }
         return thread
     }
@@ -114,7 +114,7 @@ final class MacTodayProcessRun {
         threadID = thread.id
         Task {
             await coordinator.send(text: turn.text, mode: turn.mode,
-                                   thread: thread, context: context)
+                                   thread: thread, context: context, sentFor: turn.sentFor)
             threadID = nil
             await day.refresh()
         }

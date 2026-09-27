@@ -178,6 +178,9 @@ struct MacHealthView: View {
         let thread = JesseThread(mode: .tell)
         context.insert(thread)
         try? context.save()
-        Task { await coordinator.send(text: HealthNewDay.prompt, mode: .tell, thread: thread, context: context) }
+        Task {
+            await coordinator.send(text: HealthNewDay.prompt, mode: .tell, thread: thread,
+                                   context: context, sentFor: PromptSender.healthNewDay)
+        }
     }
 }

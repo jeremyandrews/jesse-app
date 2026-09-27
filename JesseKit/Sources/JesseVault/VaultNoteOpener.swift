@@ -115,14 +115,28 @@ public enum VaultNoteOpening: Equatable, Sendable {
     /// No local copy, and the Studio could not be asked.
     case unavailable
 
-    /// The decision, as a pure function of the local copy's stamp and the fetch.
+    /// The decision, as a pure function of the local copy's stamp, the fetch, and this
+    /// device's own writes to the note that the Studio has not answered yet (`queued`, as
+    /// the outbox holds them, oldest first).
+    ///
+    /// THE QUEUED WRITES ARE WHY A SAVE SHOWS AT ONCE. A save writes the local copy and
+    /// queues the same text for the Studio, and the reader reloads straight after, usually
+    /// before the flush has reached the bridge. The Studio then still answers with its old
+    /// copy, and a decision made from the hashes alone called the device's copy "behind" when
+    /// it was the newer one by construction. When the newest unanswered write left the local
+    /// copy exactly as it is now, the local copy is what the Studio is about to have.
     public static func decide(localStamp: VaultFileStamp?,
-                              fetch: VaultBridgeNoteFetch) -> VaultNoteOpening {
+                              fetch: VaultBridgeNoteFetch,
+                              queued: [VaultOutboxEntry] = []) -> VaultNoteOpening {
         switch fetch {
         case .notModified:
             return localStamp == nil ? .unavailable : .local
         case .note(let note):
             if let localStamp, localStamp.digest.caseInsensitiveCompare(note.sha256) == .orderedSame {
+                return .local
+            }
+            if let localStamp, let mine = newestUnanswered(queued),
+               VaultFileStamp(text: mine) == localStamp {
                 return .local
             }
             return .bridge(note)
@@ -131,6 +145,14 @@ public enum VaultNoteOpening: Equatable, Sendable {
         case .routeMissing, .failed:
             return localStamp == nil ? .unavailable : .offline
         }
+    }
+
+    /// The whole note as this device's newest unanswered write left it, or nil when there is
+    /// none. A conflicted write is not one: it waits for a person, under its own notice. A
+    /// capture carries only the line it appends, never the whole note, so it is not one
+    /// either.
+    public static func newestUnanswered(_ entries: [VaultOutboxEntry]) -> String? {
+        entries.last { $0.state == .queued && $0.record.deviceText != nil }?.record.deviceText
     }
 }
 
@@ -198,20 +220,24 @@ public actor VaultNoteOpener {
     }
 
     /// Open the note at device relative `localPath`, whose local copy has `localStamp`
-    /// (nil: not on this device).
-    public func open(localPath: String, localStamp: VaultFileStamp?) async -> VaultNoteOpening {
+    /// (nil: not on this device). `queued` is what the outbox holds for the note: see
+    /// `VaultNoteOpening.decide`.
+    public func open(localPath: String, localStamp: VaultFileStamp?,
+                     queued: [VaultOutboxEntry] = []) async -> VaultNoteOpening {
         guard isConfigured else { return localStamp == nil ? .unavailable : .local }
         let path = VaultBridgePath.bridge(fromLocal: localPath)
         if let cached = recent[path], Date().timeIntervalSince(cached.at) < Self.reuseWindow {
             recent[path] = nil
-            return VaultNoteOpening.decide(localStamp: localStamp, fetch: .note(cached.note))
+            return VaultNoteOpening.decide(localStamp: localStamp, fetch: .note(cached.note),
+                                           queued: queued)
         }
         guard let client = await client() else {
-            return VaultNoteOpening.decide(localStamp: localStamp, fetch: .failed("offline"))
+            return VaultNoteOpening.decide(localStamp: localStamp, fetch: .failed("offline"),
+                                           queued: queued)
         }
         let result = await fetch(client, path: path, target: nil,
                                  ifNoneMatch: localStamp?.digest)
-        return VaultNoteOpening.decide(localStamp: localStamp, fetch: result)
+        return VaultNoteOpening.decide(localStamp: localStamp, fetch: result, queued: queued)
     }
 
     /// Where a wiki link leads, given what the local index made of it.
@@ -260,6 +286,13 @@ public actor VaultNoteOpener {
 
     public static func notOnStudioCaption(_ name: String) -> String {
         "\(VaultWikiLink.basename(name)) doesn't exist on the Studio, and there's no copy on this device."
+    }
+
+    /// The line above the Studio's copy when it is shown with this device's own change that
+    /// the Studio has not taken yet.
+    public static func behindWithQueuedCaption(modified: Date?) -> String {
+        behindCaption(modified: modified)
+            + " Your change is shown on it and hasn't reached the Studio yet."
     }
 
     public static let truncatedCaption = "Only the first 64 KB are shown, and it can't be edited here."

@@ -594,6 +594,12 @@ impl DirectRuntime {
             // phone has never been shown, and a `ToolUse` block carries the model's arguments;
             // both are deliberately outside the mid-turn contract and neither belongs in a
             // transcript either. Only the visible text of a message survives.
+            // A message that carries a tool call was said on the way to it: narration.
+            let narration = msg.role == Role::Assistant
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
             let text: String = msg
                 .content
                 .iter()
@@ -625,6 +631,7 @@ impl DirectRuntime {
                 // within it, which is exactly what a client merging history needs.
                 turn_key: Some(format!("{session_id}:{i}")),
                 artifacts: Vec::new(),
+                narration,
             });
         }
         Some(out)

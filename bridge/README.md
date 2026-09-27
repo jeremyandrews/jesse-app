@@ -773,10 +773,11 @@ Frames are `event:`/`data:` pairs; each `data:` is a one-line JSON object:
 
 | `event:` | `data:` | Meaning |
 |---|---|---|
-| `reset` | `{"text":"…"}` | **Replace** the shown text with this. Sent first (replay of text-so-far) and to re-sync after a lag. |
+| `reset` | `{"text":"…"}`, plus `"narration":"…","answer":"…"` once something was narrated | **Replace** the shown text with this. Sent first (replay of text-so-far) and to re-sync after a lag. `text` is always the whole buffer; `narration` and `answer` split it at the last tool call. |
 | `delta` | `{"text":"…"}` | **Append** this chunk. |
-| `activity` | `{"name":"Read"}` | Coarse tool-use hint ("reading the vault…"). |
-| `done` | `{"response":"…","session_id":"…"}` | Terminal: final authoritative text + session id. |
+| `activity` | `{"name":"Read"}` | Coarse tool-use hint ("reading the vault…"). Also the narration boundary: the text streamed since the previous tool call was narration. |
+| `narration` | `{"text":"…"}` | One whole block of narration a harness reports on its own channel (Codex commentary). Never part of the answer. |
+| `done` | `{"response":"…","session_id":"…","narration":"…"}` | Terminal: final authoritative answer + session id, and the narration apart from it (`null` when none). |
 | `error` | `{"error":"…"}` | Terminal: the turn failed. |
 | `cancelled` | `{}` | Terminal: the turn was cancelled (`POST /jesse/cancel`). Surfaced cleanly, not as an error. |
 
@@ -789,6 +790,28 @@ Frames are `event:`/`data:` pairs; each `data:` is a one-line JSON object:
 - Unknown / expired id → **404**.
 
 `GET /jesse/result/:job_id` is untouched and remains the **poll fallback**.
+
+### Narration apart from the answer
+
+A turn streams everything the model says, including what it says on its way to a
+tool call ("Let me check the vault."). That text is **narration**: the reply carries
+it apart from the answer, in `narration` on the `done` frame and the poll result
+(persisted with the job), so the app can fold it away. `response` is the answer, the
+same text every client has always shown, so an older app is unaffected.
+
+The boundary is the one each harness reports, never the wording:
+
+- **claude-code**: text a `tool_use` block start closed is narration; `result` (the
+  last assistant message) is the answer. Hydration uses the transcript's own record
+  of the same boundary: an assistant line whose message `stop_reason` is `tool_use`
+  hydrates with `"narration": true`.
+- **direct**: the agent loop's answer is its last call's text; every earlier call's
+  text (each followed by a tool call) is narration.
+- **codex**: the `commentary` phase. Its deltas are still held back; each completed
+  commentary item goes out once as a `narration` frame.
+
+When the answer IS the whole streamed text (the empty-`result` fallback), the
+narration is already inside it and `narration` is `null`, so nothing shows twice.
 
 ### Design (broadcast + accumulate)
 
@@ -1416,6 +1439,10 @@ curl -s http://127.0.0.1:8765/jesse/conversations \
   every hydrated user turn, so history and the list agree.
 - **`title`** comes from the [title store](#conversation-titles-post-jessetitle),
   keyed on the conversation id, or `null` if none was ever minted.
+- **`sent_for`** names what sent the conversation's opening turn when the owner did
+  not type it (`"Scheduled: archive box"`, `"Morning routine"`). Set once, from the
+  `sent_for` field of the `POST /jesse` that created the conversation (the scheduler
+  and strand ticks set it themselves), and omitted for a typed conversation.
 - **`favorite` / `archived`** and their `_updated_ms` clocks come from the flag
   store, keyed on the conversation id, defaulting to `false` / `0`. They are part of
   the serialized body, so flipping a flag changes the ETag and invalidates a cached
@@ -1496,6 +1523,9 @@ curl -s "http://127.0.0.1:8765/jesse/conversations/<conversation_id>/transcript"
   conversation and byte-identical across repeated hydrates, which is what lets a
   client merge history without duplicating a turn it already holds, including two
   genuinely identical messages, which a content hash would wrongly collapse.
+- **`narration`** is `true` on an assistant turn the model said on its way to a tool
+  call (see [Narration apart from the answer](#narration-apart-from-the-answer)), and
+  omitted otherwise.
 - **`404`** for an unknown `conversation_id`.
 - **`400`** for a malformed `conversation_id` (anything but a canonical lowercase
   UUID) or a malformed cursor. A bad cursor is deliberately an error rather than a

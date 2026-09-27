@@ -114,6 +114,14 @@ pub struct JesseRequest {
     // app builds simply omit it) — every POST is a fresh turn.
     #[serde(default)]
     request_id: Option<String>,
+    // Who sent this turn when it was NOT typed by the owner: a short display label such
+    // as "Morning routine" or "Health ask". Set by the app for a turn it composed on his
+    // behalf and by the bridge's own senders (see `JesseRequest::set_sent_for`); absent
+    // means typed. Recorded on the conversation only when this turn CREATES it, because
+    // what it marks is the conversation's opening turn, and surfaced on the conversation
+    // list so every device folds that turn away. Capped and trimmed by `clean_sent_for`.
+    #[serde(default)]
+    sent_for: Option<String>,
     // Optional PER-TURN model selection (retire the global switch). Names a registry id
     // (`opus`, `glm-5.2`, `local`, …); when present that model backs THIS turn only —
     // its `ANTHROPIC_*` backend, subagent model, price deck, and (per-model) write posture.
@@ -168,6 +176,13 @@ impl JesseRequest {
         self.return_line = line;
     }
 
+    /// Mark this turn as sent for the owner rather than typed by him, with the label the app
+    /// shows on the folded prompt. Used by the bridge's own senders (the scheduler, strand
+    /// ticks); the app sets the same field on the wire.
+    pub fn set_sent_for(&mut self, label: impl Into<String>) {
+        self.sent_for = Some(label.into());
+    }
+
     /// The request a `[[schedule]]` job submits: a mode, the prompt text, and nothing
     /// else. Every other field takes its absent-field default, which is what makes a
     /// scheduled turn identical to the simplest possible client turn.
@@ -212,8 +227,29 @@ impl JesseRequest {
             location_context_unavailable_reason: None,
             meal_corrections_ack: None,
             request_id: None,
+            sent_for: None,
         }
     }
+}
+
+/// A `sent_for` label as the conversation stores it: trimmed, at most
+/// [`SENT_FOR_MAX_CHARS`] characters, `None` when blank. A label is display text for a
+/// folded row, so an oversized one is cut rather than refused: the turn itself is fine.
+pub fn clean_sent_for(label: Option<&str>) -> Option<String> {
+    let t = label?.trim();
+    (!t.is_empty()).then(|| t.chars().take(SENT_FOR_MAX_CHARS).collect())
+}
+
+/// The longest `sent_for` label kept. Long enough for "Scheduled: " and a schedule id.
+pub const SENT_FOR_MAX_CHARS: usize = 80;
+
+/// The label a `[[schedule]]` fire carries: the schedule's id, read as words.
+pub fn scheduled_sent_for(schedule_id: &str) -> String {
+    let words: String = schedule_id
+        .chars()
+        .map(|c| if c == '-' || c == '_' { ' ' } else { c })
+        .collect();
+    format!("Scheduled: {}", words.trim())
 }
 
 /// Validate a POST /jesse idempotency `request_id`: at most 64 characters, ASCII
@@ -695,8 +731,17 @@ pub async fn start_turn(
     // conversation registers nothing new; an absent id means an older client, and the
     // bridge mints one it can safely ignore.
     let conversation = match req.conversation_id.as_deref() {
-        Some(cid) => st.conversations.register(cid, None, now_ms),
-        None => st.conversations.mint(None, now_ms),
+        Some(cid) => st.conversations.register_sent_for(
+            cid,
+            None,
+            clean_sent_for(req.sent_for.as_deref()).as_deref(),
+            now_ms,
+        ),
+        None => st.conversations.mint_sent_for(
+            None,
+            clean_sent_for(req.sent_for.as_deref()).as_deref(),
+            now_ms,
+        ),
     };
     let conversation_id = conversation.conversation_id.clone();
     // A legacy `session_id` on a conversation that has no alias for it yet: bind it. This
@@ -2096,6 +2141,7 @@ pub async fn jesse_result(
             provenance,
             artifacts,
             last_reply_ms,
+            narration,
         }) => Ok(Json(json!({
             "status": "done",
             "response": response,
@@ -2111,6 +2157,9 @@ pub async fn jesse_result(
             // bridge can neither hide a new reply nor revive a read one. `0` for a turn
             // with no conversation record; an older app ignores the key.
             "last_reply_ms": last_reply_ms,
+            // The model's working narration, apart from `response`; null when there was
+            // none. An older app ignores it: `response` is the whole answer either way.
+            "narration": narration,
             "timing": timing,
             "usage": usage,
         }))),
@@ -2814,6 +2863,30 @@ pub fn app(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_schedule_id_reads_as_words_in_its_sent_for_label() {
+        assert_eq!(scheduled_sent_for("archive-box"), "Scheduled: archive box");
+        assert_eq!(
+            scheduled_sent_for("health_new_day"),
+            "Scheduled: health new day"
+        );
+    }
+
+    #[test]
+    fn a_sent_for_label_is_trimmed_capped_and_blank_means_typed() {
+        assert_eq!(clean_sent_for(None), None);
+        assert_eq!(clean_sent_for(Some("   ")), None);
+        assert_eq!(
+            clean_sent_for(Some(" Health ask ")).as_deref(),
+            Some("Health ask")
+        );
+        let long = "x".repeat(SENT_FOR_MAX_CHARS + 10);
+        assert_eq!(
+            clean_sent_for(Some(&long)).map(|s| s.chars().count()),
+            Some(SENT_FOR_MAX_CHARS)
+        );
+    }
 
     #[test]
     fn validate_request_id_accepts_alnum_and_hyphens_within_length() {

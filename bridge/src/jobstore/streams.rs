@@ -22,6 +22,11 @@ pub enum StreamFrame {
     Delta(String),
     /// A coarse "Jesse is using the <name> tool" activity hint.
     Activity(ToolActivity),
+    /// One whole block of narration a harness reports on its own channel rather than
+    /// as deltas (Codex's `commentary` phase). Claude Code and the direct loop never
+    /// send this: their narration arrives as ordinary deltas and is told apart by the
+    /// tool call that closes it (see [`StreamRegistry::push_activity`]).
+    Narration(String),
     /// Terminal: the turn finished. Carries the authoritative final text,
     /// session id, any extracted directives, and the structured provenance (same
     /// values `complete` persisted), not the accumulated deltas.
@@ -39,6 +44,9 @@ pub enum StreamFrame {
         // `JobState::Done`'s field for the same reason every other sidecar here does:
         // a streamed reply and a polled one must carry the identical value.
         last_reply_ms: u64,
+        // The model's working narration, apart from `response`. Mirrors
+        // `JobState::Done`'s field; `None` on a turn that narrated nothing.
+        narration: Option<String>,
     },
     /// Terminal: the turn failed. Carries the human-readable cause.
     Error(String),
@@ -100,6 +108,57 @@ struct StreamHandle {
     tx: broadcast::Sender<StreamFrame>,
     text: String,
     activity: Option<ToolActivity>,
+    /// The same deltas as `text`, cut where the harness reported a tool call. Every
+    /// block a tool call CLOSED is narration: the model said it on its way to doing
+    /// something, not as the answer. `open` is the text since the last tool call, which
+    /// is the answer if nothing follows it. This is the boundary Claude Code draws too:
+    /// its `result` is the last assistant message, the one no tool call interrupted.
+    narration: Vec<String>,
+    open: String,
+    /// Narration a harness reported on its own channel ([`StreamFrame::Narration`]). Kept
+    /// apart from `narration` because it was never in `text`, so no answer can contain it.
+    side: Vec<String>,
+    /// What [`StreamRegistry::settle_narration`] decided, once the terminal result is
+    /// known. `None` until then, and `None` after it when the answer already holds all
+    /// of the streamed text, so the terminal state never carries the narration twice.
+    settled: Option<String>,
+}
+
+/// Join narration blocks the way they read: one paragraph each.
+fn join_blocks(blocks: &[String]) -> String {
+    blocks.join("\n\n")
+}
+
+/// A tool call was reported: whatever text was open is narration now.
+fn close_block(h: &mut StreamHandle) {
+    let block = std::mem::take(&mut h.open);
+    let block = block.trim();
+    if !block.is_empty() {
+        h.narration.push(block.to_string());
+    }
+}
+
+/// The narration a finished reply carries apart from its `answer`. Pure, so the rule is
+/// tested without a job store.
+///
+/// `side` (narration reported on its own channel) is always carried: it was never in the
+/// streamed text, so no answer holds it. `blocks` (streamed text a tool call closed) is
+/// carried unless the answer IS the whole streamed text: then the narration is already
+/// inside the answer (the empty-`result` fallback delivers the stream verbatim) and
+/// carrying it again would show it twice. `None` when nothing is left to carry.
+pub fn settled_narration(
+    side: &[String],
+    blocks: &[String],
+    streamed: &str,
+    answer: &str,
+) -> Option<String> {
+    let inside = answer.trim() == streamed.trim();
+    let carried: Vec<String> = side
+        .iter()
+        .chain(blocks.iter().filter(|_| !inside))
+        .cloned()
+        .collect();
+    (!carried.is_empty()).then(|| join_blocks(&carried))
 }
 
 /// Broadcast backlog per job. Generous so a briefly-slow subscriber doesn't lag
@@ -134,6 +193,10 @@ impl StreamRegistry {
                 tx,
                 text: String::new(),
                 activity: None,
+                narration: Vec::new(),
+                open: String::new(),
+                side: Vec::new(),
+                settled: None,
             },
         );
     }
@@ -148,6 +211,7 @@ impl StreamRegistry {
         if let Some(h) = guard.get_mut(id) {
             if h.text.len() < MAX_OUTPUT_BYTES {
                 h.text.push_str(delta);
+                h.open.push_str(delta);
             }
             let _ = h.tx.send(StreamFrame::Delta(delta.to_string()));
         }
@@ -158,6 +222,7 @@ impl StreamRegistry {
         let mut guard = self.streams.lock_ok();
         if let Some(h) = guard.get_mut(id) {
             h.activity = Some(activity.clone());
+            close_block(h);
             let _ = h.tx.send(StreamFrame::Activity(activity));
         }
     }
@@ -169,6 +234,10 @@ impl StreamRegistry {
         if let Some(h) = self.streams.lock_ok().get_mut(id) {
             h.text.clear();
             h.activity = None;
+            h.narration.clear();
+            h.open.clear();
+            h.side.clear();
+            h.settled = None;
         }
     }
 
@@ -196,6 +265,47 @@ impl StreamRegistry {
         Some(self.streams.lock_ok().get(id)?.text.clone())
     }
 
+    /// Record one whole block of narration a harness reported on its own channel (Codex's
+    /// `commentary` phase) and broadcast it. It is NOT appended to `text`: that buffer is
+    /// what an older client shows as the reply-so-far, and this text was never part of
+    /// it. No-op if gone.
+    pub fn push_narration(&self, id: &str, block: &str) {
+        let block = block.trim();
+        if block.is_empty() {
+            return;
+        }
+        let mut guard = self.streams.lock_ok();
+        if let Some(h) = guard.get_mut(id) {
+            h.side.push(block.to_string());
+            let _ = h.tx.send(StreamFrame::Narration(block.to_string()));
+        }
+    }
+
+    /// The narration so far and the text since the last tool call, for the `reset` frame
+    /// a late or lagging subscriber gets. `None` once the job is terminal.
+    pub fn split(&self, id: &str) -> Option<(String, String)> {
+        let guard = self.streams.lock_ok();
+        let h = guard.get(id)?;
+        let all: Vec<String> = h.side.iter().chain(&h.narration).cloned().collect();
+        Some((join_blocks(&all), h.open.clone()))
+    }
+
+    /// Decide, once the harness's terminal answer is known, what narration the reply
+    /// carries apart from it. Called by the turn driver with the raw answer before any
+    /// delivery processing. When the answer already holds the whole streamed text (the
+    /// empty-`result` fallback, or a harness that delivers everything it streamed), the
+    /// narration is inside it and is not carried a second time.
+    pub fn settle_narration(&self, id: &str, answer: &str) {
+        if let Some(h) = self.streams.lock_ok().get_mut(id) {
+            h.settled = settled_narration(&h.side, &h.narration, &h.text, answer);
+        }
+    }
+
+    /// The narration [`settle_narration`](Self::settle_narration) decided, if any.
+    pub fn narration(&self, id: &str) -> Option<String> {
+        self.streams.lock_ok().get(id)?.settled.clone()
+    }
+
     /// Close a job's stream with a terminal frame and remove the entry. The frame
     /// reaches every current subscriber (they hold receivers); a subscriber that
     /// arrives afterwards finds no entry and reads the terminal state from `jobs`.
@@ -212,5 +322,95 @@ impl StreamRegistry {
 impl Default for StreamRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocks(b: &[&str]) -> Vec<String> {
+        b.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The text a tool call closed is narration; the text after the last tool call is the
+    /// answer. The registry cuts the stream where the harness reported the call.
+    #[test]
+    fn a_tool_call_closes_the_open_text_as_narration() {
+        let r = StreamRegistry::new();
+        r.register("j");
+        r.push_delta("j", "Let me ");
+        r.push_delta("j", "look.");
+        r.push_activity("j", ToolActivity::used("Read"));
+        r.push_delta("j", "Checking the footer.");
+        r.push_activity("j", ToolActivity::used("Grep"));
+        r.push_delta("j", "Found it.");
+        assert_eq!(
+            r.split("j"),
+            Some((
+                "Let me look.\n\nChecking the footer.".to_string(),
+                "Found it.".to_string()
+            ))
+        );
+        r.settle_narration("j", "Found it.");
+        assert_eq!(
+            r.narration("j").as_deref(),
+            Some("Let me look.\n\nChecking the footer.")
+        );
+    }
+
+    #[test]
+    fn no_tool_call_means_no_narration() {
+        let r = StreamRegistry::new();
+        r.register("j");
+        r.push_delta("j", "Just the answer.");
+        r.settle_narration("j", "Just the answer.");
+        assert_eq!(r.narration("j"), None);
+    }
+
+    /// The empty-`result` fallback delivers the whole stream as the answer, so the
+    /// narration is inside it already and is not carried twice.
+    #[test]
+    fn an_answer_that_is_the_whole_stream_carries_no_narration() {
+        assert_eq!(
+            settled_narration(
+                &[],
+                &blocks(&["Let me look."]),
+                "Let me look.Found it.",
+                "Let me look.Found it."
+            ),
+            None
+        );
+    }
+
+    /// Codex commentary never entered the streamed text, so it is carried even when the
+    /// answer is the whole stream.
+    #[test]
+    fn side_channel_narration_is_always_carried() {
+        assert_eq!(
+            settled_narration(&blocks(&["I'll look that up."]), &[], "42", "42").as_deref(),
+            Some("I'll look that up.")
+        );
+        let r = StreamRegistry::new();
+        r.register("j");
+        r.push_narration("j", "  I'll look that up.  ");
+        r.push_delta("j", "42");
+        r.settle_narration("j", "42");
+        assert_eq!(r.narration("j").as_deref(), Some("I'll look that up."));
+    }
+
+    /// A retry starts from nothing: no narration from the failed attempt survives it.
+    #[test]
+    fn reset_clears_the_narration() {
+        let r = StreamRegistry::new();
+        r.register("j");
+        r.push_delta("j", "Let me look.");
+        r.push_activity("j", ToolActivity::used("Read"));
+        r.push_narration("j", "side");
+        r.reset("j");
+        r.push_delta("j", "Answer.");
+        r.settle_narration("j", "Answer.");
+        assert_eq!(r.narration("j"), None);
+        assert_eq!(r.split("j"), Some((String::new(), "Answer.".to_string())));
     }
 }

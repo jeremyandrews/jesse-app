@@ -1127,6 +1127,12 @@ async fn run_spawned_turn(
                 // Cap the stored reply at MAX_OUTPUT_BYTES *bytes* on a char
                 // boundary (M1) — not chars, which for multibyte text could keep
                 // up to ~4× the budget. This matches the byte-based stream cap.
+                //
+                // THE NARRATION. `result` is the harness's answer; the text a tool call closed
+                // on the way to it is narration, carried beside it (see `settled_narration`).
+                // Settled here, on the raw answer, because this is the last point that can tell
+                // the empty-`result` fallback (answer IS the stream) from a real `result`.
+                jobs.stream_settle_narration(job_id, &result);
                 break Ok((
                     truncate_bytes_on_char_boundary(&result, MAX_OUTPUT_BYTES).to_string(),
                     session_id,
@@ -1188,6 +1194,10 @@ impl TurnSink for JobStoreSink<'_> {
     fn tool_activity(&self, activity: ToolActivity) {
         self.trace.note_tool(&activity.name);
         self.jobs.stream_push_activity(self.job_id, activity);
+    }
+
+    fn narration(&self, block: &str) {
+        self.jobs.stream_push_narration(self.job_id, block);
     }
 
     /// Onto the trace, and nowhere else. The verdict is provenance rather than a live event:
@@ -1404,6 +1414,8 @@ async fn run_in_process_turn(
             // The deck is the ACTIVE model's, which is the same multiplication the badge
             // performs — one usage vector, one deck, two readers that cannot disagree.
             trace.note_usage(usage.clone(), usage.cost_on(&active.price));
+            // What narration this reply carries apart from its answer. See the spawned arm.
+            jobs.stream_settle_narration(job_id, &result);
             Ok((
                 truncate_bytes_on_char_boundary(&result, MAX_OUTPUT_BYTES).to_string(),
                 session_id,

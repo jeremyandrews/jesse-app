@@ -253,6 +253,7 @@ async fn tool_activity_and_text_interleave_in_order() {
             match frame {
                 StreamFrame::Delta(d) => seen.push(format!("text:{d}")),
                 StreamFrame::Activity(a) => seen.push(format!("tool:{}", a.name)),
+                StreamFrame::Narration(n) => seen.push(format!("narration:{n}")),
                 StreamFrame::Done { .. } | StreamFrame::Error(_) | StreamFrame::Cancelled => break,
             }
         }

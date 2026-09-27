@@ -66,6 +66,13 @@ pub struct ConversationRecord {
     /// and therefore as READ, so the upgrade marks nothing unread.
     #[serde(default)]
     pub last_reply_ms: u64,
+    /// What sent this conversation's OPENING turn when the owner did not type it: the
+    /// label the apps show on the folded prompt ("Scheduled: archive box", "Morning
+    /// routine"). Set once, by the turn that created the record, and never after; `None`
+    /// for a conversation he started by typing and for every record written before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_for: Option<String>,
 }
 
 impl ConversationRecord {
@@ -270,6 +277,19 @@ impl ConversationStore {
         origin: Option<&str>,
         now_ms: u64,
     ) -> ConversationRecord {
+        self.register_sent_for(conversation_id, origin, None, now_ms)
+    }
+
+    /// [`register`](Self::register), recording `sent_for` on the record when THIS call
+    /// creates it. A known id is returned unchanged, label and all: only the turn that
+    /// opened the conversation can say what sent its opening turn.
+    pub fn register_sent_for(
+        &self,
+        conversation_id: &str,
+        origin: Option<&str>,
+        sent_for: Option<&str>,
+        now_ms: u64,
+    ) -> ConversationRecord {
         let rec = {
             let mut inner = self.inner.lock_ok();
             if let Some(existing) = inner.map.get(conversation_id) {
@@ -283,6 +303,7 @@ impl ConversationStore {
                 origin: origin.map(str::to_string),
                 // No reply yet, which reads as READ against a zero `read_through_ms`.
                 last_reply_ms: 0,
+                sent_for: sent_for.map(str::to_string),
             };
             inner.map.insert(conversation_id.to_string(), rec.clone());
             rec
@@ -295,8 +316,19 @@ impl ConversationStore {
     /// build, or a non-app caller. The id is returned in the 202 either way, so such a
     /// client simply ignores a field it does not decode.
     pub fn mint(&self, origin: Option<&str>, now_ms: u64) -> ConversationRecord {
+        self.mint_sent_for(origin, None, now_ms)
+    }
+
+    /// [`mint`](Self::mint), recording what sent the opening turn. See
+    /// [`register_sent_for`](Self::register_sent_for).
+    pub fn mint_sent_for(
+        &self,
+        origin: Option<&str>,
+        sent_for: Option<&str>,
+        now_ms: u64,
+    ) -> ConversationRecord {
         let id = uuid::Uuid::new_v4().hyphenated().to_string();
-        self.register(&id, origin, now_ms)
+        self.register_sent_for(&id, origin, sent_for, now_ms)
     }
 
     /// Bind a Claude session id to a conversation, making it the CURRENT one.
@@ -460,6 +492,8 @@ impl ConversationStore {
                         // with no reply time, so adopting a directory full of old
                         // sessions cannot light up the badge.
                         last_reply_ms: 0,
+                        // Nothing is known about who typed an adopted transcript's turns.
+                        sent_for: None,
                     });
                 if !rec.session_ids.iter().any(|s| s == sid) {
                     rec.session_ids.push(sid.to_string());

@@ -1070,6 +1070,8 @@ async fn interleaved_text_and_tool_calls_keep_their_order_in_the_thread() {
         ],
         "the text the model said BEFORE the call stays before it"
     );
-    // The outcome's text is every visible delta of the turn, which is what the user watched.
-    assert_eq!(ran.outcome.text, "Let me look.Found it.");
+    // The answer is what the last call said; what the model said on its way to the tool is
+    // narration, kept apart and verbatim, and the two together are what streamed.
+    assert_eq!(ran.outcome.text, "Found it.");
+    assert_eq!(ran.outcome.narration, vec!["Let me look.".to_string()]);
 }

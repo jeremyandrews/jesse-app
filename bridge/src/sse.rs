@@ -38,6 +38,22 @@ pub fn sse_reset(text: &str) -> Event {
     sse_event("reset", json!({ "text": text }))
 }
 
+/// A `reset` frame for a LIVE job, which also says where the narration ends. `text` is the
+/// whole accumulated buffer exactly as before, so an older client is unaffected; a newer
+/// one reads `narration` (the blocks a tool call closed, plus any commentary) and `answer`
+/// (the text since the last tool call) and never shows narration as the answer. The two
+/// keys are omitted when nothing has been narrated, leaving the frame byte-for-byte as it
+/// was.
+pub fn sse_live_reset(text: &str, split: Option<(String, String)>) -> Event {
+    match split {
+        Some((narration, answer)) if !narration.is_empty() => sse_event(
+            "reset",
+            json!({ "text": text, "narration": narration, "answer": answer }),
+        ),
+        _ => sse_reset(text),
+    }
+}
+
 /// An `activity` frame. ONE encoder, because two paths emit it — the live broadcast and
 /// the replay a late subscriber gets — and a subscriber that joined a beat late must not
 /// be told something different from one that was there.
@@ -58,6 +74,7 @@ pub fn frame_to_event(frame: &StreamFrame) -> Event {
     match frame {
         StreamFrame::Delta(text) => sse_event("delta", json!({ "text": text })),
         StreamFrame::Activity(a) => sse_activity(a),
+        StreamFrame::Narration(text) => sse_event("narration", json!({ "text": text })),
         StreamFrame::Done {
             response,
             session_id,
@@ -65,6 +82,7 @@ pub fn frame_to_event(frame: &StreamFrame) -> Event {
             provenance,
             artifacts,
             last_reply_ms,
+            narration,
         } => sse_event(
             "done",
             json!({
@@ -81,6 +99,10 @@ pub fn frame_to_event(frame: &StreamFrame) -> Event {
                 // the reply identically. `0` for a turn with no conversation record; an
                 // older client simply ignores the key.
                 "last_reply_ms": last_reply_ms,
+                // The model's working narration, apart from `response`. `null` on a turn
+                // that narrated nothing; an older client ignores the key and shows
+                // `response`, which is the whole answer either way.
+                "narration": narration,
             }),
         ),
         StreamFrame::Error(error) => sse_event("error", json!({ "error": error })),
@@ -120,7 +142,8 @@ pub async fn forward_live_frames(
             // text, so no delta is silently lost.
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 let snapshot = jobs.stream_snapshot(&jid).unwrap_or_default();
-                if tx.send(Ok(sse_reset(&snapshot))).await.is_err() {
+                let split = jobs.stream_split(&jid);
+                if tx.send(Ok(sse_live_reset(&snapshot, split))).await.is_err() {
                     break;
                 }
             }
@@ -155,7 +178,7 @@ pub async fn jesse_stream(
         // Live job: replay text-so-far (+ any activity), then forward broadcast
         // frames on a task that ends when the terminal frame arrives or the
         // client goes away (the mpsc send fails once the response body is dropped).
-        let _ = tx.try_send(Ok(sse_reset(&text)));
+        let _ = tx.try_send(Ok(sse_live_reset(&text, st.jobs.stream_split(&job_id))));
         if let Some(a) = activity {
             let _ = tx.try_send(Ok(sse_activity(&a)));
         }
@@ -184,6 +207,7 @@ pub async fn jesse_stream(
                 provenance,
                 artifacts,
                 last_reply_ms,
+                narration,
             }) => {
                 let _ = tx.try_send(Ok(sse_reset(&response)));
                 let _ = tx.try_send(Ok(frame_to_event(&StreamFrame::Done {
@@ -193,6 +217,7 @@ pub async fn jesse_stream(
                     provenance,
                     artifacts,
                     last_reply_ms,
+                    narration,
                 })));
             }
             Some(JobState::Failed { error, .. }) => {
@@ -225,6 +250,70 @@ pub async fn jesse_stream(
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    /// The SSE wire text of a list of events, as a client would read it.
+    async fn wire_of(events: Vec<Event>) -> String {
+        let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+        for e in events {
+            tx.try_send(Ok(e)).unwrap();
+        }
+        drop(tx);
+        let resp = Sse::new(SseBody { rx }).into_response();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// A live `reset` says where the narration ends, and says nothing extra when there is
+    /// none: the frame an older client decodes is unchanged either way, since `text` is still
+    /// the whole buffer.
+    #[tokio::test]
+    async fn a_live_reset_names_the_narration_only_when_there_is_some() {
+        let wire = wire_of(vec![
+            sse_live_reset(
+                "Let me look.Found",
+                Some(("Let me look.".into(), "Found".into())),
+            ),
+            sse_live_reset("Found", Some((String::new(), "Found".into()))),
+            sse_live_reset("Found", None),
+        ])
+        .await;
+        assert!(
+            wire.contains(
+                r#"data: {"answer":"Found","narration":"Let me look.","text":"Let me look.Found"}"#
+            ),
+            "{wire}"
+        );
+        assert_eq!(
+            wire.matches(r#"data: {"text":"Found"}"#).count(),
+            2,
+            "no narration, byte-for-byte the old frame: {wire}"
+        );
+    }
+
+    /// The `done` frame carries the answer in `response`, as it always has, and the narration
+    /// beside it; a Codex commentary block goes out on its own `narration` event.
+    #[tokio::test]
+    async fn the_done_frame_carries_the_narration_beside_the_whole_answer() {
+        let wire = wire_of(vec![
+            frame_to_event(&StreamFrame::Narration("I'll look.".into())),
+            frame_to_event(&StreamFrame::Done {
+                response: "42".into(),
+                session_id: None,
+                directives: None,
+                provenance: None,
+                artifacts: Vec::new(),
+                last_reply_ms: 0,
+                narration: Some("I'll look.".into()),
+            }),
+        ])
+        .await;
+        assert!(
+            wire.contains("event: narration\ndata: {\"text\":\"I'll look.\"}"),
+            "{wire}"
+        );
+        assert!(wire.contains(r#""narration":"I'll look.""#), "{wire}");
+        assert!(wire.contains(r#""response":"42""#), "{wire}");
+    }
 
     // Forces a subscriber to fall behind the broadcast backlog (RecvError::Lagged)
     // and asserts the forwarder re-sends the FULL accumulated text as a single
@@ -260,6 +349,7 @@ mod tests {
                 provenance: None,
                 artifacts: Vec::new(),
                 last_reply_ms: 0,
+                narration: None,
             },
         );
 

@@ -298,10 +298,16 @@ pub struct TurnDeps<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {
     pub thread_id: ThreadId,
-    /// Every visible text delta of the turn, concatenated — including the narration around
-    /// intermediate tool calls, because that is what the user watched stream past. The last
-    /// message alone would silently drop it.
+    /// The ANSWER: the visible text of the turn's last call, the one no tool call followed.
+    /// When that call said nothing (a turn that stopped right after its tools), it is every
+    /// visible delta of the turn instead, concatenated, and `narration` is empty: a turn that
+    /// produced visible text never delivers an empty answer.
     pub text: String,
+    /// The NARRATION: the visible text of every earlier call, each one followed by a tool
+    /// call, in order and verbatim. It streamed past as deltas like the answer did; it is kept
+    /// apart so the client can fold it away instead of reading it as part of the answer.
+    /// `narration.concat() + text` is exactly what streamed.
+    pub narration: Vec<String>,
     pub stop_reason: StopReason,
     /// The turn's aggregate token vector, in the shape `bridge/src/shadow.rs` already uses.
     pub usage: TokenUsage,
@@ -345,6 +351,7 @@ pub async fn run_turn(
     let mut trace = TurnTrace::default();
     let mut spend = Spend::default();
     let mut answer = String::new();
+    let mut narration: Vec<String> = Vec::new();
 
     // ---- The thread ------------------------------------------------------
     let thread_id = match thread_id {
@@ -452,7 +459,12 @@ pub async fn run_turn(
         );
         spend.record_call(&usage, &prices);
         trace.iterations = spend.iterations;
-        answer.push_str(&outcome.text);
+        // A new call only follows a tool dispatch, so whatever the PREVIOUS call said was
+        // said on the way to a tool: narration, not the answer.
+        let previous = std::mem::replace(&mut answer, outcome.text.clone());
+        if !previous.is_empty() {
+            narration.push(previous);
+        }
 
         // ---- The assistant's message goes into the thread ----------------
         //
@@ -526,9 +538,18 @@ pub async fn run_turn(
         }
     };
 
+    // A last call that said nothing: deliver everything that streamed as the answer, so a
+    // turn that produced visible text is never delivered empty.
+    if answer.trim().is_empty() && !narration.is_empty() {
+        let all = narration.concat() + &answer;
+        answer = all;
+        narration.clear();
+    }
+
     TurnOutcome {
         thread_id,
         text: answer,
+        narration,
         stop_reason: stop,
         usage: TokenUsage {
             input_tokens: Some(spend.input_tokens),
@@ -1068,6 +1089,7 @@ fn store_failure(
     TurnOutcome {
         thread_id,
         text: String::new(),
+        narration: Vec::new(),
         stop_reason: StopReason::Store(e.to_string()),
         usage: TokenUsage::default(),
         cost_usd: spend.cost_usd,

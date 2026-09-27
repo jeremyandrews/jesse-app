@@ -14,6 +14,33 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (178)] - 2026-09-28
+
+**The note editor opens where the reader was, and the reader comes back to where the edit
+was.** Edit always opened the editor at the top of the note, so every edit began with
+hunting for the passage that had been on screen, and after Save or Cancel the reader was
+wherever SwiftUI had left it. The reader never recorded its position, the editor took no
+starting position, and nothing scrolled either of them.
+
+- The reader keeps the scroll id of its topmost block (or raw line) through
+  `scrollPosition(id:anchor:)` over `.scrollTargetLayout()`, the ids it already had. Edit
+  opens the editor at that block's file line; an unscrolled note opens at line 1.
+- A block's `line` already counts the frontmatter (the parser starts at the line after its
+  closing fence), and a raw line is a file line, so no offset is applied anywhere.
+- The editor turns the line into a UTF-16 `NSRange` against the text view's own text, puts
+  the caret there, and brings that line to the TOP of the view, not the bottom edge the
+  keyboard covers. Once, on first layout, never on a later update. A line past the end
+  (the note shrank on disk) clamps to the last line.
+- Edit here, in each formatted block's context menu (long press on the iPhone, right click
+  on the Mac), opens the editor with exactly that block's source lines selected. It is
+  absent wherever Edit is refused (`Today.md`, a cut note), through the same rule.
+- Save and Cancel report the caret's line. The reader scrolls the block containing it to
+  the top, after the reload on Save so it resolves against the saved note, with no search
+  hit tint.
+
+All in JesseKit, so the iPhone and the Mac both have it. The search hit landing, the save
+path and the outbox are unchanged.
+
 ## [App 1.0 (177)] - 2026-09-27
 
 **"When is my flight today?" was answered "Not found in the vault on this device", with

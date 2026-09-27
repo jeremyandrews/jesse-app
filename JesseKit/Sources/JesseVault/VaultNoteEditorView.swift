@@ -42,12 +42,30 @@ public struct VaultNoteEditorView: View {
     /// Told after a save so the reader behind this screen reloads rather than showing what
     /// it read before the edit.
     private let onSaved: () -> Void
+    /// Told the 1-based file line the caret was on as the editor closes, on Save and on
+    /// Cancel alike, and whether it saved, so the reader can come back to where the edit
+    /// was rather than wherever SwiftUI left it.
+    private let onClose: (_ caretLine: Int, _ saved: Bool) -> Void
 
     public init(path: String,
+                start: VaultEditorStart? = nil,
                 model: VaultNoteEditorModel? = nil,
-                onSaved: @escaping () -> Void = {}) {
-        _model = State(initialValue: model ?? VaultNoteEditorModel(path: path))
+                onSaved: @escaping () -> Void = {},
+                onClose: @escaping (_ caretLine: Int, _ saved: Bool) -> Void = { _, _ in }) {
+        _model = State(initialValue: model ?? VaultNoteEditorModel(path: path, start: start))
         self.onSaved = onSaved
+        self.onClose = onClose
+    }
+
+    /// The caret's line, read BEFORE a save: the selection is in the text view's units,
+    /// and a save can give the text its CRLF back, which moves every offset after line 1.
+    private var caretLine: Int { model.caretLine(for: selection) }
+
+    /// Leave, telling the reader where the caret was.
+    private func close(line: Int, saved: Bool) {
+        if saved { onSaved() }
+        onClose(line, saved)
+        dismiss()
     }
 
     public var body: some View {
@@ -59,16 +77,17 @@ public struct VaultNoteEditorView: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { if model.cancel() { dismiss() } }
+                    Button("Cancel") {
+                        let line = caretLine
+                        if model.cancel() { close(line: line, saved: false) }
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        let line = caretLine
                         Task {
                             await model.save()
-                            if model.didSave {
-                                onSaved()
-                                dismiss()
-                            }
+                            if model.didSave { close(line: line, saved: true) }
                         }
                     }
                     .disabled(!model.canSave)
@@ -98,12 +117,10 @@ public struct VaultNoteEditorView: View {
             .alert("Overwrite the newer version?",
                    isPresented: isPresenting(.confirmOverwrite)) {
                 Button("Overwrite", role: .destructive) {
+                    let line = caretLine
                     Task {
                         await model.overwrite()
-                        if model.didSave {
-                            onSaved()
-                            dismiss()
-                        }
+                        if model.didSave { close(line: line, saved: true) }
                     }
                 }
                 Button("Cancel", role: .cancel) { model.dismissPrompt() }
@@ -112,8 +129,9 @@ public struct VaultNoteEditorView: View {
             }
             .alert("Discard your changes?", isPresented: isPresenting(.confirmDiscard)) {
                 Button("Discard", role: .destructive) {
+                    let line = caretLine
                     model.confirmDiscard()
-                    dismiss()
+                    close(line: line, saved: false)
                 }
                 Button("Keep editing", role: .cancel) { model.dismissPrompt() }
             }
@@ -157,7 +175,8 @@ public struct VaultNoteEditorView: View {
                 #endif
                 VaultPlainTextEditor(text: $model.text, resetToken: resetToken,
                                      selectedRange: $selection,
-                                     pendingEdit: pendingEdit, editToken: editToken)
+                                     pendingEdit: pendingEdit, editToken: editToken,
+                                     start: model.start)
             }
             #if os(iOS)
             .safeAreaInset(edge: .bottom, spacing: 0) {

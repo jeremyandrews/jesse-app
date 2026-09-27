@@ -43,6 +43,15 @@ import AppKit
 // point. One hop later everything is ordinary: the replace fires the delegate, the
 // delegate writes the binding, and the next update sees text that already matches.
 
+// WHERE IT OPENS. Handed a `VaultEditorStart`, the view selects what it asks for and puts
+// that line at the TOP of the visible text, once, the first time it has a size and a
+// window. Once only, and that is the rule that matters: a start applied on a later update
+// would yank the caret back to where the editor opened, mid-word, every time SwiftUI
+// re-evaluated the owner. The range is computed from the view's own text at that moment,
+// never from anything the reader parsed. `scrollRangeToVisible` alone is not enough: it
+// brings a line to the NEAREST edge, which from the top of a note is the bottom one, and on
+// an iPhone the bottom edge is under the keyboard.
+
 /// The file's own text, monospaced, with every automatic substitution off.
 public struct VaultPlainTextEditor: View {
     @Binding private var text: String
@@ -59,20 +68,55 @@ public struct VaultPlainTextEditor: View {
     /// Bumped by the owner for each edit it wants applied. A token rather than the edit's
     /// own identity because the same mark applied twice in a row is two edits.
     private let editToken: Int
+    /// Where to open, applied once when the view first has a size. Nil opens at the top.
+    private let start: VaultEditorStart?
 
     public init(text: Binding<String>, resetToken: Int = 0,
                 selectedRange: Binding<NSRange>? = nil,
-                pendingEdit: VaultTextEdit? = nil, editToken: Int = 0) {
+                pendingEdit: VaultTextEdit? = nil, editToken: Int = 0,
+                start: VaultEditorStart? = nil) {
         _text = text
         self.resetToken = resetToken
         self.selectedRange = selectedRange
         self.pendingEdit = pendingEdit
         self.editToken = editToken
+        self.start = start
     }
 
     public var body: some View {
         Representable(text: $text, resetToken: resetToken, selectedRange: selectedRange,
-                      pendingEdit: pendingEdit, editToken: editToken)
+                      pendingEdit: pendingEdit, editToken: editToken, start: start)
+    }
+
+    /// The y offset, in the text container's coordinates, at which the line holding UTF-16
+    /// `location` starts. Nil when the view has no TextKit 2 layout to ask.
+    ///
+    /// TextKit 2 on both platforms, rather than a layout manager: asking an `NSTextView` or
+    /// a `UITextView` for its `layoutManager` silently drops it back to TextKit 1 for the
+    /// rest of its life.
+    @MainActor
+    static func lineTop(at location: Int, layout: NSTextLayoutManager?) -> CGFloat? {
+        guard let layout, let content = layout.textContentManager else { return nil }
+        let documentStart = content.documentRange.location
+        guard let target = content.location(documentStart, offsetBy: location) else { return nil }
+        layout.ensureLayout(for: NSTextRange(location: documentStart, end: target)
+                            ?? content.documentRange)
+        var top: CGFloat?
+        layout.enumerateTextLayoutFragments(from: target, options: [.ensuresLayout]) { fragment in
+            top = fragment.layoutFragmentFrame.minY
+            for line in fragment.textLineFragments {
+                // A soft-wrapped paragraph is one fragment of several lines: find the line
+                // the location is on, not the paragraph's first.
+                let range = line.characterRange
+                let start = content.offset(from: documentStart, to: fragment.rangeInElement.location)
+                if location >= start + range.location, location <= start + NSMaxRange(range) {
+                    top = fragment.layoutFragmentFrame.minY + line.typographicBounds.minY
+                    break
+                }
+            }
+            return false
+        }
+        return top
     }
 }
 
@@ -85,13 +129,19 @@ extension VaultPlainTextEditor {
         let selectedRange: Binding<NSRange>?
         let pendingEdit: VaultTextEdit?
         let editToken: Int
+        let start: VaultEditorStart?
 
         func makeCoordinator() -> Coordinator {
             Coordinator(text: $text, selection: selectedRange)
         }
 
         func makeUIView(context: Context) -> UITextView {
-            let view = UITextView()
+            let view = StartingTextView()
+            view.start = start
+            view.onStart = { [selection = selectedRange] range in
+                guard let selection, selection.wrappedValue != range else { return }
+                selection.wrappedValue = range
+            }
             view.delegate = context.coordinator
             view.font = .monospacedSystemFont(ofSize: UIFont.systemFontSize, weight: .regular)
             // THE FOUR, OFF.
@@ -174,6 +224,59 @@ extension VaultPlainTextEditor {
 }
 
 extension VaultPlainTextEditor {
+    /// A `UITextView` that applies its start the first time layout gives it a size and a
+    /// window, and never again.
+    final class StartingTextView: UITextView {
+        var start: VaultEditorStart?
+        /// Tells the owner's selection binding, one hop later: a write from inside a layout
+        /// pass that SwiftUI may be driving is a write during a view update.
+        var onStart: ((NSRange) -> Void)?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let start, window != nil, bounds.height > 0 else { return }
+            self.start = nil
+            let report = onStart
+            // One hop: `open` lays the view out again to measure, and doing that from inside
+            // this view's own layout pass is re-entering it.
+            Task { @MainActor in
+                let range = VaultPlainTextEditor.open(self, at: start)
+                report?(range)
+            }
+        }
+    }
+
+    /// Select what `start` asks for and bring its first line to the top of the view.
+    /// Returns the range selected. Static and handed a view so a test can call it.
+    @MainActor
+    @discardableResult
+    static func open(_ view: UITextView, at start: VaultEditorStart) -> NSRange {
+        let range = VaultNotePosition.range(for: start, in: view.text)
+        // First responder first: a `UITextView` that is not first responder draws no caret
+        // and no selection, and a selection nobody can see is not a place to start typing.
+        view.becomeFirstResponder()
+        view.selectedRange = range
+        view.scrollRangeToVisible(NSRange(location: range.location, length: 0))
+        // THE VIEW'S OWN CARET RECT, corrected until it holds still. TextKit 2 lays out
+        // what is near the viewport and ESTIMATES the rest, so moving the viewport refines
+        // the heights above the line and the line moves under the offset just set. Each
+        // pass measures after the last one's layout; two is the usual count, and the bound
+        // keeps a pathological note from looping.
+        for _ in 0..<4 {
+            view.layoutIfNeeded()
+            guard let caret = view.position(from: view.beginningOfDocument,
+                                            offset: range.location) else { break }
+            let top = view.caretRect(for: caret).minY
+            let inset = view.adjustedContentInset
+            let highest = max(-inset.top,
+                              view.contentSize.height + inset.bottom - view.bounds.height)
+            let y = min(max(-inset.top, top - inset.top - 4), highest)
+            if abs(view.contentOffset.y - y) < 0.5 { break }
+            view.setContentOffset(CGPoint(x: view.contentOffset.x, y: y), animated: false)
+        }
+        return range
+    }
+
     /// Apply one edit through the text view's own undoable replace, and leave the caret
     /// where the edit says.
     ///
@@ -205,14 +308,26 @@ extension VaultPlainTextEditor {
         let selectedRange: Binding<NSRange>?
         let pendingEdit: VaultTextEdit?
         let editToken: Int
+        let start: VaultEditorStart?
 
         func makeCoordinator() -> Coordinator {
             Coordinator(text: $text, selection: selectedRange)
         }
 
         func makeNSView(context: Context) -> NSScrollView {
-            let scroll = NSTextView.scrollableTextView()
-            guard let view = scroll.documentView as? NSTextView else { return scroll }
+            let scroll = StartingScrollView()
+            scroll.start = start
+            scroll.onStart = { [selection = selectedRange] range in
+                guard let selection, selection.wrappedValue != range else { return }
+                selection.wrappedValue = range
+            }
+            // AppKit's own text view, exactly as `scrollableTextView()` configures it (its
+            // sizing and container tracking are the part that is easy to get subtly wrong),
+            // moved into the scroll view subclass that knows when it has a size.
+            let made = NSTextView.scrollableTextView()
+            guard let view = made.documentView as? NSTextView else { return made }
+            made.documentView = nil
+            scroll.documentView = view
             view.delegate = context.coordinator
             view.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
             // THE FOUR, OFF — plus `isRichText`, without which a paste carries the source's
@@ -289,6 +404,51 @@ extension VaultPlainTextEditor {
 }
 
 extension VaultPlainTextEditor {
+    /// An `NSScrollView` that applies its text view's start the first time it is laid out
+    /// in a window with a size, and never again.
+    final class StartingScrollView: NSScrollView {
+        var start: VaultEditorStart?
+        var onStart: ((NSRange) -> Void)?
+
+        override func layout() {
+            super.layout()
+            guard let start, window != nil, contentView.bounds.height > 0,
+                  let view = documentView as? NSTextView else { return }
+            self.start = nil
+            let report = onStart
+            // One hop: the text view's own layout is part of this pass, and asking TextKit
+            // for a fragment's frame inside it answers from a layout that is not finished.
+            Task { @MainActor in
+                let range = VaultPlainTextEditor.open(view, in: self, at: start)
+                report?(range)
+            }
+        }
+    }
+
+    /// Select what `start` asks for and bring its first line to the top of the scroll view.
+    @MainActor
+    @discardableResult
+    static func open(_ view: NSTextView, in scroll: NSScrollView,
+                     at start: VaultEditorStart) -> NSRange {
+        let range = VaultNotePosition.range(for: start, in: view.string)
+        view.window?.makeFirstResponder(view)
+        view.setSelectedRange(range)
+        view.scrollRangeToVisible(NSRange(location: range.location, length: 0))
+        // Corrected until it holds still, for the reason the iOS half gives: moving the
+        // viewport refines TextKit 2's estimates of the heights above the line.
+        for _ in 0..<4 {
+            view.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            guard let top = lineTop(at: range.location, layout: view.textLayoutManager)
+            else { break }
+            let highest = max(0, view.frame.height - scroll.contentView.bounds.height)
+            let y = min(max(0, top + view.textContainerOrigin.y - 4), highest)
+            if abs(scroll.contentView.bounds.minY - y) < 0.5 { break }
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        return range
+    }
+
     /// Apply one edit through the text view's own undoable insertion, and leave the caret
     /// where the edit says.
     ///

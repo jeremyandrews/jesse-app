@@ -207,6 +207,21 @@ jessekit_on_simulator() {
       CODE_SIGNING_ALLOWED=NO )
 }
 
+# JesseKit's tests, compiled for iOS. The package declares iOS as well as macOS, and
+# `swift test` on this host compiles them for macOS only, so a test that cannot
+# compile for iOS (an AppKit type with no fence) passes here and fails nowhere a
+# gate looks. PR 242 merged exactly that: StrandBoardRenderTests read its render
+# through NSBitmapImageRep, and `main` stopped building its iOS tests. A generic
+# destination needs no simulator, so this runs on any macOS 26 host. An older host
+# skips it because jessekit_on_simulator already compiles and runs them for iOS.
+jessekit_ios_tests_build() {
+  ( cd "$ROOT/JesseKit" && xcodebuild build-for-testing \
+      -scheme JesseKit-Package \
+      -destination "generic/platform=iOS Simulator" \
+      -derivedDataPath "$ROOT/Jesse/build/DerivedDataKitIOS" \
+      CODE_SIGNING_ALLOWED=NO )
+}
+
 # Simulator resolution mirrors the workflow's jq query exactly: newest available
 # runtime for the platform, and a device type that runtime itself declares it
 # supports. The one deliberate difference from CI is REUSE — CI creates a throwaway
@@ -402,6 +417,7 @@ if [ "$OLD_HOST" = yes ]; then
   run_step "JesseKit package (host build + tests, warnings-as-errors; tests on iOS sim)" jessekit
 else
   run_step "JesseKit package (build + test, warnings-as-errors)" jessekit
+  run_step "JesseKit tests compile for iOS"                    jessekit_ios_tests_build
 fi
 if [ "$OLD_HOST" = yes ]; then
   run_step "iOS build (generic simulator, warnings-as-errors)" ios_build_generic

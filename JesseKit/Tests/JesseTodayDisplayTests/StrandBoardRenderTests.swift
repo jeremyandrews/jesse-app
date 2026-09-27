@@ -1,5 +1,8 @@
 import XCTest
 import SwiftUI
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 @testable import JesseTodayDisplay
 import JesseNetworking
 
@@ -19,6 +22,12 @@ import JesseNetworking
 //
 // The paths are printed. `STRAND_BOARD_PNG_DIR` overrides where they land, which is how
 // the two attached to the pull request were collected.
+//
+// The image handling is CoreGraphics and ImageIO only, on purpose: `renderer.cgImage`, an
+// ImageIO PNG encode, and a pixel read from an RGBA buffer. JesseKit declares iOS and
+// macOS, so this file compiles for both, and an AppKit type here (the first version used
+// `nsImage` and `NSBitmapImageRep`) breaks the package's iOS test build. No `#if`, because
+// a fence would drop the iOS half of the render without anything reporting the loss.
 
 @MainActor
 final class StrandBoardRenderTests: XCTestCase {
@@ -172,36 +181,51 @@ final class StrandBoardRenderTests: XCTestCase {
             let name = scheme == .dark ? "strands-tree-dark.png" : "strands-tree-light.png"
             let renderer = ImageRenderer(content: lens(scheme))
             renderer.scale = 2
-            let image = try XCTUnwrap(renderer.nsImage, "\(scheme) rendered nothing")
-            XCTAssertGreaterThan(image.size.width, 400, "\(scheme)")
-            XCTAssertGreaterThan(image.size.height, 400, "\(scheme)")
-            let bitmap = try XCTUnwrap(image.representations.compactMap { $0 as? NSBitmapImageRep }.first
-                                       ?? NSBitmapImageRep(data: image.tiffRepresentation ?? Data()),
-                                       "\(scheme) has no bitmap")
-            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]),
-                                    "\(scheme) would not encode")
+            let image = try XCTUnwrap(renderer.cgImage, "\(scheme) rendered nothing")
+            // Pixels at scale 2: the old 400 point floor.
+            XCTAssertGreaterThan(image.width, 800, "\(scheme)")
+            XCTAssertGreaterThan(image.height, 800, "\(scheme)")
+            let png = NSMutableData()
+            let destination = try XCTUnwrap(
+                CGImageDestinationCreateWithData(png, UTType.png.identifier as CFString, 1, nil),
+                "\(scheme) has no PNG destination")
+            CGImageDestinationAddImage(destination, image, nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination), "\(scheme) would not encode")
             let url = directory.appendingPathComponent(name)
-            try png.write(to: url)
+            try (png as Data).write(to: url)
             print("STRAND BOARD PNG \(scheme): \(url.path)")
 
             // A blank render is the failure mode that matters here: `ImageRenderer` hands
             // back an empty image for a scrolling container, and an all-one-colour PNG
             // would sail past a "the file exists" check.
-            XCTAssertGreaterThan(distinctColours(bitmap), 40,
+            let colours = try distinctColours(image)
+            print("STRAND BOARD COLOURS \(scheme): \(colours)")
+            XCTAssertGreaterThan(colours, 40,
                                  "\(scheme) rendered fewer colours than a board has tones")
         }
     }
 
     /// Roughly how many colours the render holds, sampled on a grid. Enough to tell a
-    /// drawn board from a blank rectangle.
-    private func distinctColours(_ bitmap: NSBitmapImageRep) -> Int {
+    /// drawn board from a blank rectangle. The image is drawn once into an sRGB RGBA8
+    /// buffer, so every pixel is read in the same space on either platform.
+    private func distinctColours(_ image: CGImage) throws -> Int {
+        let width = image.width, height = image.height, bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        XCTAssertTrue(drawn, "no RGBA context for a \(width)x\(height) image")
         var seen: Set<Int> = []
-        for x in stride(from: 0, to: bitmap.pixelsWide, by: 3) {
-            for y in stride(from: 0, to: bitmap.pixelsHigh, by: 3) {
-                guard let colour = bitmap.colorAt(x: x, y: y) else { continue }
-                let r = Int(colour.redComponent * 255), g = Int(colour.greenComponent * 255)
-                let b = Int(colour.blueComponent * 255)
-                seen.insert(r << 16 | g << 8 | b)
+        for x in stride(from: 0, to: width, by: 3) {
+            for y in stride(from: 0, to: height, by: 3) {
+                let i = y * bytesPerRow + x * 4
+                seen.insert(Int(pixels[i]) << 16 | Int(pixels[i + 1]) << 8 | Int(pixels[i + 2]))
             }
         }
         return seen.count

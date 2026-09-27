@@ -14,6 +14,48 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (176)] - 2026-09-27
+
+**A saved note edit showed on the reader only after a relaunch.** Edit a note, Save, and
+back in the reader the text was as it had been before the save, under "The Obsidian copy on
+this device is behind"; force quit, relaunch, and the edit was there. It started with bridge
+0.154.0, whose `GET /jesse/vault/note` made the reader ask the Studio on every open. Before
+that route existed the reader always showed the device's copy, so nothing could race.
+
+**The root cause: the reload after a save raced the unawaited outbox flush, and the open
+decision ignored this device's own queued writes.** `VaultNoteWriter.replace` queues the
+write, writes the local file, and starts the flush without waiting for it. The editor's
+Save then reloads the reader at once, which reads the new local bytes and asks the Studio
+with their hash; the flush has usually not reached the bridge yet, so the Studio answers
+with its old copy, and `VaultNoteOpening.decide`, working from the two hashes alone, showed
+that old copy as if the device were behind. When the flush then landed, nothing reloaded:
+the outbox's change notice only refreshed the pending count. Two smaller holes led to the
+same screen. A save to the Studio's copy (`VaultBridgeCopyWriter`) whose flush came back
+`503` or failed left the write queued and reloaded onto the Studio's unchanged text, with no
+sign that the save was only waiting. And `VaultNoteWriter` never cleared the opener's ten
+second reuse cache, so a Studio copy fetched just before a local save could be served to the
+reload after it. Failing tests confirmed all three on `main` before anything changed.
+
+**The fix, all in JesseKit, so the iPhone and the Mac both have it.**
+
+- The open decision takes this device's unanswered writes to the note. When the newest one
+  left the local copy exactly as it is now, the local copy is the newer one by construction
+  and opens as the device's own, editable, with no "behind" line. A conflicted write, and
+  every offline answer, decide exactly as before.
+- On the Studio's copy, an unanswered save is shown as what was saved, with the pending
+  notice and a header line saying the change has not reached the Studio. An edit or a tick
+  made on it takes it as its base, so a second save queues against what is on screen. The
+  Obsidian folder is still never written from the Studio's copy.
+- The reader reloads, without a spinner, when a write of its note is answered (applied or
+  refused), and never while the editor is open. A write answered while the reader was
+  asking the Studio makes it ask once more.
+- `VaultNoteWriter` clears the opener's cached copy after every write, as
+  `VaultBridgeCopyWriter` already did. The reader's default writer now uses the reader's own
+  outbox and opener.
+
+No sleep, retry or polling: the reader shows the saved text because the decision knows it is
+the saved text, and the Studio's answer is read when the outbox reports it.
+
 ## [App 1.0 (175), Bridge 0.156.0, Agent 0.12.0] - 2026-09-27
 
 **Every conversation now opens on the answer.** A scheduled run used to open on a screen or

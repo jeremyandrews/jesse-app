@@ -74,12 +74,17 @@ public struct VaultNoteWriter: VaultNoteWriting {
     private let log: OfflineWriteLog
     /// Where every write is queued for the Studio. Nil only in a test that is not about it.
     private let outbox: VaultWriteOutbox?
+    /// Told to forget its copy of the note after every write, so the reader's reload asks
+    /// the Studio again rather than reusing a copy fetched before the save. Nil only in a
+    /// test that is not about it.
+    private let opener: VaultNoteOpener?
 
     public init(source: VaultIndexSource = .shared, log: OfflineWriteLog = .shared,
-                outbox: VaultWriteOutbox? = .shared) {
+                outbox: VaultWriteOutbox? = .shared, opener: VaultNoteOpener? = .shared) {
         self.source = source
         self.log = log
         self.outbox = outbox
+        self.opener = opener
     }
 
     public func readStamped(path: String) async throws -> (text: String, stamp: VaultFileStamp) {
@@ -144,6 +149,7 @@ public struct VaultNoteWriter: VaultNoteWriting {
                                           kind: kind,
                                           bytesBefore: expected.bytes))
         }.value
+        await opener?.forget(path: path)
         if let outbox { Task { await outbox.flush() } }
         return stamp
     }

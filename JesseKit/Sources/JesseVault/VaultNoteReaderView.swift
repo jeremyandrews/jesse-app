@@ -106,6 +106,9 @@ public final class VaultNoteReaderModel {
     /// The writes from this device to this note that the Studio has not taken yet, a
     /// conflict included. Read from the outbox, never kept here.
     public private(set) var pending: [VaultOutboxEntry] = []
+    /// The Studio's copy is on screen with this device's own unanswered change applied to
+    /// it: what was saved, not what the Studio still has. See `present`.
+    public private(set) var showsQueuedChange = false
 
     private let source: VaultIndexSource
     private let ticker: VaultNoteTicker
@@ -117,7 +120,8 @@ public final class VaultNoteReaderModel {
                 opener: VaultNoteOpener? = .shared,
                 outbox: VaultWriteOutbox = .shared) {
         self.source = source
-        self.ticker = VaultNoteTicker(writer: writer ?? VaultNoteWriter(source: source))
+        self.ticker = VaultNoteTicker(
+            writer: writer ?? VaultNoteWriter(source: source, outbox: outbox, opener: opener))
         self.opener = opener
         self.outbox = outbox
     }
@@ -177,13 +181,30 @@ public final class VaultNoteReaderModel {
     /// `keepOnFailure` is `reload`'s: a note already on screen stays there rather than being
     /// replaced by an error from a refresh.
     private func present(path: String, keepOnFailure: Bool) async {
+        // A write of this note answered while the Studio was being asked means the answer
+        // shown may predate it: ask once more. Bounded, because each pass needs a new answer.
+        if await presentOnce(path: path, keepOnFailure: keepOnFailure) {
+            await opener?.forget(path: path)
+            _ = await presentOnce(path: path, keepOnFailure: true)
+        }
+    }
+
+    /// One read and decision. True when a write the decision counted as unanswered was
+    /// answered before it finished.
+    ///
+    /// THIS DEVICE'S OWN UNANSWERED WRITES are read FIRST and are part of the decision. A
+    /// save queues its text and flushes without waiting, and the reload that follows it
+    /// usually reaches the Studio before the flush does. Without them, the Studio's old copy
+    /// was shown as if the device were behind, and the save seemed lost until a relaunch.
+    private func presentOnce(path: String, keepOnFailure: Bool) async -> Bool {
         let source = self.source
+        let queued = await outbox.entries(forPath: path)
         let local = await Self.read(path: path, source: source)
         var localStamp: VaultFileStamp?
         if case .success(let read) = local { localStamp = read.4 }
         let opening: VaultNoteOpening
         if let opener {
-            opening = await opener.open(localPath: path, localStamp: localStamp)
+            opening = await opener.open(localPath: path, localStamp: localStamp, queued: queued)
         } else {
             opening = localStamp == nil ? .unavailable : .local
         }
@@ -195,8 +216,14 @@ public final class VaultNoteReaderModel {
         case (.localOnly, .success(let read)):
             apply(read, origin: .localOnly)
         case (.bridge(let note), _):
-            apply(await Self.parse(note: note, path: path, source: source),
-                  origin: .bridge(modified: note.modified, truncated: note.truncated))
+            // The Studio's copy, with this device's newest unanswered change to it shown as
+            // what it is: what was saved. The pending notice says it has not arrived; an
+            // edit or a tick made now takes it as its base, so a second save queues against
+            // what is on screen. Never over a cut copy, which cannot have been edited here.
+            let mine = note.truncated ? nil : VaultNoteOpening.newestUnanswered(queued)
+            apply(await Self.parse(note: note, showing: mine, path: path, source: source),
+                  origin: .bridge(modified: note.modified, truncated: note.truncated),
+                  showsQueuedChange: mine != nil)
         case (.notOnStudio, _):
             if !keepOnFailure || document == nil {
                 state = .failed(VaultNoteOpener.notOnStudioCaption(path))
@@ -209,16 +236,24 @@ public final class VaultNoteReaderModel {
             apply(read, origin: .offline)
         }
         pending = await outbox.entries(forPath: path)
+        return !Self.answered(since: queued, now: pending).isEmpty
+    }
+
+    /// The ids that were waiting in `before` and have left the queue in `now`: applied, or
+    /// refused. A conflicted write stays, so it is never one of them.
+    static func answered(since before: [VaultOutboxEntry], now: [VaultOutboxEntry]) -> Set<UUID> {
+        Set(before.filter { $0.state == .queued }.map(\.id)).subtracting(now.map(\.id))
     }
 
     private func apply(_ read: (VaultNoteDocument, [String: String], URL?, String, VaultFileStamp),
-                       origin: Origin) {
+                       origin: Origin, showsQueuedChange: Bool = false) {
         let (document, map, url, text, stamp) = read
         resolved = map
         fileURL = url
         self.text = text
         self.stamp = stamp
         self.origin = origin
+        self.showsQueuedChange = showsQueuedChange
         optimistic = [:]
         messages = [:]
         state = .loaded(document)
@@ -230,17 +265,23 @@ public final class VaultNoteReaderModel {
     /// TAPPABLE (an empty path, which the renderer draws as a link by target) rather than
     /// drawn as missing, because a note the device is behind on is exactly the note that
     /// links to things the device has not got yet.
-    private static func parse(note: VaultBridgeNote, path: String, source: VaultIndexSource)
+    ///
+    /// `showing` is this device's unanswered change to the note, shown in place of the
+    /// Studio's text and stamped as its own bytes, so a write made on it has it as its base.
+    private static func parse(note: VaultBridgeNote, showing mine: String?, path: String,
+                              source: VaultIndexSource)
         async -> (VaultNoteDocument, [String: String], URL?, String, VaultFileStamp) {
         await Task.detached {
-            let document = VaultNoteDocument.parse(path: path, text: note.markdown,
+            let markdown = mine ?? note.markdown
+            let stamp = mine.map { VaultFileStamp(text: $0) } ?? note.stamp
+            let document = VaultNoteDocument.parse(path: path, text: markdown,
                                                    modified: note.modified)
             let index = try? source.index()
             var map: [String: String] = [:]
             for target in document.wikiTargets {
                 map[target] = index?.resolve(target: target) ?? ""
             }
-            return (document, map, nil, note.markdown, note.stamp)
+            return (document, map, nil, markdown, stamp)
         }.value
     }
 
@@ -296,6 +337,23 @@ public final class VaultNoteReaderModel {
     public func refreshPending() async {
         guard !route.isEmpty else { return }
         pending = await outbox.entries(forPath: route)
+    }
+
+    /// The outbox changed: read it again, and when a write of this note has been answered
+    /// (applied, or refused), read the note again too, quietly.
+    ///
+    /// Until the answer, the reader shows the note as it was saved; after it, the Studio has
+    /// the final word, and nothing else would ever ask it. Never while `editing`: a reload
+    /// under the editor would move the reader beneath someone who is typing, and the Save
+    /// that closes the editor reloads anyway.
+    public func outboxDidChange(editing: Bool) async {
+        guard !route.isEmpty else { return }
+        let before = pending
+        pending = await outbox.entries(forPath: route)
+        guard !editing, case .loaded = state,
+              !Self.answered(since: before, now: pending).isEmpty else { return }
+        await opener?.forget(path: route)
+        await reload()
     }
 
     /// "Keep mine" on a conflict: send this device's version over the Studio's, then show
@@ -602,7 +660,8 @@ public struct VaultNoteReaderView: View {
             Text(linkMissing ?? "")
         }
         .onReceive(NotificationCenter.default.publisher(for: VaultWriteOutbox.didChange)) { _ in
-            Task { await model.refreshPending() }
+            let editing = isEditing
+            Task { await model.outboxDidChange(editing: editing) }
         }
         .task(id: route.path) { await model.load(path: route.path) }
     }
@@ -669,7 +728,9 @@ public struct VaultNoteReaderView: View {
             // modification time; the Studio's says the device is behind.
             switch model.origin {
             case .bridge(let modified, let truncated):
-                Label(VaultNoteOpener.behindCaption(modified: modified),
+                Label(model.showsQueuedChange
+                      ? VaultNoteOpener.behindWithQueuedCaption(modified: modified)
+                      : VaultNoteOpener.behindCaption(modified: modified),
                       systemImage: "arrow.triangle.2.circlepath")
                     .font(.caption)
                     .foregroundStyle(.secondary)

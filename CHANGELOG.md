@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (174)] - 2026-09-27
+
+**The Strands board opened in Most recent on every launch, whatever lens was last picked.**
+Tree or By group lasted only as long as the process: the lens lived on `StrandsModel` and
+nothing stored it, so an owner who reads the board as a tree re-picked Tree after every
+relaunch. The board now opens in the lens this device was last left in, and keeps it until
+another one is picked.
+
+The lens is remembered per device and never sent to the bridge, exactly as the badge filter
+is: which order a board is shown in is a fact about this phone or this Mac. It goes in
+`TodayViewPreferences`, the store both shells already use for the day's view state, and the
+models still hold no storage of their own — each shell loads the value before the board's
+first frame and writes it back when it changes.
+
+**What is stored is the CHOSEN key, never the effective one.** `effectiveSortKey` falls back
+to Most recent whenever Tree is not offered, which is the case before the first snapshot
+arrives and against any bridge that does not serve `parent`. Persisting what the menu shows
+would therefore have overwritten a remembered Tree with that fallback on every cold launch,
+which is the same bug in a new place. A stored Tree is kept while the board cannot draw it
+and takes effect the moment a board that serves parents lands; an unrecognised stored value
+reads as Most recent rather than trapping.
+
+The load happens where each model is built — `RootTabView.makeStrandsModel()` on iOS, the
+`init` of `MacTodayView` on the Mac — rather than in a `.task`, which fires after the first
+frame and would have drawn the board once in Most recent and then reordered it under the
+reader. Nothing else about the board is persisted: the Today day's own sort still is not, and
+the collapsed Tree parents are stored as they already were.
+
+### Changed
+
+- `TodayViewPreferences`: `strandsLensKey` (`"strands.lens"`) and a `strandsLens`
+  accessor, defaulting to `.mostRecent` when absent or unrecognised. Its doc says why the
+  stored value may be `Tree` on a board that cannot offer it.
+- `StrandsModel.sortKey`: documented as per device and remembered across launches by the
+  shells; the model still holds no storage. `effectiveSortKey` is documented as never
+  persisted. Neither it nor `availableSortKeys` changed behaviour.
+- `RootTabView`: `strandsModel` is built by a new `makeStrandsModel()` that applies the
+  remembered lens at construction, and an `.onChange(of: strandsModel.sortKey)` writes the
+  chosen key back through the view's own `TodayViewPreferences`.
+- `MacTodayView`: the same pair — the stored lens applied in `init` before the board's first
+  frame, and an `.onChange(of: strands.sortKey)` beside the badge filter's own write-back.
+- `StrandsLensMemoryTests`: the default, the relaunch, an unrecognised stored value, and the
+  one that pins the reason the chosen key is stored (a `Tree` held on a board with no
+  snapshot draws Most recent, keeps the choice, and returns to Tree once the board loads).
+- `TodayTabTests` and `MacTodayTests`: a per-shell relaunch test each, in the shape of the
+  badge filter's, asserting the effective lens is not what gets stored.
+
 ## [JesseKit tests compile for iOS] - 2026-09-27
 
 **A JesseKit test that could not compile for iOS merged green, because no gate compiled the

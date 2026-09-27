@@ -14,13 +14,14 @@ import Foundation
 // Absent it, the fallback is deliberately small rather than optimistic: a prompt that
 // is refused is not a degraded answer, it is no answer at all.
 //
-// TWO ORDERS, FUSED. bm25 knows about words; a sentence embedding knows that "concert"
-// and "recital" are the same thing and that a note about a brick order is not about
-// either. Neither is reliable alone, and choosing between them per query is a tuning
-// problem nobody can see the inputs to, so both orders are computed and combined by
-// reciprocal rank fusion — which needs only the RANKS, never a calibration between two
-// score scales that have nothing to do with each other. With no embedding available,
-// bm25's order simply stands.
+// TWO ORDERS, FUSED. The lexical order knows about words; a sentence embedding knows
+// that "concert" and "recital" are the same thing and that a note about a brick order is
+// not about either. Neither is reliable alone, and choosing between them per query is a
+// tuning problem nobody can see the inputs to, so both orders are computed and combined
+// by reciprocal rank fusion — which needs only the RANKS, never a calibration between two
+// score scales that have nothing to do with each other. With no embedding available, the
+// lexical order simply stands. (That order is the CONCEPT RANK below, with bm25 breaking
+// its ties, rather than bm25 alone.)
 //
 // `Inbox/` IS NEVER RETRIEVED FROM. It holds pasted mail and scan output: text written
 // by other people, sitting in the vault, that would otherwise be lifted verbatim into a
@@ -38,6 +39,14 @@ import Foundation
 // the app's setting, and `what's my birthday` goes to the index as `birthday Jeremy` —
 // which is how the precise pass finds the one heading that answers it instead of every
 // note that says "birthday".
+//
+// THE NAME PROMOTES, IT DOES NOT GATE, and nor does any other word of the question. That
+// is the 2026-09-27 fix and it replaced the three widening passes this file used to run:
+// the question is PLANNED into concept groups (`LookupPlan`), ONE query ORs every term of
+// every group, and a chunk is ranked by HOW MANY GROUPS it matched. A booking that never
+// says whose it is still comes back; a booking that says `JEREMIAH` and carries today's
+// date comes back ahead of it. The reasoning, and why a query per term is the thing to
+// avoid, is written at the top of `LookupPlan`.
 
 /// One chunk, retrieved whole, with the two facts that let a citation open it.
 public struct RetrievedChunk: Equatable, Sendable {
@@ -168,9 +177,18 @@ public enum RankFusion {
 
 /// The chunks one question gets answered from.
 public struct VaultRetriever: Sendable {
-    /// How many hits the search asks for before re-ranking. Twenty rather than the
-    /// four that survive, because the fusion has to have something to reorder.
+    /// How many hits survive into the re-ranking. Twenty rather than the four that
+    /// survive it, because the fusion has to have something to reorder.
     public static let searchLimit = 20
+    /// How many chunks the one lexical query asks the index for, before anything is
+    /// ranked by concept.
+    ///
+    /// Larger than `searchLimit` because bm25 is not the order that decides here: the
+    /// chunk that matches three of the question's concepts has to be IN the rows SQL
+    /// returned before the group rank can put it first. A hundred and twenty rows cost
+    /// one more page of the index and a body read each; the alternative is a query per
+    /// term, which is what this replaced.
+    public static let lexicalScanLimit = 120
     /// Below this many base hits the expansion tier is worth spending — the same
     /// threshold the conversation list and the vault search already use.
     public static let expansionThreshold = 5
@@ -182,18 +200,23 @@ public struct VaultRetriever: Sendable {
     private let index: VaultIndex
     private let expander: any VaultQueryExpanding
     private let embedding: any ChunkEmbedding
-    /// How the vault names the person asking, from the app's owner-name setting. Nil on a
-    /// device that has no name for him, where every question behaves as it always did.
+    /// How the vault names the person asking, from the app's owner-name setting: one
+    /// name, or several spellings separated by commas. Nil on a device that has no name
+    /// for him, where every question behaves as it always did.
     private let ownerName: String?
+    /// What day it is, which is the only way "today" can mean anything to an index.
+    private let clock: VaultClock
 
     public init(index: VaultIndex,
                 expander: any VaultQueryExpanding = NoVaultExpansion(),
                 embedding: any ChunkEmbedding = NoChunkEmbedding(),
-                ownerName: String? = nil) {
+                ownerName: String? = nil,
+                clock: VaultClock = .device) {
         self.index = index
         self.expander = expander
         self.embedding = embedding
         self.ownerName = ownerName
+        self.clock = clock
     }
 
     /// What one question retrieved, and what it cost — the numbers the diagnostics
@@ -217,44 +240,41 @@ public struct VaultRetriever: Sendable {
 
     /// Retrieve, re-rank, and clip to `budget`.
     ///
-    /// THREE PASSES, WIDENING, and the first one that finds enough wins. The vault
-    /// search requires EVERY token of a query to be present — which is right for a
-    /// search field, where the person is choosing the words, and wrong for a typed
-    /// question, where "when is the school concert" would require a note containing the
-    /// word "when". So:
+    /// ONE QUERY, RANKED BY CONCEPT, and a widening tier behind it for the rare question
+    /// nothing at all matches:
     ///
-    ///   1. The question's KEYWORDS, all of them. The precise pass; when it hits, it is
-    ///      the right note.
-    ///   2. The same keywords through the app's own expander, which is the tier the
-    ///      conversation list and the vault search already use, on the same threshold.
-    ///   3. EACH KEYWORD ALONE, longest first, unioned in behind whatever the first two
-    ///      found. This is the pass that makes an ordinary spoken question work at all,
-    ///      and it can only ADD — nothing found by a more precise pass is displaced.
+    ///   1. THE PLAN'S TERMS, ORed. Every content word of the question, every spelling
+    ///      of the owner's name, and every absolute form of the day a relative word
+    ///      named. Nothing is required, so no single word can empty the result — which
+    ///      is what "today" and the owner's name each did before this.
+    ///   2. The app's own expander, on the same threshold the conversation list and the
+    ///      vault search use, and only when pass 1 found almost nothing. It can only
+    ///      ADD: pass 1's hits keep their place.
+    ///
+    /// Then the rank: how many of the plan's concept GROUPS each chunk matches, bm25
+    /// breaking the ties, one chunk per file, and the archive demotion and the embedding
+    /// fusion exactly as they were.
     public func retrieve(question: String, budget: VaultRetrievalBudget) async -> Result {
         let searcher = VaultSearcher(index: index,
                                      expansionThreshold: Self.expansionThreshold,
                                      limit: Self.searchLimit)
-        let keywords = LookupQuery.keywords(question, ownerName: ownerName)
-        let query = keywords.joined(separator: " ")
+        let plan = LookupPlan.make(question: question, ownerName: ownerName, clock: clock)
 
-        var hits = Self.allowed(searcher.base(query).hits)
+        var hits = Self.allowed(searcher.matchingAny(plan.terms,
+                                                     limit: Self.lexicalScanLimit))
         if hits.count < Self.expansionThreshold {
-            hits = Self.allowed(await searcher.search(query, expander: expander).hits)
-        }
-        if hits.count < Self.expansionThreshold, keywords.count > 1 {
-            var seen = Set(hits.map(\.path))
-            for keyword in keywords.sorted(by: { $0.count > $1.count }) {
-                for hit in Self.allowed(searcher.base(keyword).hits)
-                where !seen.contains(hit.path) {
-                    seen.insert(hit.path)
-                    hits.append(hit)
-                }
+            var seen = Set(hits.map(\.id))
+            let query = plan.contentWords.joined(separator: " ")
+            for hit in Self.allowed(await searcher.search(query, expander: expander).hits)
+            where !seen.contains(hit.id) {
+                seen.insert(hit.id)
+                hits.append(hit)
             }
         }
-        hits = Array(hits.prefix(Self.searchLimit))
         guard !hits.isEmpty else {
             return Result(chunks: [], hitCount: 0, embedded: false)
         }
+        let hitCount = hits.count
 
         // The snippet a hit carries is fifteen words around the match. The BODY is what
         // gets read, so a hit whose chunk is no longer in the index (a reindex between
@@ -267,8 +287,9 @@ public struct VaultRetriever: Sendable {
             bodies.append((hit, body))
         }
         guard !bodies.isEmpty else {
-            return Result(chunks: [], hitCount: hits.count, embedded: false)
+            return Result(chunks: [], hitCount: hitCount, embedded: false)
         }
+        bodies = Array(Self.byConcept(bodies, plan: plan).prefix(Self.searchLimit))
 
         // ARCHIVED NOTES RANK BEHIND LIVE ONES, ALWAYS. Fusing the two groups separately
         // and concatenating is what makes that absolute: the embedding reorders WITHIN a
@@ -285,11 +306,56 @@ public struct VaultRetriever: Sendable {
                            heading: entry.hit.heading,
                            text: Self.clip(entry.text, to: budget.perChunkCharacters))
         }
-        return Result(chunks: Array(chunks), hitCount: hits.count,
+        return Result(chunks: Array(chunks), hitCount: hitCount,
                       embedded: embedding.isAvailable)
     }
 
     // MARK: - Pure halves, asserted directly
+
+    /// THE RANK THIS FILE EXISTS FOR: how many of the question's concept groups a chunk
+    /// matches, bm25 breaking the ties, one chunk per file.
+    ///
+    /// bm25 alone cannot express it. It scores a chunk that says "flight" six times
+    /// above one that says "flight" once and carries the date and the traveller's name,
+    /// because it is counting words and the question is asking about things. Counting
+    /// GROUPS is the whole difference, and it is why the owner's name and the day both
+    /// promote a chunk without either being able to exclude one.
+    ///
+    /// A chunk is matched over its body, its heading, its title and its path, which is
+    /// the same four columns the index searches — a flight table under `## Flight
+    /// Details` answers "flight" through its heading and would otherwise be scored as
+    /// though the word were not there.
+    ///
+    /// THE QUESTION'S OWN WORDS ARE THE FIRST KEY and the whole group count the second,
+    /// for the reason `LookupPlan.score` gives: the owner and the date PROMOTE a chunk
+    /// that is already about what was asked, and cannot carry one that is about nothing
+    /// else.
+    ///
+    /// COLLAPSED BY FILE AFTERWARDS, never before: the best chunk of a file is the one
+    /// that matched the most concepts, not the one bm25 liked.
+    public static func byConcept(_ bodies: [(hit: VaultSearchHit, text: String)],
+                                 plan: LookupPlan) -> [(hit: VaultSearchHit, text: String)] {
+        let ranked = bodies.enumerated().map { entry -> (index: Int, content: Int, total: Int) in
+            let searchable = [entry.element.hit.title, entry.element.hit.heading,
+                              entry.element.hit.path, entry.element.text].joined(separator: " ")
+            let score = plan.score(inTokens: LookupPlan.tokenize(searchable))
+            return (entry.offset, score.content, score.total)
+        }
+        let ordered = ranked.sorted { lhs, rhs in
+            if lhs.content != rhs.content { return lhs.content > rhs.content }
+            if lhs.total != rhs.total { return lhs.total > rhs.total }
+            let a = bodies[lhs.index].hit, b = bodies[rhs.index].hit
+            if a.score != b.score { return a.score < b.score }
+            if a.path != b.path { return a.path < b.path }
+            return a.line < b.line
+        }
+        var seen = Set<String>()
+        return ordered.compactMap { entry in
+            let body = bodies[entry.index]
+            guard seen.insert(body.hit.path).inserted else { return nil }
+            return body
+        }
+    }
 
     /// Everything outside `Inbox/`, in the order it arrived.
     public static func allowed(_ hits: [VaultSearchHit]) -> [VaultSearchHit] {
@@ -315,7 +381,8 @@ public struct VaultRetriever: Sendable {
         }
     }
 
-    /// The bm25 order and the embedding order, fused.
+    /// The lexical order — `byConcept`'s, which the caller has already applied — and the
+    /// embedding order, fused.
     ///
     /// The embedding is asked only when it says it is available, and a pair it cannot
     /// place is left out of its ordering entirely rather than scored zero — zero is a
@@ -459,6 +526,25 @@ public enum LookupQuery {
     static func ownerTokens(_ ownerName: String?) -> [String] {
         guard let ownerName else { return [] }
         return VaultSearchQuery.tokens(ownerName).filter { !isStopWord($0) }
+    }
+
+    /// EVERY SPELLING OF THE OWNER'S NAME the setting holds, as one concept.
+    ///
+    /// The setting is one name, or several separated by COMMAS, because one person has
+    /// several names in his own notes and a prefix term matches none of the others: the
+    /// owner is `Jeremy` in prose, `Jeremiah` on anything legal (in capitals, on a
+    /// boarding pass), `Jeremia` to Italians, and `Andrews` in a list of surnames.
+    /// `"Jeremy"*` matches exactly one of those four.
+    ///
+    /// A form of several words stays whole — `Jeremiah Kirsten Andrews` is one spelling,
+    /// not three — and becomes an FTS5 phrase. Blank entries and a trailing comma are
+    /// dropped, so a setting that has only ever held one name behaves exactly as it did.
+    public static func ownerForms(_ ownerName: String?) -> [String] {
+        guard let ownerName else { return [] }
+        return ownerName.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { VaultSearchQuery.tokens($0).joined(separator: " ") }
+            .filter { !$0.isEmpty }
     }
 
     /// The words worth searching for, in the order they were typed, with the owner's name

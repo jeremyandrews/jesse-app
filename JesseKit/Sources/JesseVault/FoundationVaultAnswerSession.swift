@@ -51,12 +51,20 @@ public final class FoundationVaultAnswerSession: VaultAnswerGenerating, @uncheck
 
     // MARK: - VaultAnswerGenerating
 
+    /// The plain shape the seam requires, for a caller that has no clock of its own.
+    /// This device's, then, which is the same value `VaultAnswerer` would pass.
     public func generate(question: String, chunks: [RetrievedChunk]) async throws
         -> VaultAnswerDraft {
+        try await generate(question: question, chunks: chunks, clock: .device)
+    }
+
+    public func generate(question: String, chunks: [RetrievedChunk],
+                         clock: VaultClock) async throws -> VaultAnswerDraft {
         do {
             let response = try await session(&answerSession,
                                              instructions: VaultAnswerer.instructions)
-                .respond(to: VaultAnswerer.prompt(question: question, chunks: chunks),
+                .respond(to: VaultAnswerer.prompt(question: question, chunks: chunks,
+                                                  clock: clock),
                          generating: GeneratedVaultAnswer.self)
             let content = response.content
             return VaultAnswerDraft(answer: content.answer,

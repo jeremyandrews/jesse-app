@@ -4,11 +4,15 @@ import XCTest
 // THE RETRIEVAL FLOOR.
 //
 // Everything else in this suite asserts a mechanism. This asserts the OUTCOME the whole
-// feature stands on: for twelve ordinary questions, over a corpus of twenty notes that
+// feature stands on: for eighteen ordinary questions, over a corpus of thirty notes that
 // share vocabulary with each other, the note that actually answers the question is among
 // the handful put in front of the model.
 //
-// It is a floor, not a benchmark. Twelve of twelve is the passing bar because the corpus
+// FOUR OF THEM ASK WITH A WORD NO NOTE CONTAINS ("today", "this evening", a delivery that
+// the clay note calls a delivered order), which is the 2026-09-27 incident and the reason
+// this suite pins a clock.
+//
+// It is a floor, not a benchmark. Every one of them is the passing bar because the corpus
 // is small and invented; what it catches is a regression — a tokenizer change, a fusion
 // change, an exclusion that starts eating real notes — turning "answers with a citation"
 // into "abstains" without anybody noticing until the phone is in the air.
@@ -42,7 +46,12 @@ final class VaultRetrievalFloorTests: XCTestCase {
         try index.reindex(scan: VaultScanner().scan(root: root),
                           read: { try file.read(relativePath: $0) })
 
-        let retriever = VaultRetriever(index: index)
+        // The clock and the owner name are the corpus's own, pinned: four of the
+        // questions are about "today", and a floor whose verdict changes at midnight
+        // would be a floor nobody could read.
+        let retriever = VaultRetriever(index: index,
+                                       ownerName: VaultRetrievalFixture.ownerName,
+                                       clock: VaultRetrievalFixture.clock)
         let budget = VaultRetrievalBudget.forMeasuredPrompt(nil)
 
         var missed: [String] = []

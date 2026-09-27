@@ -224,10 +224,12 @@ final class VaultAnswererTests: XCTestCase {
 
     // MARK: - The prompt
 
-    func testThePromptIsTheQuestionAndTheNotesAndNothingElse() {
+    func testThePromptIsTheDateTheQuestionAndTheNotesAndNothingElse() {
         let prompt = VaultAnswerer.prompt(question: "  when is the concert  ",
-                                          chunks: [chunk("A.md", line: 4, text: "on Thursday")])
-        XCTAssertEqual(prompt, "when is the concert\n\nNOTE A.md:4\non Thursday")
+                                          chunks: [chunk("A.md", line: 4, text: "on Thursday")],
+                                          clock: VaultRetrievalFixture.clock)
+        XCTAssertEqual(prompt, "Today is Sunday, 27 September 2026.\nwhen is the concert"
+                       + "\n\nNOTE A.md:4\non Thursday")
     }
 
     func testTheInstructionsAreShortEnoughForThisModel() {

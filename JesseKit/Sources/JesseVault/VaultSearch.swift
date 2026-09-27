@@ -36,6 +36,29 @@ public enum VaultSearchQuery {
         return terms.map { "\"\(escaped($0))\"*" }.joined(separator: " AND ")
     }
 
+    /// The FTS5 MATCH expression for a set of terms where ANY of them may match, or nil
+    /// when there is nothing to search for.
+    ///
+    /// THE CHAT RETRIEVAL PATH'S EXPRESSION, and the difference from the one above is
+    /// the whole of the 2026-09-27 fix: a typed search means "every word", a spoken
+    /// question means "these concepts", and requiring a note to contain the word "today"
+    /// is requiring the wrong thing. Ranking by how many CONCEPTS a chunk matched is
+    /// `LookupPlan`'s job; this only widens what the index is allowed to return.
+    ///
+    /// A term may be several words (`Sun 27 Sep`), which quoting turns into an FTS5
+    /// PHRASE — the words adjacent and in order — with the trailing `*` making its last
+    /// word a prefix. Each term is taken as given rather than re-tokenized, because a
+    /// phrase re-tokenized into separate terms would be several concepts again.
+    public static func anyMatchExpression(_ terms: [String]) -> String? {
+        let usable = terms.compactMap { term -> String? in
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.contains(where: { $0.isLetter || $0.isNumber }) else { return nil }
+            return trimmed
+        }
+        guard !usable.isEmpty else { return nil }
+        return usable.map { "\"\(escaped($0))\"*" }.joined(separator: " OR ")
+    }
+
     /// The tokens of a query, as FTS5 can use them.
     ///
     /// `SearchQueryRules.significantTokens` first, so the vault and the chat list agree on
@@ -229,6 +252,23 @@ public struct VaultSearcher: Sendable {
                                              tokens: tokens, limit: limit)
         return VaultSearchOutcome(hits: ranked,
                                   baseDuration: Date().timeIntervalSince(started))
+    }
+
+    /// EVERY CHUNK MATCHING ANY OF `terms`, in bm25 order, NOT collapsed by file.
+    ///
+    /// The chat retrieval path's one query. It lives here rather than in the retriever
+    /// so the scope and folder narrowing this type holds apply to it too, for the reason
+    /// `folderPrefix` gives.
+    ///
+    /// Uncollapsed on purpose: collapsing to one hit per file keeps each file's best
+    /// chunk BY BM25, and the caller is about to re-rank by how many concepts a chunk
+    /// matches. A note whose flight table is its third-best bm25 chunk would otherwise
+    /// have that chunk thrown away before the rank that would have chosen it.
+    public func matchingAny(_ terms: [String], limit scanLimit: Int) -> [VaultSearchHit] {
+        guard let expression = VaultSearchQuery.anyMatchExpression(terms) else { return [] }
+        return index.search(expression: expression, limit: scanLimit,
+                            underPrefix: sqlPrefix)
+            .filter { includes($0.path) }
     }
 
     /// The typed query, widened by the on-device expander when — and only when — the

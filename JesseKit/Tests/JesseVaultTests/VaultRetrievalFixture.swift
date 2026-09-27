@@ -25,6 +25,32 @@ enum VaultRetrievalFixture {
         let expectedPath: String
     }
 
+    /// The live itinerary for the day the clock is pinned to.
+    static let dayTrip = "Travel/Rotterdam-Trip.md"
+    /// A live itinerary of exactly the same shape on another day.
+    static let otherTrip = "Travel/Vienna-Trip.md"
+    /// The day's list, which names the flight without the word.
+    static let todayList = "Today.md"
+
+    /// THE DAY THIS CORPUS IS READ ON. Sunday 27 September 2026, 11:00 in Rome, which is
+    /// the morning of the incident. Pinned rather than real for the reason every clock in
+    /// this package is injected: a suite whose result changes overnight is not a test.
+    static let clock = fixedClock(day: 27)
+    /// The day before, for the "tomorrow" shape.
+    static let dayBeforeClock = fixedClock(day: 26)
+
+    /// The owner-name setting as the device holds it: every spelling his own notes use.
+    static let ownerName = "Jeremy, Jeremiah, Jeremia, Andrews"
+
+    static func fixedClock(day: Int) -> VaultClock {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Rome") ?? .gmt
+        let date = calendar.date(from: DateComponents(year: 2026, month: 9, day: day,
+                                                      hour: 11, minute: 0)) ?? Date()
+        return VaultClock.fixed(date, calendar: calendar,
+                                locale: Locale(identifier: "en_GB"))
+    }
+
     static func write(in root: URL) {
         func note(_ text: String, _ path: String) {
             VaultFixture.write(text, to: path, in: root)
@@ -216,6 +242,167 @@ enum VaultRetrievalFixture {
             the one worth rereading.
             """, "Personal/Reading.md")
 
+        // ── THE DAY'S TRAVEL, and the four notes the 2026-09-27 incident needs.
+        //
+        //    THE ANSWER CHUNK IS DELIBERATELY POOR. `## Flight Details` carries the date
+        //    in the form an itinerary table writes it, a passenger name in capitals that
+        //    is not the owner-name setting, a flight code and two airport codes — and NO
+        //    city name, no airline name, and not the word "today". Every word the two
+        //    questions actually contain is therefore missing from it except "flight",
+        //    which is the whole shape of the incident: the note that answers the question
+        //    shares almost none of the question's words.
+        note("""
+            ---
+            title: Rotterdam trip
+            ---
+
+            # Rotterdam trip
+
+            ## Flight Details
+
+            **Booking code:** QXRTVB · **Passenger:** JEREMIAH KIRSTEN ANDREWS
+
+            | Leg | Route | Flight | Dep | Arr |
+            |---|---|---|---|---|
+            | Out, Sun 27 Sep | FLR to AMS | KL1654 | 12:40 | 14:50 |
+            | Back, Fri 2 Oct | AMS to FLR | KL1657 | 17:05 | 19:00 |
+
+            ## Room
+
+            Four nights in a junior suite, booked in the legal name.
+            """, dayTrip)
+
+        // The same shape on another date. Nothing separates it from the note above
+        // except WHICH day it is, which is the point.
+        note("""
+            ---
+            title: Vienna trip
+            ---
+
+            # Vienna trip
+
+            ## Flight Details
+
+            **Booking code:** BWQ2LM · **Passenger:** JEREMIAH KIRSTEN ANDREWS
+
+            | Leg | Route | Flight | Dep | Arr |
+            |---|---|---|---|---|
+            | Out, Fri 16 Oct | FLR to VIE | OS512 | 09:15 | 11:05 |
+            | Back, Tue 20 Oct | VIE to FLR | OS511 | 12:30 | 14:10 |
+            """, otherTrip)
+
+        // The day's list. It names the flight by number and time and never uses the
+        // word "flight" — the note a person would expect to answer first and the one a
+        // required-keyword query can never reach.
+        note("""
+            # Today
+
+            - Travel day. KL 1654 leaves Florence 12:40, lands 14:50.
+            - Ask [[Suppliers/Terrasole]] about the pallet before the bank closes.
+            """, todayList)
+
+        // Live notes that say "flight" and answer nothing. Without them the corpus
+        // would have two flight notes and the questions could not go wrong.
+        note("""
+            # Stairs
+
+            The flight of stairs down to the cellar has a loose tread, third from the
+            bottom. The carpenter wants to see it before he quotes.
+            """, "House/Stairs.md")
+
+        note("""
+            # Chicago notes
+
+            The flight over was delayed four hours and the hotel held the room anyway.
+            Next time, take the earlier flight and eat at the airport.
+            """, "Travel/Chicago-Notes.md")
+
+        note("""
+            # Freight
+
+            Air freight was quoted per flight and refused: the bricks go by road on a
+            pallet, which is slower and a third of the money.
+            """, "Suppliers/Freight.md")
+
+        note("""
+            # Birds
+
+            A heron in flight over the valley at dusk, every evening this month, always
+            downstream and never back.
+            """, "Personal/Birds.md")
+
+        note("""
+            # Attic
+
+            The attic flight is steeper than the cellar flight and the top step of the
+            attic flight is loose.
+            """, "House/Attic.md")
+
+        note("""
+            # Lost luggage
+
+            The flight was fine; the bag took a later flight and arrived two days after
+            the flight it was booked on.
+            """, "Travel/Lost-Luggage.md")
+
+        note("""
+            # Model aeroplanes
+
+            Arlo's glider flight lasted nine seconds. The next flight went into the
+            olives and the flight after that into the road.
+            """, "Personal/Gliders.md")
+
+        // ── THE OWNER'S OWN NAME, EVERYWHERE, WHICH IS WHAT A PERSONAL VAULT IS LIKE.
+        //
+        //    Six short notes that name him and answer nothing about a flight. They are
+        //    here because the pass they defeat was REAL: the retriever used to fall back
+        //    to a query per keyword, each returning its own top twenty, and in a vault
+        //    where the owner's name is in hundreds of notes that fallback fills the whole
+        //    prompt with notes that merely say who he is. A corpus where his name appears
+        //    only on the booking would prove the opposite of what it looks like.
+        note("""
+            # Passport
+
+            The passport is in the legal name, JEREMIAH KIRSTEN ANDREWS, and so is the
+            residence permit. JEREMIAH is what the questura prints; ANDREWS alone is what
+            the old card said.
+            """, "Personal/Passport.md")
+
+        note("""
+            # Dottor Bellini
+
+            The file is under ANDREWS, JEREMIAH. Jeremy goes every spring and Jeremy's
+            notes are still on paper.
+            """, "People/Bellini.md")
+
+        note("""
+            # Tax
+
+            The comune writes JEREMIA ANDREWS, the accountant writes Jeremiah Andrews, and
+            the bank writes JEREMIAH K ANDREWS. All three are the same person.
+            """, "House/Tax.md")
+
+        note("""
+            # Running log
+
+            Jeremy ran the valley loop on Tuesday and again on Friday. Jeremy's shoes are
+            done at 700 km and these are at 680.
+            """, "Personal/Running-Log.md")
+
+        note("""
+            # Bank
+
+            The account is JEREMIAH KIRSTEN ANDREWS. The card reads ANDREWS JEREMIAH K,
+            which is why the name on a receipt never matches.
+            """, "Personal/Bank.md")
+
+        note("""
+            # Library
+
+            The card says ANDREWS, JEREMIAH. Jeremy has had it since the year the library
+            reopened and Jeremy renews it every January.
+            """, "Personal/Library.md")
+
         // ── THE TWO TRAPS. Both are under `Inbox/`, both are better keyword matches for
         //    a question than the note that answers it, and neither may ever be retrieved.
         note("""
@@ -267,6 +454,16 @@ enum VaultRetrievalFixture {
              expectedPath: "Workshop/Studio-Rent.md"),
         Case(question: "when does the studio insurance renew",
              expectedPath: "House/Insurance.md"),
+        // ── THE FOUR THE 2026-09-27 INCIDENT ADDED. Every one of them asks with a word
+        //    the answering note does not contain, which is what the old every-token rule
+        //    could not survive: "today" and "this evening" appear in no note at all,
+        //    "delivery" and "weigh" appear in none of the notes about clay.
+        Case(question: "When is my flight today?", expectedPath: dayTrip),
+        Case(question: "When is the KLM flight to Amsterdam today?", expectedPath: dayTrip),
+        Case(question: "when is the school concert this evening",
+             expectedPath: "Family/School-Year.md"),
+        Case(question: "what did the last clay delivery weigh",
+             expectedPath: "Suppliers/Clay.md"),
     ]
 }
 

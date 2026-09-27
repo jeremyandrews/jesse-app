@@ -133,6 +133,26 @@ public protocol VaultAnswerGenerating: Sendable {
     /// Throws `VaultAnswerGenerationError.contextWindow` when the prompt was refused
     /// for size, and `.failed` for anything else.
     func generate(question: String, chunks: [RetrievedChunk]) async throws -> VaultAnswerDraft
+
+    /// The same, told what day it is.
+    ///
+    /// THE CLOCK IS PASSED RATHER THAN READ, for the reason `VaultClock` gives: the
+    /// prompt states the date, the retrieval that chose these chunks resolved "today"
+    /// against a date, and a turn in which those two disagreed would answer one day's
+    /// question from another day's notes.
+    ///
+    /// Defaulted, and the default ignores it, because only ONE conformance builds a
+    /// prompt — the rest are stubs that answer out of the chunks they are handed, and a
+    /// stub should not have to mention a date it has no use for.
+    func generate(question: String, chunks: [RetrievedChunk],
+                  clock: VaultClock) async throws -> VaultAnswerDraft
+}
+
+public extension VaultAnswerGenerating {
+    func generate(question: String, chunks: [RetrievedChunk],
+                  clock: VaultClock) async throws -> VaultAnswerDraft {
+        try await generate(question: question, chunks: chunks)
+    }
 }
 
 /// No model on this device.
@@ -157,7 +177,8 @@ public struct VaultAnswerer: Sendable {
     /// prompt, rather than in the file that owns the framework.
     public static let instructions = """
         Answer only from the notes given. If they do not contain the answer, set \
-        abstain. Cite only the paths given. At most 60 words.
+        abstain. Cite only the paths given. Today, tomorrow and yesterday mean the date \
+        in the first line. At most 60 words.
         """
 
     /// How many citations the model may return.
@@ -165,11 +186,14 @@ public struct VaultAnswerer: Sendable {
 
     private let generator: any VaultAnswerGenerating
     private let timeLimit: TimeInterval
+    private let clock: VaultClock
 
     public init(generator: any VaultAnswerGenerating,
-                timeLimit: TimeInterval = VaultAnswerer.defaultTimeLimit) {
+                timeLimit: TimeInterval = VaultAnswerer.defaultTimeLimit,
+                clock: VaultClock = .device) {
         self.generator = generator
         self.timeLimit = timeLimit
+        self.clock = clock
     }
 
     /// Answer `question` from `chunks`, or say why not.
@@ -178,16 +202,19 @@ public struct VaultAnswerer: Sendable {
         guard !chunks.isEmpty else { return .unanswered(.noHits) }
 
         let generator = self.generator
+        let clock = self.clock
         do {
             let draft = try await Self.withTimeLimit(timeLimit) {
                 do {
-                    return try await generator.generate(question: question, chunks: chunks)
+                    return try await generator.generate(question: question, chunks: chunks,
+                                                        clock: clock)
                 } catch VaultAnswerGenerationError.contextWindow {
                     // ONE retry, with half the chunks. Not a loop: if half of a measured
                     // budget still does not fit, the budget is wrong and the right
                     // outcome is an honest abstain rather than four more round trips.
                     let halved = Array(chunks.prefix(max(1, chunks.count / 2)))
-                    return try await generator.generate(question: question, chunks: halved)
+                    return try await generator.generate(question: question, chunks: halved,
+                                                        clock: clock)
                 }
             }
             return Self.validate(draft, chunks: chunks, question: question)
@@ -204,11 +231,22 @@ public struct VaultAnswerer: Sendable {
 
     // MARK: - Pure halves, asserted directly
 
-    /// The prompt: the question, then each chunk under its own `NOTE path:line`
-    /// header, and nothing else. No preamble, no restating of the instructions, no
-    /// invented framing — every character here is a character not spent on a note.
-    public static func prompt(question: String, chunks: [RetrievedChunk]) -> String {
-        var out = question.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// The prompt: TODAY'S DATE, the question, then each chunk under its own
+    /// `NOTE path:line` header, and nothing else. No preamble, no restating of the
+    /// instructions, no invented framing — every character here is a character not
+    /// spent on a note.
+    ///
+    /// THE DATE IS THE ONE LINE THAT IS NOT A NOTE, and it is here because a model that
+    /// cannot place "today" can only abstain. On 2026-09-27 "When is my flight today?"
+    /// had the itinerary in front of it and the itinerary says `Sun 27 Sep`; with no
+    /// idea what day it was, abstaining was the correct behaviour under these
+    /// instructions. Unconditional rather than only when the question says "today":
+    /// thirty characters, and "is that this week?" is a question about the date that
+    /// does not contain the word.
+    public static func prompt(question: String, chunks: [RetrievedChunk],
+                              clock: VaultClock = .device) -> String {
+        var out = "Today is \(clock.todaySentence).\n"
+        out += question.trimmingCharacters(in: .whitespacesAndNewlines)
         for chunk in chunks {
             out += "\n\nNOTE \(chunk.reference)\n\(chunk.text)"
         }

@@ -74,6 +74,14 @@ public struct OfflineLookupSettings: @unchecked Sendable {
 
     /// How the vault names the owner, or nil when this device has no name for him.
     ///
+    /// ONE NAME, OR SEVERAL SEPARATED BY COMMAS (`Jeremy, Jeremiah, Jeremia, Andrews`).
+    /// A person has more than one name in his own notes — the short one in prose, the
+    /// legal one in capitals on a booking, the local spelling, the surname in a list —
+    /// and a prefix term matches exactly one of them. The retriever treats the whole list
+    /// as ONE concept (`LookupQuery.ownerForms`); a setting holding a single name behaves
+    /// exactly as it always did. What a SENTENCE calls him is the first form alone, which
+    /// is what `PromptStore.ownerName` answers with.
+    ///
     /// Nil rather than a placeholder: `PromptStore.ownerName` answers "the user" on an
     /// unset device because it is building a SENTENCE, and handing "the user" to the index
     /// as a keyword would require a note to contain the word "user". A device with no name
@@ -188,7 +196,9 @@ public final class OfflineAnswerService: OfflineAnswering {
     private let settings: OfflineLookupSettings
     private let diagnostics: OfflineLookupDiagnostics
     private let timeLimit: TimeInterval
-    private let now: @Sendable () -> Date
+    /// ONE CLOCK for the whole turn: the day the retriever resolves "today" against, the
+    /// day the prompt states, and the stopwatch the diagnostics row is timed with.
+    private let clock: VaultClock
 
     public init(source: VaultIndexSource = .shared,
                 generator: any VaultAnswerGenerating,
@@ -197,7 +207,7 @@ public final class OfflineAnswerService: OfflineAnswering {
                 settings: OfflineLookupSettings = OfflineLookupSettings(),
                 diagnostics: OfflineLookupDiagnostics = .shared,
                 timeLimit: TimeInterval = VaultAnswerer.defaultTimeLimit,
-                now: @escaping @Sendable () -> Date = { Date() }) {
+                clock: VaultClock = .device) {
         self.source = source
         self.generator = generator
         self.embedding = embedding
@@ -205,7 +215,7 @@ public final class OfflineAnswerService: OfflineAnswering {
         self.settings = settings
         self.diagnostics = diagnostics
         self.timeLimit = timeLimit
-        self.now = now
+        self.clock = clock
     }
 
     /// Whether this device can take the on-device route at all. Read by the composer's
@@ -241,14 +251,14 @@ public final class OfflineAnswerService: OfflineAnswering {
     /// refusals, because "why did it queue that?" is the question the list exists to
     /// answer.
     public func answer(_ question: String) async -> VaultAnswerOutcome {
-        let started = now()
+        let started = clock.now()
         func finish(_ outcome: VaultAnswerOutcome, gate: String,
                     hits: Int = 0, chunks: Int = 0, characters: Int = 0)
             -> VaultAnswerOutcome {
             diagnostics.record(OfflineLookupRecord(
                 question: question, gateVerdict: gate, hitCount: hits,
                 chunkCount: chunks, characters: characters,
-                elapsed: now().timeIntervalSince(started), outcome: outcome.label))
+                elapsed: clock.now().timeIntervalSince(started), outcome: outcome.label))
             return outcome
         }
 
@@ -267,13 +277,15 @@ public final class OfflineAnswerService: OfflineAnswering {
         // notes that call him by name, and this is the one place on the offline path that
         // knows both.
         let retriever = VaultRetriever(index: index, expander: expander,
-                                       embedding: embedding, ownerName: settings.ownerName)
+                                       embedding: embedding, ownerName: settings.ownerName,
+                                       clock: clock)
         let retrieved = await retriever.retrieve(question: question, budget: settings.budget)
         guard !retrieved.chunks.isEmpty else {
             return finish(.unanswered(.noHits), gate: "passed", hits: retrieved.hitCount)
         }
 
-        let outcome = await VaultAnswerer(generator: generator, timeLimit: timeLimit)
+        let outcome = await VaultAnswerer(generator: generator, timeLimit: timeLimit,
+                                          clock: clock)
             .answer(question: question, chunks: retrieved.chunks)
         return finish(outcome, gate: "passed", hits: retrieved.hitCount,
                       chunks: retrieved.chunks.count, characters: retrieved.characters)

@@ -65,10 +65,17 @@ enum PromptStore {
     /// Settings to a real name; the bridge's own wrappers are personalized
     /// separately via its `jesse.local.toml` persona. A blank value reads as the
     /// default so an empty field never sends "".
+    ///
+    /// THE FIRST FORM ONLY. The setting may hold several spellings of the same person
+    /// separated by commas, because the offline retriever needs every way his own notes
+    /// name him (`OfflineLookupSettings.ownerName`). A sentence needs one name, and the
+    /// first is the one he is called; "Jeremy, Jeremiah, Jeremia, Andrews" in the middle
+    /// of a coach rollup would read as four people.
     static var ownerName: String {
         get {
             let v = (defaults.string(forKey: ownerNameKey) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: ",").first
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
             return v.isEmpty ? "the user" : v
         }
         set {

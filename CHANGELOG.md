@@ -14,6 +14,94 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (177)] - 2026-09-27
+
+**"When is my flight today?" was answered "Not found in the vault on this device", with
+the answer sitting in three live notes.** Both questions asked on the phone that Sunday
+with the bridge unreachable — the owner's own phrasing, and "When is the KLM flight to
+Amsterdam today?" — reached the itinerary's `## Flight Details`, the trip note's booking
+section and the day's list, and retrieved none of them. Three causes, each proved against
+the real vault before anything was changed:
+
+1. **Every word of the question was a requirement on the note.** The chat path dropped
+   stop words and then handed the survivors to `VaultSearchQuery.matchExpression`, which
+   joins tokens with `AND`. "today" is not a stop word and no note writes it for a date,
+   so the precise pass matched nothing; the single-keyword fallback then fused a top
+   twenty PER WORD, and the fused four need not hold the right chunk.
+2. **The owner's name was one more requirement**, appended to a first-person question by
+   App 1.0 (170). A booking, a calendar line or a Today item rarely names whose it is —
+   and the one that did spelled it `JEREMIAH KIRSTEN ANDREWS`, which the prefix term
+   `"Jeremy"*` does not match.
+3. **The model was never told the date.** With `Sun 27 Sep` in front of it and no idea
+   what day it was, abstaining was the correct behaviour under its own instructions.
+
+A question is now PLANNED rather than tokenized. `LookupPlan` reads it as concept groups:
+one per content word, every spelling of the owner's name as one, and the absolute forms of
+whatever day a relative word named as one more. ONE FTS5 query ORs every term of every
+group, and a chunk is ranked by how many GROUPS it matched — the question's own words
+first, the owner and the date as modifiers on top of them, bm25 breaking the ties. Nothing
+is required, so no single word can empty the result, and four spellings of one name are
+four chances to match one concept rather than four concepts.
+
+**The typed search box is untouched.** Its rule is every token and it stays every token:
+the person typing into a field chose those words. Only the chat retrieval path changed.
+
+On the real vault, pinned to the morning of the incident: "When is my flight today?" went
+from four unrelated chunks to the trip note's booking section third and the itinerary's
+flight table fourth — both carrying `KL1654`, `12:40` and `Sun 27 Sep`. "When is the KLM
+flight to Amsterdam today?" now ranks the right NOTE first but still the wrong section of
+it: the booking row says `AMS`, not `Amsterdam`, so the fare table that was researched
+before the booking matches one more of the question's words. The vocabulary gap between
+`AMS` and `Amsterdam` is the expansion tier's job and that tier is unchanged here.
+
+### Added
+
+- `LookupPlan` (and `VaultClock`) in JesseVault: the pure planner. Content words with the
+  relative day words removed (today, tonight, tomorrow, yesterday, this morning, this
+  afternoon, this evening, this week, next week), the owner's forms, and the day's
+  absolute forms derived from one list of nine formats (`2026-09-27`, `27 Sep`, `Sep 27`,
+  `27 September`, `September 27`, each of the four again behind the weekday abbreviation
+  an itinerary table uses). `this week` and `next week` name a span, so they leave the
+  query and bring no date with them. Every form is spelled in the device's locale AND in
+  English, because the notes are English on a device that may not be.
+- `VaultSearchQuery.anyMatchExpression(_:)`: the OR expression, each term a quoted FTS5
+  phrase with a prefix on its last word, so `27 Sep` also matches `27 September`.
+- `VaultSearcher.matchingAny(_:limit:)`: the one query, uncollapsed, so the concept rank
+  sees a note's flight table even when bm25 preferred another of its chunks.
+- `VaultRetriever.byConcept(_:plan:)`: the rank, and `lexicalScanLimit` (120 rows) it
+  ranks over.
+- `VaultRelativeDateRetrievalTests`: nineteen tests over the floor corpus — both
+  questions, the same shape for "tomorrow", every relative phrase and the day it means, a
+  day no note mentions, the owner's four spellings counted once, a first-person question
+  still finding a note that names nobody, the rank itself, and the prompt's date line.
+
+### Changed
+
+- `VaultRetriever.retrieve`: three widening passes became one query plus the existing
+  expansion tier, which is now additive rather than replacing. The archive demotion, the
+  `Inbox/` exclusion, the budget and the embedding fusion are unchanged; the fusion now
+  reorders the concept rank rather than bm25's raw order.
+- `VaultAnswerer.prompt`: states the date first — `Today is Sunday, 27 September 2026.` —
+  in the device's locale and zone, from an injected clock. Unconditional: thirty
+  characters, and "is that this week?" is a question about the date that does not contain
+  the word.
+- `VaultAnswerer.instructions`: one more sentence, "Today, tomorrow and yesterday mean the
+  date in the first line." Thirty-six words, still under the sixty-word ceiling.
+- `VaultAnswerGenerating`: a second, defaulted `generate(question:chunks:clock:)`. Only
+  one conformance builds a prompt; the stubs do not have to mention a date they have no
+  use for.
+- `OfflineLookupSettings.ownerName`: may hold several spellings separated by commas
+  (`Jeremy, Jeremiah, Jeremia, Andrews`). `PromptStore.ownerName`, which builds sentences,
+  answers with the first form alone.
+- `OfflineAnswerService`: one `VaultClock` for the turn — the day the retriever resolves
+  "today" against, the day the prompt states, and the stopwatch the diagnostics row is
+  timed with. It replaces the `now` closure.
+- `VaultRetrievalFixture`: two itineraries of the same shape on different days, a Today
+  list that names the flight without the word, four live notes that say "flight" and
+  answer nothing, six that name the owner and answer nothing, a pinned clock and an owner
+  name. The floor suite grew from fourteen questions to eighteen; the four new ones each
+  ask with a word no note contains.
+
 ## [App 1.0 (176)] - 2026-09-27
 
 **A saved note edit showed on the reader only after a relaunch.** Edit a note, Save, and

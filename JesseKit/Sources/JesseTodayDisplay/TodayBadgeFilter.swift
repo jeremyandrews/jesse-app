@@ -75,10 +75,10 @@ extension TodaySemantics {
 /// The Today screen's per-device view preferences, in `UserDefaults`.
 ///
 /// One tiny store rather than the same key spelled out in both shells. The shells own
-/// the DECISION to persist (the model deliberately holds no storage, the same line it
-/// holds for the view sort), but the key and its default are one fact, and two
-/// hand-written copies of a string are one typo away from a Mac and a phone that
-/// disagree about which preference they are reading.
+/// the DECISION to persist (the models deliberately hold no storage, the strand board's
+/// lens included), but each key and its default are one fact, and two hand-written
+/// copies of a string are one typo away from a Mac and a phone that disagree about
+/// which preference they are reading.
 ///
 /// `UserDefaults`, because that is where this app already keeps small per-device view
 /// state and a boolean does not deserve a schema. The suite is injectable so a test
@@ -98,6 +98,12 @@ public struct TodayViewPreferences {
     /// accessor: the segment is view state with no model behind it, and a second
     /// spelling of the key is the only way the picker and a relaunch could disagree.
     public static let segmentKey = "today.segment"
+
+    /// Which lens the strand board opens in. An accessor rather than a bare key for
+    /// `segment`'s reason inverted: there IS a model behind this one, so the shells
+    /// read it into `StrandsModel.sortKey` and write the chosen value back, and the
+    /// default belongs next to the key rather than at both call sites.
+    public static let strandsLensKey = "strands.lens"
 
     private let defaults: UserDefaults
 
@@ -119,6 +125,24 @@ public struct TodayViewPreferences {
     public var segment: TodaySegment {
         get { TodaySegment(rawValue: defaults.string(forKey: Self.segmentKey) ?? "") ?? .today }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Self.segmentKey) }
+    }
+
+    /// Which lens the strand board opens in. `Most recent` by default, which is what the
+    /// board has always opened in and the only lens every bridge can serve.
+    ///
+    /// **What is stored is the CHOICE, not what was drawn.** The value here may be
+    /// `Tree` on a launch whose board cannot offer it — before the first snapshot
+    /// arrives, or against a bridge that does not send `parent` — and that is the point:
+    /// `StrandsModel.effectiveSortKey` draws `Most recent` meanwhile and returns to
+    /// `Tree` the moment a board that serves parents lands. Writing the EFFECTIVE key
+    /// here would overwrite the choice with that fallback on every cold launch, which is
+    /// exactly the bug this preference exists to fix.
+    ///
+    /// An unrecognised stored string reads as `Most recent` rather than trapping: a lens
+    /// removed in a future build must not leave a device unable to draw its board.
+    public var strandsLens: StrandsSortKey {
+        get { StrandsSortKey(rawValue: defaults.string(forKey: Self.strandsLensKey) ?? "") ?? .mostRecent }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Self.strandsLensKey) }
     }
 }
 

@@ -444,6 +444,32 @@ final class TodayTabTests: XCTestCase {
         XCTAssertEqual(stub.checkCount, 0, "and none of this touched the day")
     }
 
+    /// AND THE STRAND BOARD'S LENS, on this phone, the same way and through the same
+    /// store. The shell loads it into the model at construction (`RootTabView`
+    /// `makeStrandsModel`) and writes the CHOSEN key back on change; what it never
+    /// stores is `effectiveSortKey`, which reads `Most recent` until a board that serves
+    /// parents has loaded and would therefore erase a remembered `Tree`.
+    func testTheStrandsLensSurvivesARelaunchOnThisDevice() throws {
+        let name = "jesse-ios-strands-lens-tests"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defaults.removePersistentDomain(forName: name)
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        let strands = StrandsModel(makeClient: { StubStrandsClient() })
+        strands.sortKey = TodayViewPreferences(defaults: defaults).strandsLens
+        XCTAssertEqual(strands.sortKey, .mostRecent, "the board opens in the server's order")
+
+        strands.sortKey = .tree
+        TodayViewPreferences(defaults: defaults).strandsLens = strands.sortKey
+
+        let relaunched = StrandsModel(makeClient: { StubStrandsClient() })
+        relaunched.sortKey = TodayViewPreferences(defaults: defaults).strandsLens
+        XCTAssertEqual(relaunched.sortKey, .tree)
+        XCTAssertEqual(relaunched.effectiveSortKey, .mostRecent,
+                       "drawn as Most recent until a board arrives, and the choice survives it")
+        XCTAssertEqual(TodayViewPreferences(defaults: defaults).strandsLens, .tree)
+    }
+
     // MARK: - Offline
 
     /// The tab hands its own reachability probe to the model, so the day goes
@@ -544,6 +570,12 @@ final class TodayTabTests: XCTestCase {
 
     /// A `TodayProviding` that serves one fixed day and counts what it was asked to
     /// change, so "nothing was sent" is assertable.
+    /// A board that answers nothing. The lens is a preference, not a fetch.
+    private struct StubStrandsClient: StrandsProviding {
+        func getStrands(ifNoneMatch: String?) async throws -> StrandsFetchResult { .notModified }
+        func getStrand(slug: String) async throws -> StrandDetail { StrandDetail(markdown: "") }
+    }
+
     private final class StubTodayClient: TodayProviding, @unchecked Sendable {
         let day: TodaySnapshot
         private(set) var fetchCount = 0

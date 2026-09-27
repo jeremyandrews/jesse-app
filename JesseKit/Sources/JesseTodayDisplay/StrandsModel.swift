@@ -39,8 +39,14 @@ public final class StrandsModel {
     /// When the board on screen was last confirmed against the bridge.
     public private(set) var lastFetchedAt: Date?
 
-    /// The lens. Per device and per session: which order a board is shown in is a view
-    /// choice, and the day screen deliberately does not persist its own either.
+    /// The lens. Per device, and REMEMBERED across launches: which order a board is
+    /// shown in is a view choice, so it is a fact about this phone or this Mac and never
+    /// sent to the bridge, but it is one the owner should only have to make once.
+    ///
+    /// The storage is not here. This model holds no `UserDefaults` of its own, the same
+    /// line the day model holds: the shells load this from `TodayViewPreferences` before
+    /// the board's first frame and write it back when it changes. What they store is this
+    /// CHOSEN key, never `effectiveSortKey` — see that property.
     public var sortKey: StrandsSortKey = .mostRecent
 
     private let makeClient: @MainActor () -> any StrandsProviding
@@ -73,6 +79,10 @@ public final class StrandsModel {
     /// The lens actually drawn: the chosen one while it is offered, `Most recent`
     /// otherwise. A `Tree` chosen against a newer bridge and then served by an older one
     /// falls back rather than drawing a tree with no branches.
+    ///
+    /// **Never persisted.** This is a fallback, not a decision: it reads `Most recent`
+    /// on every launch until a snapshot arrives, so a shell that stored it would erase a
+    /// remembered `Tree` before the board had even loaded. `sortKey` is what is stored.
     public var effectiveSortKey: StrandsSortKey {
         availableSortKeys.contains(sortKey) ? sortKey : .mostRecent
     }

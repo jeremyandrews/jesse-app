@@ -467,6 +467,15 @@ public struct VaultNoteReaderView: View {
     @State private var captured: String?
     /// The editor, presented over this screen.
     @State private var isEditing = false
+    /// Where the editor opens: the passage on screen, or the block Edit here was chosen on.
+    /// Set immediately before `isEditing`, so the sheet reads it as it is built.
+    @State private var editStart: VaultEditorStart?
+    /// The scroll id of the topmost block (or raw line) on screen, kept by the scroll view
+    /// itself. What Edit opens the editor at.
+    @State private var topAnchor: String?
+    /// The file line the editor closed on, waiting for the document it belongs to. Set on
+    /// close, consumed by `comeBack` once the reload after a Save has applied.
+    @State private var returnLine: Int?
     /// Formatted or raw, seeded from the remembered preference and written back on every
     /// change so the choice survives the next note and the next launch.
     @State private var mode: VaultReaderMode
@@ -492,7 +501,6 @@ public struct VaultNoteReaderView: View {
     /// target depends on nothing, so a caller's own view (the strand sheet's `On Today`
     /// block) arrives erased rather than as a type this file would have to import.
     private let accessory: AnyView?
-
     public init(route: VaultNoteRoute,
                 model: VaultNoteReaderModel? = nil,
                 preferences: VaultReaderPreferences = VaultReaderPreferences(),
@@ -549,6 +557,14 @@ public struct VaultNoteReaderView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
+                // Every block and raw line is a scroll target, so the scroll view reports
+                // which one is at the top without a geometry reader on each of them.
+                .scrollTargetLayout()
+            }
+            .scrollPosition(id: $topAnchor, anchor: .top)
+            .onChange(of: returnLine) { _, line in
+                guard let line else { return }
+                comeBack(to: line, with: scroller)
             }
             .onChange(of: model.generation) { _, _ in
                 guard case .loaded(let document) = model.state else { return }
@@ -583,7 +599,7 @@ public struct VaultNoteReaderView: View {
             // the overflow ellipsis is an edit action nobody finds.
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    isEditing = true
+                    edit(from: .caret(line: readingLine))
                 } label: {
                     Label("Edit", systemImage: "square.and.pencil")
                 }
@@ -621,11 +637,22 @@ public struct VaultNoteReaderView: View {
                 // folder; the device's own copy through the usual one.
                 VaultNoteEditorView(
                     path: route.path,
-                    model: model.bridgeWriter.map {
-                        VaultNoteEditorModel(path: route.path, writer: $0)
-                    }) {
-                    Task { await model.reload() }
-                }
+                    start: editStart,
+                    model: model.bridgeWriter.map { [editStart] in
+                        VaultNoteEditorModel(path: route.path, start: editStart, writer: $0)
+                    },
+                    onClose: { line, saved in
+                        guard saved else {
+                            returnLine = line
+                            return
+                        }
+                        // After the reload, never before it: a save changes the blocks, and
+                        // the line is only meaningful against the document it was typed in.
+                        Task {
+                            await model.reload()
+                            returnLine = line
+                        }
+                    })
             }
             #if os(macOS)
             .frame(minWidth: 560, minHeight: 420)
@@ -705,6 +732,61 @@ public struct VaultNoteReaderView: View {
             withAnimation { scroller.scrollTo(id, anchor: .top) }
             try? await Task.sleep(for: .seconds(2))
             if landedOn == anchor { landedOn = nil }
+        }
+    }
+
+    // MARK: - Editing where the reader is
+
+    /// Open the editor at `start`.
+    private func edit(from start: VaultEditorStart) {
+        editStart = start
+        isEditing = true
+    }
+
+    /// The file line of the block (or raw line) at the top of the screen: 1 when nothing is
+    /// scrolled, which is the top of the file, frontmatter included.
+    private var readingLine: Int {
+        guard let document = model.document, let topAnchor else { return 1 }
+        return Self.line(forAnchor: topAnchor, in: document) ?? 1
+    }
+
+    /// The file line a scroll id stands for. The FIRST block reads as line 1, so a note
+    /// opened and edited without scrolling opens in the editor at its top, frontmatter
+    /// showing, rather than just below it.
+    static func line(forAnchor anchor: String, in document: VaultNoteDocument) -> Int? {
+        if let raw = anchor.split(separator: "-").last.flatMap({ Int($0) }),
+           anchor.hasPrefix("raw-") {
+            return raw
+        }
+        guard anchor.hasPrefix("block-"),
+              let id = anchor.split(separator: "-").last.flatMap({ Int($0) }),
+              let block = document.blocks.first(where: { $0.id == id }) else { return nil }
+        return block.id == document.blocks.first?.id ? 1 : block.line
+    }
+
+    /// The scroll id the reader returns to for the editor's closing line: the block the
+    /// line is IN, or the raw line itself, clamped to the note.
+    static func returnAnchor(forLine line: Int, in document: VaultNoteDocument,
+                             raw: Bool) -> String? {
+        if raw {
+            guard !document.rawLines.isEmpty else { return nil }
+            return anchorID(min(max(line, 1), document.rawLines.count), raw: true)
+        }
+        return VaultNoteDocument.blockID(containingLine: line, in: document.blocks)
+            .map { anchorID($0, raw: false) }
+    }
+
+    /// Scroll back to where the edit was. No tint: this is where the person already was,
+    /// and a flash would say "something happened here" when nothing did.
+    private func comeBack(to line: Int, with scroller: ScrollViewProxy) {
+        returnLine = nil
+        guard let document = model.document,
+              let id = Self.returnAnchor(forLine: line, in: document, raw: mode == .raw)
+        else { return }
+        Task {
+            // One turn, for the reason `land` gives: the reloaded blocks are built lazily.
+            await Task.yield()
+            scroller.scrollTo(id, anchor: .top)
         }
     }
 
@@ -852,6 +934,18 @@ public struct VaultNoteReaderView: View {
             blockView(block)
                 .id(Self.anchorID(block.id, raw: false))
                 .background(landedOn == block.id ? Color.accentColor.opacity(0.15) : .clear)
+                // Long press on the iPhone, right click on the Mac. Empty, and so not
+                // offered at all, wherever Edit itself is refused.
+                .contextMenu {
+                    if editRefusal == nil,
+                       let lines = document.sourceLines(ofBlock: block.id) {
+                        Button {
+                            edit(from: .select(lines: lines))
+                        } label: {
+                            Label("Edit here", systemImage: "square.and.pencil")
+                        }
+                    }
+                }
         }
     }
 

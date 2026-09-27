@@ -54,6 +54,10 @@ public final class VaultNoteEditorModel {
     }
 
     public let path: String
+    /// Where the editor opens: the passage the reader was showing, or the block it was
+    /// asked to edit. Nil opens at the top. Applied ONCE, when the text first loads; see
+    /// `VaultPlainTextEditor`.
+    public let start: VaultEditorStart?
     public private(set) var phase: Phase = .loading
     /// The editor's text. The ONLY mutable-from-outside property: it is a `TextEditor`'s
     /// binding, and every keystroke writes it.
@@ -73,11 +77,19 @@ public final class VaultNoteEditorModel {
     private let stash: VaultEditStash
 
     public init(path: String,
+                start: VaultEditorStart? = nil,
                 writer: any VaultNoteWriting = VaultNoteWriter(),
                 stash: VaultEditStash = .shared) {
         self.path = path
+        self.start = start
         self.writer = writer
         self.stash = stash
+    }
+
+    /// The 1-based file line the caret is on, for a selection in the editor's text: what
+    /// the reader scrolls back to when the editor closes.
+    public func caretLine(for selection: NSRange) -> Int {
+        VaultNotePosition.line(atOffset: selection.location, in: text)
     }
 
     /// Save is offered only for a real difference.

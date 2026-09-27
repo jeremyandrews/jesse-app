@@ -114,11 +114,30 @@ struct RootTabView: View {
     /// Today tab hosts both segments, so both have to survive a tab switch. It reads
     /// nothing the day model reads and writes nothing at all, so the two are entirely
     /// independent apart from sharing the on-disk cache.
-    @State private var strandsModel = StrandsModel(
-        makeClient: {
-            JesseBridgeClient(config: ConfigStore.load(), snapshotCache: SnapshotCache.shared)
-        },
-        cache: SnapshotCache.shared)
+    ///
+    /// Built through a factory rather than inline because the remembered lens is applied
+    /// AT CONSTRUCTION: see `makeStrandsModel`.
+    @State private var strandsModel = RootTabView.makeStrandsModel()
+
+    /// The strand board's model with this phone's remembered lens already on it.
+    ///
+    /// The lens is loaded HERE, before the model has ever been read by a view, rather
+    /// than in a `.task`: a `.task` fires after the first frame, so the board would draw
+    /// once in `Most recent` and then reorder itself under the reader. Nothing observes
+    /// the model yet at this point, so the assignment is free.
+    ///
+    /// The write-back is the `.onChange` on `strandsModel.sortKey` below. Between them
+    /// they are the whole feature, and `TodayViewPreferences` is the only store either
+    /// one touches.
+    private static func makeStrandsModel() -> StrandsModel {
+        let model = StrandsModel(
+            makeClient: {
+                JesseBridgeClient(config: ConfigStore.load(), snapshotCache: SnapshotCache.shared)
+            },
+            cache: SnapshotCache.shared)
+        model.sortKey = TodayViewPreferences().strandsLens
+        return model
+    }
 
     /// **The offline capture queue**, one per process.
     ///
@@ -133,6 +152,12 @@ struct RootTabView: View {
     /// message, neither of which has a view hierarchy to read one from.
     @MainActor static let pendingStore = PendingIntentStore(
         context: ModelContext(AppModelContainer.shared.container))
+
+    /// This phone's per-device view preferences. Held here, beside the models, because
+    /// the one preference this view writes belongs to a model this view owns: the strand
+    /// board's lens. The Today tab keeps its own for the badge filter, over the same
+    /// keys and the same defaults domain.
+    @State private var viewPreferences = TodayViewPreferences()
 
     /// The Vault tab's model, and with it the index.
     ///
@@ -270,6 +295,13 @@ struct RootTabView: View {
             // running to agree or disagree with it. One count query per activation settles
             // that, and publishes nothing unless the number really moved.
             if phase == .active { unread.recountNow() }
+        }
+        // THE LENS THE OWNER PICKED, remembered on this phone. The CHOSEN key, never
+        // `effectiveSortKey`: that one reads `Most recent` until a board that serves
+        // parents has loaded, so storing it would erase a remembered `Tree` on every
+        // cold launch. Loaded at construction (see `makeStrandsModel`).
+        .onChange(of: strandsModel.sortKey) { _, key in
+            viewPreferences.strandsLens = key
         }
         .onChange(of: todayModel.serverSnapshot) { _, _ in
             watchLink?.pushCurrent()

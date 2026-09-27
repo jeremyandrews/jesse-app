@@ -16,11 +16,11 @@ import JesseVault
 // Mac-only persistence, and no second idea of which rows are checked: check, move and
 // glance all go through the shared model to the same bridge endpoints the phone writes
 // to, so with both apps open the later action wins on the next refresh (the glance
-// flags are last-writer-wins bridge-side by construction). The one durable per-device
-// thing on this screen is the badge filter, kept in this Mac's own defaults through
-// `TodayViewPreferences`: the shared model holds view state but no storage, so which
-// preferences survive a relaunch is each shell's own decision. The view sort is
-// deliberately not one of them, on either platform.
+// flags are last-writer-wins bridge-side by construction). The durable per-device things
+// on this screen are the badge filter and the strand board's lens, kept in this Mac's own
+// defaults through `TodayViewPreferences`: the shared models hold view state but no
+// storage, so which preferences survive a relaunch is each shell's own decision. The
+// day's own sort is deliberately not one of them, on either platform.
 //
 // NO POLLING, exactly as on the phone. The screen refetches on the four things that can
 // actually have changed it: the shared view's own load-on-appear, ⌘R, the app becoming
@@ -42,7 +42,8 @@ struct MacTodayView: View {
     @State private var model: TodayDashboardModel
 
     /// The strand board, beside the day and independent of it: it reads a different
-    /// route, writes nothing, and shares only the on-disk cache.
+    /// route, writes nothing, and shares only the on-disk cache. Its lens is this Mac's
+    /// remembered one, applied in `init` before the board's first frame.
     @State private var strands: StrandsModel
 
     /// **The one strand opener** for this tab, as on the iPhone: a row's strand chip, the
@@ -112,6 +113,11 @@ struct MacTodayView: View {
         let strands = StrandsModel(makeClient: {
             JesseBridgeClient(config: configStore.config, snapshotCache: SnapshotCache.shared)
         }, cache: SnapshotCache.shared)
+        // THE LENS THIS MAC WAS LAST LEFT IN, applied here rather than in a `.task`: a
+        // `.task` fires after the first frame, so the board would draw once in `Most
+        // recent` and then reorder itself under the reader. Nothing observes the model
+        // yet, so the assignment is free. The write-back is the `.onChange` below.
+        strands.sortKey = TodayViewPreferences().strandsLens
         _strands = State(initialValue: strands)
         _strandOpener = State(initialValue: StrandOpener(localNotes: VaultLocalNoteProvider(),
                                                          remote: strands))
@@ -227,6 +233,11 @@ struct MacTodayView: View {
         // view sort, so the shell is where the preference becomes durable.
         .task { model.isBadgeFilterOn = viewPreferences.isBadgeFilterOn }
         .onChange(of: model.isBadgeFilterOn) { _, on in viewPreferences.isBadgeFilterOn = on }
+        // The lens the owner picked, remembered on this Mac. The CHOSEN key, never
+        // `effectiveSortKey`: that one reads `Most recent` until a board that serves
+        // parents has loaded, so storing it would erase a remembered `Tree` on every cold
+        // launch. There is no matching `.task` because the load happens in `init`.
+        .onChange(of: strands.sortKey) { _, key in viewPreferences.strandsLens = key }
         // Coming back covers the overnight case: a window left open on this tab has
         // already run its `.task`, so without this it keeps rendering yesterday's day.
         // A Mac that SLEPT never leaves `.active`, which is why this is `onReconnect`

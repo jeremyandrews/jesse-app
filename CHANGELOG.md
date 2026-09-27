@@ -14,6 +14,103 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (175), Bridge 0.156.0, Agent 0.12.0] - 2026-09-27
+
+**Every conversation now opens on the answer.** A scheduled run used to open on a screen or
+more of instructions nobody typed, and a reply could lead with the model's working
+narration ("Starting now: I'll find the checked archive boxes…") as if it were part of the
+answer. A prompt the owner did not type is now always folded under a compact Prompt row,
+and narration is folded into a separate, visibly different Thinking row above the answer,
+on the iPhone and on the Mac.
+
+**What was found first.**
+
+- *What a reply stores.* Live, the app stores the bridge's final `response`. For Claude Code
+  that is the CLI's `result` (the last assistant message), so narration streamed as deltas
+  and then vanished; for Codex the commentary phase never reached the app at all; for the
+  direct harness `agent/src/loop.rs` glued every visible delta of the turn into the answer
+  with no separator, narration included.
+- *Where the narration showed.* Hydration is one turn per transcript line
+  (`bridge/src/sessions.rs`, `shape_turn_line`), so every assistant message the model wrote
+  before a tool call came back as its own Jesse bubble. A scheduled run is only ever seen
+  hydrated, which is why its conversations showed narration as answers. The live view had
+  the same fault in miniature: the streaming text was every delta, narration and answer as
+  one block.
+- *Where the prompt came from.* A scheduled fire (`scheduler.rs`, `run_one`) and a strand
+  tick mint a fresh conversation through the same `start_turn` as a typed message; the
+  hydrated user turn is the prompt, and nothing on the conversation, the turn or the wire
+  said the owner did not type it (`ConversationRecord.origin` existed but was never set by
+  either). The app's own composed prompts (morning routine, automatic health turns, Today
+  actions) were stored as plain user turns too.
+
+**Root cause: the boundary each harness already reports was dropped before the app.** The
+tool call that closes a block of narration (Claude Code's `tool_use` block start, the
+direct loop's next call, Codex's `commentary` phase) was known to the bridge and thrown
+away; and where a turn came from was known to the code that sent it and never recorded.
+
+### Added
+
+- Bridge: the job's stream registry cuts the streamed text where the harness reported a
+  tool call. Text a tool call closed is narration; `result` is the answer. It is settled on
+  the raw answer (`stream_settle_narration`), and carried apart as `narration` on the `done`
+  frame, the poll result and the persisted job. When the answer IS the whole stream (the
+  empty-`result` fallback) the narration is already inside it and is not carried twice.
+  `response` is unchanged, so an older app still shows every reply in full.
+- Bridge: a live `reset` adds `narration` and `answer` once something has been narrated
+  (`text` is still the whole buffer), and a new `narration` SSE event carries a Codex
+  commentary block (`TurnSink::narration`, defaulted to a no-op).
+- Bridge: hydrated assistant turns carry `"narration": true` when the transcript itself
+  says the message stopped for a tool (`message.stop_reason == "tool_use"` for Claude Code,
+  a message carrying a tool call for the direct loop). Omitted otherwise.
+- Bridge: `POST /jesse` takes `sent_for`, a short label naming what sent a turn the owner
+  did not type. It is recorded on the conversation only by the turn that creates it
+  (`ConversationStore::register_sent_for`) and listed as `sent_for` on
+  `GET /jesse/conversations`, omitted when typed. The scheduler sends
+  `Scheduled: <schedule id as words>`, strand ticks `Strand tick`.
+- Agent 0.12.0: `TurnOutcome.text` is the last call's text (the answer) and
+  `TurnOutcome.narration` the earlier calls' text, each followed by a tool call. A last call
+  that said nothing still delivers everything that streamed, with no narration.
+- App: `Turn.sentFor`, `Turn.thinkingText`, `Turn.isNarration` and `JesseThread.sentFor`,
+  all additive defaulted columns (lightweight migration, no resync).
+- JesseKit: `PromptFold.hint` decides a folded prompt from where it came from, never its
+  wording: the turn names its sender, or it carried a screen's context with nothing typed,
+  or it is the opening turn of a conversation the bridge marked `sent_for` (or an automatic
+  thread from before labels). `ReplyFold` and `TranscriptItem.items` group narration with the
+  answer after it; `LiveReply` applies the same tool-call cut to the live stream. Both apps
+  render through these, so they cannot drift.
+- App: the Prompt row (document symbol, "Prompt", the sender, a chevron) sits trailing where
+  the bubble would be and expands to the full, selectable prompt. The Thinking row (brain
+  symbol, smaller and dimmer, no bubble) sits leading above the answer and expands to the
+  narration in secondary colour behind a thin leading rule, capped in height so opening it
+  never pushes the answer far down. Both are single VoiceOver buttons with a label, an
+  expanded or collapsed value and a hint, use Dynamic Type text styles, and animate with the
+  system default (none under Reduce Motion). Expansion is view state: reopening a
+  conversation folds everything again. While a turn runs, its narration sits in the Thinking
+  row's "Thinking…" state and the answer streams below it.
+- App senders label their prompts: morning routine, automatic health turns, the Health
+  tab's start new day, Today actions and Process updates, annotation reviews, and the
+  offline-answers review. The label rides `sent_for` so every other device folds the turn too.
+
+### Changed
+
+- Share (iOS) carries every prompt, thinking and answer in full, labelled
+  (`JesseThread.sharedTranscript`).
+- The Mac list row previews the latest answer only (`JesseThread.lastAnswerText`); it used
+  to show whatever turn was last, a prompt or narration included.
+- Conversation search also matches a reply's stored narration (`Turn.searchableTexts`);
+  folded prompts were already searched through `text`.
+- `send(… sentFor:)` is a required parameter of both client protocols, with no forwarding
+  default, for the reason the protocols give.
+
+### Not changed
+
+- Push text and unread already used the final `response`, which is the answer for every
+  harness now. The iOS list shows titles only.
+- Conversations adopted before this bridge carry no `sent_for`: an old scheduled run's prompt
+  still shows until it is re-sent, and old hydrated narration turns stay as they were stored.
+  Automatic threads and context-only asks fold from their stored fields.
+- A bridge deploy is needed for the Thinking split and for scheduled prompts to fold.
+
 ## [App 1.0 (174)] - 2026-09-27
 
 **The Strands board opened in Most recent on every launch, whatever lens was last picked.**

@@ -167,6 +167,19 @@ jobs:
           swift build -Xswiftc -warnings-as-errors
           swift test -Xswiftc -warnings-as-errors
 
+      # The package declares iOS too, and `swift test` above compiles its tests for
+      # macOS only, so an iOS only compile error in a test (PR 242: an AppKit type in
+      # StrandBoardRenderTests) passed every check. Same step as local-ci-macos.sh.
+      - name: JesseKit tests compile for iOS
+        working-directory: ${{ github.workspace }}/JesseKit
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -scheme JesseKit-Package \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath ${{ github.workspace }}/Jesse/build/DerivedDataKitIOS \
+            CODE_SIGNING_ALLOWED=NO
+
       - name: Resolve simulator destination
         id: sim
         run: |

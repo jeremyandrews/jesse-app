@@ -14,6 +14,32 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [JesseKit tests compile for iOS] - 2026-09-27
+
+**A JesseKit test that could not compile for iOS merged green, because no gate compiled the
+package's tests for iOS.** `StrandBoardRenderTests`, added in App 1.0 (171), read its render
+through `nsImage` and `NSBitmapImageRep`, and from that merge on `main` could not build
+JesseKit's tests for the iOS simulator.
+
+**Root cause: the package declares iOS and macOS, and both gates compiled its tests for
+macOS only.** `ios-ci.yml` and `scripts/local-ci-macos.sh` run `swift build` and `swift test`
+in `JesseKit/`, which on a macOS 26 host build for the host and nothing else, so an AppKit type
+in a test file is invisible to them. Only the gate's older host path runs the package on the
+iOS simulator, and that is where the break was first seen, on untouched `main`. No shipping
+code changes.
+
+### Changed
+
+- **`StrandBoardRenderTests` is platform neutral.** The render comes from
+  `renderer.cgImage`, the PNG is encoded through ImageIO, and the colour count samples an
+  sRGB RGBA8 buffer, with no `#if`. Every assertion stands: the size (now 800 pixels at
+  scale 2, the old 400 points), the encode, the file write and the more than 40 colours.
+  The test also prints its colour count per appearance.
+- **Both gates compile JesseKit's tests for iOS.** A new step, "JesseKit tests compile for
+  iOS", runs `xcodebuild build-for-testing` on the package for the generic iOS simulator,
+  right after the JesseKit package step, in `ios-ci.yml` and in `local-ci-macos.sh` on a
+  macOS 26 host. An older host already compiles and runs the tests on the simulator.
+
 ## [App 1.0 (173)] - 2026-09-26
 
 **Whenever the Studio could not be reached, the Mac's window grew taller than the screen and

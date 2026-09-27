@@ -9798,6 +9798,7 @@ async fn artifacts_survive_a_hydrate_of_the_conversation() {
             timestamp: None,
             turn_key: None,
             artifacts: Vec::new(),
+            narration: false,
         },
         HydratedTurn {
             role: "assistant".into(),
@@ -9805,6 +9806,7 @@ async fn artifacts_survive_a_hydrate_of_the_conversation() {
             timestamp: None,
             turn_key: None,
             artifacts: Vec::new(),
+            narration: false,
         },
     ];
     attach_artifacts(&mut turns, &st.artifacts.for_conversation(&conversation_id));
@@ -9820,6 +9822,7 @@ async fn artifacts_survive_a_hydrate_of_the_conversation() {
         timestamp: None,
         turn_key: None,
         artifacts: Vec::new(),
+        narration: false,
     }];
     attach_artifacts(&mut other, &st.artifacts.for_conversation(&conversation_id));
     assert!(other[0].artifacts.is_empty());
@@ -10700,4 +10703,172 @@ async fn strands_etag_moves_with_a_note_and_not_otherwise() {
         assert_ne!(etag_of(&changed), tag, "{path}: a note edit moves the tag");
         std::fs::write(&note, src).unwrap();
     }
+}
+
+// ---- Narration apart from the answer ----------------------------------------------------
+//
+// A Claude Code turn streams every text block, including what the model says on its way to
+// a tool call ("Let me check the vault."). Its `result` is only the last message. The reply
+// carries that narration apart from the answer, cut at the tool call the stream reported, so
+// the app can fold it away; `response` stays the whole answer for every client, old or new.
+
+/// A fake `claude` streaming narration, a tool call, then the answer and its `result`.
+fn narrating_claude(answer: &str) -> std::path::PathBuf {
+    let ev = |e: &str| format!("printf '%s\\n' '{{\"type\":\"stream_event\",\"event\":{e}}}'\n");
+    let delta = |t: &str| {
+        ev(&format!(
+            r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{t}"}}}}"#
+        ))
+    };
+    let script = format!(
+        "#!/bin/sh\n{}{}{}printf '%s\\n' '{{\"type\":\"result\",\"is_error\":false,\"result\":\"{answer}\",\"session_id\":\"sess-narr\"}}'\n",
+        delta("Let me check the vault."),
+        ev(r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Read","input":{}}}"#),
+        delta(answer),
+    );
+    write_fake_claude(&script)
+}
+
+#[tokio::test]
+async fn a_reply_carries_its_narration_apart_from_the_answer() {
+    let fake = narrating_claude("The answer is 42.");
+    let st = AppState::new(Config {
+        claude_bin: fake.to_string_lossy().into_owned(),
+        ..test_config()
+    });
+    let resp = app(st.clone())
+        .oneshot(jesse_request(
+            Some("Bearer test-token"),
+            r#"{"mode":"ask","text":"what is it"}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+    let done = wait_for_status(&st, &job_id, "done").await;
+    // THE OLD WIRE SHAPE STILL CARRIES THE WHOLE REPLY: `response` is the full answer, and
+    // an older app that ignores `narration` shows exactly that.
+    assert_eq!(done["response"], "The answer is 42.");
+    assert_eq!(done["narration"], "Let me check the vault.");
+    let _ = std::fs::remove_file(&fake);
+}
+
+#[tokio::test]
+async fn a_reply_with_no_tool_call_has_no_narration() {
+    // No tool call, so nothing was said on the way to one: the frame is what it always was.
+    let script = "#!/bin/sh\n\
+        printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Plain answer.\"}}}'\n\
+        printf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"Plain answer.\",\"session_id\":\"sess-plain\"}'\n";
+    let fake = write_fake_claude(script);
+    let st = AppState::new(Config {
+        claude_bin: fake.to_string_lossy().into_owned(),
+        ..test_config()
+    });
+    let resp = app(st.clone())
+        .oneshot(jesse_request(
+            Some("Bearer test-token"),
+            r#"{"mode":"ask","text":"hi"}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+    let done = wait_for_status(&st, &job_id, "done").await;
+    assert_eq!(done["response"], "Plain answer.");
+    assert!(done["narration"].is_null(), "{done}");
+    let _ = std::fs::remove_file(&fake);
+}
+
+#[tokio::test]
+async fn an_empty_result_delivers_the_stream_once_not_twice() {
+    // The empty-`result` fallback delivers everything that streamed as the answer, narration
+    // included. Carrying the narration beside it as well would show it twice.
+    let fake = narrating_claude("");
+    let st = AppState::new(Config {
+        claude_bin: fake.to_string_lossy().into_owned(),
+        ..test_config()
+    });
+    let resp = app(st.clone())
+        .oneshot(jesse_request(
+            Some("Bearer test-token"),
+            r#"{"mode":"ask","text":"what is it"}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+    let done = wait_for_status(&st, &job_id, "done").await;
+    assert_eq!(done["response"], "Let me check the vault.");
+    assert!(done["narration"].is_null(), "{done}");
+    let _ = std::fs::remove_file(&fake);
+}
+
+// ---- Turns sent for the owner -------------------------------------------------------------
+
+#[tokio::test]
+async fn sent_for_marks_the_conversation_its_turn_opened_and_only_that_one() {
+    let fake = narrating_claude("ok");
+    let st = AppState::new(Config {
+        claude_bin: fake.to_string_lossy().into_owned(),
+        ..test_config()
+    });
+    let cid = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+    for (text, sent_for) in [
+        ("routine prompt", "Morning routine"),
+        ("typed follow-up", "Other"),
+    ] {
+        let json = format!(
+            r#"{{"mode":"tell","text":"{text}","conversation_id":"{cid}","sent_for":"{sent_for}"}}"#
+        );
+        let resp = app(st.clone())
+            .oneshot(jesse_request(Some("Bearer test-token"), &json))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        wait_for_status(&st, body["job_id"].as_str().unwrap(), "done").await;
+    }
+    let resp = app(st.clone())
+        .oneshot(conversations_request(Some("Bearer test-token"), None, None))
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let row = list["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["conversation_id"] == cid)
+        .expect("the conversation lists");
+    // The label the OPENING turn carried, never replaced by a later turn's.
+    assert_eq!(row["sent_for"], "Morning routine");
+    let _ = std::fs::remove_file(&fake);
+}
+
+#[tokio::test]
+async fn a_typed_conversation_lists_without_sent_for() {
+    let fake = narrating_claude("ok");
+    let st = AppState::new(Config {
+        claude_bin: fake.to_string_lossy().into_owned(),
+        ..test_config()
+    });
+    let resp = app(st.clone())
+        .oneshot(jesse_request(
+            Some("Bearer test-token"),
+            r#"{"mode":"ask","text":"typed"}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    wait_for_status(&st, body["job_id"].as_str().unwrap(), "done").await;
+    let resp = app(st.clone())
+        .oneshot(conversations_request(Some("Bearer test-token"), None, None))
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    for row in list["conversations"].as_array().unwrap() {
+        assert!(
+            row.get("sent_for").is_none(),
+            "key omitted when typed: {row}"
+        );
+    }
+    let _ = std::fs::remove_file(&fake);
 }

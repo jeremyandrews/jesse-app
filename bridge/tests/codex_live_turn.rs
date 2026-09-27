@@ -94,6 +94,7 @@ fn watch(jobs: &Arc<JobStore>, jid: &str) -> tokio::task::JoinHandle<Watched> {
         while let Ok(frame) = rx.recv().await {
             match frame {
                 StreamFrame::Activity(a) => out.activity.push(a),
+                StreamFrame::Narration(_) => {}
                 // Terminal frames close the stream; stop rather than spin on RecvError.
                 StreamFrame::Done { .. } | StreamFrame::Error(_) | StreamFrame::Cancelled => break,
                 // THE TIMING THIS TEST EXISTS TO RECORD SINCE 0.121.0. `first_delta_ms` is

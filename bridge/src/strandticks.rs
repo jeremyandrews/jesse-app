@@ -438,7 +438,9 @@ pub async fn run_pass(st: &AppState, ledger: &TickLedger, now_ms: u64) -> Option
 /// is tried again on the next pass; a turn that starts is recorded as fired
 /// before this returns.
 async fn fire(st: &AppState, ledger: &TickLedger, key: &TickKey, now_ms: u64) -> Option<String> {
-    let req = JesseRequest::scheduled("tell", key.sentence(), None);
+    let mut req = JesseRequest::scheduled("tell", key.sentence(), None);
+    // Composed by the bridge, not typed: the apps fold it away as a strand tick.
+    req.set_sent_for("Strand tick");
     match start_turn(st, req, None).await {
         Ok(TurnStart::Accepted {
             job_id,

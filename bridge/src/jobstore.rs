@@ -64,6 +64,11 @@ pub enum JobState {
         // before this field existed; the app reads that as "no bridge value" and falls
         // back to its own clock.
         last_reply_ms: u64,
+        // The model's working narration, kept apart from `response` so the app can fold it
+        // away: the text a tool call interrupted, or a harness's own commentary channel.
+        // `None` for a turn that narrated nothing and for any job file persisted before
+        // this field existed, whose `response` is then served exactly as it always was.
+        narration: Option<String>,
     },
     Failed {
         error: String,
@@ -225,6 +230,7 @@ pub fn job_to_value(id: &str, job: &Job) -> Option<Value> {
         error,
         partial,
         last_reply_ms,
+        narration,
     ) = match &job.state {
         JobState::Done {
             response,
@@ -233,6 +239,7 @@ pub fn job_to_value(id: &str, job: &Job) -> Option<Value> {
             provenance,
             artifacts,
             last_reply_ms,
+            narration,
         } => (
             "done",
             Some(response.clone()),
@@ -243,6 +250,7 @@ pub fn job_to_value(id: &str, job: &Job) -> Option<Value> {
             None,
             Value::Null,
             *last_reply_ms,
+            narration.clone(),
         ),
         JobState::Failed { error, partial } => (
             "failed",
@@ -254,6 +262,7 @@ pub fn job_to_value(id: &str, job: &Job) -> Option<Value> {
             Some(error.clone()),
             partial_to_value(partial.as_deref()),
             0,
+            None,
         ),
         JobState::Cancelled => (
             "cancelled",
@@ -265,6 +274,7 @@ pub fn job_to_value(id: &str, job: &Job) -> Option<Value> {
             None,
             Value::Null,
             0,
+            None,
         ),
         JobState::Running => return None,
     };
@@ -300,6 +310,9 @@ pub fn job_to_value(id: &str, job: &Job) -> Option<Value> {
         // other state and on any file written before this field existed, which the app
         // reads as "no bridge value".
         "last_reply_ms": last_reply_ms,
+        // The reply's narration, so a restart still serves it folded apart. Null on every
+        // other state, on a turn that narrated nothing, and on any older file.
+        "narration": narration,
     }))
 }
 
@@ -341,6 +354,11 @@ pub fn value_to_job(v: &Value) -> Option<(String, Job)> {
             // existed loads: the app reads it as "no bridge value" and falls back to its
             // own clock, exactly as it does against an older bridge.
             last_reply_ms: v.get("last_reply_ms").and_then(|m| m.as_u64()).unwrap_or(0),
+            // Absent/null → None: an older file's reply has no separate narration.
+            narration: v
+                .get("narration")
+                .and_then(|n| n.as_str())
+                .map(str::to_string),
         },
         "failed" => JobState::Failed {
             error: v
@@ -761,6 +779,9 @@ impl JobStore {
         // The turn is over — drop its abort handle so the map can't leak. Done in
         // its own statement so the `aborts` lock is released before taking `jobs`.
         self.aborts.lock_ok().remove(id);
+        // The narration the turn driver settled on the live stream, read before the `jobs`
+        // lock is taken (the two locks are never held together; see `streams`).
+        let narration = self.streams.narration(id);
         let state = match outcome {
             Ok((response, session_id, directives)) => JobState::Done {
                 response,
@@ -775,6 +796,7 @@ impl JobStore {
                 provenance: provenance.map(Box::new),
                 artifacts,
                 last_reply_ms,
+                narration,
             },
             Err((_code, error)) => JobState::Failed {
                 error,
@@ -857,6 +879,21 @@ impl JobStore {
         self.streams.subscribe(id)
     }
 
+    /// Record one whole block of narration a harness reported on its own channel.
+    pub fn stream_push_narration(&self, id: &str, block: &str) {
+        self.streams.push_narration(id, block);
+    }
+
+    /// The narration so far and the text since the last tool call, for a `reset` frame.
+    pub fn stream_split(&self, id: &str) -> Option<(String, String)> {
+        self.streams.split(id)
+    }
+
+    /// Settle the narration a finished turn carries apart from its raw `answer`.
+    pub fn stream_settle_narration(&self, id: &str, answer: &str) {
+        self.streams.settle_narration(id, answer);
+    }
+
     /// The full accumulated text for a job, if its stream is still live.
     pub fn stream_snapshot(&self, id: &str) -> Option<String> {
         self.streams.snapshot(id)
@@ -882,6 +919,7 @@ impl JobStore {
                 provenance,
                 artifacts,
                 last_reply_ms,
+                narration,
             }) => self.stream_finish(
                 id,
                 StreamFrame::Done {
@@ -891,6 +929,7 @@ impl JobStore {
                     provenance,
                     artifacts,
                     last_reply_ms,
+                    narration,
                 },
             ),
             Some(JobState::Failed { error, .. }) => {
@@ -1426,6 +1465,7 @@ mod tests {
                     provenance: None,
                     artifacts: Vec::new(),
                     last_reply_ms: 0,
+                    narration: None,
                 },
                 completed_at: Some(SystemTime::now()),
                 first_retrieved_at: None,
@@ -1669,6 +1709,7 @@ mod tests {
                 provenance: None,
                 artifacts: Vec::new(),
                 last_reply_ms: 0,
+                narration: None,
             },
             completed_at: Some(SystemTime::now()),
             first_retrieved_at: None,
@@ -1706,6 +1747,7 @@ mod tests {
                 provenance: None,
                 artifacts: Vec::new(),
                 last_reply_ms: 0,
+                narration: None,
             },
             completed_at: Some(SystemTime::now()),
             first_retrieved_at: None,

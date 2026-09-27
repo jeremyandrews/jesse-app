@@ -541,7 +541,7 @@ struct ThreadListView: View {
         context.insert(thread)
         coordinator.send(thread: thread,
                          text: MorningRoutine.prompt(now: .now, includeHealthNewDay: includeHealth),
-                         voice: false, context: context)
+                         voice: false, context: context, sentFor: PromptSender.morningRoutine)
         path.append(thread)
         morningRoutineLastFiredDay = MorningRoutine.dayStamp(.now)
         // Folding the health refresh in IS the Health tab's new-day refresh, so record it

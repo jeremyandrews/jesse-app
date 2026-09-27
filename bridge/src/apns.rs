@@ -1637,6 +1637,7 @@ mod tests {
             provenance: None,
             artifacts: Vec::new(),
             last_reply_ms: 0,
+            narration: None,
         }));
         assert!(job_state_is_pushable(&JobState::Failed {
             error: "x".into(),

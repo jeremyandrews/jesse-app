@@ -210,6 +210,12 @@ public final class JesseThread {
     // code (matching `isFavorite`/`aiTitle`), and an old row with no value reads as
     // `.phone`.
     public var origin: String = ThreadOrigin.phone.rawValue
+    // What sent this conversation's OPENING turn when the owner did not type it, as the
+    // bridge recorded it (`sent_for` on the conversation list): "Scheduled: archive box",
+    // "Morning routine". It is how a device that never sent that turn still folds it away.
+    // Nil for a typed conversation and against a bridge that predates the field. Additive
+    // optional property, so SwiftData lightweight-migrates.
+    public var sentFor: String?
     // Whether this thread is archived: hidden from the main list (All / Favorites /
     // Watch) and shown only in the dedicated Archived view, from which it can be
     // restored. Distinct from deletion: archiving keeps the thread and its turns and
@@ -554,15 +560,6 @@ public final class JesseThread {
     /// 2 after a turn is appended (invalidation). Not persisted.
     public var orderedSortCount: Int { orderedMemo.sortCount }
 
-    /// The whole conversation as a role-labeled Markdown transcript, for copy /
-    /// share. Uses each turn's *raw* text so any links or formatting survive,
-    /// with a blank line between turns so it reads cleanly when pasted.
-    public var sharedTranscript: String {
-        orderedTurns
-            .map { "**\($0.isUser ? "You" : "Jesse"):** \($0.text)" }
-            .joined(separator: "\n\n")
-    }
-
     /// Max length of a derived thread title before it's truncated with an ellipsis.
     public static let titleCharacterLimit = 60
 
@@ -644,6 +641,26 @@ public final class Turn {
     // and for one that carried an untitled one (which reads as the generic label — see
     // `AttachedContext.contextLabel`).
     public var contextLabel: String?
+
+    // What SENT this user turn when the owner did not type it: the label its folded prompt
+    // row shows ("Morning routine", "Health: start new day"). Set by the code that composed
+    // the prompt at the moment it creates the turn, from where the turn came from, never
+    // from its wording. Nil for a typed turn and for every turn stored before this field;
+    // `PromptFold.hint` decides those from the thread instead. Additive optional property,
+    // so SwiftData lightweight-migrates.
+    public var sentFor: String?
+
+    // The model's working narration for a JESSE reply (the bridge's `narration`): what it said
+    // on its way to a tool call, kept apart from `text` (the answer) so the transcript can
+    // fold it away. Nil for a reply with none and for every reply stored before this field.
+    // Additive optional property.
+    public var thinkingText: String?
+
+    // A JESSE turn that IS narration: a hydrated transcript line the bridge marked as said on
+    // the way to a tool call. It renders folded into the Thinking row of the answer after it,
+    // never as a bubble of its own. False for every other turn and for every turn stored
+    // before this field. Additive defaulted property.
+    public var isNarration: Bool = false
 
     public init(role: TurnRole, text: String, createdAt: Date = Date()) {
         self.id = UUID()

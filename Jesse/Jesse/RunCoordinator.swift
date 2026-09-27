@@ -78,7 +78,15 @@ final class RunCoordinator {
     // until the turn finishes (then it's cleared and the real Turn is appended).
     // Transient and in-memory only — the persisted transcript is the source of
     // truth; the SSE stream replays this on reconnect.
+    // The live ANSWER only: what streamed since the last tool call. Narration moves out of it
+    // into `partialThinking` the moment a tool call closes it (`LiveReply`'s rule, shared with
+    // the Mac), so the answer area never shows narration as if it were the answer.
     private(set) var partialText: [UUID: String] = [:]
+    // threadID → the live narration, shown inside the collapsed Thinking row while the turn runs.
+    // Rare events (a tool call, a reset, a commentary block) update it, never the token path.
+    private(set) var partialThinking: [UUID: String] = [:]
+    // threadID → the live split itself. Mirrors `partialBuffer` for the answer half.
+    @ObservationIgnored private var liveReply: [UUID: LiveReply] = [:]
     // threadID → a coarse "what Jesse is doing" line from tool-use events.
     private(set) var activity: [UUID: String] = [:]
     // threadID → context a screen ATTACHED to a thread it opened without firing a
@@ -508,6 +516,8 @@ final class RunCoordinator {
         partialBuffer[threadID] = nil
         partialLastPublish[threadID] = nil
         partialText[threadID] = nil
+        partialThinking[threadID] = nil
+        liveReply[threadID] = nil
     }
 
     // MARK: - Query (read by views)
@@ -553,6 +563,8 @@ final class RunCoordinator {
     /// The reply text streamed so far for a running turn (nil/empty when nothing
     /// has arrived yet). Rendered live in the transcript while `isRunning`.
     func partialText(for threadID: UUID) -> String? { partialText[threadID] }
+    /// The live narration for a running turn, nil when it has narrated nothing yet.
+    func partialThinking(for threadID: UUID) -> String? { partialThinking[threadID] }
     /// The current coarse activity line (e.g. "Reading the vault…"), if any.
     func activity(for threadID: UUID) -> String? { activity[threadID] }
 
@@ -634,8 +646,12 @@ final class RunCoordinator {
     /// message is never in neither place and never in both; a save that throws puts the
     /// draft straight back.
     @discardableResult
+    ///
+    /// `sentFor` names what composed `text` when the owner did not type it (the morning
+    /// routine, an automatic health turn, a Today action): the turn then folds away under a
+    /// Prompt row, here and on every other device. Nil for a typed turn.
     func send(thread: JesseThread, text: String, voice: Bool, context: ModelContext,
-              attachments: [JesseAttachment] = [],
+              attachments: [JesseAttachment] = [], sentFor: String? = nil,
               onAck: (@MainActor (Bool) -> Void)? = nil) -> Bool {
         let threadID = thread.id
         // What was already waiting on this thread BEFORE any offline carry was composed
@@ -676,7 +692,8 @@ final class RunCoordinator {
             attachedContexts[threadID] = nil
             errors[threadID] = nil
             return sendOnDevice(thread: thread, trimmed: composed, typed: typed,
-                                attached: existing, voice: voice, context: context)
+                                attached: existing, sentFor: sentFor, voice: voice,
+                                context: context)
         }
         // ── NO CARRY HERE ANY MORE. What the device answered while the bridge was away used
         //    to ride this message as attached context, which meant it existed in memory only,
@@ -726,6 +743,7 @@ final class RunCoordinator {
             userTurn.displayText = typed
             userTurn.contextLabel = existing.contextLabel
         }
+        userTurn.sentFor = sentFor
         thread.turns.append(userTurn)
         if thread.title.isEmpty {
             thread.title = JesseThread.deriveTitle(from: composed)
@@ -885,7 +903,7 @@ final class RunCoordinator {
     /// twice, minutes apart, in one transcript. A question this device does NOT answer
     /// gets its outbox item below, from the same user turn, so nothing is lost either way.
     private func sendOnDevice(thread: JesseThread, trimmed: String, typed: String,
-                              attached: AttachedContext?, voice: Bool,
+                              attached: AttachedContext?, sentFor: String?, voice: Bool,
                               context: ModelContext) -> Bool {
         let threadID = thread.id
         if thread.modelContext == nil { context.insert(thread) }
@@ -895,6 +913,7 @@ final class RunCoordinator {
             userTurn.displayText = typed
             userTurn.contextLabel = attached.contextLabel
         }
+        userTurn.sentFor = sentFor
         thread.turns.append(userTurn)
         if thread.title.isEmpty { thread.title = JesseThread.deriveTitle(from: trimmed) }
         thread.updatedAt = Date()
@@ -1068,6 +1087,9 @@ final class RunCoordinator {
         let text = item.text
         let voice = item.voice
         let mode = item.modeValue
+        // Who sent this turn when the owner did not type it, off the user turn it stages: the
+        // same label its folded Prompt row shows here, so every device folds it the same way.
+        let sentFor = thread.turns.first(where: { $0.id == item.turnID })?.promptHint
         let sessionId = thread.sessionId
         // The thread identity, sent on EVERY turn. A thread always has one (the model mints
         // it at init), but a store row migrated from before the property reads nil until the
@@ -1109,7 +1131,8 @@ final class RunCoordinator {
                                                    attachments: attachments,
                                                    requestId: requestId,
                                                    model: model,
-                                                   effort: effort)
+                                                   effort: effort,
+                                                   sentFor: sentFor)
                 switch result {
                 case .reply(let reply, _, let remoteConversationId):
                     // ACK (legacy inline 200 — effectively dead against the fixed
@@ -1515,6 +1538,7 @@ final class RunCoordinator {
             }
             thread.aiTitle = c.title
             thread.updatedAt = stamp
+            thread.adoptSentFor(from: c)
             // When this conversation last replied, on the BRIDGE's clock. An adopted stub
             // carries it so a conversation answered on the Mac shows its dot here without
             // waiting to be opened and hydrated.
@@ -1543,6 +1567,7 @@ final class RunCoordinator {
                 thread.sessionId = sid
                 changed = true
             }
+            if thread.adoptSentFor(from: c) { changed = true }
             let stamp = Date(timeIntervalSince1970: TimeInterval(c.lastModified))
             if stamp > thread.updatedAt {
                 thread.updatedAt = stamp
@@ -1741,9 +1766,7 @@ final class RunCoordinator {
                     // holds its own artifact rows and must not gain a second set.
                     bound += 1
                 case .insert:
-                    let turn = Turn(role: TranscriptMerge.role(for: t.role), text: t.text,
-                                    createdAt: TranscriptMerge.timestamp(t.timestamp))
-                    turn.sourceKey = t.turnKey.isEmpty ? nil : t.turnKey
+                    let turn = TranscriptMerge.newTurn(from: t)
                     // A turn this device never saw — hydrated from another device's send,
                     // or after a reinstall. The bridge re-attached its returned files, so
                     // history shows the chart instead of silently losing it.
@@ -2457,13 +2480,17 @@ final class RunCoordinator {
             for try await event in client.stream(jobId: jobId) {
                 if Task.isCancelled { return nil }
                 switch event {
-                case .reset(let text):
-                    resetPartial(threadID, to: text)
+                case .reset, .resetSplit, .narration:
+                    applyLive(threadID, event)
                     noteStreamActivity(threadID)
                 case .delta(let chunk):
+                    liveReply[threadID, default: LiveReply()].apply(event)
                     appendPartial(threadID, chunk)
                     noteStreamActivity(threadID)
                 case .activity(let a):
+                    // Also the narration boundary: what streamed before this call was said on
+                    // the way to it, so it leaves the answer for the Thinking row.
+                    applyLive(threadID, event)
                     activity[threadID] = Self.activityLabel(for: a)
                     // Push the new human activity line to the Live Activity.
                     syncLiveActivity(threadID)
@@ -2484,6 +2511,17 @@ final class RunCoordinator {
         // the poll own completion.
         flushPartial(threadID)
         return nil
+    }
+
+    /// Fold a rare (non-delta) stream event into the live split and publish both halves at
+    /// once: the answer through the coalescer's immediate reset, the narration directly.
+    private func applyLive(_ threadID: UUID, _ event: JesseStreamEvent) {
+        var live = liveReply[threadID] ?? LiveReply()
+        live.apply(event)
+        liveReply[threadID] = live
+        let thinking = live.thinking
+        partialThinking[threadID] = thinking.isEmpty ? nil : thinking
+        if partialBuffer[threadID] != live.answer { resetPartial(threadID, to: live.answer) }
     }
 
     /// Map a coarse tool activity to a human line. The mapping itself lives on
@@ -2996,7 +3034,9 @@ extension RunCoordinator {
                                                voice: voice, instructions: instructions,
                                                floorOverride: floorOverride, attachments: [],
                                                requestId: requestId, model: model,
-                                               effort: effort)
+                                               effort: effort,
+                                               // A relayed watch turn was dictated by the owner.
+                                               sentFor: nil)
             switch result {
             case .reply(let reply, _, let remoteConversationId):
                 // An older bridge that answered inline. Deliver it directly.

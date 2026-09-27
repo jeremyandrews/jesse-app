@@ -1583,6 +1583,8 @@ async fn run_one(
     let start_ms = system_time_to_ms(SystemTime::now());
     let mut req = JesseRequest::scheduled(&job.mode, prompt, job.model.clone());
     req.set_return_line(run.return_line.clone());
+    // Not typed by the owner: the apps fold this prompt away under the schedule's name.
+    req.set_sent_for(scheduled_sent_for(&job.id));
     // A REJECTION HERE IS A FAILURE, NOT A SKIP — and the line between the two is
     // whose decision it was. The slot wait above is the SCHEDULER deciding to stand
     // down, which is a skip. Everything below is the turn path refusing a turn the

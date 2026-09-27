@@ -200,7 +200,7 @@ struct JesseMacApp: App {
         try? context.save()
         Task {
             await coordinator.send(text: sentence, mode: .tell, thread: thread,
-                                   context: context)
+                                   context: context, sentFor: PromptSender.annotationReview)
         }
     }
 

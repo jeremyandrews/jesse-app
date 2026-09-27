@@ -30,6 +30,8 @@ struct Echo {
     /// Emitted through the sink before the outcome, so the test can tell "the driver
     /// forwarded the deltas" from "the driver used the terminal text".
     deltas: &'static [&'static str],
+    /// Emitted AFTER the tool call: the answer, when `deltas` was narration.
+    after_tool: &'static [&'static str],
 }
 
 impl Harness for Echo {
@@ -75,6 +77,9 @@ impl InProcessHarness for Echo {
                 sink.text_delta(d);
             }
             sink.tool_activity(ToolActivity::used("vault_read"));
+            for d in self.after_tool {
+                sink.text_delta(d);
+            }
             Ok(TurnOutcome {
                 text: self.text.to_string(),
                 session_id: Some("direct-11111111-1111-4111-8111-111111111111".to_string()),
@@ -130,6 +135,7 @@ async fn a_directive_from_an_in_process_turn_parses_exactly_as_a_spawned_one_doe
     let h = Echo {
         text: raw,
         deltas: &["Here is ", "the answer."],
+        after_tool: &[],
     };
     let (text, sid, usage, _) = drive(&h).await;
 
@@ -168,6 +174,7 @@ async fn an_in_process_turn_pushes_its_deltas_onto_the_jobs_live_stream() {
     let h = Echo {
         text: "Here is the answer.",
         deltas: &["Here is ", "the answer."],
+        after_tool: &[],
     };
     let (_, _, _, streamed) = drive(&h).await;
     assert_eq!(
@@ -185,6 +192,7 @@ async fn a_spoken_line_from_an_in_process_turn_is_handled_by_the_shared_path() {
     let h = Echo {
         text: raw,
         deltas: &["The full written answer."],
+        after_tool: &[],
     };
     let (text, _, _, _) = drive(&h).await;
     assert_eq!(text, raw, "the driver must not edit a voice turn's text");
@@ -196,4 +204,46 @@ async fn a_spoken_line_from_an_in_process_turn_is_handled_by_the_shared_path() {
         delivered_text(raw),
         "one function, one answer, whichever arm produced the text"
     );
+}
+
+/// **NARRATION IS CUT AT THE TOOL CALL, ON THIS ARM TOO.** An in-process harness that said
+/// something on its way to a tool call and then answered: the driver returns the answer, and
+/// the job carries what came before the call as narration, apart from it.
+#[tokio::test]
+async fn an_in_process_turn_carries_its_narration_apart_from_the_answer() {
+    let h = Echo {
+        text: "Found it.",
+        deltas: &["Let me ", "look."],
+        after_tool: &["Found it."],
+    };
+    let mut cfg = common::test_config();
+    cfg.timeout_secs = 30;
+    let jobs = Arc::new(JobStore::new(
+        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(600),
+        None,
+    ));
+    let job_id = jobs.create();
+    jobs.stream_register(&job_id);
+    let active = ActiveModel::ambient();
+    let spawned = SpawnedSessions::new();
+    let trace = TurnTrace::from_cfg(&cfg);
+    let (text, sid, _usage) = run_claude_streaming(
+        &cfg, "PROMPT", None, &jobs, &job_id, &active, &h, &spawned, None, None, None, &trace,
+    )
+    .await
+    .expect("the echo harness answers");
+    assert_eq!(text, "Found it.");
+    jobs.complete_full(&job_id, Ok((text, sid, None)), None, None, Vec::new(), 0);
+    match jobs.get(&job_id) {
+        Some(JobState::Done {
+            response,
+            narration,
+            ..
+        }) => {
+            assert_eq!(response, "Found it.");
+            assert_eq!(narration.as_deref(), Some("Let me look."));
+        }
+        _ => panic!("the job is done"),
+    }
 }

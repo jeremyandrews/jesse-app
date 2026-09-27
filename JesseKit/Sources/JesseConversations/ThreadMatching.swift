@@ -57,7 +57,10 @@ public func threadMatches(_ thread: JesseThread, query: String) -> Bool {
 /// case/diacritic-insensitively.
 private func fieldsContain(_ thread: JesseThread, _ needle: String) -> Bool {
     if thread.title.localizedStandardContains(needle) { return true }
-    return thread.turns.contains { $0.text.localizedStandardContains(needle) }
+    // Every text a turn holds, folded or not: a prompt's whole body and a reply's narration.
+    return thread.turns.contains { turn in
+        turn.searchableTexts.contains { $0.localizedStandardContains(needle) }
+    }
 }
 
 /// Whether `thread` matches ANY of the given `queries` via the multi-token

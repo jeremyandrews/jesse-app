@@ -672,6 +672,11 @@ pub struct ConversationSummary {
     pub read_through_ms: u64,
     pub read_updated_ms: u64,
     pub registered_ms: u64,
+    /// What sent the conversation's opening turn when the owner did not type it (see
+    /// `ConversationRecord::sent_for`). OMITTED when absent, so a typed conversation's row
+    /// is byte-for-byte what it was and an older app, which ignores the key, is unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent_for: Option<String>,
 }
 
 /// Render the registry as the conversation list, newest first.
@@ -749,6 +754,7 @@ pub fn list_conversations_in(
             read_through_ms: f.read_through_ms,
             read_updated_ms: f.read_updated_ms,
             registered_ms: rec.registered_ms,
+            sent_for: rec.sent_for.clone(),
             conversation_id: rec.conversation_id,
         });
     }
@@ -911,6 +917,14 @@ pub struct HydratedTurn {
     /// no job id, so it cannot be the obvious one.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub artifacts: Vec<Artifact>,
+    /// An ASSISTANT turn the model said on its way to a tool call: working narration, not
+    /// the answer. Taken from the harness's own record of the boundary (for Claude Code,
+    /// the message's `stop_reason` of `tool_use`; for the direct loop, a message that
+    /// carries a tool call), never from the wording. The client folds these away beside the
+    /// answer that follows. OMITTED when false, so every other turn is byte-for-byte what
+    /// it was and an older client, which ignores the key, still shows the text in full.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub narration: bool,
 }
 
 /// Shape one transcript jsonl line into a renderable turn, or `None` to skip it.
@@ -949,6 +963,7 @@ fn shape_turn_line(line: &str, turn_key: Option<String>) -> Option<HydratedTurn>
                 timestamp: ts,
                 turn_key,
                 artifacts: Vec::new(),
+                narration: false,
             })
         }
         Some("assistant") => {
@@ -958,6 +973,14 @@ fn shape_turn_line(line: &str, turn_key: Option<String>) -> Option<HydratedTurn>
             // sits above this Claude-Code-specific parser and so also covers a future
             // harness's parser. Do not re-derive that strip here — two copies is how
             // the two paths drift apart, which is the bug this arrangement fixes.
+            // The boundary Claude Code itself records: a message that stopped to call a tool
+            // was said on the way there. Its `result` is the last message, which stopped on
+            // `end_turn`, so this is exactly the split a live turn's reply makes.
+            let narration = v
+                .get("message")
+                .and_then(|m| m.get("stop_reason"))
+                .and_then(Value::as_str)
+                == Some("tool_use");
             let text = extract_assistant_text(&v)?;
             let text = text.trim();
             (!text.is_empty()).then(|| HydratedTurn {
@@ -966,6 +989,7 @@ fn shape_turn_line(line: &str, turn_key: Option<String>) -> Option<HydratedTurn>
                 timestamp: ts,
                 turn_key,
                 artifacts: Vec::new(),
+                narration,
             })
         }
         _ => None,
@@ -1588,6 +1612,36 @@ pub fn report_tool_id_collisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A message that stopped to call a tool was said on the way there: narration. The last
+    /// message, which stopped on `end_turn`, is the answer. The boundary is the harness's
+    /// own record, never the wording.
+    #[test]
+    fn a_message_that_stopped_for_a_tool_hydrates_as_narration() {
+        let narr = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Starting now: I'll find it."}]}}"#;
+        let tool = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t","name":"Read","input":{}}]}}"#;
+        let answer = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Here it is."}]}}"#;
+        let t = shape_turn_line(narr, None).expect("narration has visible text");
+        assert!(t.narration);
+        assert_eq!(t.text, "Starting now: I'll find it.");
+        assert!(
+            shape_turn_line(tool, None).is_none(),
+            "a tool-use-only line has no text"
+        );
+        let a = shape_turn_line(answer, None).expect("the answer");
+        assert!(!a.narration);
+        // The key is omitted when false, so an answer's JSON is exactly what it was.
+        let json = serde_json::to_value(&a).unwrap();
+        assert!(json.get("narration").is_none(), "{json}");
+        assert_eq!(serde_json::to_value(&t).unwrap()["narration"], true);
+    }
+
+    /// A user line is never narration, whatever its shape.
+    #[test]
+    fn a_user_turn_is_never_narration() {
+        let user = r#"{"type":"user","message":{"content":"hello"}}"#;
+        assert!(!shape_turn_line(user, None).unwrap().narration);
+    }
 
     #[test]
     fn escape_matches_the_verified_convention() {

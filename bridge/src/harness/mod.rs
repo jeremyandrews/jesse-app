@@ -930,6 +930,15 @@ pub trait TurnSink: Send + Sync {
     /// DEFAULTED TO A NO-OP, so every sink that reports nowhere stays silent by writing
     /// nothing. See [`crate::quota`].
     fn quota(&self, _scope: QuotaScopeId, _patch: QuotaPatch) {}
+
+    /// One whole block of the model's working narration, reported on the harness's OWN
+    /// channel rather than as deltas (Codex's `commentary` phase). Not part of the answer:
+    /// nothing sent here appears in [`TurnOutcome::text`], and the client folds it away
+    /// apart from the answer. A harness whose narration arrives as ordinary deltas never
+    /// calls this; the tool call that closes such text is what marks it as narration.
+    ///
+    /// DEFAULTED TO A NO-OP, like the two provenance methods above.
+    fn narration(&self, _block: &str) {}
 }
 
 /// What an in-process turn hands back when it succeeds: exactly what the driver needs to

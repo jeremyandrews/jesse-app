@@ -625,7 +625,13 @@ fn notification(
             if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
                 return None;
             }
+            // A completed COMMENTARY item is the model's working narration. Its deltas were
+            // held back above so they never read as the answer; its final text goes to the
+            // client on the narration channel, to be folded away beside the answer.
             if Phase::of(item) == Phase::Commentary {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    ctx.sink.narration(text);
+                }
                 return None;
             }
             if let Some(text) = item.get("text").and_then(Value::as_str) {
@@ -1087,6 +1093,7 @@ mod tests {
         text: std::sync::Mutex<String>,
         activity: std::sync::Mutex<Vec<String>>,
         quota: std::sync::Mutex<Vec<(QuotaScopeId, QuotaPatch)>>,
+        narration: std::sync::Mutex<Vec<String>>,
     }
 
     impl TurnSink for Recorder {
@@ -1098,6 +1105,9 @@ mod tests {
         }
         fn quota(&self, scope: QuotaScopeId, patch: QuotaPatch) {
             self.quota.lock_ok().push((scope, patch));
+        }
+        fn narration(&self, block: &str) {
+            self.narration.lock_ok().push(block.to_string());
         }
     }
 
@@ -1222,10 +1232,11 @@ mod tests {
         assert_eq!(result, "the password is [redacted]");
     }
 
-    /// **COMMENTARY IS NOT THE ANSWER, AND ITS DELTAS ARE NOT SHOWN.** Codex emits a short
-    /// preamble as its own agent message before it starts calling tools; the bridge has never
-    /// shown it and does not start now. Streaming it would put text on screen that the
-    /// terminal answer then replaces.
+    /// **COMMENTARY IS NOT THE ANSWER, AND ITS DELTAS ARE NOT SHOWN AS IT.** Codex emits a
+    /// short preamble as its own agent message before it starts calling tools. Streaming its
+    /// deltas would put text on screen that the terminal answer then replaces, so they are held
+    /// back; the completed item goes out once, on the narration channel, to be folded away
+    /// beside the answer.
     #[test]
     fn commentary_never_reaches_the_client_or_the_answer() {
         let mut f = Fixture::new();
@@ -1242,6 +1253,11 @@ mod tests {
             json!({"item": {"type": "agentMessage", "id": "c1", "text": "I'll look that up.", "phase": "commentary"}}),
         );
         assert_eq!(f.streamed(), "", "a preamble is not the visible answer");
+        assert_eq!(
+            f.sink.narration.lock_ok().clone(),
+            vec!["I'll look that up.".to_string()],
+            "the preamble is narration, reported once, whole"
+        );
 
         // …and then the real answer, interleaved with a tool call, arrives and IS shown.
         f.on(

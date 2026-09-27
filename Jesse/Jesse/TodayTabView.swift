@@ -350,7 +350,8 @@ struct TodayTabView: View {
         guard let text = intent.tellFallback else { return }
         let thread = JesseThread(mode: .tell)
         context.insert(thread)
-        coordinator.send(thread: thread, text: text, voice: false, context: context)
+        coordinator.send(thread: thread, text: text, voice: false, context: context,
+                         sentFor: PromptSender.todayAction)
         model.discardPending(id: intent.id)
         openedThread = thread
     }

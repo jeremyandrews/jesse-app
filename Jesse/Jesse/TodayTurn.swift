@@ -39,7 +39,8 @@ enum TodayThreadOpener {
                     context: ModelContext) -> JesseThread {
         let thread = JesseThread(mode: turn.mode)
         context.insert(thread)
-        coordinator.send(thread: thread, text: turn.text, voice: false, context: context)
+        coordinator.send(thread: thread, text: turn.text, voice: false, context: context,
+                         sentFor: turn.sentFor)
         return thread
     }
 

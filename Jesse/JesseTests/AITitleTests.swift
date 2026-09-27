@@ -63,7 +63,7 @@ final class TitleCountingClient: JesseClientProtocol {
               conversationId: String, voice: Bool,
               instructions: String?, floorOverride: String?,
               attachments: [JesseAttachment], requestId: UUID,
-              model: String?, effort: String?) async throws -> JesseSendResult {
+              model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
         .running(jobId: "unused", conversationId: nil)
     }
     func result(jobId: String) async throws -> JesseResultState { .running }

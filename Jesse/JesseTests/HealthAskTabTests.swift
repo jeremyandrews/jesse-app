@@ -313,7 +313,7 @@ private final class CapturingAskClient: JesseClientProtocol {
               conversationId: String, voice: Bool,
               instructions: String?, floorOverride: String?,
               attachments: [JesseAttachment], requestId: UUID,
-              model: String?, effort: String?) async throws -> JesseSendResult {
+              model: String?, effort: String?, sentFor: String?) async throws -> JesseSendResult {
         sent.append(Sent(mode: mode, text: text))
         return .reply(JesseReply(text: "ok", sessionId: "s-1"), jobId: nil, conversationId: nil)
     }

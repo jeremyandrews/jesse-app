@@ -170,8 +170,13 @@ struct MacTurnRun: Equatable {
     /// still being in flight. A spinner covers both, which is why the delivery caption reads
     /// `phase` instead.
     var accepted = false
-    /// Live assistant text for this turn (a `reset` frame REPLACES it, a `delta` APPENDS).
-    var streamingText = ""
+    /// Live text for this turn, split as the thread shows it: the narration so far and the
+    /// answer so far. `LiveReply` owns the rule (a tool call closes narration), shared with iOS.
+    var live = LiveReply()
+    /// The live ANSWER, never the narration.
+    var streamingText: String { live.answer }
+    /// The live narration, empty until the turn has said something on its way to a tool call.
+    var thinkingText: String { live.thinking }
     /// The current tool-activity LINE, already human ("Reading the vault…"), from
     /// `ToolActivity.displayLabel` — the same mapping the iOS app uses. Empty until this turn
     /// reports any activity.
@@ -400,6 +405,9 @@ final class MacCoordinator {
     /// This conversation's live assistant text, empty when it has none.
     func streamingText(for threadID: UUID) -> String { runs[threadID]?.streamingText ?? "" }
 
+    /// This conversation's live narration, empty when it has none.
+    func thinkingText(for threadID: UUID) -> String { runs[threadID]?.thinkingText ?? "" }
+
     /// This conversation's current activity line, empty when it has none.
     func activity(for threadID: UUID) -> String { runs[threadID]?.activity ?? "" }
 
@@ -432,9 +440,15 @@ final class MacCoordinator {
     /// composer is what makes every send path honor it, and what makes an empty composer
     /// with a context attached a real turn ("just look at it") instead of a silently
     /// dropped one.
-    func send(text: String, mode: JesseMode, thread: JesseThread, context: ModelContext) async {
-        guard let composed = stage(text: text, thread: thread, context: context) else { return }
-        await deliver(composed, mode: mode, thread: thread, context: context)
+    /// `sentFor` names what composed `text` when the owner did not type it (the morning
+    /// routine, a Today action): the turn then folds away under a Prompt row, here and on every
+    /// other device. Nil for a typed turn.
+    func send(text: String, mode: JesseMode, thread: JesseThread, context: ModelContext,
+              sentFor: String? = nil) async {
+        guard let staged = stage(text: text, thread: thread, context: context, sentFor: sentFor)
+        else { return }
+        await deliver(staged.text, sentFor: staged.promptHint, mode: mode, thread: thread,
+                      context: context)
     }
 
     /// The COMPOSER's send: stages synchronously, then delivers in a detached task.
@@ -461,10 +475,13 @@ final class MacCoordinator {
         //    to ride this message as attached context, in memory, on one conversation, until
         //    something happened to be sent. It is persisted the moment the Mac answers now
         //    (`reviewStore`) and `deliver` sends it ahead of this message.
-        guard let composed = stage(text: text, thread: thread, context: context) else {
+        guard let staged = stage(text: text, thread: thread, context: context) else {
             return false
         }
-        Task { await deliver(composed, mode: mode, thread: thread, context: context) }
+        let composed = staged.text
+        let sentFor = staged.promptHint
+        Task { await deliver(composed, sentFor: sentFor, mode: mode, thread: thread,
+                             context: context) }
         return true
     }
 
@@ -547,13 +564,15 @@ final class MacCoordinator {
     /// happens after it differs.
     private func stageAndAnswerOnDevice(text: String, mode: JesseMode, thread: JesseThread,
                                         context: ModelContext) -> Bool {
-        guard let composed = stage(text: text, thread: thread, context: context) else {
+        guard let staged = stage(text: text, thread: thread, context: context) else {
             return false
         }
+        let composed = staged.text
+        let sentFor = staged.promptHint
         Task { [weak self] in
             guard let self else { return }
             let outcome = await self.offline.answer(composed)
-            await self.finishOnDevice(outcome, question: composed, mode: mode,
+            await self.finishOnDevice(outcome, question: composed, sentFor: sentFor, mode: mode,
                                       thread: thread, context: context)
         }
         return true
@@ -567,6 +586,7 @@ final class MacCoordinator {
     /// ordinary send path, which reaches an unreachable bridge and surfaces its own error,
     /// which is precisely what it did before this feature existed.
     private func finishOnDevice(_ outcome: VaultAnswerOutcome, question: String,
+                                sentFor: String?,
                                 mode: JesseMode, thread: JesseThread,
                                 context: ModelContext) async {
         if case .answered(let answer) = outcome {
@@ -617,18 +637,19 @@ final class MacCoordinator {
         context.insert(note)
         thread.updatedAt = Date()
         try? save(context)
-        await deliver(question, mode: mode, thread: thread, context: context)
+        await deliver(question, sentFor: sentFor, mode: mode, thread: thread, context: context)
     }
 
     /// Persist the optimistic user turn (and spend the attachment and the draft) for a send,
-    /// returning the COMPOSED text to transmit, or nil if the send was refused or could not
-    /// be saved.
+    /// returning that turn (its `text` is the COMPOSED text to transmit), or nil if the send
+    /// was refused or could not be saved. `sentFor` marks a turn the owner did not type.
     ///
     /// Synchronous by design: everything that decides whether this message now exists —
     /// the guards, the run gate, the insert, the draft release, the save — happens before
     /// this function returns, so no caller can observe a half-staged send and no keystroke
     /// can land inside the handoff.
-    private func stage(text: String, thread: JesseThread, context: ModelContext) -> String? {
+    private func stage(text: String, thread: JesseThread, context: ModelContext,
+                       sentFor: String? = nil) -> Turn? {
         let attached = attachedContexts[thread.id]
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmed = attached.map { TodayThreadContext.firstMessage(context: $0.body, typed: text) }
@@ -665,6 +686,7 @@ final class MacCoordinator {
             userTurn.displayText = typed
             userTurn.contextLabel = attached.contextLabel
         }
+        userTurn.sentFor = sentFor
         userTurn.thread = thread
         context.insert(userTurn)
         thread.updatedAt = Date()
@@ -695,7 +717,7 @@ final class MacCoordinator {
         // A staged send is a completed round trip with the local store, which is the one thing
         // that can take an app-wide "couldn't reach the Studio" off the screen from here.
         lastError = nil
-        return trimmed
+        return userTurn
     }
 
     /// The network half of a send: this conversation's pending offline review first, if it has
@@ -706,22 +728,24 @@ final class MacCoordinator {
     /// exchange it is about is the non sequitur this whole path exists to prevent, and the Mac
     /// has no outbox to order the two in. Every Mac send path goes through here, so the
     /// morning routine and the Today actions honour it too.
-    private func deliver(_ trimmed: String, mode: JesseMode, thread: JesseThread,
+    private func deliver(_ trimmed: String, sentFor: String?, mode: JesseMode, thread: JesseThread,
                          context: ModelContext) async {
         // THIS conversation's slot, and nothing else's. The defer used to clear the app's one
         // slot, so the turn that finished first opened the gate for every conversation and
         // closed the spinner on turns that were still running.
         defer { endRun(thread.id) }
         if let review = stagePendingReview(thread: thread, context: context) {
-            await post(review, mode: mode, thread: thread, context: context)
+            // Composed from this Mac's offline answers, not typed: it folds under their label.
+            await post(review, sentFor: OfflineAnswerCarry.title, mode: mode, thread: thread,
+                       context: context)
         }
-        await post(trimmed, mode: mode, thread: thread, context: context)
+        await post(trimmed, sentFor: sentFor, mode: mode, thread: thread, context: context)
     }
 
     /// One POST and whatever it turns into. Split out of `deliver` so a conversation's pending
     /// review and the message behind it are two posts inside ONE run, rather than two runs
     /// whose spinners and error lines fight each other.
-    private func post(_ trimmed: String, mode: JesseMode, thread: JesseThread,
+    private func post(_ trimmed: String, sentFor: String?, mode: JesseMode, thread: JesseThread,
                       context: ModelContext) async {
         let cli = client
         // The PER-TURN model this conversation sends on: its own stored selection, else this
@@ -742,7 +766,7 @@ final class MacCoordinator {
                 conversationId: conversationId,
                 voice: false, instructions: nil, floorOverride: nil,
                 attachments: [], requestId: UUID().uuidString, model: model,
-                effort: effort)
+                effort: effort, sentFor: sentFor)
             // Adopt the AUTHORITATIVE id the bridge registered and stamp the first ACK, which
             // is what the detail view's delivery caption reads.
             adoptRegistration(thread: thread, conversationId: result.conversationId)
@@ -818,7 +842,8 @@ final class MacCoordinator {
             Task { [weak self] in
                 guard let self else { return }
                 defer { self.endRun(threadID) }
-                await self.post(review, mode: thread.modeValue, thread: thread, context: context)
+                await self.post(review, sentFor: OfflineAnswerCarry.title, mode: thread.modeValue,
+                                thread: thread, context: context)
             }
         }
     }
@@ -855,8 +880,10 @@ final class MacCoordinator {
             // (already badge-free); a cancel with no terminal reply keeps whatever streamed,
             // exactly as before.
             let streamed = runs[thread.id]?.streamingText ?? ""
+            let thinking = runs[thread.id]?.thinkingText ?? ""
             await finalize(thread: thread,
-                           reply: reply ?? JesseReply(text: streamed, sessionId: nil),
+                           reply: reply ?? JesseReply(text: streamed, sessionId: nil,
+                                                      narration: thinking.isEmpty ? nil : thinking),
                            streamedText: streamed, context: context, client: cli)
         case .dropped, .stalled:
             // Both are "this stream will not tell us how the turn ended" — the poll resolves
@@ -893,9 +920,13 @@ final class MacCoordinator {
                     ticker.tick()
                     guard case let .event(ev) = item else { continue }
                     switch ev {
-                    case let .reset(s): self.runs[thread.id]?.streamingText = s
-                    case let .delta(s): self.runs[thread.id]?.streamingText += s
-                    case let .activity(a): self.runs[thread.id]?.activity = a.displayLabel
+                    case .reset, .resetSplit, .delta, .narration:
+                        self.runs[thread.id]?.live.apply(ev)
+                    case let .activity(a):
+                        // Also the narration boundary: what streamed before this call was said on
+                        // the way to it, so it moves out of the answer into the Thinking row.
+                        self.runs[thread.id]?.live.apply(ev)
+                        self.runs[thread.id]?.activity = a.displayLabel
                     case let .done(reply): terminal = (reply, nil)
                     case let .failed(msg): terminal = (nil, msg)
                     case .cancelled: terminal = (nil, nil)
@@ -993,6 +1024,9 @@ final class MacCoordinator {
         let fields = Self.turnFields(from: reply, streamedText: streamedText)
         let jesseTurn = Turn(role: .jesse, text: fields.text)
         jesseTurn.provenanceJSON = fields.provenanceJSON
+        // The narration the reply arrived with, folded into its Thinking row. Mirrors the iOS
+        // `TurnWriter`.
+        jesseTurn.thinkingText = reply.storedNarration
         // The account quota this turn refreshed, into the one store the picker and Settings
         // read. Mirrors the iOS `TurnWriter`.
         UsageStore.shared.apply(reply.provenance?.quota)
@@ -1079,9 +1113,7 @@ final class MacCoordinator {
                     existing[existingIndex].sourceKey = t.turnKey
                     changed = true
                 case .insert:
-                    let turn = Turn(role: TranscriptMerge.role(for: t.role), text: t.text,
-                                    createdAt: TranscriptMerge.timestamp(t.timestamp))
-                    turn.sourceKey = t.turnKey.isEmpty ? nil : t.turnKey
+                    let turn = TranscriptMerge.newTurn(from: t)
                     // A turn this Mac never saw — hydrated from the phone's send, or
                     // after a fresh install. The bridge re-attached its returned files, so
                     // history shows the chart instead of silently losing it. Metadata
@@ -1212,6 +1244,7 @@ final class MacCoordinator {
             }
             t.aiTitle = c.title
             t.updatedAt = stamp
+            t.adoptSentFor(from: c)
             // When this conversation last replied, on the BRIDGE's clock, so a stub
             // adopted from the phone shows its dot without waiting to be opened.
             t.noteReply(atUnixMillis: Int(c.lastReplyMs))
@@ -1234,6 +1267,7 @@ final class MacCoordinator {
                 t.title = JesseThread.deriveTitle(from: fm)
             }
             if let sid = c.sessionId, !sid.isEmpty, t.sessionId != sid { t.sessionId = sid }
+            t.adoptSentFor(from: c)
             if stamp > t.updatedAt { t.updatedAt = stamp }
             // A reply that landed on the phone shows its dot here from the list pull
             // alone. `max`, never assignment — see the phone's half.

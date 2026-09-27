@@ -163,6 +163,11 @@ struct ThreadDetailView: View {
     // "jump to latest" button; the follow decision itself lives in the pure,
     // unit-tested `TranscriptScroll` helper.
     @State private var isAtBottom = true
+    // Which folds (Prompt and Thinking rows) are open, by turn id. View state on purpose: it
+    // lasts while this conversation is open and is gone when it is reopened, so every open
+    // starts on the answer.
+    @State private var openFolds: Set<UUID> = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The name this conversation shows in the navigation bar: the shared
     /// `displayTitle(for:)` resolution, the same one the list row draws, and NOT a
@@ -217,6 +222,8 @@ struct ThreadDetailView: View {
             // has to hold the user's unsent text again the instant this view exists.
             restoreDraft()
             if attachedContext != nil && turns.isEmpty { inputFocused = true }
+            // Empty in every ordinary launch: a conversation always opens with its folds closed.
+            openFolds = TranscriptFoldUITestSeam.initialOpenFolds(for: thread.id)
             isOnScreen = true
             // NOT ON THIS TURN OF THE LOOP. `onAppear` runs inside the push's own
             // transaction, and marking read is a `context.save()` — a sqlite write, plus
@@ -317,22 +324,12 @@ struct ThreadDetailView: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 40)
                     }
-                    ForEach(turns) { turn in
-                        VStack(alignment: turn.isUser ? .trailing : .leading, spacing: 4) {
-                            TurnRow(turn: turn)
-                            // A user turn whose message never reached the bridge shows
-                            // a compact per-message failure line with its own Retry /
-                            // Discard — the composer stays enabled, and each failed
-                            // message retries independently.
-                            if let item = failedItem(for: turn.id) {
-                                OutboxFailedControls(
-                                    lastError: item.lastError,
-                                    onRetry: { coordinator.retry(itemID: item.id, context: context) },
-                                    onDiscard: { coordinator.discard(itemID: item.id, context: context) })
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: turn.isUser ? .trailing : .leading)
-                        .id(turn.id)
+                    // The transcript as it renders: a prompt the owner did not type folds under a
+                    // Prompt row, and narration folds into a Thinking row above its answer. The
+                    // grouping is JesseKit's (`TranscriptItem`), shared with the Mac.
+                    ForEach(TranscriptItem.items(turns)) { item in
+                        transcriptRow(item)
+                            .id(item.id)
                     }
                     // Delivery caption under the LAST user bubble, exactly where Messages
                     // puts "Delivered". "Sending…" is the pre-ACK window (the message could
@@ -353,6 +350,12 @@ struct ThreadDetailView: View {
                         // Unknown versions are left visible (loud by contract).
                         let partial = MealLogParser.scrubbedStreamingText(
                             coordinator.partialText(for: thread.id) ?? "")
+                        // What the running turn has said on its way to its tools, folded into the
+                        // Thinking row in its live state, never shown as the answer.
+                        if let thinking = coordinator.partialThinking(for: thread.id) {
+                            ThinkingFold(text: thinking, isLive: true,
+                                         isExpanded: fold(thread.id))
+                        }
                         if !partial.isEmpty {
                             // Coalesced to ~10Hz so a long stream doesn't re-parse
                             // the whole growing string on every delta (M8).
@@ -437,6 +440,57 @@ struct ThreadDetailView: View {
             // after) a reply. Hidden while following, so it's out of the way.
             .overlay(alignment: .bottomTrailing) { jumpToLatestButton(proxy) }
         }
+    }
+
+    /// One rendered transcript row. A user turn keeps its per-message failure line (Retry /
+    /// Discard) whether it renders as a bubble or folded under a Prompt row.
+    @ViewBuilder
+    private func transcriptRow(_ item: TranscriptItem) -> some View {
+        switch item {
+        case .user(let turn):
+            userRow(turn) { TurnRow(turn: turn) }
+        case .prompt(let turn, let hint):
+            userRow(turn) {
+                PromptFoldView(turn: turn, hint: hint, isExpanded: fold(turn.id))
+            }
+        case .reply(let answer, let thinking, let id):
+            VStack(alignment: .leading, spacing: 4) {
+                if let thinking {
+                    ThinkingFold(text: thinking, isLive: false, isExpanded: fold(id))
+                }
+                if let answer { TurnRow(turn: answer) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// A user turn's column: its content, trailing, and under it the compact failure line a
+    /// message that never reached the bridge shows, with its own Retry and Discard. The
+    /// composer stays enabled, and each failed message retries independently.
+    private func userRow<Content: View>(_ turn: Turn,
+                                        @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            content()
+            if let item = failedItem(for: turn.id) {
+                OutboxFailedControls(
+                    lastError: item.lastError,
+                    onRetry: { coordinator.retry(itemID: item.id, context: context) },
+                    onDiscard: { coordinator.discard(itemID: item.id, context: context) })
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    /// Whether one fold is open, as a binding its row toggles. The animation is the system
+    /// default, and none at all under Reduce Motion.
+    private func fold(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { openFolds.contains(id) },
+            set: { open in
+                withAnimation(reduceMotion ? nil : .default) {
+                    if open { openFolds.insert(id) } else { openFolds.remove(id) }
+                }
+            })
     }
 
     @ViewBuilder
@@ -1349,6 +1403,127 @@ private struct TurnRow: View {
             // Selectable path (native per-block word/sentence selection).
             MarkdownText(turn.text)
         }
+    }
+}
+
+/// A user turn the owner did not type, folded. Collapsed it is one compact trailing row where
+/// the bubble would be: a document symbol, "Prompt", what sent it, and a chevron. Expanded it is
+/// the full prompt as a selectable bubble, exactly as a typed message renders. Always collapsed
+/// when the conversation opens; the expansion lives in the detail view's state.
+struct PromptFoldView: View {
+    let turn: Turn
+    let hint: String
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            Button { isExpanded.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: FoldCopy.promptSymbol)
+                    Text(FoldCopy.promptTitle).fontWeight(.semibold)
+                    Text(hint)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Image(systemName: FoldCopy.chevron(expanded: isExpanded))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.subheadline)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.accentColor.opacity(0.12))
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(FoldCopy.promptAccessibilityLabel(hint: hint))
+            .accessibilityValue(FoldCopy.accessibilityValue(expanded: isExpanded))
+            .accessibilityHint(FoldCopy.promptAccessibilityHint(expanded: isExpanded))
+            .accessibilityAddTraits(.isButton)
+            if isExpanded {
+                if !turn.attachments.isEmpty {
+                    TurnAttachmentsView(attachments: turn.orderedAttachments)
+                }
+                // The WHOLE prompt, context included: this is where what was sent is read.
+                SelectableText(attributed: NSAttributedString(
+                    string: turn.text,
+                    attributes: [.font: UIFont.preferredFont(forTextStyle: .body),
+                                 .foregroundColor: UIColor.label]))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.accentColor.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+}
+
+/// The model's working narration, folded above its answer. Deliberately NOT a bubble and not
+/// the Prompt row's look: a small, dim, leading line with its own symbol, so it reads as
+/// metadata about the reply rather than content. Expanded, the narration is secondary-coloured
+/// text set off by a thin leading rule, capped in height so opening it never pushes the answer
+/// far down the screen. `isLive` is the running turn's state ("Thinking…").
+struct ThinkingFold: View {
+    let text: String
+    let isLive: Bool
+    @Binding var isExpanded: Bool
+
+    /// The tallest the expanded narration grows before it scrolls inside itself.
+    static let expandedMaxHeight: CGFloat = 260
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { isExpanded.toggle() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: FoldCopy.thinkingSymbol)
+                    Text(isLive ? FoldCopy.thinkingLiveTitle : FoldCopy.thinkingTitle)
+                    Image(systemName: FoldCopy.chevron(expanded: isExpanded))
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(FoldCopy.thinkingAccessibilityLabel)
+            .accessibilityValue(FoldCopy.accessibilityValue(expanded: isExpanded))
+            .accessibilityHint(FoldCopy.thinkingAccessibilityHint(expanded: isExpanded))
+            .accessibilityAddTraits(.isButton)
+            if isExpanded {
+                ViewThatFits(in: .vertical) {
+                    narration
+                    ScrollView { narration }
+                }
+                .frame(maxHeight: Self.expandedMaxHeight)
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(.tertiary).frame(width: 2)
+                }
+                .padding(.bottom, 4)
+                .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var narration: some View {
+        Text(Self.attributed(text))
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Inline Markdown (bold, code, links) with the line breaks kept; plain text if it will
+    /// not parse.
+    static func attributed(_ s: String) -> AttributedString {
+        (try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
     }
 }
 

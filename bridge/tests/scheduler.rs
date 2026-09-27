@@ -1900,3 +1900,29 @@ async fn the_endpoint_names_the_scheduler_zone() {
     let _ = std::fs::remove_file(&fake);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- Sent for the owner ------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_scheduled_fire_marks_its_conversation_as_sent_for_the_owner() {
+    // The prompt a schedule sends was not typed by the owner. The conversation it opens says
+    // so, under the schedule's name, so every app folds that opening turn away.
+    let dir = temp_state_dir();
+    let log = dir.join("runs.log");
+    let fake = logging_claude(&log, "0");
+    let (at, anchor) = due_at(5);
+    let st = state_with(vec![head("archive-box", &at)], &fake, &dir);
+    st.scheduler.state.claim("archive-box", anchor);
+
+    tick_and_wait(&st, now_ms()).await;
+
+    let labels: Vec<Option<String>> = st
+        .conversations
+        .all()
+        .into_iter()
+        .map(|r| r.sent_for)
+        .collect();
+    assert_eq!(labels, vec![Some("Scheduled: archive box".to_string())]);
+    let _ = std::fs::remove_file(&fake);
+    let _ = std::fs::remove_dir_all(&dir);
+}

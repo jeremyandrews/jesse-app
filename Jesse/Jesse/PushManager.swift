@@ -2,6 +2,7 @@ import Combine
 import SwiftUI
 import UIKit
 import UserNotifications
+import JesseSpeech
 
 // Push notifications: capture the APNs device token, register it with the bridge,
 // ask for authorization at a sensible moment (after a turn succeeds, not on cold
@@ -345,8 +346,36 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 self?.refresh.schedule(at: date)
             }
             HealthAutoTrigger.shared.startIfEnabled()
+            // A recording's run measures lost contact in FOREGROUND time and runs this
+            // device's own engine only in the foreground, so the clock must know where the
+            // app is from the first instant, including a launch straight into the
+            // background to hand over an upload or a completion push.
+            ForegroundClock.shared.setActive(application.applicationState != .background)
+            let center = NotificationCenter.default
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil,
+                               queue: .main) { _ in ForegroundClock.shared.setActive(false) }
+            center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil,
+                               queue: .main) { _ in ForegroundClock.shared.setActive(true) }
+            RecordingRunService.shared.start()
         }
         return true
+    }
+
+    /// The recording upload's background session has events for an app that was suspended
+    /// or not running. Creating the session (in `start`, above, which has already run)
+    /// delivers them; the system's handler is called once they are all in.
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == BackgroundStudioUploader.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        let done = UncheckedCompletion(completionHandler)
+        MainActor.assumeIsolated {
+            RecordingRunService.shared.start()
+            RecordingRunService.shared.uploader.handleBackgroundEvents { done.call() }
+        }
     }
 
     /// A push arrived, and the app may be nowhere on screen.
@@ -366,11 +395,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // work is a checked `Sendable` value — a push's `userInfo` is `[AnyHashable: Any]`
         // and has no business travelling any further than this line.
         let payload = BackgroundDelivery.Payload(userInfo: userInfo)
+        let transcription = RecordingPush(userInfo: userInfo)
         Task { @MainActor in
-            let outcome = await AppDelegate.withDeadline(AppDelegate.backgroundWindow) {
+            async let turn = AppDelegate.withDeadline(AppDelegate.backgroundWindow) {
                 await AppDelegate.delivery.handle(payload)
             }
-            completionHandler(outcome.fetchResult)
+            // A recording's run finished on the Studio: wait, within the same window, for
+            // its transcript to land in the conversation's draft.
+            async let recording = AppDelegate.withDeadline(AppDelegate.backgroundWindow) {
+                guard let transcription else { return .noData }
+                await RecordingRunService.shared.runs.refresh(studioRunID: transcription.runID)
+                return .newData
+            }
+            completionHandler(BackgroundDelivery.combine(await turn, await recording).fetchResult)
         }
     }
 
@@ -414,7 +451,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        // A transcript that is landing in the composer the owner is looking at needs no
+        // banner on top of it.
+        let push = RecordingPush(userInfo: notification.request.content.userInfo)
+        let onScreen = push?.conversationID.map { id in
+            MainActor.assumeIsolated { RecordingRunService.shared.runs.isOnScreen(id) }
+        } ?? false
+        completionHandler(onScreen ? [] : [.banner, .sound])
     }
 
     // A tap: hand BOTH routing keys to the router so ContentView opens the thread and
@@ -428,4 +471,31 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
         completionHandler()
     }
+}
+
+/// A push saying a recording's transcription ended on the Studio: the run's id and the
+/// conversation it belongs to, and nothing else (`bridge/src/apns.rs`
+/// `build_transcription_payload`). Parsed at the delegate's synchronous entry like every
+/// other payload.
+nonisolated struct RecordingPush: Equatable, Sendable {
+    static let runKey = "transcription_id"
+
+    let runID: String
+    let conversationID: UUID?
+
+    init?(userInfo: [AnyHashable: Any]) {
+        guard let raw = (userInfo[Self.runKey] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        runID = raw
+        conversationID = (userInfo[BackgroundDelivery.PayloadKey.conversationId] as? String)
+            .flatMap(UUID.init(uuidString:))
+    }
+}
+
+/// The system's completion handler for background session events, carried to the main
+/// actor. It is called exactly once, by the uploader.
+nonisolated struct UncheckedCompletion: @unchecked Sendable {
+    private let body: () -> Void
+    init(_ body: @escaping () -> Void) { self.body = body }
+    func call() { body() }
 }

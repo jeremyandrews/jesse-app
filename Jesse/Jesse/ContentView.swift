@@ -124,6 +124,7 @@ struct ContentView: View {
             Task { await coordinator.refreshSessions(context: context) }
             inbox.drain()
             drainSharedRecording()
+            RecordingRunUITestSeam.startIfArmed(context: context) { land(on: $0) }
             PushManager.shared.refreshRegistration()
             reachability.refresh(config: config)
         }

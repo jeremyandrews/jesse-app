@@ -15,7 +15,7 @@
 //! photos and would refuse a recording long before its cap.
 
 use super::intake::{over_cap, AudioCustody, SniffedUpload, UploadGate};
-use super::service::JobOptions;
+use super::service::{FinishHook, JobOptions};
 use crate::*;
 use tokio::io::AsyncWriteExt;
 
@@ -28,6 +28,17 @@ pub struct TranscribeQuery {
     pub conditioning: Option<String>,
     #[serde(default)]
     pub second_reading: Option<String>,
+    /// `1` asks for a completion push to the registered device when the run ends, so a phone
+    /// that went to the background (or was killed) while the Studio worked still hears about
+    /// it. An app that does not send it gets exactly the old behaviour: it polls, nothing is
+    /// pushed.
+    #[serde(default)]
+    pub notify: Option<String>,
+    /// The conversation the recording was attached in, carried in the push so the app can
+    /// deliver the transcript to that conversation and a tap can open it. An opaque id: the
+    /// bridge only echoes it.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 pub async fn jesse_transcribe(
@@ -99,7 +110,15 @@ pub async fn jesse_transcribe(
             format!("could not keep the upload: {e}"),
         )
     })?;
-    let status = speech.start(custody, upload, sniffed, opts);
+    // The completion push, when the app asked for one AND one can actually be sent. The
+    // answer says which, as `notify`, so an app that gets `false` knows to tell the owner
+    // itself rather than wait for a push that is not coming.
+    let hook = completion_hook(&st, &q);
+    let will_push = hook.is_some();
+    let mut status = speech.start(custody, upload, sniffed, opts, hook);
+    if let Some(obj) = status.as_object_mut() {
+        obj.insert("notify".to_string(), json!(will_push));
+    }
     Ok((StatusCode::ACCEPTED, Json(status)).into_response())
 }
 
@@ -139,10 +158,81 @@ async fn receive(
     gate.finish()
 }
 
+/// A conversation id worth echoing: short, and nothing but letters, digits and hyphens (a
+/// UUID in practice). Anything else is dropped rather than refused, because the push is a
+/// convenience and the upload must not fail over it.
+fn echoable_conversation_id(raw: Option<&str>) -> Option<String> {
+    let id = raw?.trim();
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    ok.then(|| id.to_string())
+}
+
+/// The hook that pushes a run's ending to the registered device, or `None` when the app did
+/// not ask for one or none could be sent (push not configured, no device registered).
+///
+/// The push carries ids and the outcome and NOTHING ELSE: never a word of the transcript,
+/// which the app fetches over the paired connection like every other status.
+fn completion_hook(st: &AppState, q: &TranscribeQuery) -> Option<FinishHook> {
+    let asked = matches!(
+        q.notify
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("on")
+    );
+    if !asked || st.apns.is_none() || st.devices.get().is_none() {
+        return None;
+    }
+    let st = st.clone();
+    let conversation = echoable_conversation_id(q.conversation_id.as_deref());
+    Some(Box::new(move |id: &str, state: &'static str| {
+        // A cancel is the owner's own decision, made in the app: nothing to tell them.
+        if state == "cancelled" {
+            return;
+        }
+        let id = id.to_string();
+        tokio::spawn(async move {
+            push_transcription_outcome(&st, &id, conversation.as_deref(), state).await;
+        });
+    }))
+}
+
+/// Send one completion push. Every failure is logged and swallowed, as every other push is:
+/// the result is already kept for the app to collect, and the app also collects it on its
+/// next launch or foreground, so a lost push delays delivery and loses nothing.
+async fn push_transcription_outcome(
+    st: &AppState,
+    id: &str,
+    conversation_id: Option<&str>,
+    state: &str,
+) {
+    let Some(apns) = st.apns.as_deref() else {
+        return;
+    };
+    let Some(token) = st.devices.get() else {
+        eprintln!("jesse-bridge: speech PUSH id={id} — no device registered, nothing sent");
+        return;
+    };
+    let payload = build_transcription_payload(id, conversation_id, state);
+    let badge = Some(unread_conversation_count(&st.conversations, &st.flags));
+    match apns.push_payload(&token, payload, badge).await {
+        PushOutcome::Sent => eprintln!("jesse-bridge: speech PUSH id={id} state={state} sent"),
+        PushOutcome::DeadToken => {
+            st.devices.clear();
+            eprintln!("jesse-bridge: speech PUSH id={id} — device token rejected (410) — cleared");
+        }
+        PushOutcome::Failed(e) => {
+            eprintln!("jesse-bridge: speech PUSH id={id} failed: {e} — swallowed")
+        }
+    }
+}
+
 fn not_found() -> ApiError {
     (
         StatusCode::NOT_FOUND,
-        "no such transcription — a finished one is kept for an hour, and none survives a \
+        "no such transcription — a finished one is kept for a day, and none survives a \
          bridge restart"
             .to_string(),
     )
@@ -584,6 +674,198 @@ mod tests {
         assert_eq!(roles, vec!["primary", "second"]);
     }
 
+    // ---- The phone is not always there ------------------------------------------------
+
+    /// What the phone's background, lock and termination cases all come down to on this
+    /// side: nobody is polling. The run must not care, and its result must still be there
+    /// when the phone comes back, for a day.
+    #[tokio::test]
+    async fn a_run_nobody_polls_still_finishes_and_its_result_is_kept_for_a_day() {
+        let r = rig(
+            engine(
+                "primary-model",
+                &[(0, 2, "Kept for when the phone returns.")],
+            ),
+            engine(
+                "second-model",
+                &[(0, 2, "Kept for when the phone returns.")],
+            ),
+        );
+        let app = app(r.st.clone());
+        let id = start(&app, recording(0.5), "?conditioning=off").await;
+        // Not a single GET while it runs: wait on the overview's running count instead.
+        for _ in 0..1_000 {
+            if r.st.speech.overview()["running"] == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let hour = 3_600_000;
+        r.st.speech.backdate_finish(&id, 23 * hour);
+        let v = body_json(
+            app.clone()
+                .oneshot(get(&format!("/jesse/transcriptions/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            v["state"], "done",
+            "23 hours on, the result is still there: {v}"
+        );
+        assert_eq!(v["transcript"], "Kept for when the phone returns.");
+        r.st.speech.backdate_finish(&id, hour + 1_000);
+        let resp = app
+            .clone()
+            .oneshot(get(&format!("/jesse/transcriptions/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "after a day it is gone"
+        );
+        assert!(body_text(resp).await.contains("kept for a day"));
+    }
+
+    fn pushing_rig(primary: ScriptedEngine) -> (Rig, crate::apns::tests::MockApns) {
+        let r = rig(primary, engine("second-model", &[(0, 2, "whatever")]));
+        let mock = crate::apns::tests::MockApns::default();
+        let mut st = r.st.clone();
+        st.apns = Some(crate::apns::tests::test_apns(Arc::new(mock.clone())));
+        st.devices.set("phonetoken0123".to_string());
+        (
+            Rig {
+                st,
+                root: r.root.clone(),
+                fetcher: r.fetcher.clone(),
+            },
+            mock,
+        )
+    }
+
+    async fn pushes(mock: &crate::apns::tests::MockApns, want: usize) -> Vec<Value> {
+        for _ in 0..500 {
+            if mock.calls.lock_ok().len() >= want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        mock.calls
+            .lock_ok()
+            .iter()
+            .map(|c| serde_json::from_slice(&c.payload).unwrap())
+            .collect()
+    }
+
+    async fn first_status(app: &Router, query: &str) -> Value {
+        let resp = app
+            .clone()
+            .oneshot(upload(recording(0.5), Some("audio/wav"), query))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        body_json(resp).await
+    }
+
+    /// The push that lets a suspended or killed phone finish the job: ids and the outcome,
+    /// to the registered device, and not one word of what was said.
+    #[tokio::test]
+    async fn a_finished_run_the_app_asked_about_pushes_ids_only() {
+        let (r, mock) = pushing_rig(engine(
+            "primary-model",
+            &[(0, 2, "The plumber comes Thursday at nine.")],
+        ));
+        let app = app(r.st.clone());
+        let conversation = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+        let v = first_status(
+            &app,
+            &format!("?conditioning=off&notify=1&conversation_id={conversation}"),
+        )
+        .await;
+        assert_eq!(v["notify"], true, "the answer says a push is coming");
+        let id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(settle(&app, &id).await["state"], "done");
+        let sent = pushes(&mock, 1).await;
+        assert_eq!(sent.len(), 1, "exactly one push per run");
+        assert!(mock.calls.lock_ok()[0].path.ends_with("/phonetoken0123"));
+        let p = &sent[0];
+        assert_eq!(p["transcription_id"], id.as_str());
+        assert_eq!(p["conversation_id"], conversation);
+        assert_eq!(p["outcome"], "done");
+        assert_eq!(p["aps"]["content-available"], 1);
+        let keys: Vec<&String> = p.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["aps", "conversation_id", "outcome", "transcription_id"],
+            "ids and the outcome, nothing else"
+        );
+        let wire = String::from_utf8(mock.calls.lock_ok()[0].payload.clone()).unwrap();
+        for word in ["plumber", "Thursday", "nine"] {
+            assert!(!wire.contains(word), "no transcript text in a push: {wire}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_pushes_its_failure_and_a_cancelled_one_pushes_nothing() {
+        let (r, mock) = pushing_rig(engine("primary-model", &[]));
+        let app = app(r.st.clone());
+        let v = first_status(&app, "?conditioning=off&notify=1&conversation_id=abc").await;
+        let id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(settle(&app, &id).await["state"], "failed");
+        let sent = pushes(&mock, 1).await;
+        assert_eq!(sent[0]["outcome"], "failed");
+        assert_eq!(sent[0]["transcription_id"], id.as_str());
+
+        let mut holding = engine("primary-model", &[(0, 1, "never")]);
+        holding.hold_until_cancelled = true;
+        let (r, mock) = pushing_rig(holding);
+        let app = crate::handlers::app(r.st.clone());
+        let v = first_status(&app, "?conditioning=off&notify=1").await;
+        let id = v["id"].as_str().unwrap().to_string();
+        r.st.speech.cancel(&id);
+        assert_eq!(settle(&app, &id).await["state"], "cancelled");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.calls.lock_ok().is_empty(),
+            "the owner cancelled; nothing to tell"
+        );
+    }
+
+    /// An app that does not ask, or a bridge that cannot push, changes nothing: no push, and
+    /// the answer says so, so the app knows to tell the owner itself.
+    #[tokio::test]
+    async fn no_push_unless_asked_for_and_possible() {
+        let (r, mock) = pushing_rig(engine("primary-model", &[(0, 2, "hello")]));
+        let app = app(r.st.clone());
+        let v = first_status(&app, "?conditioning=off").await;
+        assert_eq!(v["notify"], false);
+        settle(&app, v["id"].as_str().unwrap()).await;
+
+        r.st.devices.clear();
+        let v = first_status(&app, "?conditioning=off&notify=1").await;
+        assert_eq!(
+            v["notify"], false,
+            "no device registered, so no push is coming"
+        );
+        settle(&app, v["id"].as_str().unwrap()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(mock.calls.lock_ok().is_empty());
+    }
+
+    #[test]
+    fn only_a_plain_id_is_echoed_into_a_push() {
+        assert_eq!(
+            echoable_conversation_id(Some(" 6F9619FF-8B86-D011-B42D-00C04FC964FF ")).as_deref(),
+            Some("6F9619FF-8B86-D011-B42D-00C04FC964FF")
+        );
+        assert_eq!(echoable_conversation_id(Some("a\"b")), None);
+        assert_eq!(echoable_conversation_id(Some("")), None);
+        assert_eq!(echoable_conversation_id(Some(&"a".repeat(65))), None);
+        assert_eq!(echoable_conversation_id(None), None);
+    }
     // ---- THE EGRESS BAN ---------------------------------------------------------------
 
     /// A server that stands in for every hosted surface and counts every connection made to

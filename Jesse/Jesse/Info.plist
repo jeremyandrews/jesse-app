@@ -29,6 +29,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.tag1.Jesse.refresh</string>
+		<string>com.tag1.Jesse.transcription.*</string>
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>

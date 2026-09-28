@@ -1721,7 +1721,7 @@ audio may reach the bridge and nothing past it; once it is text, it is an ordina
 
 | Route | What it does |
 |---|---|
-| `POST /jesse/transcriptions?language=it&conditioning=auto&second_reading=auto` | The body IS the recording (not base64), streamed to disk. `Content-Type` declares it and must match the magic bytes: `audio/mp4` (M4A), `audio/wav`, `audio/aiff`, `audio/x-caf`, `audio/mpeg`, `audio/flac`. `202` with the run's first status. `413` past the cap, `503` when this bridge does not transcribe. |
+| `POST /jesse/transcriptions?language=it&conditioning=auto&second_reading=auto` | The body IS the recording (not base64), streamed to disk. `Content-Type` declares it and must match the magic bytes: `audio/mp4` (M4A), `audio/wav`, `audio/aiff`, `audio/x-caf`, `audio/mpeg`, `audio/flac`. `202` with the run's first status. `413` past the cap, `503` when this bridge does not transcribe. Optional `notify=1&conversation_id=<uuid>` asks for a completion push to the registered device when the run finishes or fails (ids and outcome only, never transcript text); the first status then carries `"notify": true` when a push will actually be sent (APNs configured and a device registered), `false` otherwise. |
 | `GET /jesse/transcriptions/{id}` | The run: `state` (`running`/`done`/`failed`/`cancelled`), `phase` (`queued`, `downloading_model`, `preparing`, `conditioning`, `transcribing`, `second_reading`, `reconciling`), `fraction`, the `engine` running, then `transcript`, `engines`, `disagreements`, `notes`, or `error.kind`. Kept an hour after it ends. Not rate-limited. |
 | `POST /jesse/transcriptions/{id}/cancel` | Stop the run. Its audio is deleted like every other ending. |
 | `GET /jesse/speech` | Whether this bridge transcribes, the tier, and each model's role and install state. |
@@ -1769,7 +1769,7 @@ days = ["sat"]
 | `JESSE_SPEECH_SECOND_READING` | on | `off` runs one engine and returns no disagreement list |
 | `JESSE_SPEECH_MAX_AUDIO_BYTES` | 1 GiB | per recording |
 | `JESSE_SPEECH_THREADS` | 8 | CPU threads beside the GPU |
-| `JESSE_SPEECH_RESULT_TTL_SECS` | 3600 | how long a finished transcript is kept for the app |
+| `JESSE_SPEECH_RESULT_TTL_SECS` | 86400 | how long a finished transcript is kept for the app (a day: the phone may collect it hours later, after a push or at its next launch) |
 
 Building needs `cmake` on the PATH (whisper.cpp is compiled by `whisper-rs-sys`); the
 sentinel's deploy PATH includes `/opt/homebrew/bin`, so `brew install cmake` covers it.

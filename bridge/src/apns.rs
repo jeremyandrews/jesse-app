@@ -770,6 +770,37 @@ pub fn build_scheduled_payload(
     payload.to_string().into_bytes()
 }
 
+/// The payload for a recording's transcription ending on the Studio: the run's id, the
+/// conversation it was attached in, and whether it finished or failed. IDS ONLY: the alert
+/// names the outcome and never carries a word of the transcript, which the app fetches over
+/// the paired connection (`GET /jesse/transcriptions/{id}`) and puts in that conversation's
+/// composer. `content-available` wakes the app to do that in the background; the alert is
+/// what the owner sees if it cannot, and its tap opens the conversation.
+pub fn build_transcription_payload(
+    transcription_id: &str,
+    conversation_id: Option<&str>,
+    state: &str,
+) -> Vec<u8> {
+    let body = if state == "done" {
+        "Transcript ready. It’s in the conversation’s composer, not sent."
+    } else {
+        "A recording couldn’t be transcribed. Open the conversation to see why."
+    };
+    let mut payload = json!({
+        "aps": {
+            "alert": { "title": "Jesse", "body": body },
+            "sound": "default",
+            "content-available": 1
+        },
+        "transcription_id": transcription_id,
+        "outcome": state,
+    });
+    if let Some(cid) = conversation_id {
+        payload["conversation_id"] = json!(cid);
+    }
+    payload.to_string().into_bytes()
+}
+
 /// The CONSECUTIVE-FAILURE escalation payload: "this is the third night running", which is
 /// a different statement from "last night failed" and the one that gets acted on.
 pub fn build_escalation_payload(schedule_id: &str, streak: u32, reason: &str) -> Vec<u8> {
@@ -954,17 +985,18 @@ pub fn build_apns() -> Option<Arc<ApnsClient>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::testutil::*;
     /// A recording transport: captures every request and returns a fixed result.
     /// `fail` simulates a transport error (`Err`); `status` overrides the returned
     /// HTTP status (0 → 200), so a test can drive a 410 dead-token response.
+    /// Crate-visible so other modules' tests (the transcription push) can assert on it.
     #[derive(Clone, Default)]
-    struct MockApns {
-        calls: Arc<Mutex<Vec<ApnsRequest>>>,
-        fail: bool,
-        status: u16,
+    pub(crate) struct MockApns {
+        pub(crate) calls: Arc<Mutex<Vec<ApnsRequest>>>,
+        pub(crate) fail: bool,
+        pub(crate) status: u16,
     }
     impl ApnsTransport for MockApns {
         fn post(
@@ -986,7 +1018,7 @@ mod tests {
     }
     /// Generate a throwaway ES256 key in-process (no committed key material) and
     /// wrap it in an `ApnsClient` over the given transport.
-    fn test_apns(transport: Arc<dyn ApnsTransport>) -> Arc<ApnsClient> {
+    pub(crate) fn test_apns(transport: Arc<dyn ApnsTransport>) -> Arc<ApnsClient> {
         let rng = ring::rand::SystemRandom::new();
         let doc = ring::signature::EcdsaKeyPair::generate_pkcs8(
             &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,

@@ -36,8 +36,11 @@ use crate::*;
 pub const INTAKE_DIR_NAME: &str = "speech-intake";
 /// The models directory's name under the state dir, a sibling of `jobs/` and `artifacts/`.
 pub const MODELS_DIR_NAME: &str = "speech-models";
-/// How long a finished transcript is kept for the app to collect.
-pub const DEFAULT_RESULT_TTL_SECS: u64 = 3_600;
+/// How long a finished transcript is kept for the app to collect: a day. The phone may be
+/// suspended, locked or killed while the Studio works, and it collects the result when a
+/// completion push wakes it or the owner next opens the app, which can be hours later. An
+/// hour (the old value) expired results the phone had every right to still come back for.
+pub const DEFAULT_RESULT_TTL_SECS: u64 = 86_400;
 /// The most finished runs kept at once, however recent.
 pub const MAX_KEPT_RESULTS: usize = 64;
 
@@ -533,12 +536,18 @@ impl SpeechService {
     }
 
     /// Take custody of an accepted upload and start its run. Returns the run's first status.
+    ///
+    /// `on_finish`, when given, is called once as the run ends, with its id and its wire
+    /// state (`done`, `failed` or `cancelled`), after the audio is deleted and the result is
+    /// readable. It is how the HTTP side sends the completion push without this file ever
+    /// seeing the application state.
     pub fn start(
         &self,
         custody: AudioCustody,
         upload: PathBuf,
         sniffed: SniffedUpload,
         opts: JobOptions,
+        on_finish: Option<FinishHook>,
     ) -> Value {
         self.evict();
         let id = format!("tr-{}", random_hex());
@@ -561,7 +570,7 @@ impl SpeechService {
             second_reading: opts.second_reading.unwrap_or(self.config.second_reading),
         };
         let status = job.to_json();
-        tokio::spawn(run(parts, job, custody, upload, opts));
+        tokio::spawn(run(parts, job, custody, upload, opts, on_finish));
         status
     }
 
@@ -612,6 +621,16 @@ impl SpeechService {
         v
     }
 
+    /// Move a finished run's ending `by_ms` into the past, so a test can walk a result
+    /// through its retention without waiting a day.
+    #[cfg(test)]
+    pub(crate) fn backdate_finish(&self, id: &str, by_ms: u64) {
+        if let Some(job) = self.jobs.lock_ok().get(id) {
+            let mut s = job.status.lock_ok();
+            s.finished_ms = s.finished_ms.map(|f| f.saturating_sub(by_ms));
+        }
+    }
+
     fn evict(&self) {
         let now = system_time_to_ms(SystemTime::now());
         let ttl_ms = self.config.result_ttl_secs.saturating_mul(1000);
@@ -645,6 +664,9 @@ struct RunParts {
     second_reading: bool,
 }
 
+/// Told once that a run has ended: its id and its wire state. See [`SpeechService::start`].
+pub type FinishHook = Box<dyn FnOnce(&str, &'static str) + Send>;
+
 enum Stop {
     Cancelled,
     Failed(SpeechFailure),
@@ -656,6 +678,9 @@ async fn run(
     custody: AudioCustody,
     upload: PathBuf,
     opts: JobOptions,
+    // Beside the parts rather than among them: a hook is `Send` but not `Sync`, and the
+    // parts are borrowed across the pipeline's awaits.
+    on_finish: Option<FinishHook>,
 ) {
     let started = Instant::now();
     let outcome = pipeline(&parts, &job, &custody, &upload, &opts).await;
@@ -684,6 +709,10 @@ async fn run(
             );
             job.finish(Phase::Failed, Some(f));
         }
+    }
+    // After `finish`, so whoever the hook tells can already read the result.
+    if let Some(hook) = on_finish {
+        hook(&job.id, job.status.lock_ok().phase.state());
     }
 }
 

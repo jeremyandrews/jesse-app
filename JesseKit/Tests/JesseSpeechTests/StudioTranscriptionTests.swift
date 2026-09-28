@@ -315,6 +315,74 @@ final class StudioWireTests: XCTestCase {
         XCTAssertNil(request.httpBody, "the recording is streamed from its file, not held in memory")
     }
 
+    /// A chosen engine rides on the same request to the same bridge: the app still sends
+    /// audio only to the Studio, and the Studio decides nothing hosted unless asked.
+    func testAChosenEngineGoesAsAParameterToTheSameBridgeRoute() throws {
+        let endpoint = try XCTUnwrap(StudioEndpoint(baseURL: URL(string: "http://studio.example.ts.net:8765/"),
+                                                    token: "tok"))
+        let request = URLSessionStudioTransport.uploadRequest(
+            endpoint: endpoint, language: "it", contentType: "audio/mp4",
+            options: StudioUploadOptions(engine: "hosted:gemini-flash"))
+        XCTAssertEqual(request.url?.absoluteString,
+                       "http://studio.example.ts.net:8765/jesse/transcriptions?language=it&engine=hosted:gemini-flash")
+        let plain = URLSessionStudioTransport.uploadRequest(endpoint: endpoint, language: "it",
+                                                            contentType: "audio/mp4",
+                                                            options: StudioUploadOptions(engine: nil))
+        XCTAssertFalse(plain.url?.absoluteString.contains("engine") ?? true,
+                       "no choice sends no parameter, so the Studio's default applies")
+    }
+
+    /// A transcript read by a hosted engine says so, and where, in the header text; one read
+    /// on the Studio reads exactly as before.
+    func testAHostedReadingIsNeverDescribedAsTheStudio() throws {
+        let json = """
+        {"id":"tr-9","state":"done","phase":"done","transcript":"Ciao.",
+         "engines":[{"id":"hosted:gemini-flash","label":"gemini-3.8-flash via Gemini 3.8 Flash",
+                     "role":"primary","hosted":true,"host":"generativelanguage.googleapis.com"}],
+         "hosted":true,"engine_choice":"hosted:gemini-flash"}
+        """
+        let status = try JSONDecoder().decode(StudioRunStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.engines.first?.isHosted, true)
+        let description = StudioFirstTranscriber.engineDescription(status.engines)
+        XCTAssertEqual(description,
+                       "a hosted engine at generativelanguage.googleapis.com (gemini-3.8-flash via Gemini 3.8 Flash), not the Studio")
+        XCTAssertFalse(description.hasPrefix(StudioFirstTranscriber.studioName))
+
+        let mixed = StudioFirstTranscriber.engineDescription([
+            .init(id: "whisper-large-v3", label: "Whisper large-v3", role: "primary"),
+            .init(id: "hosted:glm", label: "whisper-v3-turbo via GLM 5.3", role: "second",
+                  host: "audio-turbo.example"),
+        ])
+        XCTAssertEqual(mixed,
+                       "the Studio (Whisper large-v3, checked against whisper-v3-turbo via GLM 5.3, hosted at audio-turbo.example)")
+        XCTAssertEqual(StudioFirstTranscriber.engineDescription([
+            .init(id: "whisper-large-v3", label: "Whisper large-v3", role: "primary"),
+        ]), "the Studio (Whisper large-v3)")
+    }
+
+    /// The bridge's engine list decodes, and every hosted row says it leaves the Studio.
+    func testTheEngineMenuDecodesAndNamesWhereAHostedEngineSendsTheAudio() throws {
+        let json = """
+        {"available":true,"tier":"accurate","default_engine":"local,hosted:glm",
+         "engines":[{"id":"local","label":"On the Studio (accurate tier)","hosted":false},
+                    {"id":"hosted:glm","label":"whisper-v3-turbo via GLM 5.3","hosted":true,
+                     "host":"audio-turbo.example","model":"whisper-v3-turbo"}]}
+        """
+        let menu = try JSONDecoder().decode(SpeechEngineMenu.self, from: Data(json.utf8))
+        XCTAssertTrue(menu.offersAChoice)
+        XCTAssertEqual(menu.engines.map(\.id), ["local", "hosted:glm"])
+        XCTAssertEqual(menu.engines[0].menuLabel, "On the Studio (accurate tier)")
+        XCTAssertEqual(menu.engines[1].menuLabel,
+                       "whisper-v3-turbo via GLM 5.3, sent from the Studio to audio-turbo.example")
+        XCTAssertEqual(menu.defaultLabel,
+                       "The Studio’s default (On the Studio (accurate tier), then whisper-v3-turbo via GLM 5.3 if that fails)")
+
+        let old = try JSONDecoder().decode(SpeechEngineMenu.self,
+                                           from: Data(#"{"available":true,"tier":"accurate"}"#.utf8))
+        XCTAssertFalse(old.offersAChoice, "an older bridge offers no choice")
+        XCTAssertEqual(old.defaultEngine, "local")
+    }
+
     func testAnUnpairedDeviceHasNoStudio() {
         XCTAssertNil(StudioEndpoint(baseURL: nil, token: "tok"))
         XCTAssertNil(StudioEndpoint(baseURL: URL(string: "http://studio:8765/"), token: ""))

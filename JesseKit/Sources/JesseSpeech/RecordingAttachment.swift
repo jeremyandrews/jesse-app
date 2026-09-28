@@ -8,11 +8,14 @@ import Observation
 // all converge on it — and because it owns the two promises that must not be
 // re-implemented per platform:
 //
-//   1. THE WORKING COPY IS DELETED ON EVERY EXIT PATH. Success, every failure,
-//      cancellation, and a language sheet dismissed without choosing. There is exactly
-//      one place that ends a run (`settle`) and it is the only place that clears state,
-//      so "the transcript arrived but the audio is still on disk" is not a state this
-//      type can be in.
+//   1. THE WORKING COPY IS DELETED ON EVERY WAY OUT. Success, cancellation, a language
+//      sheet dismissed without choosing, and an explicit Discard. There is exactly one
+//      place that ends a run (`settle`) and it is the only place that clears state, so
+//      "the transcript arrived but the audio is still on disk" is not a state this type
+//      can be in. A FAILED run is the one exception, and a bounded one: its recording is
+//      kept so the owner can "Try again with" another engine (a local engine failing was
+//      the day the owner had no transcript at all), until they retry, discard it, pick
+//      another recording, or the launch sweep deletes it after a day.
 //   2. EVERY FAILURE HAS ITS OWN SENTENCE. The taxonomy is `TranscriptionFailure`'s; this
 //      only pairs it with the name of the file the user actually picked.
 //
@@ -153,6 +156,21 @@ public final class RecordingAttachment {
     /// A finished transcript waiting to be moved into the composer. Read it with
     /// `takeCompleted()`, which also clears it, so one recording can never land twice.
     public private(set) var completed: CompletedRecording?
+    /// The engines the paired bridge offers, loaded when a recording is picked. Nil from a
+    /// bridge that offers no choice, and then the picker shows none.
+    public private(set) var engineMenu: SpeechEngineMenu?
+    /// The engine chosen for this recording, or nil for the Studio's own default. The picker
+    /// binds to it; it is sent as the upload's `engine`.
+    public var selectedEngine: String?
+    /// A failed run's recording, kept for another try. Nil when there is none.
+    public private(set) var retry: RetryOffer?
+
+    /// What the composer offers after a failure: the same recording, again, with any engine
+    /// the bridge lists (or just again, when it lists none).
+    public struct RetryOffer: Equatable, Sendable {
+        public let sourceName: String
+        public let engines: [SpeechEngineOption]
+    }
 
     public var isBusy: Bool {
         if case .running = stage { return true }
@@ -167,7 +185,9 @@ public final class RecordingAttachment {
     /// exit path (and swept at the next launch for a run the system killed). So the draft
     /// notes the name and the restored composer says the recording is gone, rather than
     /// handing back text that has quietly lost its transcript.
-    public var isInFlight: Bool { stage != .idle }
+    ///
+    /// A failed recording kept for another try counts: it is still in hand.
+    public var isInFlight: Bool { stage != .idle || retry != nil }
 
     private let transcriber: any AudioFileTranscribing
     private let probe: any AudioFileProbing
@@ -177,6 +197,11 @@ public final class RecordingAttachment {
     private let preferredLanguages: @Sendable () -> [String]
     private let readLastLanguage: @Sendable () -> String?
     private let writeLastLanguage: @Sendable (String) -> Void
+    private let loadEngineMenu: @Sendable () async -> SpeechEngineMenu?
+    /// The language a kept recording was read in, for its retry.
+    private var retainedLocale: Locale?
+    /// The language of the run in progress, kept if it fails.
+    private var runLocale: Locale?
 
     /// Set for the iPhone's runs, which outlive their screen; nil for the Mac's.
     public let durable: DurableRecordingRun?
@@ -204,6 +229,7 @@ public final class RecordingAttachment {
                     = { UserDefaults.standard.string(forKey: RecordingAttachment.lastLanguageKey) },
                 writeLastLanguage: @escaping @Sendable (String) -> Void
                     = { UserDefaults.standard.set($0, forKey: RecordingAttachment.lastLanguageKey) },
+                engineMenu: (@Sendable () async -> SpeechEngineMenu?)? = nil,
                 durable: DurableRecordingRun? = nil) {
         self.durable = durable
         self.transcriber = durable?.studio ?? transcriber
@@ -214,6 +240,15 @@ public final class RecordingAttachment {
         self.preferredLanguages = preferredLanguages
         self.readLastLanguage = readLastLanguage
         self.writeLastLanguage = writeLastLanguage
+        // The Studio transcriber knows how to ask the bridge; any other transcriber (this
+        // device's own) has no engines to offer.
+        if let engineMenu {
+            self.loadEngineMenu = engineMenu
+        } else if let studio = durable?.studio ?? (transcriber as? StudioFirstTranscriber) {
+            self.loadEngineMenu = { await studio.engineMenu() }
+        } else {
+            self.loadEngineMenu = { nil }
+        }
     }
 
     /// The remembered language is one device-wide preference, not a per-conversation
@@ -228,6 +263,8 @@ public final class RecordingAttachment {
     /// Adopt a file the user picked. `url` is the picker's URL, which may be
     /// security-scoped and is never used after this call returns.
     public func begin(pickedFileAt url: URL, displayName: String? = nil) async {
+        // A new recording means the owner has moved on from a failed one kept for a retry.
+        discardRecording()
         // One run per conversation: a durable run in flight is never replaced by a second
         // recording, whose adoption would take over its source and its record.
         if durable != nil, isInFlight { return }
@@ -251,6 +288,7 @@ public final class RecordingAttachment {
     /// the audio in the group container to transcribe in place would be one fewer copy
     /// and one more way to leave a recording behind.
     public func begin(handoff: PendingRecording) async {
+        discardRecording()
         if durable != nil, isInFlight { return }
         guard let handoffStore else {
             fail(.engineFailed(reason: "the shared container isn’t available"),
@@ -308,6 +346,10 @@ public final class RecordingAttachment {
         selectedLanguage = TranscriptionLocalePolicy.resolve(remembered: readLastLanguage(),
                                                             preferred: preferredLanguages(),
                                                             supported: supported)
+        // Each recording starts on the Studio's own default; choosing a hosted engine is a
+        // decision made for this recording, never one carried over from the last.
+        engineMenu = await loadEngineMenu()
+        selectedEngine = nil
         stage = .choosingLanguage
     }
 
@@ -318,15 +360,26 @@ public final class RecordingAttachment {
         guard case .choosingLanguage = stage,
               let source, let locale = selectedLanguage else { return }
         writeLastLanguage(locale.identifier)
+        start(source: source, locale: locale)
+    }
+
+    /// Start a run over `source`: the picker's confirm, or a retry of a kept recording.
+    private func start(source: RecordingSource, locale: Locale, retrying: TranscriptionRunRecord? = nil) {
+        runLocale = locale
         let language = TranscriptionLocalePolicy.displayName(locale)
         stage = .running(TranscriptionUpdate(phase: .preparing, fraction: 0))
 
         if let durable {
-            startDurable(durable, source: source, locale: locale, language: language)
+            if let retrying {
+                restartDurable(durable, record: retrying, locale: locale)
+            } else {
+                startDurable(durable, source: source, locale: locale, language: language)
+            }
             return
         }
 
         let transcriber = self.transcriber
+        let engine = selectedEngine
         let url = source.workingURL
         let name = source.displayName
         let run = generation
@@ -339,9 +392,16 @@ public final class RecordingAttachment {
                 Task { @MainActor in self?.advance(update, run: run) }
             }
             do {
-                let result = try await transcriber.transcribe(fileAt: url,
+                let result: TranscriptionResult
+                if let studio = transcriber as? StudioFirstTranscriber {
+                    result = try await studio.transcribe(fileAt: url, locale: locale,
+                                                         options: StudioUploadOptions(engine: engine),
+                                                         hooks: .none, onProgress: onProgress)
+                } else {
+                    result = try await transcriber.transcribe(fileAt: url,
                                                               locale: locale,
                                                               onProgress: onProgress)
+                }
                 self?.succeed(result, language: language, run: run)
             } catch let failure as TranscriptionFailure {
                 self?.fail(failure, named: name, run: run)
@@ -389,11 +449,23 @@ public final class RecordingAttachment {
                                             durationSeconds: source.durationSeconds,
                                             language: language,
                                             localeIdentifier: locale.identifier,
-                                            audioFileName: fileName)
+                                            audioFileName: fileName,
+                                            engine: selectedEngine)
         self.source = RecordingSource(displayName: source.displayName,
                                       workingURL: durable.store.audioURL(for: record),
                                       durationSeconds: source.durationSeconds)
         durable.store.save(record)
+        self.record = record
+        events.started(record)
+        runDurable(durable, record: record, locale: locale)
+    }
+
+    /// Start a kept recording again as a NEW run over the same stored audio, with the engine
+    /// chosen now.
+    private func restartDurable(_ durable: DurableRecordingRun, record kept: TranscriptionRunRecord,
+                                locale: Locale) {
+        let record = kept.retried(engine: selectedEngine)
+        durable.store.replace(kept, with: record)
         self.record = record
         events.started(record)
         runDurable(durable, record: record, locale: locale)
@@ -416,7 +488,9 @@ public final class RecordingAttachment {
             fail(.unreadableFile, named: record.sourceName, run: generation)
             return
         }
-        runDurable(durable, record: record, locale: Locale(identifier: record.localeIdentifier))
+        let locale = Locale(identifier: record.localeIdentifier)
+        runLocale = locale
+        runDurable(durable, record: record, locale: locale)
     }
 
     private func runDurable(_ durable: DurableRecordingRun, record: TranscriptionRunRecord, locale: Locale) {
@@ -427,7 +501,8 @@ public final class RecordingAttachment {
         let run = generation
         let options = StudioUploadOptions(tag: record.id.uuidString,
                                           conversationID: record.conversationID.uuidString,
-                                          notify: true)
+                                          notify: true,
+                                          engine: record.engine)
         work = Task { [weak self] in
             let onProgress: @Sendable (TranscriptionUpdate) -> Void = { update in
                 Task { @MainActor in self?.advance(update, run: run) }
@@ -474,6 +549,88 @@ public final class RecordingAttachment {
     /// Show a failure that happened while nobody was looking (restored from the store).
     func present(error message: String) {
         errorMessage = message
+    }
+
+    /// Bring back a run a previous process kept after it failed: its sentence and its
+    /// "Try again with" offer, and nothing started.
+    public func restoreKept(_ record: TranscriptionRunRecord) async {
+        guard let durable, stage == .idle, record.isKeptAfterFailure else { return }
+        let url = durable.store.audioURL(for: record)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            durable.store.remove(record)
+            return
+        }
+        sourceName = record.sourceName
+        source = RecordingSource(displayName: record.sourceName, workingURL: url,
+                                 durationSeconds: record.durationSeconds)
+        self.record = record
+        retainedLocale = Locale(identifier: record.localeIdentifier)
+        errorMessage = record.failureMessage
+        engineMenu = await loadEngineMenu()
+        retry = RetryOffer(sourceName: record.sourceName, engines: engineMenu?.engines ?? [])
+    }
+
+    // MARK: - After a failure
+
+    /// Transcribe the kept recording again, with `engine` (`local`, `hosted:<id>`, or nil for
+    /// the Studio's default).
+    public func retry(engine: String?) {
+        guard retry != nil, stage == .idle, let source, let locale = retainedLocale else { return }
+        retry = nil
+        errorMessage = nil
+        notice = nil
+        selectedEngine = engine
+        retainedLocale = nil
+        start(source: source, locale: locale, retrying: record)
+    }
+
+    /// The owner's Discard: delete the kept recording now.
+    public func discardRecording() {
+        guard retry != nil else { return }
+        retry = nil
+        errorMessage = nil
+        retainedLocale = nil
+        // Its ending was already told when it failed.
+        settle(.cancelled, tell: false)
+    }
+
+    /// Whether another engine could do better than the one that failed. A file that is not
+    /// audio will not become audio, and a cancel is a decision; anything else might.
+    private static func isWorthRetrying(_ failure: TranscriptionFailure) -> Bool {
+        switch failure {
+        case .cancelled, .unreadableFile: return false
+        default: return true
+        }
+    }
+
+    /// Keep a failed run's recording for "Try again with", instead of deleting it.
+    private func keep(after failure: TranscriptionFailure, message: String, locale: Locale) {
+        if var record, let durable {
+            record.failureMessage = message
+            record.failedAt = Date()
+            durable.store.save(record)
+            self.record = record
+            // After the save, which clears the conversation's unseen failure: the keeper
+            // records it again when the owner was not looking.
+            events.ended(record, .failed(message))
+        }
+        retainedLocale = locale
+        runLocale = nil
+        retry = RetryOffer(sourceName: sourceName, engines: engineMenu?.engines ?? [])
+        stage = .idle
+        generation &+= 1
+        // A run resumed after a relaunch never loaded the menu; ask now, so the offer lists
+        // the engines rather than only "again".
+        if engineMenu == nil {
+            let load = loadEngineMenu
+            let name = sourceName
+            Task { [weak self] in
+                let menu = await load()
+                guard let self, self.retry?.sourceName == name, let menu else { return }
+                self.engineMenu = menu
+                self.retry = RetryOffer(sourceName: name, engines: menu.engines)
+            }
+        }
     }
 
     /// The user's Cancel. Stops the engine and deletes the audio; says nothing, because
@@ -524,21 +681,33 @@ public final class RecordingAttachment {
         // A cancel is a decision, not a fault: it deletes the audio and says nothing.
         if failure != .cancelled { errorMessage = failure.message(sourceName: name) }
         work = nil
+        // A failed recording is KEPT for "Try again with", when another engine could help and
+        // the audio is still here to give it.
+        if Self.isWorthRetrying(failure), let source, let locale = runLocale,
+           FileManager.default.fileExists(atPath: source.workingURL.path) {
+            keep(after: failure, message: failure.message(sourceName: name), locale: locale)
+            return
+        }
         settle(failure == .cancelled ? .cancelled : .failed(failure.message(sourceName: name)))
     }
 
     /// The ONE way a run ends. Deletes the working copy and the hand-off, then returns
     /// to idle. Every terminal path goes through here, which is what makes "no copy of
-    /// the audio remains on disk" a property of the type rather than a habit.
+    /// the audio remains on disk" a property of the type rather than a habit. (A failed run
+    /// kept for a retry has not ended: it ends here when retried to success, discarded, or
+    /// replaced.)
     ///
     /// A durable run first tells its keeper how it ended (so a transcript is delivered while
     /// its record still exists), then its record and its audio are deleted from the store.
-    private func settle(_ ending: RecordingRunEnding) {
+    /// `tell` is false only for a kept failure being discarded, whose ending was told when
+    /// it failed.
+    private func settle(_ ending: RecordingRunEnding, tell: Bool = true) {
         if let record, let durable {
-            events.ended(record, ending)
+            if tell { events.ended(record, ending) }
             durable.store.remove(record)
             self.record = nil
         }
+        runLocale = nil
         if let source {
             workingCopy.remove(source.workingURL)
             if let handoff = source.handoff { handoffStore?.discard(handoff) }

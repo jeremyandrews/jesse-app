@@ -136,6 +136,7 @@ fn with_vaultqa_offload(mut cfg: Config) -> Config {
         health: HealthConfig::default(),
         vision: Vec::new(),
         vision_complementary: false,
+        transcription: None,
     });
     cfg.model_registry = ModelRegistry { models };
     cfg.offload_order = vec!["local-vaultqa".to_string()];
@@ -4906,6 +4907,7 @@ fn cfg_with_switch_registry(state_dir: &std::path::Path) -> Config {
                 health: HealthConfig::default(),
                 vision: Vec::new(),
                 vision_complementary: false,
+                transcription: None,
             },
             RegistryModel {
                 family: None,
@@ -4939,6 +4941,7 @@ fn cfg_with_switch_registry(state_dir: &std::path::Path) -> Config {
                 health: HealthConfig::default(),
                 vision: Vec::new(),
                 vision_complementary: false,
+                transcription: None,
             },
             RegistryModel {
                 family: None,
@@ -4963,6 +4966,7 @@ fn cfg_with_switch_registry(state_dir: &std::path::Path) -> Config {
                 health: HealthConfig::default(),
                 vision: Vec::new(),
                 vision_complementary: false,
+                transcription: None,
             },
         ],
     };
@@ -6015,6 +6019,7 @@ async fn preprocess_pairs_and_frames_a_faithful_view() {
         health: HealthConfig::default(),
         vision: Vec::new(),
         vision_complementary: false,
+        transcription: None,
     };
     let text = RegistryModel {
         family: None,
@@ -6042,6 +6047,7 @@ async fn preprocess_pairs_and_frames_a_faithful_view() {
             role: VisionRole::General,
         }],
         vision_complementary: false,
+        transcription: None,
     };
     let cfg = Config {
         model_registry: ModelRegistry {
@@ -6125,6 +6131,7 @@ async fn unpaired_model_reports_no_vision() {
         health: HealthConfig::default(),
         vision: Vec::new(),
         vision_complementary: false,
+        transcription: None,
     };
     let registry = ModelRegistry { models: vec![text] };
     let glm = registry.get("glm").unwrap();
@@ -6231,6 +6238,7 @@ async fn the_vision_path_is_identical_on_both_harnesses() {
         health: HealthConfig::default(),
         vision: Vec::new(),
         vision_complementary: false,
+        transcription: None,
     };
     let cfg = Config {
         model_registry: ModelRegistry {

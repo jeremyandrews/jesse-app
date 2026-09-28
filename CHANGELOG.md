@@ -14,6 +14,103 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (183), Bridge 0.159.0] - 2026-09-29
+
+**When the Studio's local speech engines failed, there was no transcript at all, and the
+recording was thrown away.** On 2026-09-28 every hour-long recording came back as about a
+minute of text. Nothing failed as far as the bridge could tell: each run logged `DONE`
+(`audio=3351s ... loops=1`, `audio=3624s ... loops=1`), and the retained results show why:
+Whisper large-v3 locked onto one sentence ("He's a technical architect at QET42.") and
+repeated it about 1,750 times to the end of the audio, which the cleanup correctly
+collapsed to one line and a `[repeated ×1750, collapsed]` mark. The second reading was so
+different (over 3,000 words) that it was not compared. The design allowed no other engine,
+and the app deletes a failed recording on every failure path, so there was nothing to try
+again with.
+
+The loop's cause is in the engine, not in this change: `STUDIO_DECODE.carry_context: false`
+becomes whisper.cpp's `no_context`, which only clears the prompt carried in from a PREVIOUS
+call. Within one call, `whisper_full_with_state` keeps feeding each window's text into the
+next (`prompt_past1`) unless `n_max_text_ctx` is 0, so an hour-long single call conditions
+on its own output throughout, which is the classic long-form loop. That fix belongs to the
+engine and is left to its own change.
+
+**Decision: the audio egress rule changes, on purpose.** "Recorded audio never leaves the
+Studio" is replaced by: **audio leaves the Studio only to a hosted speech engine the owner
+explicitly selected, and only as that engine's transcription request.** Nothing selects one
+implicitly; a local failure never escalates to the cloud unless the owner configured that
+fallback; audio still never reaches a turn, the assistant child, a vision helper, or a
+registered model through the turn path, and the turn attachment gate still refuses it. With
+no hosted engine selected (the default), behaviour and wire traffic are unchanged. The
+reason is the one above: the old rule protected the audio by leaving the owner with no
+transcript.
+
+### Bridge 0.159.0
+
+- **A hosted speech engine**, `speech/hosted.rs`, the only speech file that makes an
+  outbound request. Two wire shapes, each verified live on 2026-09-28 with a synthetic clip:
+  OpenAI's `POST <base>/audio/transcriptions` multipart upload (Fireworks serves it for
+  `whisper-v3-turbo` on its audio host, with timed `verbose_json` segments), and a chat
+  request with an `input_audio` part (Gemini's OpenAI-compatible surface, which has no
+  `/audio/transcriptions`). The decoded 16 kHz audio is cut into chunks under the
+  provider's size and duration caps with a 3 s overlap, staged as WAV in the run's 0700
+  custody directory, sent, deleted, and stitched back by time; a word run the overlap read
+  twice is kept once.
+- **"Any model that supports it" is a declared capability.** A registry entry carries
+  `transcription` (wire shape, speech slug, optional endpoint, limits). The built-in GLM,
+  Kimi and Qwen entries declare Fireworks `whisper-v3-turbo`; the three Gemini entries
+  declare their own slug on the chat shape. A `[[models]]` entry declares it with a
+  `transcription = { model = "...", wire = "...", ... }` sub-table. Each reuses its entry's
+  own token; no new secret. `<PREFIX>_TRANSCRIPTION=off`, `_TRANSCRIPTION_MODEL` and
+  `_TRANSCRIPTION_BASE_URL` adjust a built-in. Anthropic-surface models take no audio and
+  declare nothing.
+- **Selection.** `JESSE_SPEECH_ENGINE` is `local` (the default), `hosted:<id>`, or
+  `local,hosted:<id>` (local first, that engine only when the local reading fails).
+  `POST /jesse/transcriptions?engine=` overrides it for one run and is refused by name
+  (400) when the id is not an armed transcription engine; a configured default that cannot
+  be used is a 503 naming it, and is warned about at startup. `JESSE_SPEECH_SECOND_ENGINE`
+  and `?second_engine=` put a hosted engine on the second reading, which the reconciler
+  compares like any other. A hosted primary reads alone unless a second engine is named.
+- **Provenance.** Each engine in the status carries `hosted` and `host`; the status
+  carries `hosted` and `engine_choice`; the log's `ACCEPTED` line names the engine choice.
+  A hosted failure has its own kind, `hosted_failed`.
+- **`GET /jesse/speech`** lists `engines` (the Studio, then every armed hosted engine) and
+  `default_engine`. Never a token.
+- **`jesse-transcribe <file> [--engine <id>] [--language <code>] [--env-plist <plist>]`**, a
+  new binary that runs the same intake, decode, conditioning, engine, chunking and
+  reconciliation pipeline in process and prints the transcript and the disagreement list.
+  `--env-plist` takes the bridge's launch environment from its launchd plist, so it works
+  from a shell on the Studio after a `cargo build --release`, without touching the running
+  bridge. `--list-engines` prints the choices.
+- **The guards, rewritten to the new rule.** `ci-guards.sh` still fails the build if any
+  speech file but `http.rs` names the application state, the registry, the vision layer or
+  the turn path (now including `hosted.rs`), and now separately fails it on an outbound
+  request anywhere in `speech/` but `hosted.rs`, or on any request in `hosted.rs` that is
+  not `.post(&url)` to its target's URL. The wire tests are three:
+  `recorded_audio_never_reaches_a_hosted_backend` (kept, and now with an ARMED speech
+  engine on the counting server, which must see nothing when not selected);
+  `a_selected_hosted_engine_is_the_only_place_the_audio_goes` (a PCM canary reaches the
+  selected engine's transcription endpoint and nothing else, and the same audio as a turn
+  attachment is refused); and `local_then_hosted_sends_audio_only_when_the_local_reading_fails`.
+
+### App 1.0 (183)
+
+- **Choose the engine.** The language sheet lists the engines the bridge offers, starting
+  on the Studio's own default; every hosted row says it sends the recording on from the
+  Studio and to which host. A choice is for one recording and is sent as the upload's
+  `engine`. The app still sends audio only to the paired bridge.
+- **Try again instead of discard.** A failed run keeps its recording and offers "Try again
+  with" each listed engine, or Discard. It is deleted on success, on Cancel, on Discard, on
+  picking another recording, and by the launch sweep a day after it failed (the share
+  inbox's existing `sweep` for a hand-off). On the iPhone the kept run survives a relaunch
+  as an offer and never restarts on its own; a retry is a new run with a new upload tag.
+  A file that is not audio is not kept.
+- **A cloud transcript never reads as a Studio one.** The header says "transcribed on a
+  hosted engine at `<host>` (`<engine>`), not the Studio" when a hosted engine made it.
+- The comments that called a failed recording "not worth storing" are rewritten.
+
+Not changed: the Speech Recognition permission text still says nothing is uploaded, which
+is no longer true when the owner chooses a hosted engine; that is its own change.
+
 ## [Bridge 0.158.0] - 2026-09-28
 
 **Every deploy was a new app to macOS, so privacy grants did not survive a deploy.** Root

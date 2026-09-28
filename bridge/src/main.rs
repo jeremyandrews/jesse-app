@@ -365,6 +365,36 @@ async fn main() {
         ),
         Err(why) => eprintln!("jesse-bridge: speech transcription OFF — {why}"),
     }
+    // Which engine reads a recording by default, and every hosted engine a run may choose.
+    // A default that names an engine this bridge cannot use is said here, loudly, rather
+    // than discovered on the first upload.
+    if state.speech.availability().is_ok() {
+        let hosted: Vec<String> = jesse_bridge::speech::http::hosted_targets(&state.cfg)
+            .iter()
+            .map(|t| t.engine_id())
+            .collect();
+        match jesse_bridge::speech::http::resolve_plan(&state.cfg, None, None) {
+            Ok(plan) => eprintln!(
+                "jesse-bridge: speech engine {} (audio leaves the Studio: {}); hosted engines \
+                 armed: {}",
+                plan.choice.label(),
+                if plan.leaves_the_studio() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if hosted.is_empty() {
+                    "none".to_string()
+                } else {
+                    hosted.join(", ")
+                },
+            ),
+            Err(e) => eprintln!(
+                "jesse-bridge: WARNING — the configured speech engine cannot be used ({e}); \
+                 every upload that does not name an engine is refused until it is fixed"
+            ),
+        }
+    }
 
     // Pairing QR — scan it from the app's Settings to fill in host/port/token.
     // The advertised host defaults to the bound IP (reliably reachable on the

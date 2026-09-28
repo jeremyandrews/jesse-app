@@ -47,7 +47,10 @@ public struct RecordingLanguageSheet: View {
                 } header: {
                     Text("Language spoken in “\(model.sourceName)”")
                 } footer: {
-                    Text("Transcribed on the Studio by your Jesse bridge, or on this device when the Studio can’t be reached. The recording goes to the bridge and nowhere else — never to the cloud assistant — and it is deleted in both places as soon as the text exists.")
+                    Text("Transcribed on the Studio by your Jesse bridge, or on this device when the Studio can’t be reached. The recording goes to the bridge, never to the cloud assistant, and it is deleted in both places as soon as the text exists.")
+                }
+                if let menu = model.engineMenu, menu.offersAChoice {
+                    RecordingEngineSection(menu: menu, selection: $model.selectedEngine)
                 }
             }
             .navigationTitle("Transcribe Recording")
@@ -160,5 +163,83 @@ public struct RecordingNoticeRow: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+    }
+}
+
+/// Which engine reads the recording. The Studio's own default is first and preselected; every
+/// hosted engine says, in its row, that choosing it sends the recording on from the Studio
+/// and where to. Nothing hosted is ever chosen for the owner.
+public struct RecordingEngineSection: View {
+    let menu: SpeechEngineMenu
+    @Binding var selection: String?
+
+    public init(menu: SpeechEngineMenu, selection: Binding<String?>) {
+        self.menu = menu
+        self._selection = selection
+    }
+
+    public var body: some View {
+        Section {
+            row(id: nil, label: menu.defaultLabel)
+            ForEach(menu.engines) { engine in
+                row(id: engine.id, label: engine.menuLabel)
+            }
+        } header: {
+            Text("Transcribe with")
+        } footer: {
+            Text("A hosted engine receives the recording from the Studio to transcribe it, and nothing else does. The transcript says which engine read it.")
+        }
+    }
+
+    private func row(id: String?, label: String) -> some View {
+        Button {
+            selection = id
+        } label: {
+            HStack {
+                Text(label).foregroundStyle(.primary)
+                Spacer()
+                if selection == id {
+                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                }
+            }
+        }
+        .accessibilityAddTraits(selection == id ? [.isSelected] : [])
+    }
+}
+
+/// After a failure: the recording is still here, so offer it to another engine, or let it go.
+/// Shown by both composers under the error line, for as long as the recording is kept.
+public struct RecordingRetryRow: View {
+    let offer: RecordingAttachment.RetryOffer
+    let onRetry: (String?) -> Void
+    let onDiscard: () -> Void
+
+    public init(offer: RecordingAttachment.RetryOffer, onRetry: @escaping (String?) -> Void,
+                onDiscard: @escaping () -> Void) {
+        self.offer = offer
+        self.onRetry = onRetry
+        self.onDiscard = onDiscard
+    }
+
+    public var body: some View {
+        HStack(spacing: 8) {
+            if offer.engines.count > 1 {
+                Menu("Try again with…") {
+                    ForEach(offer.engines) { engine in
+                        Button(engine.menuLabel) { onRetry(engine.id) }
+                    }
+                }
+                .accessibilityLabel("Try “\(offer.sourceName)” again with another engine")
+            } else {
+                Button("Try again") { onRetry(nil) }
+                    .accessibilityLabel("Try transcribing “\(offer.sourceName)” again")
+            }
+            Button("Discard", role: .destructive, action: onDiscard)
+                .accessibilityLabel("Discard “\(offer.sourceName)”")
+            Spacer()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .font(.caption)
     }
 }

@@ -318,6 +318,12 @@ struct MacThreadDetailView: View {
                 Text(error).font(.caption).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // A failed recording is kept, so it can go to another engine instead of being lost.
+            if let offer = recording.retry {
+                RecordingRetryRow(offer: offer,
+                                  onRetry: { recording.retry(engine: $0) },
+                                  onDiscard: { recording.discardRecording() })
+            }
             // Read on this Mac because the Studio could not be reached: said out loud, beside
             // the draft it produced.
             if let notice = recording.notice {

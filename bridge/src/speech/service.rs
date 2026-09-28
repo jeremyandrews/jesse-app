@@ -24,6 +24,7 @@ use super::engine::{
     clean_segments, CancelFn, Cleaned, EngineError, EngineLoader, EngineRun, ProgressFn, Segment,
     SpeechEngine, WhisperLoader,
 };
+use super::hosted::{HostedEngine, HostedTarget, HOSTED_PREFIX};
 use super::intake::{self, AudioCustody, SniffedUpload, DEFAULT_MAX_AUDIO_BYTES};
 use super::models::{
     self, CatalogEntry, CheckReport, HttpFetcher, ModelFetcher, ModelManager, Readiness, SpeechTier,
@@ -60,6 +61,12 @@ pub struct SpeechConfig {
     pub threads: i32,
     /// `JESSE_SPEECH_RESULT_TTL_SECS`.
     pub result_ttl_secs: u64,
+    /// `JESSE_SPEECH_ENGINE`: which engine reads a recording when the run does not say.
+    /// `local` (the default) sends nothing anywhere.
+    pub engine: EngineChoice,
+    /// `JESSE_SPEECH_SECOND_ENGINE`: `local` (the default: the other local tier) or
+    /// `hosted:<id>`, the engine of the second reading.
+    pub second_engine: Option<String>,
 }
 
 fn env_off(name: &str) -> bool {
@@ -95,6 +102,22 @@ impl SpeechConfig {
             threads: env_parse("JESSE_SPEECH_THREADS", 8i32).clamp(1, 64),
             result_ttl_secs: env_parse("JESSE_SPEECH_RESULT_TTL_SECS", DEFAULT_RESULT_TTL_SECS)
                 .max(60),
+            engine: match env_string("JESSE_SPEECH_ENGINE") {
+                None => EngineChoice::Local,
+                Some(raw) => EngineChoice::parse(&raw).unwrap_or_else(|e| {
+                    eprintln!("jesse-bridge: WARNING — JESSE_SPEECH_ENGINE: {e}; using local");
+                    EngineChoice::Local
+                }),
+            },
+            second_engine: match env_string("JESSE_SPEECH_SECOND_ENGINE") {
+                None => None,
+                Some(raw) => parse_second_engine(&raw).unwrap_or_else(|e| {
+                    eprintln!(
+                        "jesse-bridge: WARNING — JESSE_SPEECH_SECOND_ENGINE: {e}; using local"
+                    );
+                    None
+                }),
+            },
         }
     }
 
@@ -109,6 +132,8 @@ impl SpeechConfig {
             second_reading: true,
             threads: 4,
             result_ttl_secs: DEFAULT_RESULT_TTL_SECS,
+            engine: EngineChoice::Local,
+            second_engine: None,
         }
     }
 
@@ -156,6 +181,121 @@ pub struct JobOptions {
     pub conditioning: ConditioningRequest,
     /// `None` follows the config.
     pub second_reading: Option<bool>,
+    /// Which engines read this recording. Resolved by the HTTP boundary (the only speech file
+    /// that sees the registry) from the run's `engine` or the configured default; the parser
+    /// leaves it local.
+    pub plan: EnginePlan,
+}
+
+/// Which engine reads a recording, as configured or asked for: the engine ids the wire uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EngineChoice {
+    /// The Studio's own whisper engines. Nothing leaves the machine.
+    #[default]
+    Local,
+    /// `hosted:<id>`: the registry entry `<id>`'s transcription capability, and nothing local.
+    Hosted(String),
+    /// `local,hosted:<id>`: local first; when the local reading fails, that hosted engine.
+    LocalThenHosted(String),
+}
+
+fn hosted_id(raw: &str) -> Result<String, String> {
+    let id = raw
+        .trim()
+        .strip_prefix(HOSTED_PREFIX)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{raw:?} is not \"local\" or \"hosted:<model id>\""))?;
+    Ok(id.to_string())
+}
+
+impl EngineChoice {
+    /// `local`, `hosted:<id>`, or `local,hosted:<id>`.
+    pub fn parse(raw: &str) -> Result<EngineChoice, String> {
+        let parts: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        match parts.as_slice() {
+            [] => Ok(EngineChoice::Local),
+            [one] if one.eq_ignore_ascii_case("local") => Ok(EngineChoice::Local),
+            [one] => Ok(EngineChoice::Hosted(hosted_id(one)?)),
+            [first, then] if first.eq_ignore_ascii_case("local") => {
+                Ok(EngineChoice::LocalThenHosted(hosted_id(then)?))
+            }
+            _ => Err(format!(
+                "{raw:?} is not \"local\", \"hosted:<model id>\" or \"local,hosted:<model id>\""
+            )),
+        }
+    }
+
+    /// The wire form, which [`EngineChoice::parse`] reads back.
+    pub fn label(&self) -> String {
+        match self {
+            EngineChoice::Local => "local".to_string(),
+            EngineChoice::Hosted(id) => format!("{HOSTED_PREFIX}{id}"),
+            EngineChoice::LocalThenHosted(id) => format!("local,{HOSTED_PREFIX}{id}"),
+        }
+    }
+
+    /// The hosted id the choice names, if any.
+    pub fn hosted(&self) -> Option<&str> {
+        match self {
+            EngineChoice::Local => None,
+            EngineChoice::Hosted(id) | EngineChoice::LocalThenHosted(id) => Some(id),
+        }
+    }
+}
+
+/// `local` (`None`) or `hosted:<id>` (`Some(id)`): the second reading's engine.
+pub fn parse_second_engine(raw: &str) -> Result<Option<String>, String> {
+    let t = raw.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("local") {
+        return Ok(None);
+    }
+    hosted_id(t).map(Some)
+}
+
+/// Where one reading comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineSource {
+    /// The local engine for the configured tier (primary) or the other tier (second).
+    Local,
+    Hosted(HostedTarget),
+}
+
+/// A run's engines, resolved. The default is today's: local, and a local second reading.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnginePlan {
+    pub primary: EngineSource,
+    /// Read with this when a LOCAL primary fails. Only ever set from the owner's
+    /// configuration or the run's own `engine`.
+    pub fallback: Option<HostedTarget>,
+    /// The second reading's engine. `Local` is the other local tier.
+    pub second: EngineSource,
+    /// What the plan was asked as, for the log and the status.
+    pub choice: EngineChoice,
+}
+
+impl Default for EnginePlan {
+    fn default() -> Self {
+        EnginePlan {
+            primary: EngineSource::Local,
+            fallback: None,
+            second: EngineSource::Local,
+            choice: EngineChoice::Local,
+        }
+    }
+}
+
+impl EnginePlan {
+    /// Whether any reading in this plan may send audio off the Studio.
+    pub fn leaves_the_studio(&self) -> bool {
+        matches!(self.primary, EngineSource::Hosted(_))
+            || self.fallback.is_some()
+            || matches!(self.second, EngineSource::Hosted(_))
+    }
 }
 
 impl JobOptions {
@@ -183,6 +323,7 @@ impl JobOptions {
                     ))
                 }
             },
+            plan: EnginePlan::default(),
         })
     }
 }
@@ -276,6 +417,8 @@ pub enum SpeechFailure {
     UnknownLanguage(String),
     ModelUnavailable(String),
     EngineFailed(String),
+    /// A hosted engine the owner selected refused or failed the request.
+    HostedFailed(String),
 }
 
 impl SpeechFailure {
@@ -287,6 +430,7 @@ impl SpeechFailure {
             SpeechFailure::UnknownLanguage(_) => "unknown_language",
             SpeechFailure::ModelUnavailable(_) => "model_unavailable",
             SpeechFailure::EngineFailed(_) => "engine_failed",
+            SpeechFailure::HostedFailed(_) => "hosted_failed",
         }
     }
 
@@ -306,6 +450,7 @@ impl SpeechFailure {
                 format!("The Studio has no speech model ready: {d}.")
             }
             SpeechFailure::EngineFailed(d) => format!("The Studio's speech engine failed: {d}."),
+            SpeechFailure::HostedFailed(d) => format!("The hosted speech engine failed: {d}."),
         }
     }
 }
@@ -315,6 +460,8 @@ struct EngineUse {
     id: String,
     label: String,
     role: &'static str,
+    /// The host the audio went to, for a hosted reading. `None` is the Studio itself.
+    host: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -335,6 +482,8 @@ struct JobStatus {
     failure: Option<SpeechFailure>,
     cancel_requested: bool,
     finished_ms: Option<u64>,
+    /// The engine choice the run was started with (`local`, `hosted:<id>`, ...).
+    choice: String,
 }
 
 /// One run, as the HTTP side sees it.
@@ -365,6 +514,7 @@ impl Job {
                 failure: None,
                 cancel_requested: false,
                 finished_ms: None,
+                choice: opts.plan.choice.label(),
             }),
             cancel: CancellationToken::new(),
         }
@@ -442,9 +592,14 @@ impl Job {
                 "reason": d.reason().label(),
             })),
             "transcript": s.transcript,
+            // Which engine produced what, and WHERE: a hosted reading names its host, so a
+            // transcript read in the cloud is never taken for one read on the Studio.
             "engines": s.engines.iter().map(|e| json!({
                 "id": e.id, "label": e.label, "role": e.role,
+                "hosted": e.host.is_some(), "host": e.host,
             })).collect::<Vec<_>>(),
+            "hosted": s.engines.iter().any(|e| e.host.is_some()),
+            "engine_choice": s.choice,
             "disagreements": s.disagreements,
             "agreement": s.agreement,
             "notes": s.notes,
@@ -556,18 +711,26 @@ impl SpeechService {
         // Metadata only. Never a filename, never a byte, never a word of transcript.
         eprintln!(
             "jesse-bridge: speech ACCEPTED id={id} type={} bytes={} language={} \
-             conditioning={:?}",
+             conditioning={:?} engine={}",
             sniffed.mime,
             sniffed.bytes,
             opts.language.as_deref().unwrap_or("auto"),
             opts.conditioning,
+            opts.plan.choice.label(),
         );
+        // A hosted primary reads alone unless the plan names a hosted second reading: the
+        // owner chose the cloud because the local engines were not serving, and a silent local
+        // second reading would spend the minutes and the GPU they chose to avoid.
+        let default_second = match (&opts.plan.primary, &opts.plan.second) {
+            (EngineSource::Hosted(_), EngineSource::Local) => false,
+            _ => self.config.second_reading,
+        };
         let parts = RunParts {
             models: self.models.clone(),
             decoder: self.decoder.clone(),
             run_lock: self.run_lock.clone(),
             tier: self.config.tier,
-            second_reading: opts.second_reading.unwrap_or(self.config.second_reading),
+            second_reading: opts.second_reading.unwrap_or(default_second),
         };
         let status = job.to_json();
         tokio::spawn(run(parts, job, custody, upload, opts, on_finish));
@@ -608,6 +771,13 @@ impl SpeechService {
             "reason": available.err(),
             "tier": self.config.tier.label(),
             "second_reading": self.config.second_reading,
+            "default_engine": self.config.engine.label(),
+            "second_engine": self
+                .config
+                .second_engine
+                .as_deref()
+                .map(|id| format!("{HOSTED_PREFIX}{id}"))
+                .unwrap_or_else(|| "local".to_string()),
             "max_audio_bytes": self.config.max_audio_bytes,
             "running": running,
         });
@@ -731,7 +901,22 @@ async fn pipeline(
         })?,
     };
 
-    let (primary_entry, primary) = obtain_engine(parts, job, parts.tier).await?;
+    // The primary engine. A local one is obtained (its model installed on first need) before
+    // the audio is decoded, as it always was; a hosted one has nothing to install. A LOCAL
+    // failure moves to the hosted fallback only when the plan carries one, which only the
+    // owner's configuration or the run's own `engine` can put there.
+    let mut fallback = opts.plan.fallback.clone();
+    let mut primary: Option<(EngineUse, Arc<dyn SpeechEngine>)> = match &opts.plan.primary {
+        EngineSource::Hosted(t) => Some(hosted_engine(t, "primary")),
+        EngineSource::Local => match obtain_engine(parts, job, parts.tier).await {
+            Ok((entry, engine)) => Some((local_use(&entry, &engine, "primary"), engine)),
+            Err(Stop::Failed(f)) if fallback.is_some() => {
+                note_local_failure(job, &f, fallback.as_ref());
+                None
+            }
+            Err(e) => return Err(e),
+        },
+    };
 
     job.enter(Phase::Preparing, None);
     let decoder = parts.decoder.clone();
@@ -775,27 +960,56 @@ async fn pipeline(
     };
     let samples = Arc::new(samples);
 
-    let first = clean_segments(read(job, &primary, &samples, opts, Phase::Transcribing).await?);
-    if first.segments.is_empty() {
-        return Err(Stop::Failed(SpeechFailure::NoSpeech));
+    let scratch = custody.dir();
+
+    let mut first: Option<(Cleaned, EngineUse)> = None;
+    if let Some((used, engine)) = primary.take() {
+        match read_clean(job, &engine, &samples, opts, scratch, Phase::Transcribing).await {
+            Ok(cleaned) => first = Some((cleaned, used)),
+            Err(Stop::Failed(f)) if fallback.is_some() => {
+                note_local_failure(job, &f, fallback.as_ref())
+            }
+            Err(e) => return Err(e),
+        }
     }
-    let mut engines = vec![EngineUse {
-        id: primary_entry.id.clone(),
-        label: primary.label().to_string(),
-        role: "primary",
-    }];
+    let (first, first_use) = match first {
+        Some(read) => read,
+        None => {
+            // Only reachable when a local stage failed AND the plan carries a fallback.
+            let target = fallback.take().ok_or_else(|| {
+                Stop::Failed(SpeechFailure::EngineFailed(
+                    "no engine read the recording".into(),
+                ))
+            })?;
+            let (used, engine) = hosted_engine(&target, "primary");
+            let cleaned =
+                read_clean(job, &engine, &samples, opts, scratch, Phase::Transcribing).await?;
+            (cleaned, used)
+        }
+    };
+    let mut engines = vec![first_use];
 
     let mut second: Option<Cleaned> = None;
     if parts.second_reading {
-        match obtain_engine(parts, job, parts.tier.other()).await {
-            Ok((entry, engine)) => {
-                match read(job, &engine, &samples, opts, Phase::SecondReading).await {
+        let obtained = match &opts.plan.second {
+            EngineSource::Hosted(t) => Ok(hosted_engine(t, "second")),
+            EngineSource::Local => {
+                // The other tier beside a local primary; the configured tier beside a hosted
+                // one, which used no local tier at all.
+                let tier = match opts.plan.primary {
+                    EngineSource::Hosted(_) => parts.tier,
+                    EngineSource::Local => parts.tier.other(),
+                };
+                obtain_engine(parts, job, tier)
+                    .await
+                    .map(|(entry, engine)| (local_use(&entry, &engine, "second"), engine))
+            }
+        };
+        match obtained {
+            Ok((used, engine)) => {
+                match read(job, &engine, &samples, opts, scratch, Phase::SecondReading).await {
                     Ok(segments) => {
-                        engines.push(EngineUse {
-                            id: entry.id.clone(),
-                            label: engine.label().to_string(),
-                            role: "second",
-                        });
+                        engines.push(used);
                         second = Some(clean_segments(segments));
                     }
                     Err(Stop::Cancelled) => return Err(Stop::Cancelled),
@@ -923,17 +1137,20 @@ async fn read(
     engine: &Arc<dyn SpeechEngine>,
     samples: &Arc<Vec<f32>>,
     opts: &JobOptions,
+    scratch: &Path,
     phase: Phase,
 ) -> Result<Vec<Segment>, Stop> {
     job.enter(phase, Some(engine.label().to_string()));
     let progress = job.progress_in(phase);
     let token = job.cancel.clone();
     let cancelled: CancelFn = Arc::new(move || token.is_cancelled());
-    let (engine, samples, language, c) = (
+    let hosted = engine.id().starts_with(HOSTED_PREFIX);
+    let (engine, samples, language, c, scratch) = (
         engine.clone(),
         samples.clone(),
         opts.language.clone(),
         cancelled.clone(),
+        scratch.to_path_buf(),
     );
     let result = tokio::task::spawn_blocking(move || {
         engine.transcribe(EngineRun {
@@ -941,20 +1158,79 @@ async fn read(
             language: language.as_deref(),
             progress,
             cancelled: c,
+            scratch: Some(&scratch),
         })
     })
     .await;
+    let failed = |e: String| {
+        Stop::Failed(if hosted {
+            SpeechFailure::HostedFailed(e)
+        } else {
+            SpeechFailure::EngineFailed(e)
+        })
+    };
     match result {
-        Err(e) => Err(Stop::Failed(SpeechFailure::EngineFailed(format!(
-            "the engine stopped unexpectedly ({e})"
-        )))),
+        Err(e) => Err(failed(format!("the engine stopped unexpectedly ({e})"))),
         Ok(Err(EngineError::Cancelled)) => Err(Stop::Cancelled),
         Ok(Err(EngineError::UnknownLanguage(l))) => {
             Err(Stop::Failed(SpeechFailure::UnknownLanguage(l)))
         }
-        Ok(Err(EngineError::Failed(e))) => Err(Stop::Failed(SpeechFailure::EngineFailed(e))),
+        Ok(Err(EngineError::Failed(e))) => Err(failed(e)),
         Ok(Ok(_)) if cancelled() => Err(Stop::Cancelled),
         Ok(Ok(segments)) => Ok(segments),
+    }
+}
+
+/// A reading, cleaned, where no speech at all is a failure (as it always was for the primary).
+async fn read_clean(
+    job: &Arc<Job>,
+    engine: &Arc<dyn SpeechEngine>,
+    samples: &Arc<Vec<f32>>,
+    opts: &JobOptions,
+    scratch: &Path,
+    phase: Phase,
+) -> Result<Cleaned, Stop> {
+    let cleaned = clean_segments(read(job, engine, samples, opts, scratch, phase).await?);
+    if cleaned.segments.is_empty() {
+        return Err(Stop::Failed(SpeechFailure::NoSpeech));
+    }
+    Ok(cleaned)
+}
+
+fn local_use(
+    entry: &CatalogEntry,
+    engine: &Arc<dyn SpeechEngine>,
+    role: &'static str,
+) -> EngineUse {
+    EngineUse {
+        id: entry.id.clone(),
+        label: engine.label().to_string(),
+        role,
+        host: None,
+    }
+}
+
+fn hosted_engine(target: &HostedTarget, role: &'static str) -> (EngineUse, Arc<dyn SpeechEngine>) {
+    let engine: Arc<dyn SpeechEngine> = Arc::new(HostedEngine::new(target.clone()));
+    let used = EngineUse {
+        id: target.engine_id(),
+        label: engine.label().to_string(),
+        role,
+        host: Some(target.host()),
+    };
+    (used, engine)
+}
+
+/// Say, in the result, that the local engine failed and which hosted engine read it instead.
+fn note_local_failure(job: &Job, failure: &SpeechFailure, fallback: Option<&HostedTarget>) {
+    if let Some(t) = fallback {
+        job.note(format!(
+            "The Studio's local engine failed ({}), so this transcript was read by {} at {}, \
+             the hosted fallback configured for this bridge.",
+            failure.message().trim_end_matches('.'),
+            t.engine_label(),
+            t.host()
+        ));
     }
 }
 
@@ -1022,6 +1298,7 @@ mod tests {
             SpeechFailure::UnknownLanguage("xx".into()),
             SpeechFailure::ModelUnavailable("x".into()),
             SpeechFailure::EngineFailed("x".into()),
+            SpeechFailure::HostedFailed("x".into()),
         ];
         let mut kinds: Vec<&str> = all.iter().map(|f| f.kind()).collect();
         kinds.sort();
@@ -1030,5 +1307,34 @@ mod tests {
         for f in &all {
             assert!(f.message().ends_with('.'), "{}", f.message());
         }
+    }
+
+    #[test]
+    fn engine_choices_parse_strictly_and_default_to_local() {
+        assert_eq!(EngineChoice::parse("local"), Ok(EngineChoice::Local));
+        assert_eq!(EngineChoice::parse(" "), Ok(EngineChoice::Local));
+        assert_eq!(
+            EngineChoice::parse("hosted:gemini-flash"),
+            Ok(EngineChoice::Hosted("gemini-flash".into()))
+        );
+        assert_eq!(
+            EngineChoice::parse("local, hosted:glm"),
+            Ok(EngineChoice::LocalThenHosted("glm".into()))
+        );
+        for bad in ["cloud", "hosted:", "hosted:a,local", "local,local", "a,b,c"] {
+            assert!(EngineChoice::parse(bad).is_err(), "{bad}");
+        }
+        for c in [
+            EngineChoice::Local,
+            EngineChoice::Hosted("x".into()),
+            EngineChoice::LocalThenHosted("y".into()),
+        ] {
+            assert_eq!(EngineChoice::parse(&c.label()), Ok(c.clone()));
+        }
+        assert_eq!(parse_second_engine("local"), Ok(None));
+        assert_eq!(parse_second_engine("hosted:k"), Ok(Some("k".into())));
+        assert!(parse_second_engine("k").is_err());
+        assert_eq!(SpeechConfig::disabled().engine, EngineChoice::Local);
+        assert!(!EnginePlan::default().leaves_the_studio());
     }
 }

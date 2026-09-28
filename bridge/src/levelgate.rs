@@ -1058,6 +1058,7 @@ mod tests {
             health: HealthConfig::default(),
             vision: Vec::new(),
             vision_complementary: false,
+            transcription: None,
         });
         cfg.model_registry = ModelRegistry { models };
         cfg

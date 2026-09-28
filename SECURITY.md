@@ -3084,13 +3084,23 @@ Recorded audio is transcribed on the Studio, by open speech models running insid
 bridge process. The code-level statement of what follows is the module documentation of
 `bridge/src/speech/mod.rs`.
 
-### The invariant
+### The invariant (changed in 0.159.0)
 
-**Recorded audio may reach the bridge and nothing past it.** It arrives from the phone over
-the tailnet, or over loopback from the Mac app running on the Studio, and it never leaves
-the Studio: not to the cloud assistant, not to a hosted vision helper, not to any registered
-model, not to a hosted speech API. It is transcribed in-process by models loaded from the
-Studio's own disk, and then deleted. Once audio is text, the text is an ordinary message and
+**Recorded audio leaves the Studio only to a hosted speech engine the owner explicitly
+selected, and only as that engine's transcription request.** It arrives from the phone over
+the tailnet, or over loopback from the Mac app running on the Studio. With no hosted engine
+selected (`JESSE_SPEECH_ENGINE=local`, the default) it never leaves the Studio and is
+transcribed in-process by models loaded from the Studio's own disk. With one selected (as the
+Studio default, as a fallback after a LOCAL failure, or for one run by `?engine=`) it goes to
+that engine's transcription endpoint and nowhere else. In every case it never reaches the
+cloud assistant, a hosted vision helper, or any registered model through the turn path, and
+it is deleted when the run ends.
+
+The previous rule, that audio never left the Studio at all, was retired on 2026-09-28: the
+local engines looped on every long recording that day and the owner had no other engine to
+ask, so the rule protected the audio by leaving him with no transcript. Nothing selects a
+hosted engine implicitly, a local failure never escalates to the cloud unless the owner
+configured that fallback, and every transcript names the engine and host that produced it. Once audio is text, the text is an ordinary message and
 nothing further is restricted: it is sent, like typed text, to whichever model the bridge is
 configured to use.
 
@@ -3114,27 +3124,36 @@ the same bearer token and the same rate limiter as every other request.
    are sniffed from magic bytes (M4A/MP4 audio, WAV, AIFF, CAF, MP3, FLAC), cross-checked
    against the declared type, and capped (`JESSE_SPEECH_MAX_AUDIO_BYTES`, default 1 GiB)
    while they stream.
-2. **One kind of engine.** An engine exists only as a model file on the Studio's disk loaded
-   into the bridge process (whisper.cpp through `whisper-rs`, Metal on the Studio). No
-   configuration key names an engine by address.
+2. **Two kinds of engine, both named.** A local engine exists only as a model file on the
+   Studio's disk loaded into the bridge process (whisper.cpp through `whisper-rs`, Metal on
+   the Studio). A hosted engine exists only as an ARMED registry entry that declares a
+   transcription capability, and is used only when the configuration or the run names it.
+   Its request reuses that entry's own token; no other secret exists for it.
 3. **No handle on anything else.** The pipeline is handed its own parts and nothing more —
-   no application state, no model registry, no vision layer. `scripts/ci-guards.sh` fails
-   the build if any pipeline file other than the HTTP boundary names one of those, or starts
-   a process other than the system audio decoder.
-4. **The wire test.** `speech::http::tests::recorded_audio_never_reaches_a_hosted_backend`
-   points the active model and its vision helper at a server that counts connections, pushes
-   a recording through the transcription route and through the turn route as an attachment,
-   and fails if that server sees a single connection.
+   no application state, no model registry, no vision layer; a hosted engine is handed a
+   plain target resolved at the HTTP boundary. `scripts/ci-guards.sh` fails the build if any
+   pipeline file other than the HTTP boundary names one of those, if any file other than
+   `speech/hosted.rs` makes an outbound request, if `hosted.rs` makes any request other than
+   its target's transcription POST, or if a file starts a process other than the system
+   audio decoder.
+4. **The wire tests.** `recorded_audio_never_reaches_a_hosted_backend` points the active
+   model, its vision helper AND an armed speech engine at a server that counts connections,
+   pushes a recording through the transcription route and through the turn route as an
+   attachment, and fails if that server sees a single connection.
+   `a_selected_hosted_engine_is_the_only_place_the_audio_goes` selects a hosted engine and
+   checks the recording's canary reaches its transcription endpoint and nothing else.
+   `local_then_hosted_sends_audio_only_when_the_local_reading_fails` pins the fallback.
 
 ### Custody and deletion
 
 - Each recording lives in its own `0700` directory under `<state_dir>/speech-intake/`, with
   bridge-chosen `0600` file names (the client's filename is never used). The decoded 16 kHz
-  working copy is written into the same directory; the conditioned signal is never written.
+  working copy, and a hosted engine's chunks, are written into the same directory; the
+  conditioned signal is never written.
 - The directory is removed by a `Drop` guard when the run ends — success, every failure,
   cancel, and a panic's unwind — and everything under the intake root is deleted at boot,
   because runs live in memory and anything left there was abandoned by a killed process.
-- The bridge keeps the TRANSCRIPT, in memory, for an hour so the app can collect it. It never
+- The bridge keeps the TRANSCRIPT, in memory, for a day so the app can collect it. It never
   keeps the audio, and it logs sizes and outcomes, never a filename or a word of transcript.
 - Audio is decoded by the system's `/usr/bin/afconvert` (pinned by absolute path), which runs
   without network, in the bridge's account, writing only into the custody directory.

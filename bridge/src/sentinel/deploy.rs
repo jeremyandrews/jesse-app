@@ -204,6 +204,11 @@ pub const MAX_UNDEPLOYED_RELEASES: usize = 10;
 /// (~100 MB of binaries) does not silently eat the disk the watchdog is guarding.
 pub const KEEP_BUILDS: usize = 3;
 
+/// How long one `codesign` call may take. Signing a binary takes well under a second; the
+/// ceiling exists for the one way it can hang, a keychain waiting on a dialog nobody is at
+/// the screen to answer, which must fail the deploy rather than hold the lock forever.
+pub const CODESIGN_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Lines of the deploy log carried in `state.json` so the phone can show progress without
 /// fetching the whole build output.
 pub const LOG_TAIL_LINES: usize = 20;
@@ -1500,6 +1505,71 @@ async fn phase_build(sen: &Sentinel, log: &DeployLog, sha: &str) -> Result<Vec<S
     Ok(bins)
 }
 
+/// The code signing identifier a deployed binary is signed with.
+///
+/// The bridge takes its launchd label (`JESSE_SENTINEL_LABEL_BRIDGE`), which is the name macOS
+/// shows beside its privacy grants; every other binary is namespaced under it. Deriving it
+/// from the label is what gives a second instance of this deployment (a different label) a
+/// different identity instead of sharing, and so fighting over, the first one's grants.
+pub fn signing_identifier(bridge_label: &str, name: &str) -> String {
+    if name == BRIDGE_BIN {
+        bridge_label.to_string()
+    } else {
+        format!("{bridge_label}.{name}")
+    }
+}
+
+/// Sign one staged binary with the configured identity, then verify the signature.
+///
+/// The linker's ad hoc signature changes with every build, and macOS keys Local Network and
+/// Full Disk Access grants to the code identity, so an unsigned deploy is a new app to the
+/// OS: it can lose LAN access until someone clicks Allow at the screen. Signing with one
+/// stable identity and identifier is what lets a grant survive a deploy.
+async fn sign_staged(
+    sen: &Sentinel,
+    log: &DeployLog,
+    identity: &str,
+    path: &Path,
+    identifier: &str,
+) -> Result<(), String> {
+    let p = path.to_string_lossy();
+    let sign = run_logged(
+        log,
+        None,
+        sen.cfg.bins.codesign.as_ref(),
+        &["-f", "-s", identity, "-i", identifier, &p],
+        &[],
+        CODESIGN_TIMEOUT,
+    )
+    .await;
+    if sign.timed_out {
+        return Err(format!(
+            "codesign did not finish inside {} s signing {p} (a keychain waiting on a prompt?)",
+            CODESIGN_TIMEOUT.as_secs()
+        ));
+    }
+    if !sign.ok() {
+        return Err(format!("codesign failed on {p}: {}", sign.summary()));
+    }
+    let verify = run_logged(
+        log,
+        None,
+        sen.cfg.bins.codesign.as_ref(),
+        &["-v", &p],
+        &[],
+        CODESIGN_TIMEOUT,
+    )
+    .await;
+    if !verify.ok() {
+        return Err(format!(
+            "codesign -v rejected {p} after signing: {}",
+            verify.summary()
+        ));
+    }
+    log.line(&format!("signed {p} as {identifier}"));
+    Ok(())
+}
+
 /// PHASE 4 — copy the deploy binaries into the store and repoint their symlinks.
 ///
 /// Returns the `previous` map, which is what a rollback is written in terms of.
@@ -1521,6 +1591,30 @@ async fn phase_stage(
             .map_err(|e| format!("could not copy {} to {}: {e}", src.display(), dst.display()))?;
         set_executable(&dst)?;
         log.line(&format!("staged {}", dst.display()));
+    }
+
+    // Signed BEFORE the previous record and the swap: a signing failure leaves every symlink
+    // on the old build, so the bridge that was running goes on running.
+    match sen.cfg.codesign_identity.as_deref() {
+        Some(identity) => {
+            let label = sen.cfg.label(ServiceSlot::Bridge);
+            for name in bins {
+                sign_staged(
+                    sen,
+                    log,
+                    identity,
+                    &dest.join(name),
+                    &signing_identifier(label, name),
+                )
+                .await?;
+            }
+        }
+        None => log.line(&format!(
+            "no signing identity configured ({} or JESSE_SENTINEL_CODESIGN_IDENTITY), so \
+             these binaries keep the linker's ad hoc signature and macOS privacy grants will \
+             not survive this deploy",
+            sen.cfg.codesign_identity_file().display()
+        )),
     }
 
     // BEFORE anything is repointed, and persisted before anything is repointed: a sentinel

@@ -184,6 +184,7 @@ fn config(sc: &Scratch, bridge_url: &str) -> SentinelConfig {
         github_repo: "example/example".to_string(),
         ci_job: "bridge".to_string(),
         deploy_health_timeout: Duration::from_secs(90),
+        codesign_identity: None,
     }
 }
 
@@ -858,8 +859,8 @@ async fn each_restart_verb_targets_its_own_label() {
 //     rollback's restart it does not come back at all".
 
 use jesse_bridge::sentinel::{
-    check_ci, embedded_deploy_bins, is_full_sha, prune_builds, resolve_bin, DeployRecord, Previous,
-    DEPLOY_BINS_MANIFEST, KEEP_BUILDS,
+    check_ci, embedded_deploy_bins, is_full_sha, prune_builds, resolve_bin, signing_identifier,
+    DeployRecord, Previous, DEPLOY_BINS_MANIFEST, KEEP_BUILDS,
 };
 
 /// The version the `cargo` shim's binaries print, and the version the fake bridge reports
@@ -1228,6 +1229,18 @@ async fn deploy_world_with_bins(
     ci: Ci,
     bins: &[String],
 ) -> (World, Arc<Sentinel>) {
+    deploy_world_with(sc, states, schedule, ci, bins, |_| {}).await
+}
+
+/// The same world, with `tweak` applied to the sentinel's config before it starts.
+async fn deploy_world_with(
+    sc: &Scratch,
+    states: Vec<Health>,
+    schedule: Value,
+    ci: Ci,
+    bins: &[String],
+    tweak: impl FnOnce(&mut SentinelConfig),
+) -> (World, Arc<Sentinel>) {
     let (clone, head, side) = make_repo(sc, bins);
     let launchctl_record = sc.path("launchctl.log");
     let launchctl = shim(&sc.path("launchctl"), &launchctl_record, 0, 0);
@@ -1257,6 +1270,7 @@ async fn deploy_world_with_bins(
     cfg.bins.git = resolve_bin("git", &["/usr/bin/git"]);
     cfg.bins.launchctl = Some(launchctl);
     cfg.bins.cargo = Some(cargo);
+    tweak(&mut cfg);
     let bin_dir = cfg.bin_dir.clone();
     std::fs::create_dir_all(&bin_dir).unwrap();
     let sen = Sentinel::new(cfg, None);
@@ -1566,6 +1580,132 @@ async fn a_healthy_deploy_repoints_the_symlinks_and_records_the_sha() {
             .contains("already the running bridge"),
         "a redeploy of the running commit must be refused without force"
     );
+}
+
+/// A `codesign` that records its argv and exits `sign_code` when asked to sign (`-f`) and
+/// `verify_code` when asked to verify (`-v`), so each half of the signing step can fail alone.
+fn codesign_shim(path: &Path, record: &Path, sign_code: i32, verify_code: i32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = -v ]; then exit {verify_code}; fi\nexit {sign_code}\n",
+        record.display()
+    );
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_path_buf()
+}
+
+/// A world whose sentinel signs with `TEST-IDENTITY` through a `codesign` shim.
+async fn signing_world(
+    sc: &Scratch,
+    states: Vec<Health>,
+    sign_code: i32,
+    verify_code: i32,
+) -> (World, Arc<Sentinel>, PathBuf) {
+    let record = sc.path("codesign.log");
+    let codesign = codesign_shim(&sc.path("codesign"), &record, sign_code, verify_code);
+    let (w, sen) = deploy_world_with(
+        sc,
+        states,
+        json!({ "jobs": [] }),
+        Ci::Green,
+        embedded_deploy_bins(),
+        |cfg| {
+            cfg.bins.codesign = Some(codesign);
+            cfg.codesign_identity = Some("TEST-IDENTITY".to_string());
+        },
+    )
+    .await;
+    (w, sen, record)
+}
+
+/// THE PRIVACY-GRANT DEFECT: ad hoc signing gave every deploy a new code identity, so macOS
+/// treated each build as a new app and its Local Network grant did not carry over.
+///
+/// With an identity configured every staged binary is signed with it under a fixed
+/// identifier (the bridge's own launchd label) and then verified, before the swap.
+#[tokio::test]
+async fn a_configured_identity_signs_and_verifies_every_binary_before_the_swap() {
+    let sc = Scratch::new("deploy-sign-ok");
+    let (w, sen, record) = signing_world(
+        &sc,
+        vec![Health::up(OLD_VERSION), Health::up(NEW_VERSION)],
+        0,
+        0,
+    )
+    .await;
+    seed_installed(&w.bin_dir, OLD_VERSION);
+
+    let (status, body) = post_deploy(&sen, json!({ "ref": "main" })).await;
+    assert_eq!(status, 202, "{body}");
+    let rec = await_deploy(&sen).await;
+    assert_eq!(rec.result.as_deref(), Some("ok"), "{:?}", rec.reason);
+
+    let calls = recorded(&record);
+    let built = sen.cfg.build_store().join(&w.head);
+    let label = sen.cfg.label(ServiceSlot::Bridge).to_string();
+    for name in embedded_deploy_bins() {
+        let p = built.join(name);
+        let ident = signing_identifier(&label, name);
+        assert!(
+            calls.contains(&format!("-f -s TEST-IDENTITY -i {ident} {}", p.display())),
+            "{name} was not signed as {ident}: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("-v {}", p.display())),
+            "{name} was not verified: {calls:?}"
+        );
+    }
+    assert_eq!(signing_identifier(&label, "jesse-bridge"), label);
+}
+
+/// A signing failure fails the deploy in the stage phase BEFORE a single symlink moves or the
+/// bridge is restarted: the old binary goes on running.
+#[tokio::test]
+async fn a_signing_failure_aborts_the_deploy_before_the_swap() {
+    for (tag, sign_code, verify_code, want) in [
+        ("sign", 1, 0, "codesign failed"),
+        ("verify", 0, 1, "codesign -v rejected"),
+    ] {
+        let sc = Scratch::new(&format!("deploy-sign-fail-{tag}"));
+        let (w, sen, _) =
+            signing_world(&sc, vec![Health::up(OLD_VERSION)], sign_code, verify_code).await;
+        let previously_installed = seed_installed(&w.bin_dir, OLD_VERSION);
+
+        let (status, body) = post_deploy(&sen, json!({ "ref": "main" })).await;
+        assert_eq!(status, 202, "{body}");
+        let rec = await_deploy(&sen).await;
+        assert_eq!(
+            rec.result.as_deref(),
+            Some("failed"),
+            "{tag}: {:?}",
+            rec.reason
+        );
+        assert_eq!(rec.phase, "stage", "{tag}");
+        assert!(
+            rec.reason.clone().unwrap_or_default().contains(want),
+            "{tag}: {:?}",
+            rec.reason
+        );
+
+        for name in embedded_deploy_bins() {
+            assert_eq!(
+                std::fs::read_link(w.bin_dir.join(name)).unwrap(),
+                previously_installed.join(name),
+                "{tag}: {name} moved"
+            );
+            assert_eq!(run_link(&w.bin_dir, name), OLD_VERSION, "{tag}: {name}");
+        }
+        assert!(
+            recorded(&w.launchctl_record).is_empty(),
+            "{tag}: the bridge was restarted"
+        );
+        assert!(
+            !sen.cfg.previous_file().exists(),
+            "{tag}: a rollback record was written"
+        );
+        assert!(sen.state.lock().unwrap().running_sha.is_none(), "{tag}");
+    }
 }
 
 /// THE BOOTSTRAPPING DEFECT, at the layer it lives in: the binary set comes from the TREE

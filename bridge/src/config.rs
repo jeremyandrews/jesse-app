@@ -2680,6 +2680,15 @@ pub struct RegistryModel {
     /// concatenate their outputs under labeled sections (default off). Only meaningful
     /// with a doc+general pair; ignored for a lone `Any` helper.
     pub vision_complementary: bool,
+    /// Whether this entry's provider takes recorded audio for transcription, and how:
+    /// the wire shape, the speech slug, and the provider's size and duration limits. `None`
+    /// for every provider that does not (the Anthropic surface takes no audio).
+    ///
+    /// Declaring it makes the entry SELECTABLE as a hosted speech engine
+    /// (`GET /jesse/speech`, `JESSE_SPEECH_ENGINE=hosted:<id>`); it never makes one selected.
+    /// The request reuses this entry's base URL (or the capability's own endpoint, for a
+    /// provider that serves audio on another host) and this entry's token: no new secret.
+    pub transcription: Option<crate::speech::hosted::TranscriptionCapability>,
     /// The model the bridge's OWN login is told to run — `ANTHROPIC_MODEL` on the child with
     /// no base URL and no token — or `None` to let that login run its own default.
     ///
@@ -3170,6 +3179,7 @@ fn glm_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) -
         // `JESSE_MODEL_GLM_VISION_COMPLEMENTARY`. Unset → no vision (today's behavior).
         vision: parse_vision_partners(&env_string("JESSE_MODEL_GLM_VISION").unwrap_or_default()),
         vision_complementary: env_flag_true("JESSE_MODEL_GLM_VISION_COMPLEMENTARY"),
+        transcription: transcription_from_env("JESSE_MODEL_GLM", Some(fireworks_transcription())),
         // A backend triple carries its own slug; nothing for the login to be told.
         login_model: None,
     }
@@ -3261,6 +3271,7 @@ fn kimi_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
         },
         vision: parse_vision_partners(&env_string("JESSE_MODEL_KIMI_VISION").unwrap_or_default()),
         vision_complementary: env_flag_true("JESSE_MODEL_KIMI_VISION_COMPLEMENTARY"),
+        transcription: transcription_from_env("JESSE_MODEL_KIMI", Some(fireworks_transcription())),
         // A backend triple carries its own slug; nothing for the login to be told.
         login_model: None,
     }
@@ -3346,6 +3357,7 @@ fn qwen_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
         },
         vision: parse_vision_partners(&env_string("JESSE_MODEL_QWEN_VISION").unwrap_or_default()),
         vision_complementary: env_flag_true("JESSE_MODEL_QWEN_VISION_COMPLEMENTARY"),
+        transcription: transcription_from_env("JESSE_MODEL_QWEN", Some(fireworks_transcription())),
         // A backend triple carries its own slug; nothing for the login to be told.
         login_model: None,
     }
@@ -3423,6 +3435,12 @@ fn gemini_env_entry(
     // Read once and used twice: the probe path has to follow the wire, or an operator who
     // moves this model onto another surface with `<prefix>_WIRE` keeps probing the old one.
     let wire = model_wire_from_env_defaulting(prefix, id, Wire::Chat);
+    let transcription = transcription_from_env(
+        prefix,
+        backend
+            .as_ref()
+            .map(|(_, _, slug)| gemini_transcription(slug)),
+    );
     RegistryModel {
         family: Some("Gemini".to_string()),
         // NO EFFORT SCALE, unlike the Fireworks families. `direct` has no per-turn effort
@@ -3476,6 +3494,7 @@ fn gemini_env_entry(
         },
         vision: parse_vision_partners(&env_string(&format!("{prefix}_VISION")).unwrap_or_default()),
         vision_complementary: env_flag_true(&format!("{prefix}_VISION_COMPLEMENTARY")),
+        transcription,
         // A backend triple carries its own slug; nothing for the login to be told.
         login_model: None,
     }
@@ -3644,6 +3663,7 @@ fn local_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>)
         },
         vision: parse_vision_partners(&env_string("JESSE_MODEL_LOCAL_VISION").unwrap_or_default()),
         vision_complementary: env_flag_true("JESSE_MODEL_LOCAL_VISION_COMPLEMENTARY"),
+        transcription: None,
         // A backend triple carries its own slug; nothing for the login to be told.
         login_model: None,
     }
@@ -3809,6 +3829,7 @@ fn opus_entry() -> RegistryModel {
         // never paired — vision helpers exist for the text backends that cannot.
         vision: Vec::new(),
         vision_complementary: false,
+        transcription: None,
         // Unpinned: the CLI runs its own default. See [`opus_env_entry`] for the pin.
         login_model: None,
     }
@@ -3916,6 +3937,7 @@ fn fable_env_entry() -> RegistryModel {
         // Fable sees images itself through the CLI's `Read` tool, like ambient Opus.
         vision: Vec::new(),
         vision_complementary: false,
+        transcription: None,
     }
 }
 
@@ -4031,6 +4053,138 @@ pub struct ModelToml {
     /// this model declares. Absent means none, and the app then renders no effort control.
     /// A malformed one is refused at startup, naming the model — see [`parse_effort_toml`].
     pub effort: Option<EffortToml>,
+    /// The optional `transcription = { model = "...", ... }` sub-table: this provider takes
+    /// recorded audio. See [`TranscriptionToml`].
+    pub transcription: Option<TranscriptionToml>,
+}
+
+/// The optional `transcription` sub-table of a `[[models]]` entry. Only `model` is required;
+/// `wire` defaults to `audio_transcriptions` (the OpenAI shape), and the limits default to
+/// OpenAI's (25 MB a request, ten minutes a chunk).
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct TranscriptionToml {
+    pub wire: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+    pub max_chunk_bytes: Option<u64>,
+    pub max_chunk_secs: Option<u32>,
+    pub timestamps: Option<bool>,
+}
+
+/// OpenAI's request cap on `/audio/transcriptions`, and the default for a declared capability.
+pub const OPENAI_TRANSCRIPTION_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// The longest chunk sent by default: ten minutes, which keeps progress and a retry cheap.
+pub const DEFAULT_TRANSCRIPTION_CHUNK_SECS: u32 = 600;
+
+/// A declared capability, or `None` with a warning naming the model when it is malformed.
+pub fn transcription_from_toml(
+    model_id: &str,
+    t: &TranscriptionToml,
+) -> Option<crate::speech::hosted::TranscriptionCapability> {
+    use crate::speech::hosted::{TranscriptionCapability, TranscriptionWire};
+    let wire = match t.wire.as_deref() {
+        None => TranscriptionWire::AudioTranscriptions,
+        Some(raw) => match TranscriptionWire::parse(raw) {
+            Some(w) => w,
+            None => {
+                eprintln!(
+                    "jesse-bridge: WARNING model '{model_id}' declares transcription wire \
+                     {raw:?}, which is neither \"audio_transcriptions\" nor \
+                     \"chat_input_audio\"; it is not a speech engine."
+                );
+                return None;
+            }
+        },
+    };
+    let Some(model) = t.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        eprintln!(
+            "jesse-bridge: WARNING model '{model_id}' declares transcription without a model \
+             slug; it is not a speech engine."
+        );
+        return None;
+    };
+    Some(TranscriptionCapability {
+        wire,
+        model: model.to_string(),
+        endpoint: t
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        max_chunk_bytes: t
+            .max_chunk_bytes
+            .unwrap_or(OPENAI_TRANSCRIPTION_MAX_BYTES)
+            .max(1024 * 1024),
+        max_chunk_secs: t
+            .max_chunk_secs
+            .unwrap_or(DEFAULT_TRANSCRIPTION_CHUNK_SECS)
+            .clamp(10, 3_600),
+        timestamps: t
+            .timestamps
+            .unwrap_or(wire == TranscriptionWire::AudioTranscriptions),
+    })
+}
+
+/// A built-in entry's capability after its environment has had its say:
+/// `<prefix>_TRANSCRIPTION=off` withdraws it, `<prefix>_TRANSCRIPTION_MODEL` and
+/// `<prefix>_TRANSCRIPTION_BASE_URL` move the slug and the host.
+fn transcription_from_env(
+    prefix: &str,
+    built_in: Option<crate::speech::hosted::TranscriptionCapability>,
+) -> Option<crate::speech::hosted::TranscriptionCapability> {
+    let off = env_string(&format!("{prefix}_TRANSCRIPTION")).is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    });
+    if off {
+        return None;
+    }
+    let mut cap = built_in?;
+    if let Some(m) = env_string(&format!("{prefix}_TRANSCRIPTION_MODEL")) {
+        cap.model = m;
+    }
+    if let Some(u) = env_string(&format!("{prefix}_TRANSCRIPTION_BASE_URL")) {
+        cap.endpoint = Some(u);
+    }
+    Some(cap)
+}
+
+/// Fireworks serves speech on its own audio host, not the inference host the chat entries
+/// use, and authenticates it with the same account key. `whisper-v3-turbo` on this host
+/// answered a multipart upload with timed `verbose_json` segments, verified live on
+/// 2026-09-28 with a synthetic clip and the Studio's GLM key; the `whisper-v3` host refused
+/// the same key (401), so it is not the default.
+pub const FIREWORKS_AUDIO_BASE_URL: &str =
+    "https://audio-turbo.us-virginia-1.direct.fireworks.ai/v1";
+
+/// The capability every built-in Fireworks entry carries. Fireworks takes up to 1 GB with no
+/// duration limit; chunks stay at ten minutes so progress moves and a retry is cheap.
+fn fireworks_transcription() -> crate::speech::hosted::TranscriptionCapability {
+    crate::speech::hosted::TranscriptionCapability {
+        wire: crate::speech::hosted::TranscriptionWire::AudioTranscriptions,
+        model: "whisper-v3-turbo".to_string(),
+        endpoint: Some(FIREWORKS_AUDIO_BASE_URL.to_string()),
+        max_chunk_bytes: 1024 * 1024 * 1024,
+        max_chunk_secs: DEFAULT_TRANSCRIPTION_CHUNK_SECS,
+        timestamps: true,
+    }
+}
+
+/// Gemini takes audio as an `input_audio` part on its OpenAI-compatible chat surface (it
+/// has no `/audio/transcriptions`: 404, checked 2026-09-28), with a 20 MB inline request
+/// limit, and answers text only. The speech slug is the entry's own model.
+fn gemini_transcription(slug: &str) -> crate::speech::hosted::TranscriptionCapability {
+    crate::speech::hosted::TranscriptionCapability {
+        wire: crate::speech::hosted::TranscriptionWire::ChatInputAudio,
+        model: slug.to_string(),
+        endpoint: None,
+        max_chunk_bytes: 20 * 1024 * 1024,
+        max_chunk_secs: DEFAULT_TRANSCRIPTION_CHUNK_SECS,
+        timestamps: false,
+    }
 }
 
 /// The optional `[models.quirks]` sub-table: three tri-state flags, each absent by default so
@@ -4332,6 +4486,10 @@ pub fn registry_model_from_toml(
             })
             .collect(),
         vision_complementary: t.vision_complementary.unwrap_or(false),
+        transcription: t
+            .transcription
+            .as_ref()
+            .and_then(|tr| transcription_from_toml(id, tr)),
         family: t
             .family
             .as_deref()
@@ -6309,6 +6467,7 @@ mod tests {
             health: HealthConfig::default(),
             vision: Vec::new(),
             vision_complementary: false,
+            transcription: None,
         };
         let text = RegistryModel {
             family: None,
@@ -6336,6 +6495,7 @@ mod tests {
                 role: VisionRole::Any,
             }],
             vision_complementary: false,
+            transcription: None,
         };
         let reg = ModelRegistry {
             models: vec![helper_unarmed.clone(), text.clone()],
@@ -6398,6 +6558,7 @@ mod tests {
             }),
             vision: None,
             vision_complementary: None,
+            transcription: None,
         };
         let m = registry_model_from_toml(&t, None, None).unwrap();
         assert!(matches!(m.kind, ModelKind::Local));
@@ -7244,6 +7405,104 @@ auth_token_env = "JESSE_TEST_FW_TOKEN"
                 Some(val) => std::env::set_var(k, val),
                 None => std::env::remove_var(k),
             }
+        }
+    }
+
+    // ---- The transcription capability ---------------------------------------------------
+
+    /// Every built-in whose provider takes audio declares it, with the wire shape verified
+    /// live; the Anthropic-surface entries, the local entry and the ambient login do not.
+    #[test]
+    fn the_built_ins_whose_providers_take_audio_declare_it() {
+        use crate::speech::hosted::TranscriptionWire;
+        for m in [
+            glm_env_entry(300, None),
+            kimi_env_entry(300, None),
+            qwen_env_entry(300, None),
+        ] {
+            let cap = m.transcription.expect("a Fireworks entry takes audio");
+            assert_eq!(cap.wire, TranscriptionWire::AudioTranscriptions);
+            assert_eq!(cap.model, "whisper-v3-turbo");
+            assert_eq!(cap.endpoint.as_deref(), Some(FIREWORKS_AUDIO_BASE_URL));
+            assert!(cap.timestamps);
+        }
+        let g = gemini_transcription("gemini-3.8-flash");
+        assert_eq!(g.wire, TranscriptionWire::ChatInputAudio);
+        assert_eq!(g.model, "gemini-3.8-flash", "the entry's own slug");
+        assert_eq!(g.endpoint, None, "the entry's own host");
+        assert!(!g.timestamps);
+        assert!(opus_entry().transcription.is_none());
+        assert!(local_env_entry(300, None).transcription.is_none());
+    }
+
+    #[test]
+    fn a_declared_capability_parses_with_defaults_and_a_bad_one_is_dropped() {
+        use crate::speech::hosted::TranscriptionWire;
+        let mut t = model_toml("openai-speech", "openai", Some("JESSE_TEST_DECL_TOKEN"));
+        t.transcription = Some(TranscriptionToml {
+            model: Some("gpt-4o-transcribe".into()),
+            timestamps: Some(false),
+            ..Default::default()
+        });
+        let cap = transcription_from_toml("x", t.transcription.as_ref().unwrap()).unwrap();
+        assert_eq!(cap.wire, TranscriptionWire::AudioTranscriptions);
+        assert_eq!(cap.max_chunk_bytes, OPENAI_TRANSCRIPTION_MAX_BYTES);
+        assert_eq!(cap.max_chunk_secs, DEFAULT_TRANSCRIPTION_CHUNK_SECS);
+        assert!(!cap.timestamps);
+        let m = registry_model_from_toml(&t, None, None).unwrap();
+        assert_eq!(m.transcription.unwrap().model, "gpt-4o-transcribe");
+
+        let no_model = TranscriptionToml::default();
+        assert!(transcription_from_toml("x", &no_model).is_none());
+        let bad_wire = TranscriptionToml {
+            wire: Some("carrier-pigeon".into()),
+            model: Some("m".into()),
+            ..Default::default()
+        };
+        assert!(transcription_from_toml("x", &bad_wire).is_none());
+        let chat = TranscriptionToml {
+            wire: Some("chat_input_audio".into()),
+            model: Some("m".into()),
+            max_chunk_secs: Some(1),
+            ..Default::default()
+        };
+        let cap = transcription_from_toml("x", &chat).unwrap();
+        assert!(!cap.timestamps, "a chat answer is text");
+        assert_eq!(cap.max_chunk_secs, 10, "clamped");
+
+        let parsed: ModelsFileProbe = toml::from_str(
+            "[[models]]\nid = \"s\"\nkind = \"openai\"\nbase_url = \"https://x/v1\"\n\
+             model = \"m\"\ntranscription = { model = \"whisper-1\", max_chunk_secs = 300 }\n",
+        )
+        .unwrap();
+        let tr = parsed.models[0].transcription.as_ref().unwrap();
+        assert_eq!(tr.model.as_deref(), Some("whisper-1"));
+        assert_eq!(tr.max_chunk_secs, Some(300));
+    }
+
+    #[derive(Deserialize)]
+    struct ModelsFileProbe {
+        models: Vec<ModelToml>,
+    }
+
+    #[test]
+    fn the_environment_can_withdraw_or_move_a_built_in_capability() {
+        let p = "JESSE_TEST_TRX_ENTRY";
+        let keys = [
+            format!("{p}_TRANSCRIPTION"),
+            format!("{p}_TRANSCRIPTION_MODEL"),
+            format!("{p}_TRANSCRIPTION_BASE_URL"),
+        ];
+        std::env::set_var(&keys[1], "whisper-v4");
+        std::env::set_var(&keys[2], "https://audio.example/v1");
+        let cap = transcription_from_env(p, Some(fireworks_transcription())).unwrap();
+        assert_eq!(cap.model, "whisper-v4");
+        assert_eq!(cap.endpoint.as_deref(), Some("https://audio.example/v1"));
+        std::env::set_var(&keys[0], "off");
+        assert!(transcription_from_env(p, Some(fireworks_transcription())).is_none());
+        assert!(transcription_from_env("JESSE_TEST_TRX_NONE", None).is_none());
+        for k in &keys {
+            std::env::remove_var(k);
         }
     }
 }

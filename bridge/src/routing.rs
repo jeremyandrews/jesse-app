@@ -304,6 +304,7 @@ mod tests {
             health: HealthConfig::default(),
             vision: Vec::new(),
             vision_complementary: false,
+            transcription: None,
         }
     }
 

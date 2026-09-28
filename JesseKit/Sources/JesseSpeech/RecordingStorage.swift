@@ -175,9 +175,10 @@ public struct RecordingHandoffStore: Sendable {
         directory.appendingPathComponent(record.manifestFileName)
     }
 
-    /// Delete a hand-off and its audio. Called the moment a transcript exists, and on
-    /// every failure path too — a recording that could not be transcribed is not a
-    /// recording worth storing.
+    /// Delete a hand-off and its audio. Called the moment a transcript exists, on a cancel,
+    /// and on the owner's Discard. NOT on a failure: a recording that one engine could not
+    /// transcribe is kept so the owner can try another (see `RecordingAttachment.retry`),
+    /// and `sweep` deletes it after `maxAge` if they never come back to it.
     public func discard(_ record: PendingRecording) {
         let manager = FileManager.default
         try? manager.removeItem(at: audioURL(for: record))

@@ -66,6 +66,9 @@ pub struct EngineRun<'a> {
     pub language: Option<&'a str>,
     pub progress: ProgressFn,
     pub cancelled: CancelFn,
+    /// The run's custody directory, for an engine that must stage working files (a hosted
+    /// engine's chunks). Deleted with the run. `None` outside a run.
+    pub scratch: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -562,6 +565,7 @@ mod tests {
                 language: Some("en"),
                 progress: progress.clone(),
                 cancelled: never,
+                scratch: None,
             })
             .expect("a reading with the cancel poll installed runs to the end");
         assert!(
@@ -581,6 +585,7 @@ mod tests {
                 language: Some("en"),
                 progress,
                 cancelled: always,
+                scratch: None,
             }),
             Err(EngineError::Cancelled)
         );

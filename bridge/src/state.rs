@@ -463,6 +463,7 @@ mod tests {
                     health: HealthConfig::default(),
                     vision: Vec::new(),
                     vision_complementary: false,
+                    transcription: None,
                 },
                 RegistryModel {
                     family: None,
@@ -487,6 +488,7 @@ mod tests {
                     health: HealthConfig::default(),
                     vision: Vec::new(),
                     vision_complementary: false,
+                    transcription: None,
                 },
             ],
         };

@@ -10,8 +10,13 @@ import Foundation
 // and its destination is the bridge's own `/jesse/transcriptions` on the host and token the
 // app is paired with — the same connection every turn already uses (loopback on the Studio
 // itself, the tailnet everywhere else). The bridge transcribes it with models running in
-// its own process and deletes it; it never forwards it. Once the audio is text, the text is
-// an ordinary message and flows like one.
+// its own process and deletes it. The ONE exception is the owner's own choice: a hosted
+// speech engine picked for this run (`StudioUploadOptions.engine`) or configured as the
+// Studio's default, to which the bridge sends the audio for transcription and nothing else
+// (Bridge 0.159.0, after the local engines failed and left no transcript at all). The app
+// still sends audio only to the bridge; the header of a transcript read that way names the
+// hosted engine and its host. Once the audio is text, the text is an ordinary message and
+// flows like one.
 //
 // WHY THE STUDIO. A phone is capable, but it is the weakest, battery-bound processor in
 // this system. On a hard recording — a reverberant hall, several speakers, far-field
@@ -47,11 +52,27 @@ public struct StudioRunStatus: Decodable, Sendable, Equatable {
         public let id: String
         public let label: String
         public let role: String
+        /// The host the audio went to when this reading was made by a HOSTED engine the owner
+        /// chose; nil for one read on the Studio itself (and from an older bridge).
+        public let host: String?
 
-        public init(id: String, label: String, role: String) {
+        public var isHosted: Bool { host != nil }
+
+        enum CodingKeys: String, CodingKey { case id, label, role, host }
+
+        public init(id: String, label: String, role: String, host: String? = nil) {
             self.id = id
             self.label = label
             self.role = role
+            self.host = host
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            label = try c.decode(String.self, forKey: .label)
+            role = try c.decode(String.self, forKey: .role)
+            host = try c.decodeIfPresent(String.self, forKey: .host)
         }
     }
 
@@ -172,6 +193,74 @@ public enum StudioTransportError: Error, Equatable, Sendable {
     }
 }
 
+/// One engine the bridge offers for a recording, as `GET /jesse/speech` lists it.
+public struct SpeechEngineOption: Decodable, Sendable, Equatable, Identifiable, Hashable {
+    /// What the upload's `engine` carries: `local`, or `hosted:<model id>`.
+    public let id: String
+    public let label: String
+    public let hosted: Bool
+    /// Where the audio goes, for a hosted engine.
+    public let host: String?
+
+    enum CodingKeys: String, CodingKey { case id, label, hosted, host }
+
+    public init(id: String, label: String, hosted: Bool, host: String? = nil) {
+        self.id = id
+        self.label = label
+        self.hosted = hosted
+        self.host = host
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? id
+        hosted = try c.decodeIfPresent(Bool.self, forKey: .hosted) ?? false
+        host = try c.decodeIfPresent(String.self, forKey: .host)
+    }
+
+    /// The line a picker shows: a hosted engine always says it leaves the Studio, and where to.
+    public var menuLabel: String {
+        guard hosted else { return label }
+        return "\(label), sent from the Studio to \(host ?? "a hosted service")"
+    }
+}
+
+/// The engines the paired bridge offers, and which one it uses when a run names none.
+public struct SpeechEngineMenu: Decodable, Sendable, Equatable {
+    /// `local`, `hosted:<id>` or `local,hosted:<id>`.
+    public let defaultEngine: String
+    public let engines: [SpeechEngineOption]
+
+    enum CodingKeys: String, CodingKey { case defaultEngine = "default_engine", engines }
+
+    public init(defaultEngine: String, engines: [SpeechEngineOption]) {
+        self.defaultEngine = defaultEngine
+        self.engines = engines
+    }
+
+    /// An older bridge lists no engines; that decodes as an empty menu, which offers no choice.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        defaultEngine = try c.decodeIfPresent(String.self, forKey: .defaultEngine) ?? "local"
+        engines = try c.decodeIfPresent([SpeechEngineOption].self, forKey: .engines) ?? []
+    }
+
+    /// Whether there is anything to choose between.
+    public var offersAChoice: Bool { engines.count > 1 }
+
+    /// How the Studio's default reads in a picker.
+    public var defaultLabel: String {
+        let parts = defaultEngine.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        let names = parts.map { id in engines.first { $0.id == id }?.label ?? id }
+        switch names.count {
+        case 0: return "The Studio’s default"
+        case 1: return "The Studio’s default (\(names[0]))"
+        default: return "The Studio’s default (\(names[0]), then \(names[1]) if that fails)"
+        }
+    }
+}
+
 /// What an upload says about itself beyond the audio: which run it is on this device, and
 /// who the bridge should tell when it ends.
 public struct StudioUploadOptions: Sendable, Equatable {
@@ -182,11 +271,17 @@ public struct StudioUploadOptions: Sendable, Equatable {
     public var conversationID: String?
     /// Ask the bridge to push the run's ending to this device.
     public var notify: Bool
+    /// The engine the owner chose for this run (`local`, `hosted:<id>`), or nil for the
+    /// Studio's configured default. A hosted engine sends the audio on from the Studio; only
+    /// an explicit choice (here, or the Studio's own configuration) ever does.
+    public var engine: String?
 
-    public init(tag: String? = nil, conversationID: String? = nil, notify: Bool = false) {
+    public init(tag: String? = nil, conversationID: String? = nil, notify: Bool = false,
+                engine: String? = nil) {
         self.tag = tag
         self.conversationID = conversationID
         self.notify = notify
+        self.engine = engine
     }
 
     /// An upload that asks for nothing: exactly the request an older app sends.
@@ -211,9 +306,14 @@ public protocol StudioTranscriptionTransport: Sendable {
     func status(id: String) async throws -> StudioRunStatus
     /// Best effort: the run is abandoned either way.
     func cancel(id: String) async
+    /// The engines the bridge offers (`GET /jesse/speech`), or nil when it cannot be asked
+    /// or lists none. Carries no audio.
+    func engineMenu() async -> SpeechEngineMenu?
 }
 
 public extension StudioTranscriptionTransport {
+    func engineMenu() async -> SpeechEngineMenu? { nil }
+
     func upload(fileAt url: URL, contentType: String, language: String, options: StudioUploadOptions,
                 onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus {
         try await upload(fileAt: url, contentType: contentType, language: language, onProgress: onProgress)
@@ -283,6 +383,9 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
                                      contentType: String,
                                      options: StudioUploadOptions = .plain) -> URLRequest {
         var query = [URLQueryItem(name: "language", value: language)]
+        if let engine = options.engine, !engine.isEmpty {
+            query.append(URLQueryItem(name: "engine", value: engine))
+        }
         if options.notify {
             query.append(URLQueryItem(name: "notify", value: "1"))
             if let conversation = options.conversationID {
@@ -395,6 +498,17 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
         guard let endpoint = await endpoint() else { return }
         let request = Self.request(endpoint: endpoint, path: "jesse/transcriptions/\(id)/cancel", method: "POST")
         _ = try? await session.data(for: request)
+    }
+
+    public func engineMenu() async -> SpeechEngineMenu? {
+        guard let endpoint = await endpoint() else { return nil }
+        var request = Self.request(endpoint: endpoint, path: "jesse/speech", method: "GET")
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let menu = try? JSONDecoder().decode(SpeechEngineMenu.self, from: data),
+              !menu.engines.isEmpty else { return nil }
+        return menu
     }
 
     static func isCancellation(_ error: Error) -> Bool {
@@ -654,15 +768,29 @@ public struct StudioFirstTranscriber: AudioFileTranscribing {
             notes: status.notes)
     }
 
-    /// "the Studio (Whisper large-v3, checked against Whisper large-v3 turbo)".
+    /// The engines the bridge offers, for the picker and the retry row.
+    public func engineMenu() async -> SpeechEngineMenu? {
+        await studio.engineMenu()
+    }
+
+    /// "the Studio (Whisper large-v3, checked against Whisper large-v3 turbo)", or, when a
+    /// hosted engine the owner chose made the transcript, a description that says so and
+    /// names where the audio went: a transcript read in the cloud must never read as one
+    /// read on the Studio.
     static func engineDescription(_ engines: [StudioRunStatus.Engine]) -> String {
-        let primary = engines.first { $0.role == "primary" }?.label
-        let second = engines.first { $0.role == "second" }?.label
-        switch (primary, second) {
-        case let (p?, s?): return "\(studioName) (\(p), checked against \(s))"
-        case let (p?, nil): return "\(studioName) (\(p))"
-        default: return studioName
+        func name(_ e: StudioRunStatus.Engine) -> String {
+            guard let host = e.host else { return e.label }
+            return "\(e.label), hosted at \(host)"
         }
+        let primary = engines.first { $0.role == "primary" }
+        let second = engines.first { $0.role == "second" }.map(name)
+        guard let primary else { return studioName }
+        if let host = primary.host {
+            let base = "a hosted engine at \(host) (\(primary.label)), not the Studio"
+            return second.map { "\(base), checked against \($0)" } ?? base
+        }
+        if let second { return "\(studioName) (\(primary.label), checked against \(second))" }
+        return "\(studioName) (\(primary.label))"
     }
 
     static func failure(from status: StudioRunStatus) -> TranscriptionFailure {

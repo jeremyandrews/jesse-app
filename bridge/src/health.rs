@@ -943,6 +943,7 @@ mod tests {
             health: HealthConfig::default(),
             vision: Vec::new(),
             vision_complementary: false,
+            transcription: None,
         };
         let registry = ModelRegistry {
             models: vec![glm.clone()],
@@ -997,6 +998,7 @@ mod tests {
             health: HealthConfig::default(),
             vision: Vec::new(),
             vision_complementary: false,
+            transcription: None,
         };
         let registry = ModelRegistry {
             models: vec![unarmed.clone()],

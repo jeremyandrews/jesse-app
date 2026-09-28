@@ -371,27 +371,57 @@ if [ "$sc_swift" != "$sc_want" ]; then
 fi
 rm -rf "$guard_selfcheck_dir"
 
-# 6e) THE AUDIO EGRESS BAN, at the source. Recorded audio may reach the bridge and nothing
-#     past it (bridge/src/speech/mod.rs). A runtime test pins that on the wire; this pins
-#     the SHAPE that makes it true: no file of the speech pipeline except its HTTP boundary
-#     (http.rs) names a surface a turn reaches — the application state, the model registry,
-#     the vision layer, the turn path, a backend call, an outbound POST or PUT — so there is
-#     no handle through which a later change could route audio anywhere without first
-#     tripping this. Comment lines are exempt: the module docs NAME these surfaces to forbid
-#     them. The one process the pipeline may start is the system audio decoder.
+# 6e) THE AUDIO EGRESS RULE, at the source. Recorded audio may leave the bridge only to a
+#     hosted speech engine the owner selected, as that engine's transcription request, built
+#     in ONE file (bridge/src/speech/mod.rs). Runtime tests pin that on the wire; this pins
+#     the SHAPE that makes it true:
+#       * no file of the speech pipeline except its HTTP boundary (http.rs) names a surface a
+#         turn reaches: the application state, the model registry, the vision layer, the turn
+#         path, a backend call. Not even hosted.rs: it is handed a plain target, never the
+#         registry it came from.
+#       * no file except hosted.rs issues an outbound POST or PUT, and hosted.rs posts only
+#         to its target's URL (`.post(&url)` after `let url = self.target.url();`) and
+#         issues no other verb.
+#     Comment lines are exempt: the module docs NAME these surfaces to forbid them. The one
+#     process the pipeline may start is the system audio decoder.
 SPEECH="$SRC/speech"
-SPEECH_DENY='AppState|model_registry|RegistryModel|vision::|VisionInput|ResolvedPartner|call_helper|start_turn|JesseRequest|backend_call|\.post\(|\.put\(|Command::new\("claude'
-# Self-check the pattern before trusting it, as 5a does for its own.
-for bad in 'let r = &st.cfg.model_registry;' 'vision::transcribe_input(' 'client.post(url)' 'start_turn(&st, req, None)'; do
+SPEECH_DENY='AppState|model_registry|RegistryModel|vision::|VisionInput|ResolvedPartner|call_helper|start_turn|JesseRequest|backend_call|Command::new\("claude'
+SPEECH_REQUEST='\.post\(|\.put\(|\.patch\(|\.request\('
+# Self-check the patterns before trusting them, as 5a does for its own.
+for bad in 'let r = &st.cfg.model_registry;' 'vision::transcribe_input(' 'start_turn(&st, req, None)'; do
   printf '%s\n' "$bad" | grep -qE "$SPEECH_DENY" \
     || flag "the speech egress pattern no longer matches a known-bad sample" "$bad"
+done
+for bad in 'client.post(url)' 'client.put(url)' 'client.request(Method::POST, url)'; do
+  printf '%s\n' "$bad" | grep -qE "$SPEECH_REQUEST" \
+    || flag "the speech request pattern no longer matches a known-bad sample" "$bad"
 done
 if [ -d "$SPEECH" ]; then
   speech_hits="$(grep -nE "$SPEECH_DENY" "$SPEECH"/*.rs \
     | grep -v "^$SPEECH/http.rs:" \
     | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
   if [ -n "$speech_hits" ]; then
-    flag "a speech pipeline file names a surface recorded audio must never reach (the audio egress ban — see bridge/src/speech/mod.rs)" "$speech_hits"
+    flag "a speech pipeline file names a surface recorded audio must never reach (the audio egress rule — see bridge/src/speech/mod.rs)" "$speech_hits"
+  fi
+  request_hits="$(grep -nE "$SPEECH_REQUEST" "$SPEECH"/*.rs \
+    | grep -v "^$SPEECH/hosted.rs:" \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+    | grep -vE 'Request::post\(' || true)"
+  if [ -n "$request_hits" ]; then
+    flag "a speech file other than hosted.rs makes an outbound request (only the selected hosted engine may receive audio — see bridge/src/speech/mod.rs)" "$request_hits"
+  fi
+  if [ -f "$SPEECH/hosted.rs" ]; then
+    hosted_posts="$(grep -nE "$SPEECH_REQUEST|\\.get\\(\"?http" "$SPEECH/hosted.rs" \
+      | grep -vE '^[0-9]+:[[:space:]]*//' \
+      | grep -vF '.post(&url)' || true)"
+    if [ -n "$hosted_posts" ]; then
+      flag "hosted.rs sends a request somewhere other than its target's transcription URL" "$hosted_posts"
+    fi
+    if ! grep -q 'let url = self.target.url();' "$SPEECH/hosted.rs"; then
+      flag "hosted.rs no longer takes its one URL from the selected target" "$SPEECH/hosted.rs"
+    fi
+  else
+    flag "bridge/src/speech/hosted.rs is missing, so the one allowed request site is unpinned" "$SPEECH"
   fi
   spawn_hits="$(grep -nE 'Command::new' "$SPEECH"/*.rs \
     | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \

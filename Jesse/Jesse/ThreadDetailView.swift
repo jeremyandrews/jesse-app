@@ -611,6 +611,13 @@ struct ThreadDetailView: View {
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // A failed recording is kept, so it can go to another engine instead of being
+            // lost: the owner's local engines failing is exactly when this matters.
+            if let offer = recording.retry {
+                RecordingRetryRow(offer: offer,
+                                  onRetry: { recording.retry(engine: $0) },
+                                  onDiscard: { recording.discardRecording() })
+            }
 
             // Says why the composer is empty and why Send works with nothing typed.
             // Without it, a conversation opened from Today or Health looks like a blank

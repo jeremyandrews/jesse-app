@@ -354,6 +354,62 @@ final class RecordingRunsTests: XCTestCase {
         XCTAssertNil(store.failures()[conversation])
     }
 
+    /// A failed run keeps its recording for "Try again with": across a relaunch it comes back
+    /// as an offer and never starts on its own; a retry sends the chosen engine under a NEW
+    /// tag, and its success deletes the audio.
+    func testAFailedRunIsKeptAcrossARelaunchAndRetriedWithTheChosenEngine() async throws {
+        let failed = StudioRunStatus(id: "tr-1", state: "failed", phase: "failed",
+                                     error: .init(kind: "engine_failed", message: "The engine looped."))
+        let runs = makeRuns(ScriptedStudio(hold: .success(failed)), clock: makeClock())
+        let model = try await start(runs)
+        try await waitUntil("the kept failure") { model.retry != nil }
+        let kept = try XCTUnwrap(store.runs().first)
+        XCTAssertTrue(kept.isKeptAfterFailure)
+        XCTAssertEqual(audioFiles().count, 1, "the recording is kept for another try")
+
+        // Relaunch.
+        let studio = ScriptedStudio(hold: .success(done()))
+        let again = makeRuns(studio, clock: makeClock())
+        var delivered: CompletedRecording?
+        again.deliverToDraft = { _, done in delivered = done; return true }
+        again.restore()
+        let restored = again.model(for: conversation)
+        try await waitUntil("the offer") { restored.retry != nil }
+        XCTAssertEqual(restored.stage, .idle)
+        XCTAssertTrue(studio.uploads.isEmpty, "a kept failure never starts itself")
+        XCTAssertTrue(restored.errorMessage?.contains("looped") ?? false)
+
+        restored.retry(engine: "hosted:glm")
+        try await waitUntil("delivery") { delivered != nil }
+        XCTAssertEqual(studio.uploads.first?.engine, "hosted:glm")
+        XCTAssertNotEqual(studio.uploads.first?.tag, kept.id.uuidString,
+                          "a new tag, so the failed upload's answer cannot be reattached")
+        try await waitUntil("cleanup") { store.runs().isEmpty }
+        XCTAssertEqual(audioFiles(), [])
+    }
+
+    /// Unanswered, a kept failure is swept after a day; Discard deletes it at once.
+    func testAKeptFailureIsSweptAfterADayAndDiscardDeletesItAtOnce() async throws {
+        let failed = StudioRunStatus(id: "tr-1", state: "failed", phase: "failed",
+                                     error: .init(kind: "no_speech", message: "No speech."))
+        let runs = makeRuns(ScriptedStudio(hold: .success(failed)), clock: makeClock())
+        let model = try await start(runs)
+        try await waitUntil("the kept failure") { model.retry != nil }
+        XCTAssertEqual(store.sweepExpiredFailures(now: Date()), [], "not yet")
+        let later = Date().addingTimeInterval(RecordingHandoffStore.maxAge + 60)
+        XCTAssertEqual(store.sweepExpiredFailures(now: later).count, 1)
+        XCTAssertEqual(store.runs(), [])
+        XCTAssertEqual(audioFiles(), [])
+
+        let second = makeRuns(ScriptedStudio(hold: .success(failed)), clock: makeClock())
+        let other = try await start(second)
+        try await waitUntil("the kept failure") { other.retry != nil }
+        other.discardRecording()
+        XCTAssertEqual(store.runs(), [])
+        XCTAssertEqual(audioFiles(), [])
+        XCTAssertFalse(other.isInFlight)
+    }
+
     func testAPushWaitsForItsRunToLand() async throws {
         let studio = ScriptedStudio(upload: .success(.init(id: "tr-4", state: "running", phase: "queued")),
                                     polls: Array(repeating: .success(running("tr-4")), count: 5),

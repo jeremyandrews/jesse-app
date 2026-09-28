@@ -93,8 +93,17 @@ public final class RecordingRuns {
     /// Resume every run a previous process left in flight, and bring back the failures
     /// nobody has seen. Call once at launch, after the upload session is connected.
     public func restore() {
+        // A failed recording kept for another try is deleted once it is a day old: the owner
+        // did not come back to it, and Jesse does not keep recordings.
+        store.sweepExpiredFailures()
         store.sweepUnclaimedAudio()
         for record in store.runs() {
+            // A kept failure waits for the owner's retry or discard; it never starts itself.
+            if record.isKeptAfterFailure {
+                let model = model(for: record.conversationID)
+                Task { await model.restoreKept(record) }
+                continue
+            }
             model(for: record.conversationID).resume(record)
             // Its keeper hears about it as a start: the system's progress and background
             // time belong to this process's run, not the one that died.

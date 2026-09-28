@@ -123,7 +123,8 @@ final class RecordingAttachmentTests: XCTestCase {
     private func makeModel(_ transcriber: FakeTranscriber,
                            probe: FakeProbe = FakeProbe(),
                            supported: [Locale]? = nil,
-                           preferred: [String] = ["en-US"]) -> RecordingAttachment {
+                           preferred: [String] = ["en-US"],
+                           menu: SpeechEngineMenu? = nil) -> RecordingAttachment {
         let locales = supported ?? self.supported
         let memory = self.memory
         return RecordingAttachment(
@@ -134,7 +135,8 @@ final class RecordingAttachmentTests: XCTestCase {
             supportedLocales: { locales },
             preferredLanguages: { preferred },
             readLastLanguage: { memory.stored },
-            writeLastLanguage: { memory.stored = $0 })
+            writeLastLanguage: { memory.stored = $0 },
+            engineMenu: { menu })
     }
 
     /// A file standing in for something the user picked out of Files.
@@ -415,7 +417,13 @@ final class RecordingAttachmentTests: XCTestCase {
             XCTAssertEqual(model.errorMessage, failure.message(sourceName: "memo.m4a"))
             XCTAssertNil(model.completed)
             XCTAssertEqual(model.stage, .idle)
-            XCTAssertEqual(workingFiles, [], "a failed run leaves no audio behind either")
+            XCTAssertEqual(model.retry?.sourceName, "memo.m4a", "a failed recording is offered again")
+            XCTAssertEqual(workingFiles.count, 1, "and kept for that, not thrown away")
+            XCTAssertTrue(model.isInFlight, "a kept recording is still in hand")
+            model.discardRecording()
+            XCTAssertNil(model.retry)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(workingFiles, [], "Discard deletes it")
         }
     }
 
@@ -465,9 +473,9 @@ final class RecordingAttachmentTests: XCTestCase {
         XCTAssertTrue(handoffStore.pending().isEmpty)
     }
 
-    func testAFailedHandoffStillClearsTheSharedInbox() async throws {
-        // Otherwise a recording that cannot be transcribed is retried forever, and a
-        // copy of it lives in the app group until the sweep gets to it.
+    func testAFailedHandoffIsKeptForARetryAndDiscardClearsTheSharedInbox() async throws {
+        // Kept, so another engine can have it; the owner's Discard, or the inbox sweep a
+        // day later, is what deletes it.
         let handoff = try handoffStore.stage(copying: try pickedFile(),
                                              originalName: "memo.m4a",
                                              durationSeconds: 5)
@@ -475,8 +483,85 @@ final class RecordingAttachmentTests: XCTestCase {
         await model.begin(handoff: handoff)
         model.confirmLanguage()
         await waitUntil("the failure") { model.errorMessage != nil }
-
+        XCTAssertEqual(inboxFiles.count, 2, "the hand-off is kept with its manifest")
+        XCTAssertEqual(workingFiles.count, 1)
+        model.discardRecording()
         XCTAssertEqual(inboxFiles, [])
+        XCTAssertEqual(workingFiles, [])
+    }
+
+    func testAKeptHandoffIsSweptAfterItsMaxAge() async throws {
+        let handoff = try handoffStore.stage(copying: try pickedFile(),
+                                             originalName: "memo.m4a",
+                                             durationSeconds: 5)
+        let model = makeModel(FakeTranscriber(.fail(.noSpeechFound)))
+        await model.begin(handoff: handoff)
+        model.confirmLanguage()
+        await waitUntil("the failure") { model.errorMessage != nil }
+        XCTAssertEqual(inboxFiles.count, 2)
+        handoffStore.sweep(now: Date().addingTimeInterval(RecordingHandoffStore.maxAge + 60))
+        XCTAssertEqual(inboxFiles, [], "the existing sweep deletes it after a day")
+    }
+
+    // MARK: - Try again with another engine
+
+    private static let menu = SpeechEngineMenu(defaultEngine: "local", engines: [
+        SpeechEngineOption(id: "local", label: "On the Studio (accurate tier)", hosted: false),
+        SpeechEngineOption(id: "hosted:gemini-flash", label: "gemini-3.8-flash via Gemini 3.8 Flash",
+                           hosted: true, host: "generativelanguage.googleapis.com"),
+    ])
+
+    func testTheEngineMenuIsLoadedWithEachRecordingAndStartsOnTheStudiosDefault() async throws {
+        let model = makeModel(FakeTranscriber(.succeed("x")), menu: Self.menu)
+        await model.begin(pickedFileAt: try pickedFile())
+        XCTAssertEqual(model.engineMenu, Self.menu)
+        XCTAssertNil(model.selectedEngine, "nothing hosted is chosen for the owner")
+        model.selectedEngine = "hosted:gemini-flash"
+        model.abandon()
+        await model.begin(pickedFileAt: try pickedFile())
+        XCTAssertNil(model.selectedEngine, "a choice is for one recording, never carried over")
+    }
+
+    func testAFailedRecordingIsTriedAgainAndDeletedWhenTheRetrySucceeds() async throws {
+        let transcriber = FakeTranscriber(.fail(.studioFailed(reason: "the engine looped")))
+        let model = makeModel(transcriber, menu: Self.menu)
+        await model.begin(pickedFileAt: try pickedFile(named: "Talk.m4a"))
+        model.selectedLanguage = Locale(identifier: "it-IT")
+        model.confirmLanguage()
+        await waitUntil("the failure") { model.retry != nil }
+        XCTAssertEqual(model.retry?.engines.map(\.id), ["local", "hosted:gemini-flash"])
+
+        transcriber.behaviour = .succeed("Buonasera.")
+        model.retry(engine: "hosted:gemini-flash")
+        XCTAssertNil(model.retry)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.selectedEngine, "hosted:gemini-flash")
+        await waitUntil("the retry") { model.completed != nil }
+        XCTAssertEqual(model.takeCompleted()?.transcript, "Buonasera.")
+        XCTAssertEqual(transcriber.calls.count, 2)
+        XCTAssertEqual(transcriber.calls[1].locale.identifier, "it-IT", "the same language again")
+        XCTAssertEqual(transcriber.calls[0].url, transcriber.calls[1].url, "the same kept copy")
+        XCTAssertEqual(workingFiles, [], "a successful retry deletes it")
+    }
+
+    func testPickingAnotherRecordingDiscardsAKeptOne() async throws {
+        let model = makeModel(FakeTranscriber(.fail(.noSpeechFound)))
+        await model.begin(pickedFileAt: try pickedFile(named: "first.m4a"))
+        model.confirmLanguage()
+        await waitUntil("the failure") { model.retry != nil }
+        XCTAssertEqual(workingFiles.count, 1)
+        await model.begin(pickedFileAt: try pickedFile(named: "second.m4a"))
+        XCTAssertNil(model.retry)
+        XCTAssertEqual(workingFiles.count, 1, "only the new recording's copy")
+        XCTAssertEqual(model.sourceName, "second.m4a")
+    }
+
+    func testAnUnreadableRecordingIsNotKept() async throws {
+        let model = makeModel(FakeTranscriber(.fail(.unreadableFile)))
+        await model.begin(pickedFileAt: try pickedFile())
+        model.confirmLanguage()
+        await waitUntil("the failure") { model.errorMessage != nil }
+        XCTAssertNil(model.retry, "a file that is not audio will not become audio")
         XCTAssertEqual(workingFiles, [])
     }
 

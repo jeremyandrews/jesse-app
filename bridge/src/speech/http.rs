@@ -8,16 +8,101 @@
 //! * `GET /jesse/transcriptions/{id}` — the run's status, then its transcript and
 //!   disagreement list. Polled by the app; not rate-limited, because a poll is not work.
 //! * `POST /jesse/transcriptions/{id}/cancel` — stop the run; its audio is deleted.
-//! * `GET /jesse/speech` — whether this bridge transcribes, and with which models.
+//! * `GET /jesse/speech` — whether this bridge transcribes, with which models, and which
+//!   engines a run may choose (`engines`: the Studio's own, then every armed registry entry
+//!   that declares a transcription capability).
 //!
 //! Same bearer auth as every other route. The upload route carries its OWN body limit (the
 //! audio cap, enforced while streaming) instead of the router's, which is sized for base64
 //! photos and would refuse a recording long before its cap.
+//!
+//! This file is also where a hosted engine is RESOLVED: the registry is read here and only
+//! here, and what leaves is a [`HostedTarget`], plain data the pipeline cannot use to reach
+//! anything but that engine's transcription request.
 
+use super::hosted::{HostedTarget, HOSTED_PREFIX};
 use super::intake::{over_cap, AudioCustody, SniffedUpload, UploadGate};
-use super::service::{FinishHook, JobOptions};
+use super::service::{
+    parse_second_engine, EngineChoice, EnginePlan, EngineSource, FinishHook, JobOptions,
+};
 use crate::*;
 use tokio::io::AsyncWriteExt;
+
+/// Every hosted speech engine this configuration ARMS: a registry entry that declares a
+/// transcription capability and whose backend resolved (its token is set). In registry order.
+pub fn hosted_targets(cfg: &Config) -> Vec<HostedTarget> {
+    cfg.model_registry
+        .models
+        .iter()
+        .filter(|m| m.configured)
+        .filter_map(|m| {
+            let cap = m.transcription.clone()?;
+            let (base_url, token, _) = m.backend.clone()?;
+            Some(HostedTarget {
+                id: m.id.clone(),
+                label: m.label.clone(),
+                base_url: cap.endpoint.clone().unwrap_or(base_url),
+                token,
+                cap,
+            })
+        })
+        .collect()
+}
+
+/// The armed hosted engine a choice names, by id or alias, or the sentence that says why not.
+fn armed_target(cfg: &Config, id: &str) -> Result<HostedTarget, String> {
+    let canonical = cfg
+        .model_registry
+        .get(id)
+        .map(|m| m.id.clone())
+        .unwrap_or_else(|| id.to_string());
+    let armed = hosted_targets(cfg);
+    armed
+        .iter()
+        .find(|t| t.id == canonical)
+        .cloned()
+        .ok_or_else(|| {
+            let names: Vec<String> = armed.iter().map(HostedTarget::engine_id).collect();
+            format!(
+                "engine \"{HOSTED_PREFIX}{id}\" is not an armed transcription engine on this \
+                 bridge; the choices are local{}{}",
+                if names.is_empty() { "" } else { ", " },
+                names.join(", ")
+            )
+        })
+}
+
+/// Resolve a run's engines from its `engine` and `second_engine` (or the configured defaults).
+/// Nothing is hosted unless one of the four names it.
+pub fn resolve_plan(
+    cfg: &Config,
+    engine: Option<&str>,
+    second_engine: Option<&str>,
+) -> Result<EnginePlan, String> {
+    let choice = match engine.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => EngineChoice::parse(raw).map_err(|e| format!("engine: {e}"))?,
+        None => cfg.speech.engine.clone(),
+    };
+    let second_id = match second_engine.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => parse_second_engine(raw).map_err(|e| format!("second_engine: {e}"))?,
+        None => cfg.speech.second_engine.clone(),
+    };
+    let (primary, fallback) = match &choice {
+        EngineChoice::Local => (EngineSource::Local, None),
+        EngineChoice::Hosted(id) => (EngineSource::Hosted(armed_target(cfg, id)?), None),
+        EngineChoice::LocalThenHosted(id) => (EngineSource::Local, Some(armed_target(cfg, id)?)),
+    };
+    let second = match second_id {
+        None => EngineSource::Local,
+        Some(id) => EngineSource::Hosted(armed_target(cfg, &id)?),
+    };
+    Ok(EnginePlan {
+        primary,
+        fallback,
+        second,
+        choice,
+    })
+}
 
 /// The tuning a recording may carry.
 #[derive(Deserialize, Default)]
@@ -28,6 +113,14 @@ pub struct TranscribeQuery {
     pub conditioning: Option<String>,
     #[serde(default)]
     pub second_reading: Option<String>,
+    /// `local`, `hosted:<id>` or `local,hosted:<id>`: this run's engine, overriding
+    /// `JESSE_SPEECH_ENGINE`. An id that is not an armed transcription engine is refused.
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// `local` or `hosted:<id>`: this run's second reading, overriding
+    /// `JESSE_SPEECH_SECOND_ENGINE`.
+    #[serde(default)]
+    pub second_engine: Option<String>,
     /// `1` asks for a completion push to the registered device when the run ends, so a phone
     /// that went to the background (or was killed) while the Studio worked still hears about
     /// it. An app that does not send it gets exactly the old behaviour: it polls, nothing is
@@ -58,12 +151,25 @@ pub async fn jesse_transcribe(
     speech
         .availability()
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
-    let opts = JobOptions::parse(
+    let mut opts = JobOptions::parse(
         q.language.as_deref(),
         q.conditioning.as_deref(),
         q.second_reading.as_deref(),
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Before a byte of audio is read: a run that names an engine this bridge cannot use is
+    // refused by name, and a configured default that names one is a 503 (the bridge's fault,
+    // not the request's).
+    let asked = q.engine.is_some() || q.second_engine.is_some();
+    opts.plan =
+        resolve_plan(&st.cfg, q.engine.as_deref(), q.second_engine.as_deref()).map_err(|e| {
+            let code = if asked {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            (code, e)
+        })?;
     let declared = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -261,7 +367,24 @@ pub async fn jesse_speech(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     check_auth(&headers, &st.cfg.token)?;
-    Ok(Json(st.speech.overview()))
+    let mut v = st.speech.overview();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("engines".to_string(), Value::Array(engine_rows(&st.cfg)));
+    }
+    Ok(Json(v))
+}
+
+/// The engines a run may choose: the Studio first, then each armed hosted engine. The
+/// configured default is the overview's `default_engine`; a run that sends no `engine` gets
+/// it. Never a token.
+pub fn engine_rows(cfg: &Config) -> Vec<Value> {
+    let mut rows = vec![json!({
+        "id": "local",
+        "label": format!("On the Studio ({} tier)", cfg.speech.tier.label()),
+        "hosted": false,
+    })];
+    rows.extend(hosted_targets(cfg).iter().map(HostedTarget::overview));
+    rows
 }
 
 #[cfg(test)]
@@ -303,7 +426,11 @@ mod tests {
 
     fn rig_with(mut cfg: Config, primary: ScriptedEngine, second: ScriptedEngine) -> Rig {
         let root = std::env::temp_dir().join(format!("jesse-speech-http-{}", random_hex()));
+        // A test that sets the engine choice keeps it; everything else is the default.
+        let (engine, second_engine) = (cfg.speech.engine.clone(), cfg.speech.second_engine.clone());
         cfg.speech = SpeechConfig::at(&root);
+        cfg.speech.engine = engine;
+        cfg.speech.second_engine = second_engine;
         let p = entry(
             "primary-model",
             SpeechTier::Accurate,
@@ -908,6 +1035,7 @@ mod tests {
             health: HealthConfig::default(),
             vision: Vec::new(),
             vision_complementary: false,
+            transcription: None,
         }
     }
 
@@ -929,6 +1057,11 @@ mod tests {
     /// audio through the assistant, a vision helper, or any registered model — the property
     /// the retired `AudioIsNeverAnAttachmentTests` guarded, moved from "no audio on any wire"
     /// to "no audio on any wire that leaves the Studio".
+    ///
+    /// Since Bridge 0.159.0 a hosted SPEECH engine exists, and this is the half of the rule
+    /// that says it is used only when chosen: an armed engine that declares a transcription
+    /// capability points at the same counting server, and with no engine selected (the
+    /// default) it too must see nothing.
     #[tokio::test]
     async fn recorded_audio_never_reaches_a_hosted_backend() {
         let (url, calls) = hosted_backend().await;
@@ -941,6 +1074,7 @@ mod tests {
         let mut models = cfg.model_registry.models.clone();
         models.push(hosted);
         models.push(backend_model("helper", &url));
+        models.push(speech_model("speech", &url));
         cfg.model_registry = ModelRegistry { models };
         let r = rig_with(
             cfg,
@@ -1029,5 +1163,316 @@ mod tests {
             let err = validate_and_decode_attachments(&cfg, &[att]).unwrap_err();
             assert_eq!(err.0, StatusCode::BAD_REQUEST, "{mime}");
         }
+    }
+
+    // ---- The hosted speech engine: used only when chosen, and only for transcription ----
+
+    /// A registry entry whose provider takes audio on the OpenAI transcription shape.
+    fn speech_model(id: &str, url: &str) -> RegistryModel {
+        let mut m = backend_model(id, url);
+        m.transcription = Some(crate::speech::hosted::TranscriptionCapability {
+            wire: crate::speech::hosted::TranscriptionWire::AudioTranscriptions,
+            model: "fake-whisper".to_string(),
+            endpoint: None,
+            max_chunk_bytes: 25 * 1024 * 1024,
+            max_chunk_secs: 600,
+            timestamps: true,
+        });
+        m
+    }
+
+    /// PCM whose 16-bit samples spell a canary. Each sample's high byte is 0x01, so it stays
+    /// under half scale and survives the decode to float and the re-encode to 16 bits exactly:
+    /// if the audio reaches a server, these bytes are in what it received.
+    const PCM_CANARY: &[u8] = b"J\x01E\x01S\x01S\x01E\x01-\x01C\x01A\x01N\x01A\x01R\x01Y\x01";
+
+    fn canary_recording() -> Vec<u8> {
+        let mut samples: Vec<f32> = (0..16_000)
+            .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        for _ in 0..8 {
+            for pair in PCM_CANARY.chunks(2) {
+                samples.push(i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32_768.0);
+            }
+        }
+        encode_wav16(&samples, 16_000)
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    async fn send_turn(app: &Router, bytes: &[u8]) -> Response {
+        let turn = json!({
+            "mode": "ask",
+            "text": "What is in this recording?",
+            "conversation_id": uuid::Uuid::new_v4().to_string(),
+            "request_id": "egress-test",
+            "attachments": [{
+                "filename": "memo.wav",
+                "mime": "audio/wav",
+                "data_base64": base64_encode(bytes),
+            }],
+        });
+        app.clone()
+            .oneshot(
+                Request::post("/jesse")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(turn.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn whisper_answer() -> (u16, String) {
+        (
+            200,
+            json!({"text": "Pickup is on Thursday.", "segments": [
+                {"start": 0.0, "end": 1.0, "text": "Pickup is on Thursday."}
+            ]})
+            .to_string(),
+        )
+    }
+
+    /// THE HOSTED HALF OF THE EGRESS RULE, on the wire. With a hosted engine SELECTED for
+    /// the run, the recording's canary reaches that engine's transcription endpoint and
+    /// nothing else: the active model and its vision helper (a counting server) see no
+    /// connection, the speech provider sees only `POST /v1/audio/transcriptions`, and the
+    /// same audio as a turn attachment is still refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_selected_hosted_engine_is_the_only_place_the_audio_goes() {
+        let (turn_url, turn_calls) = hosted_backend().await;
+        let (speech_url, provider) =
+            crate::speech::hosted::fakes::provider(|_, _| whisper_answer()).await;
+        let mut cfg = test_config();
+        let mut active = backend_model("hosted", &turn_url);
+        active.vision = vec![VisionPartner {
+            id: "helper".to_string(),
+            role: VisionRole::Any,
+        }];
+        let mut models = cfg.model_registry.models.clone();
+        models.push(active);
+        models.push(backend_model("helper", &turn_url));
+        models.push(speech_model("speech", &speech_url));
+        cfg.model_registry = ModelRegistry { models };
+        let r = rig_with(
+            cfg,
+            engine("primary-model", &[(0, 2, "never read locally")]),
+            engine("second-model", &[]),
+        );
+        r.st.models.set_active("hosted");
+        let app = app(r.st.clone());
+        let bytes = canary_recording();
+
+        let id = start(
+            &app,
+            bytes.clone(),
+            "?engine=hosted:speech&conditioning=off",
+        )
+        .await;
+        let v = settle(&app, &id).await;
+        assert_eq!(v["state"], "done", "{v}");
+        assert_eq!(v["transcript"], "Pickup is on Thursday.");
+        assert_eq!(v["hosted"], true);
+        assert_eq!(v["engine_choice"], "hosted:speech");
+        assert_eq!(
+            v["engines"].as_array().unwrap().len(),
+            1,
+            "no local second reading"
+        );
+        assert_eq!(v["engines"][0]["id"], "hosted:speech");
+        assert_eq!(
+            v["engines"][0]["host"],
+            speech_url
+                .trim_start_matches("http://")
+                .trim_end_matches("/v1")
+        );
+        assert!(
+            !v.to_string().contains("CANARY"),
+            "the status never carries audio"
+        );
+
+        let resp = send_turn(&app, &bytes).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "audio still starts no turn"
+        );
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let requests = provider.requests.lock_ok().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "/v1/audio/transcriptions");
+        assert!(
+            contains(&requests[0].1, PCM_CANARY),
+            "the selected engine received the recording"
+        );
+        assert_eq!(
+            turn_calls.load(Ordering::SeqCst),
+            0,
+            "the active model or its vision helper was contacted with recorded audio in the bridge"
+        );
+        assert!(intake_is_empty(&r.root), "chunks and upload are gone");
+    }
+
+    /// `local,hosted:<id>`: the local engine reads first; only when it FAILS does the hosted
+    /// one, and the result says so. When the local reading succeeds, nothing is sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_then_hosted_sends_audio_only_when_the_local_reading_fails() {
+        let (speech_url, provider) =
+            crate::speech::hosted::fakes::provider(|_, _| whisper_answer()).await;
+        let mut cfg = test_config();
+        let mut models = cfg.model_registry.models.clone();
+        models.push(speech_model("speech", &speech_url));
+        cfg.model_registry = ModelRegistry { models };
+        cfg.speech.engine = EngineChoice::LocalThenHosted("speech".to_string());
+
+        let r = rig_with(
+            cfg.clone(),
+            engine("primary-model", &[(0, 2, "Read on the Studio.")]),
+            engine("second-model", &[(0, 2, "Read on the Studio.")]),
+        );
+        let app1 = app(r.st.clone());
+        let id = start(&app1, recording(0.5), "?conditioning=off").await;
+        let v = settle(&app1, &id).await;
+        assert_eq!(v["transcript"], "Read on the Studio.");
+        assert_eq!(v["hosted"], false);
+        assert!(
+            provider.requests.lock_ok().is_empty(),
+            "a local success sends nothing"
+        );
+
+        let mut broken = engine("primary-model", &[]);
+        broken.fail = Some(EngineError::Failed("the model looped".into()));
+        let r = rig_with(cfg, broken, engine("second-model", &[(0, 2, "second")]));
+        let app2 = app(r.st.clone());
+        let id = start(&app2, recording(0.5), "?conditioning=off").await;
+        let v = settle(&app2, &id).await;
+        assert_eq!(v["state"], "done", "{v}");
+        assert_eq!(v["transcript"], "Pickup is on Thursday.");
+        assert_eq!(v["engines"][0]["id"], "hosted:speech");
+        assert_eq!(v["engines"][0]["hosted"], true);
+        assert!(
+            v["notes"].to_string().contains("local engine failed"),
+            "{v}"
+        );
+        assert_eq!(provider.requests.lock_ok().len(), 1);
+        assert!(intake_is_empty(&r.root));
+    }
+
+    /// A hosted engine as the SECOND reading: the reconciler compares a local and a hosted
+    /// reading exactly as it compares two local ones.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hosted_second_reading_is_reconciled_with_the_local_one() {
+        let (speech_url, _provider) = crate::speech::hosted::fakes::provider(|_, _| {
+            (
+                200,
+                json!({"segments": [{"start": 0.0, "end": 1.0, "text": "Pickup is on Friday."}]})
+                    .to_string(),
+            )
+        })
+        .await;
+        let mut cfg = test_config();
+        let mut models = cfg.model_registry.models.clone();
+        models.push(speech_model("speech", &speech_url));
+        cfg.model_registry = ModelRegistry { models };
+        let r = rig_with(
+            cfg,
+            engine("primary-model", &[(0, 1, "Pickup is on Thursday.")]),
+            engine("second-model", &[]),
+        );
+        let app = app(r.st.clone());
+        let id = start(
+            &app,
+            recording(1.0),
+            "?conditioning=off&second_engine=hosted:speech",
+        )
+        .await;
+        let v = settle(&app, &id).await;
+        assert_eq!(v["state"], "done", "{v}");
+        assert_eq!(v["engines"][0]["hosted"], false);
+        assert_eq!(v["engines"][1]["id"], "hosted:speech");
+        assert_eq!(v["disagreements"][0]["primary"], "Thursday.");
+        assert_eq!(v["disagreements"][0]["alternative"], "Friday.");
+    }
+
+    /// An engine this bridge cannot use is refused by name before any audio is read; the
+    /// overview lists the Studio and every ARMED hosted engine, and never a token.
+    #[tokio::test]
+    async fn unknown_engines_are_refused_and_the_overview_lists_the_armed_ones() {
+        let mut cfg = test_config();
+        let mut models = cfg.model_registry.models.clone();
+        models.push(speech_model("speech", "http://127.0.0.1:9/v1"));
+        let mut unarmed = speech_model("unarmed", "http://127.0.0.1:9/v1");
+        unarmed.configured = false;
+        models.push(unarmed);
+        models.push(backend_model("chat-only", "http://127.0.0.1:9/v1"));
+        cfg.model_registry = ModelRegistry { models };
+        let r = rig_with(
+            cfg,
+            engine("primary-model", &[]),
+            engine("second-model", &[]),
+        );
+        let app = app(r.st.clone());
+        for (query, word) in [
+            (
+                "?engine=hosted:unarmed",
+                "not an armed transcription engine",
+            ),
+            (
+                "?engine=hosted:chat-only",
+                "not an armed transcription engine",
+            ),
+            ("?engine=cloud", "is not"),
+            (
+                "?second_engine=hosted:nope",
+                "not an armed transcription engine",
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(upload(recording(0.1), Some("audio/wav"), query))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{query}");
+            assert!(body_text(resp).await.contains(word), "{query}");
+        }
+        assert!(intake_is_empty(&r.root));
+
+        let v = body_json(app.clone().oneshot(get("/jesse/speech")).await.unwrap()).await;
+        assert_eq!(v["default_engine"], "local");
+        let ids: Vec<&str> = v["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["local", "hosted:speech"]);
+        assert!(!v.to_string().contains("\"tok\""), "never a token");
+    }
+
+    /// A configured default that names an engine the bridge cannot use refuses uploads with
+    /// 503 (the bridge's fault), and a run can still choose the Studio by name.
+    #[tokio::test]
+    async fn a_default_engine_that_cannot_be_used_is_a_503_naming_it() {
+        let mut cfg = test_config();
+        cfg.speech.engine = EngineChoice::Hosted("gone".to_string());
+        let r = rig_with(
+            cfg,
+            engine("primary-model", &[(0, 1, "hello")]),
+            engine("second-model", &[(0, 1, "hello")]),
+        );
+        let app = app(r.st.clone());
+        let resp = app
+            .clone()
+            .oneshot(upload(recording(0.1), Some("audio/wav"), ""))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body_text(resp).await.contains("hosted:gone"));
+        let id = start(&app, recording(0.5), "?engine=local&conditioning=off").await;
+        assert_eq!(settle(&app, &id).await["state"], "done");
     }
 }

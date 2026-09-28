@@ -1,4 +1,7 @@
-# Jesse Bridge (Rust)
+| `JESSE_SPEECH_ENGINE` | `local` | `hosted:<id>` sends every recording to that hosted engine; `local,hosted:<id>` reads locally and sends it there only when the local reading fails. A value naming an engine that is not armed refuses uploads (503) and is warned about at startup |
+| `JESSE_SPEECH_SECOND_ENGINE` | `local` | `hosted:<id>` makes that engine the second reading |
+| `JESSE_MODEL_<X>_TRANSCRIPTION` | on where declared | `off` withdraws a built-in entry's capability; `_TRANSCRIPTION_MODEL` and `_TRANSCRIPTION_BASE_URL` move its speech slug and host |
+ Optional `engine=local|hosted:<id>|local,hosted:<id>` and `second_engine=local|hosted:<id>` override the configured engines for this run; an id that is not an armed transcription engine is a `400` naming the choices.| `GET /jesse/speech` | Whether this bridge transcribes, the tier, each model's role and install state, `engines` (the Studio, then every armed hosted engine: `id`, `label`, `host`, `model`, `wire`) and `default_engine`. Never a token. |# Jesse Bridge (Rust)
 
 Turns "Ask Jesse" / "Tell Jesse" requests from the phone into headless Claude
 Code runs against the vault. **Cowork is not scriptable; Claude Code is**, and it
@@ -1713,9 +1716,12 @@ other store in the bridge already has.
 ## Recorded audio (`POST /jesse/transcriptions`, 0.135.0)
 
 A recording is transcribed ON THE STUDIO, by whisper.cpp models running inside this process
-(Metal on the Studio's GPU), and the audio is deleted when the run ends. The invariant, and
-how the code holds it, is in `src/speech/mod.rs` and in SECURITY.md → "Recorded audio":
-audio may reach the bridge and nothing past it; once it is text, it is an ordinary message.
+(Metal on the Studio's GPU), or, when the owner chooses one (0.159.0), by a HOSTED speech
+engine; the audio is deleted when the run ends. The invariant, and how the code holds it, is
+in `src/speech/mod.rs`: audio leaves the Studio only to a hosted speech engine the owner
+explicitly selected, only as that engine's transcription request, and never reaches a turn,
+a vision helper or a registered model through the turn path. With no hosted engine selected
+(the default) nothing leaves the machine. Once it is text, it is an ordinary message.
 
 ### The routes
 
@@ -1770,6 +1776,31 @@ days = ["sat"]
 | `JESSE_SPEECH_MAX_AUDIO_BYTES` | 1 GiB | per recording |
 | `JESSE_SPEECH_THREADS` | 8 | CPU threads beside the GPU |
 | `JESSE_SPEECH_RESULT_TTL_SECS` | 86400 | how long a finished transcript is kept for the app (a day: the phone may collect it hours later, after a push or at its next launch) |
+
+### Hosted engines
+
+A registry entry is a speech engine when it declares a transcription capability AND is armed
+(its token is set). Built in: GLM, Kimi and Qwen declare Fireworks `whisper-v3-turbo` on
+`https://audio-turbo.us-virginia-1.direct.fireworks.ai/v1` (multipart
+`/audio/transcriptions`, timed segments); the three Gemini entries declare their own slug on
+Gemini's OpenAI-compatible chat surface (`input_audio`, text only). A `[[models]]` entry
+declares one with a sub-table:
+
+```toml
+[[models]]
+id = "openai"
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+model = "<its chat model slug>"
+auth_token_env = "OPENAI_API_KEY"
+transcription = { model = "whisper-1" }   # wire = "audio_transcriptions" | "chat_input_audio",
+                                          # endpoint, max_chunk_bytes, max_chunk_secs, timestamps
+```
+
+The audio is chunked under the provider's caps (3 s overlap), staged in the run's custody
+directory, and stitched back by time. `jesse-transcribe <file> --engine hosted:<id>
+--env-plist <the bridge's launchd plist>` runs the same pipeline from
+a shell without the running bridge; `--list-engines` prints the choices.
 
 Building needs `cmake` on the PATH (whisper.cpp is compiled by `whisper-rs-sys`); the
 sentinel's deploy PATH includes `/opt/homebrew/bin`, so `brew install cmake` covers it.

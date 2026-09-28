@@ -11,7 +11,9 @@ import Foundation
 //
 // THE AUDIO RULE IS UNCHANGED, only its lifetime is: Jesse never keeps a recording. The
 // copy here exists exactly as long as its run, and is deleted the moment the run ends, on
-// success, failure and cancel alike. It lives under Application Support rather than Caches
+// success and cancel alike. A FAILED run is kept, marked failed, so the owner can try it
+// again with another engine; it is deleted on the retry's success, on Discard, or by the
+// launch sweep a day after it failed. It lives under Application Support rather than Caches
 // because the system may empty Caches while the app is suspended, which is precisely when
 // this copy has to still be there; and it is excluded from backups.
 
@@ -34,10 +36,21 @@ public struct TranscriptionRunRecord: Codable, Sendable, Equatable, Identifiable
     /// not post its own notification, so the owner is told once.
     public var bridgeWillPush: Bool
     public let startedAt: Date
+    /// The engine the owner chose for this run (`local`, `hosted:<id>`), or nil for the
+    /// Studio's default. Written down so a relaunch sends it again with the same choice.
+    public var engine: String?
+    /// Set when the run FAILED and its recording is kept for "Try again with": the sentence
+    /// the owner was shown. A kept run is never resumed on its own; it waits for a retry or
+    /// a discard, and the launch sweep deletes it after `RecordingHandoffStore.maxAge`.
+    public var failureMessage: String?
+    public var failedAt: Date?
+
+    public var isKeptAfterFailure: Bool { failureMessage != nil }
 
     public init(id: UUID = UUID(), conversationID: UUID, sourceName: String, durationSeconds: Double,
                 language: String, localeIdentifier: String, audioFileName: String,
-                studioRunID: String? = nil, bridgeWillPush: Bool = false, startedAt: Date = Date()) {
+                studioRunID: String? = nil, bridgeWillPush: Bool = false, startedAt: Date = Date(),
+                engine: String? = nil, failureMessage: String? = nil, failedAt: Date? = nil) {
         self.id = id
         self.conversationID = conversationID
         self.sourceName = sourceName
@@ -48,6 +61,18 @@ public struct TranscriptionRunRecord: Codable, Sendable, Equatable, Identifiable
         self.studioRunID = studioRunID
         self.bridgeWillPush = bridgeWillPush
         self.startedAt = startedAt
+        self.engine = engine
+        self.failureMessage = failureMessage
+        self.failedAt = failedAt
+    }
+
+    /// The same recording, started again as a NEW run: a new id (so the upload's tag cannot
+    /// reattach to the failed upload's answer), no Studio id, and the engine asked for now.
+    public func retried(engine: String?, at now: Date = Date()) -> TranscriptionRunRecord {
+        TranscriptionRunRecord(conversationID: conversationID, sourceName: sourceName,
+                               durationSeconds: durationSeconds, language: language,
+                               localeIdentifier: localeIdentifier, audioFileName: audioFileName,
+                               startedAt: now, engine: engine)
     }
 }
 
@@ -117,6 +142,29 @@ public struct TranscriptionRunStore: Sendable {
         contents.runs.append(record)
         contents.failures[record.conversationID.uuidString] = nil
         write(contents)
+    }
+
+    /// Swap one record for another that keeps the same audio: a failed run started again.
+    public func replace(_ old: TranscriptionRunRecord, with new: TranscriptionRunRecord) {
+        var contents = load()
+        contents.runs.removeAll { $0.id == old.id || $0.id == new.id }
+        contents.runs.append(new)
+        contents.failures[new.conversationID.uuidString] = nil
+        write(contents)
+    }
+
+    /// Delete every run kept after a failure for longer than `maxAge`, with its audio: the
+    /// owner did not come back to try again, and Jesse does not keep recordings. Returns
+    /// what it deleted. Run at launch, before anything is restored.
+    @discardableResult
+    public func sweepExpiredFailures(now: Date = Date(),
+                                     maxAge: TimeInterval = RecordingHandoffStore.maxAge) -> [TranscriptionRunRecord] {
+        let expired = load().runs.filter { record in
+            guard record.isKeptAfterFailure else { return false }
+            return now.timeIntervalSince(record.failedAt ?? record.startedAt) > maxAge
+        }
+        for record in expired { remove(record) }
+        return expired
     }
 
     /// The run is over: forget it and delete its audio.

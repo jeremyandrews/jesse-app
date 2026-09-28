@@ -871,6 +871,9 @@ struct ThreadDetailView: View {
             } label: {
                 Label("Audio Recording", systemImage: "waveform")
             }
+            // One recording per conversation at a time: the run in flight keeps going when
+            // the composer is left, so a second one could otherwise start on top of it.
+            .disabled(recording.isInFlight)
             // Shown only when a camera exists (never on Simulator).
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button {

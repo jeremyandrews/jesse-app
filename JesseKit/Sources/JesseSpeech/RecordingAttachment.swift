@@ -228,6 +228,9 @@ public final class RecordingAttachment {
     /// Adopt a file the user picked. `url` is the picker's URL, which may be
     /// security-scoped and is never used after this call returns.
     public func begin(pickedFileAt url: URL, displayName: String? = nil) async {
+        // One run per conversation: a durable run in flight is never replaced by a second
+        // recording, whose adoption would take over its source and its record.
+        if durable != nil, isInFlight { return }
         let name = displayName ?? url.lastPathComponent
         let working: URL
         do {
@@ -248,6 +251,7 @@ public final class RecordingAttachment {
     /// the audio in the group container to transcribe in place would be one fewer copy
     /// and one more way to leave a recording behind.
     public func begin(handoff: PendingRecording) async {
+        if durable != nil, isInFlight { return }
         guard let handoffStore else {
             fail(.engineFailed(reason: "the shared container isn’t available"),
                  named: handoff.originalName, run: generation)

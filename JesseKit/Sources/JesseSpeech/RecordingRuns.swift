@@ -96,6 +96,9 @@ public final class RecordingRuns {
         store.sweepUnclaimedAudio()
         for record in store.runs() {
             model(for: record.conversationID).resume(record)
+            // Its keeper hears about it as a start: the system's progress and background
+            // time belong to this process's run, not the one that died.
+            runStarted(record)
         }
         for (conversationID, message) in store.failures() where !isInFlight(conversationID) {
             model(for: conversationID).present(error: message)

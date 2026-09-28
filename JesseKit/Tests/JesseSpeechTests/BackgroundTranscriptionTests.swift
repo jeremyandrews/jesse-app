@@ -368,6 +368,22 @@ final class RecordingRunsTests: XCTestCase {
         await runs.refresh(studioRunID: "tr-unknown") // returns at once
     }
 
+    func testASecondRecordingCannotTakeOverARunInFlight() async throws {
+        let studio = ScriptedStudio(upload: .success(.init(id: "tr-6", state: "running", phase: "queued")),
+                                    hold: nil)
+        let runs = makeRuns(studio, clock: makeClock())
+        let model = try await start(runs)
+        try await waitUntil("the Studio's id") { store.runs().first?.studioRunID == "tr-6" }
+        let first = try XCTUnwrap(model.record)
+
+        await model.begin(pickedFileAt: try pickedFile())
+        XCTAssertTrue(model.isBusy, "still the first run, not a language sheet for a second")
+        XCTAssertEqual(model.record, first)
+        XCTAssertEqual(store.runs().map(\.id), [first.id])
+        XCTAssertEqual(studio.uploads.count, 1)
+        model.cancel()
+    }
+
     private func seedRecord(studioRunID: String?) throws -> TranscriptionRunRecord {
         let id = UUID()
         let name = try store.adopt(moving: try pickedFile(), id: id)

@@ -19,15 +19,37 @@ public struct VaultFolderCount: Equatable, Sendable, Identifiable {
     /// The folder's vault relative path: `/` separated, no leading or trailing slash.
     public let path: String
     /// Every note under it, at ANY depth — so `Projects` counts the drafts inside
-    /// `Projects/drafts/archive/` too. A folder picker whose count stopped at the first
-    /// level would say "2" over a folder holding two hundred notes.
+    /// `Projects/drafts/archive/` too. What a folder held "with subfolders" shows.
     public let noteCount: Int
+    /// The notes DIRECTLY inside it, no deeper: what a folder held exactly shows, and
+    /// the number the picker leads with, because a picker that says 915 over a folder
+    /// whose own list holds 27 is describing a different folder.
+    public let directCount: Int
+    /// The folders directly inside it. Nonzero is what earns a row its chevron.
+    public let subfolderCount: Int
 
     public var id: String { path }
 
-    public init(path: String, noteCount: Int) {
+    public init(path: String, noteCount: Int, directCount: Int, subfolderCount: Int) {
         self.path = path
         self.noteCount = noteCount
+        self.directCount = directCount
+        self.subfolderCount = subfolderCount
+    }
+
+    /// The folder's own name: the last component of its path.
+    public var name: String { Self.name(of: path) }
+
+    /// The folder it is inside, or nil for a folder at the vault root.
+    public var parent: String? { Self.parent(of: path) }
+
+    public static func name(of path: String) -> String {
+        path.split(separator: "/").last.map(String.init) ?? path
+    }
+
+    public static func parent(of path: String) -> String? {
+        guard let slash = path.lastIndex(of: "/") else { return nil }
+        return String(path[..<slash])
     }
 }
 
@@ -39,10 +61,14 @@ public enum VaultFolderTree {
     /// `paths` are note paths as the index stores them; the index holds `.md` files and
     /// nothing else, so every path counted is a note. A file at the vault ROOT belongs to
     /// no folder and contributes nothing — there is no synthetic "/" row, because the row
-    /// for "everything" is the picker's own "All folders" and two of them would be one
-    /// too many.
+    /// for "everything" is the picker's own root and two of them would be one too many.
+    ///
+    /// ONE FOLD for all three counts: each note adds one to every folder above it and one
+    /// to its own folder's direct count, and each folder, once known, adds one to its
+    /// parent's subfolder count.
     public static func folders(fromPaths paths: [String]) -> [VaultFolderCount] {
         var counts: [String: Int] = [:]
+        var direct: [String: Int] = [:]
         for path in paths {
             let parts = path.split(separator: "/", omittingEmptySubsequences: true)
             // The last component is the file; a path with only one component is a note at
@@ -53,10 +79,26 @@ public enum VaultFolderTree {
                 prefix = prefix.isEmpty ? String(part) : prefix + "/" + part
                 counts[prefix, default: 0] += 1
             }
+            direct[prefix, default: 0] += 1
+        }
+        var subfolders: [String: Int] = [:]
+        for folder in counts.keys {
+            if let parent = VaultFolderCount.parent(of: folder) {
+                subfolders[parent, default: 0] += 1
+            }
         }
         return counts
-            .map { VaultFolderCount(path: $0.key, noteCount: $0.value) }
+            .map { VaultFolderCount(path: $0.key, noteCount: $0.value,
+                                    directCount: direct[$0.key] ?? 0,
+                                    subfolderCount: subfolders[$0.key] ?? 0) }
             .sorted(by: isOrderedBefore)
+    }
+
+    /// The folders directly inside `parent` (nil for the vault root), in `folders`'
+    /// order: one drill down level of the picker.
+    public static func children(of parent: String?,
+                                in folders: [VaultFolderCount]) -> [VaultFolderCount] {
+        folders.filter { $0.parent == parent }
     }
 
     /// Case insensitive first, so `Projects` and `people` read as a person expects them

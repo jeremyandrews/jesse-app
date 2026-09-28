@@ -14,6 +14,32 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (182)] - 2026-09-28
+
+**Picking a folder on the Vault tab showed its archive, not its notes.** The folder filter
+was a recursive path prefix and the list is the newest 30 notes by mtime, so a folder whose
+`archive/` subfolder was large and busy was, in practice, a view of that archive:
+`Projects/Research` holds about 27 live reports and about 887 archived ones, and the top of
+the list was archived reports. A regression test with 5 live notes and 200 newer archived
+ones under one folder returned 30 archived notes and no live one on `main`.
+
+- **A held folder is exact by default**: its own notes, not everything beneath it. Each
+  one can be widened to "and subfolders" from its chip or from the picker's context menu.
+- **Several folders at once.** The selection is an ordered set (`VaultFolderSelection`)
+  that owns both halves of its predicate, the Swift `includes` and a parameter bound,
+  escaped SQL fragment, and a test proves the two agree over every fixture path.
+- **Archives fold away.** With any folder held, notes under an `archive` directory list
+  under a collapsed Archived section, from a query of their own with its own `LIMIT`, so
+  an archive can never crowd a live note out; typed results rank live before archived.
+  The segment test now lives in one place (`VaultArchive`), and the offline answerer's
+  `VaultRetriever.isArchived` calls it.
+- **The picker drills down** a level at a time with a selection circle per row, a chevron
+  into subfolders, a "This folder" row on every level below the root, a flat list while
+  searching, and a draft selection applied on Done and discarded on Cancel.
+- **Counts are the folder's own**: `VaultFolderCount` gains `directCount` and
+  `subfolderCount` beside the recursive `noteCount`, from the same fold over the indexed
+  paths. No schema change, no reindex.
+
 ## [App 1.0 (181)] - 2026-09-28
 
 **The app's gate was red, and had been for days, so tests could go red unnoticed — and

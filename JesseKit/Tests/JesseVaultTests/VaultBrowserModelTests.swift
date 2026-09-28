@@ -142,13 +142,13 @@ final class VaultBrowserModelTests: XCTestCase {
         model.refresh()
         XCTAssertEqual(model.recents.count, 5, "the whole vault, to begin with")
 
-        model.folder = "Workshop"
+        model.folders = VaultFolderSelection(folder: "Workshop")
 
         XCTAssertEqual(Set(model.recents.map(\.path)),
                        ["Workshop/Kiln-Rebuild.md", "Workshop/Overview.md"])
-        XCTAssertEqual(model.folders.map(\.path),
+        XCTAssertEqual(model.folderCounts.map(\.path),
                        ["Bicycle", "People", "Suppliers", "Workshop"])
-        XCTAssertEqual(model.folders.first { $0.path == "Workshop" }?.noteCount, 2)
+        XCTAssertEqual(model.folderCounts.first { $0.path == "Workshop" }?.noteCount, 2)
         XCTAssertNil(model.lastError)
     }
 
@@ -166,7 +166,7 @@ final class VaultBrowserModelTests: XCTestCase {
         XCTAssertEqual(Set(model.hits.map(\.path)),
                        ["Workshop/Overview.md", "Bicycle/Overview.md"])
 
-        model.folder = "Bicycle"
+        model.folders = VaultFolderSelection(folder: "Bicycle")
         await model.awaitPendingSearch()
 
         XCTAssertEqual(model.hits.map(\.path), ["Bicycle/Overview.md"])
@@ -182,11 +182,11 @@ final class VaultBrowserModelTests: XCTestCase {
         model.search()
         await model.awaitPendingSearch()
 
-        model.folder = "Bicycle"
+        model.folders = VaultFolderSelection(folder: "Bicycle")
         await model.awaitPendingSearch()
         XCTAssertEqual(model.hits.count, 1)
 
-        model.folder = nil
+        model.folders = VaultFolderSelection()
         await model.awaitPendingSearch()
 
         XCTAssertEqual(Set(model.hits.map(\.path)),
@@ -203,14 +203,14 @@ final class VaultBrowserModelTests: XCTestCase {
     func testAFolderDeletedFromTheVaultClearsTheNarrowingAndSaysSo() async throws {
         let model = VaultBrowserModel(source: try makeSource())
         await model.indexer.reindexNow()
-        model.folder = "Bicycle"
+        model.folders = VaultFolderSelection(folder: "Bicycle")
         XCTAssertEqual(model.recents.map(\.path), ["Bicycle/Overview.md"])
 
         try FileManager.default.removeItem(at: root.appendingPathComponent("Bicycle"))
         await model.indexer.reindexNow()
         model.refresh()
 
-        XCTAssertNil(model.folder, "the narrowing is gone with the folder")
+        XCTAssertTrue(model.folders.isEmpty, "the narrowing is gone with the folder")
         XCTAssertEqual(model.lastError,
                        "Bicycle is not in the vault any more, so every note is showing.")
         XCTAssertEqual(model.recents.count, 4, "and the whole vault is showing")
@@ -225,11 +225,11 @@ final class VaultBrowserModelTests: XCTestCase {
         model.refresh()
 
         model.scope = .strands
-        model.folder = "Workshop"
+        model.folders = VaultFolderSelection(folder: "Workshop")
         XCTAssertEqual(model.scope, .all, "the folder replaced the curated scope")
 
         model.scope = .strands
-        XCTAssertNil(model.folder, "and the scope replaced the folder")
+        XCTAssertTrue(model.folders.isEmpty, "and the scope replaced the folder")
     }
 
     func testTypingAQueryAnswersThroughTheModelTheScreenDrives() async throws {

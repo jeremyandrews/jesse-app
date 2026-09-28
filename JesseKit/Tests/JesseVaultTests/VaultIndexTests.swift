@@ -51,11 +51,12 @@ final class VaultIndexTests: XCTestCase {
         try reindex(index)
 
         XCTAssertEqual(index.folders(), [
-            VaultFolderCount(path: "Bicycle", noteCount: 1),
-            VaultFolderCount(path: "People", noteCount: 1),
-            VaultFolderCount(path: "Suppliers", noteCount: 1),
-            VaultFolderCount(path: "Workshop", noteCount: 3),
-            VaultFolderCount(path: "Workshop/archive", noteCount: 1),
+            VaultFolderCount(path: "Bicycle", noteCount: 1, directCount: 1, subfolderCount: 0),
+            VaultFolderCount(path: "People", noteCount: 1, directCount: 1, subfolderCount: 0),
+            VaultFolderCount(path: "Suppliers", noteCount: 1, directCount: 1, subfolderCount: 0),
+            VaultFolderCount(path: "Workshop", noteCount: 3, directCount: 2, subfolderCount: 1),
+            VaultFolderCount(path: "Workshop/archive", noteCount: 1, directCount: 1,
+                             subfolderCount: 0),
         ])
         XCTAssertFalse(index.folders().contains { $0.path.hasPrefix(".obsidian") },
                        "a dot directory is not indexed, so it is not a folder to pick")

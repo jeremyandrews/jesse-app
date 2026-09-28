@@ -60,11 +60,17 @@ public final class FoundationVaultAnswerSession: VaultAnswerGenerating, @uncheck
 
     public func generate(question: String, chunks: [RetrievedChunk],
                          clock: VaultClock) async throws -> VaultAnswerDraft {
+        try await generate(question: question, chunks: chunks, clock: clock, ownerName: nil)
+    }
+
+    public func generate(question: String, chunks: [RetrievedChunk],
+                         clock: VaultClock, ownerName: String?) async throws
+        -> VaultAnswerDraft {
         do {
             let response = try await session(&answerSession,
                                              instructions: VaultAnswerer.instructions)
                 .respond(to: VaultAnswerer.prompt(question: question, chunks: chunks,
-                                                  clock: clock),
+                                                  clock: clock, ownerName: ownerName),
                          generating: GeneratedVaultAnswer.self)
             let content = response.content
             return VaultAnswerDraft(answer: content.answer,

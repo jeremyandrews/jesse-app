@@ -14,6 +14,43 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (179)] - 2026-09-28
+
+**Offline, "What is my birthday?" was answered "Jamie's birthday is on Tuesday, December 9."**,
+cited from a live trip itinerary titled for another person's birthday that named the owner
+once, in its list of travellers. The owner's birthday sits in a live note under
+`### Jeremy's Birthday (Sep 4 ...)`. Replayed over the real vault before any change, the
+cause was the third of the three suspected (not an old build, not an unset owner name):
+with the name set, the retriever could not tell a note ABOUT the owner from one that
+MENTIONS him.
+
+- With the name `Jeremy` and no embedding the right chunk was first; with the device's
+  embedding a note that only quoted the heading was lifted over it. With the four-spelling
+  setting (`Jeremy, Jeremiah, Jeremia, Andrews`) it was not in the top five at all: the one
+  OR query is read 120 bm25 rows deep, and notes dense in the owner's names filled every
+  row.
+- `LookupPlan.namesOwnerAsSubject`: a title or heading with the owner's name in possessive
+  or subject position, followed within two tokens by a word of the question
+  (`Jeremy's Birthday`), says the chunk is his. The name comes from the setting and the
+  words from the question; nothing is special to birthdays.
+- The retriever ranks such a chunk ahead of others that matched as many of the question's
+  words, and fuses those chunks as their own group ahead of the other live ones, so the
+  embedding cannot lift a decoy back over them. It never outranks a chunk that matched
+  more of the question's words.
+- `LookupPlan.subjectExpression` fetches those candidates with one FTS5 query over the
+  title and heading columns (`NEAR(owner, word, 2)`), unioned ahead of the OR scan, so the
+  scan's depth can no longer drop them.
+- The answer: for a first-person question the prompt says who the asker is, the
+  instructions say a fact about a different named person is not an answer, and
+  `VaultAnswerer.isAboutSomebodyElse` turns such a draft into the ordinary not-found.
+- A first-person question on a device with no owner name now says so under the offline
+  reply, instead of silently searching for every birthday in the vault.
+
+Regression tests at the retrieval layer (`VaultOwnerSubjectTests`) over a synthetic live
+decoy of the itinerary's shape, and over a vault with more notes carrying the owner's names
+than the scan is deep; both failed before the change. The lookup gate, the time limit,
+`isGrounded` and the `Inbox/` exclusion are unchanged.
+
 ## [App 1.0 (178)] - 2026-09-28
 
 **The note editor opens where the reader was, and the reader comes back to where the edit

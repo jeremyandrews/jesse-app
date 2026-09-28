@@ -86,7 +86,32 @@ public enum OfflineLookupReply {
     /// until the bridge is back. The phone does (the send outbox); the Mac does not,
     /// and telling a Mac user their question is "queued for the bridge" when nothing is
     /// holding it would be a plain untruth.
-    public static func body(_ kind: Kind, queued: Bool) -> String {
+    ///
+    /// `notice` is one more line under everything else, for a fact about THIS DEVICE the
+    /// reply depends on (`ownerNameMissing`). Nil, the default, adds nothing.
+    public static func body(_ kind: Kind, queued: Bool, notice: String? = nil) -> String {
+        let main = mainBody(kind, queued: queued)
+        guard let notice, !notice.isEmpty else { return main }
+        return main + "\n\n" + notice
+    }
+
+    /// The line a first-person question gets on a device with no owner name.
+    ///
+    /// Without a name, "my" is dropped and nothing takes its place, so "what's my
+    /// birthday" searches for every birthday in the vault. That used to happen silently;
+    /// the reply says so, and says where the fix is.
+    public static let ownerNameMissing =
+        "No owner name is set in Settings, so \"my\" and \"I\" could not be matched to your notes."
+
+    /// `ownerNameMissing` when `question` is about the asker and `ownerName` holds no name,
+    /// else nil.
+    public static func ownerNameNotice(question: String, ownerName: String?) -> String? {
+        guard LookupQuery.isFirstPerson(question),
+              LookupQuery.ownerForms(ownerName).isEmpty else { return nil }
+        return ownerNameMissing
+    }
+
+    private static func mainBody(_ kind: Kind, queued: Bool) -> String {
         switch kind {
         case .answered(let answer):
             var out = badge + "\n\n" + answer.text

@@ -34,11 +34,11 @@ public final class VaultBrowserModel {
             guard newValue != scopeStorage else { return }
             scopeStorage = newValue
             // THE TWO NARROWINGS ARE EXCLUSIVE. A segment is a CURATED view — `Strands`
-            // drops the archive and orders by each note's own stamp — and a picked folder
-            // is the raw folder, nothing added and nothing hidden. Held together they
+            // drops the archive and orders by each note's own stamp — and picked folders
+            // are raw folders, nothing added and nothing hidden. Held together they
             // would show the intersection of two things the screen states separately,
             // and the commonest intersection is empty.
-            if newValue != .all { folderStorage = nil }
+            if newValue != .all { folderStorage = VaultFolderSelection() }
             // The chips and the strand token belong to the Strands scope and are drawn
             // only under it, so leaving it drops them rather than leaving a narrowing
             // held that no control on screen admits to.
@@ -103,25 +103,26 @@ public final class VaultBrowserModel {
     /// The scope a chip or a strand implies, set without the scope setter's own reset.
     private func moveToStrands() {
         scopeStorage = .strands
-        folderStorage = nil
+        folderStorage = VaultFolderSelection()
     }
 
-    /// **The folder the tab is narrowed to**, or nil for the whole vault. A vault
-    /// relative path with no trailing slash, as `VaultFolderTree` produces it.
+    /// **The folders the tab is narrowed to**, or empty for the whole vault. Each one
+    /// is a vault relative path with no trailing slash, as `VaultFolderTree` produces it,
+    /// held EXACT (its own notes) unless widened to its subfolders.
     ///
     /// NOT to be confused with `folderStatus` and `hasFolder` a few lines down, which are
     /// about something else entirely: whether this device has been pointed at a vault at
-    /// all. That one is the root; this one is a folder inside it.
+    /// all. That one is the root; these are folders inside it.
     ///
     /// Per launch, deliberately, for `scope`'s reason: a narrowing remembered across
     /// launches is a search that silently answers a narrower question than the one that
     /// was typed, weeks after the person who chose it has forgotten choosing it.
-    public var folder: String? {
+    public var folders: VaultFolderSelection {
         get { folderStorage }
         set {
             guard newValue != folderStorage else { return }
             folderStorage = newValue
-            if newValue != nil {
+            if !newValue.isEmpty {
                 scopeStorage = .all
                 sectionStorage = .all
                 strandStorage = nil
@@ -130,7 +131,7 @@ public final class VaultBrowserModel {
         }
     }
 
-    /// Every folder in the index, with its count — what the picker lists.
+    /// Every folder in the index, with its counts — what the picker lists.
     ///
     /// Refilled by `refresh()`, so it follows a reindex without being asked and without a
     /// second path for the picker to go stale down. That costs one `SELECT path FROM
@@ -138,14 +139,14 @@ public final class VaultBrowserModel {
     /// envelope `refresh()` already has: the `counts()` call beside it does three
     /// `count(*)`s, one of them over the chunks table, which is an order of magnitude
     /// more rows than there are files.
-    public private(set) var folders: [VaultFolderCount] = []
+    public private(set) var folderCounts: [VaultFolderCount] = []
 
     /// Every note under `Strands/`, the archive included, by title: what the strand
     /// picker lists and what `showStrand` resolves a slug against. Refilled by `refresh()`.
     public private(set) var strandNotes: [VaultIndexedFile] = []
 
     private var scopeStorage: VaultSearchScope = .all
-    private var folderStorage: String?
+    private var folderStorage = VaultFolderSelection()
     private var sectionStorage: VaultStrandSection = .all
     private var strandStorage: String?
 
@@ -157,15 +158,12 @@ public final class VaultBrowserModel {
         search()
     }
 
-    /// The chosen folder as a path prefix, with the trailing slash that keeps `Work` from
-    /// matching `Workshop/`.
-    private var folderPrefix: String? { folderStorage.map { $0 + "/" } }
-
     public private(set) var hits: [VaultSearchHit] = []
     public private(set) var recents: [VaultIndexedFile] = []
-    /// Under the Strands scope, the notes in `Strands/archive/`, kept out of `recents`
-    /// so the screen can put them under their own collapsed header. Always empty under
-    /// any other scope or folder.
+    /// The archived notes, kept out of `recents` so the screen can put them under their
+    /// own collapsed header: under the Strands scope the notes in `Strands/archive/`, and
+    /// under a folder selection every selected note inside an `archive` directory
+    /// (`VaultArchive`). Always empty with neither held.
     public private(set) var archivedRecents: [VaultIndexedFile] = []
     /// Each strand note's `state:` frontmatter, keyed by path, for the caption a row
     /// shows when it is not `active`. Filled by the same pass that reads `updated:`.
@@ -215,24 +213,27 @@ public final class VaultBrowserModel {
             recents = []
             archivedRecents = []
             strandNotes = []
-            folders = []
+            folderCounts = []
             counts = VaultIndexCounts()
             return
         }
         do {
             guard let index = try source.index() else { return }
-            folders = index.folders()
+            folderCounts = index.folders()
             counts = index.counts()
             lastError = nil
             // A FOLDER CAN GO. It was deleted or renamed in Obsidian, the reindex noticed,
             // and the tab is now narrowed to a folder that does not exist — which shows as
-            // an empty screen with no reason given. Widen back to the whole vault and SAY
-            // SO. Guarded on a non-empty index, because before the first pass every folder
-            // is missing and none of them have gone anywhere.
-            if let held = folderStorage, counts.fileCount > 0,
-               !folders.contains(where: { $0.path == held }) {
-                folderStorage = nil
-                lastError = "\(held) is not in the vault any more, so every note is showing."
+            // fewer notes, or none, with no reason given. Drop only the folders that went,
+            // and SAY SO, naming them. Guarded on a non-empty index, because before the
+            // first pass every folder is missing and none of them have gone anywhere.
+            if counts.fileCount > 0 {
+                let known = Set(folderCounts.map(\.path))
+                let gone = folderStorage.paths.filter { !known.contains($0) }
+                if !gone.isEmpty {
+                    for path in gone { folderStorage.remove(path) }
+                    lastError = Self.goneSentence(gone, remaining: folderStorage.count)
+                }
             }
             strandNotes = index.recentFiles(limit: 1_000, underPrefix: VaultStrandRecord.folder)
                 .sorted {
@@ -246,7 +247,7 @@ public final class VaultBrowserModel {
                 lastError = "\(VaultStrandRecord.slug(of: held)) is not in the vault any more, so every strand is showing."
             }
             let scope = self.scopeStorage
-            if scope == .strands, folderStorage == nil {
+            if scope == .strands, folderStorage.isEmpty {
                 // EVERY strand, not a recent thirty: the scope is the record, and the
                 // archive under its header is only useful whole. Two dozen live notes
                 // and a growing archive, all from one indexed prefix query.
@@ -259,9 +260,17 @@ public final class VaultBrowserModel {
                     recents = all.filter { !VaultStrandRecord.isArchived($0.path) }
                     archivedRecents = all.filter { VaultStrandRecord.isArchived($0.path) }
                 }
+            } else if !folderStorage.isEmpty {
+                // TWO QUERIES, each with its own LIMIT, so an archive can never crowd a
+                // live note out: a folder whose archive holds hundreds of notes newer than
+                // its live ones still lists every one of the live ones first.
+                recents = index.recentFiles(limit: Self.recentLimit, in: folderStorage,
+                                            archive: .live)
+                archivedRecents = index.recentFiles(limit: Self.archivedLimit,
+                                                    in: folderStorage, archive: .archived)
             } else {
-                let prefix = folderPrefix ?? scope.pathPrefix
-                recents = Array(index.recentFiles(limit: 30, underPrefix: prefix)
+                recents = Array(index.recentFiles(limit: Self.recentLimit,
+                                                  underPrefix: scope.pathPrefix)
                     .filter { scope.includes($0.path) })
                 archivedRecents = []
             }
@@ -274,6 +283,24 @@ public final class VaultBrowserModel {
         // note and the index does not hold it: fifteen small reads, off the main actor,
         // and the list is already on screen in mtime order while they happen.
         if scope.ordersByFrontmatterUpdated { applyFrontmatterOrder(for: scope) }
+    }
+
+    /// How many live notes the recents list shows.
+    static let recentLimit = 30
+    /// How many archived notes a folder selection's collapsed section holds.
+    static let archivedLimit = 100
+
+    /// What the screen says when held folders have left the vault. Names every one.
+    nonisolated static func goneSentence(_ gone: [String], remaining: Int) -> String {
+        // Joined by hand rather than by `ListFormatter`, whose output follows the
+        // device's locale: every other sentence on this screen is English.
+        let names = gone.count < 3
+            ? gone.joined(separator: " and ")
+            : gone.dropLast().joined(separator: ", ") + " and " + gone[gone.count - 1]
+        let verb = gone.count == 1 ? "is" : "are"
+        return remaining == 0
+            ? "\(names) \(verb) not in the vault any more, so every note is showing."
+            : "\(names) \(verb) not in the vault any more, so the filter dropped \(gone.count == 1 ? "it" : "them")."
     }
 
     /// Re-sort the recents by each note's `updated:` frontmatter.
@@ -332,7 +359,7 @@ public final class VaultBrowserModel {
         guard folderStatus.isReady else { return }
         isSearching = true
         let scope = self.scopeStorage
-        let folder = self.folderStorage
+        let folders = self.folderStorage
         let strand = self.strandStorage
         let source = self.source
         let expander = self.expander
@@ -340,14 +367,14 @@ public final class VaultBrowserModel {
         searchTask = Task { [weak self] in
             try? await Task.sleep(for: debounce)
             if Task.isCancelled { return }
-            let outcome: VaultSearchOutcome? = await Task.detached { [scope, folder, strand] in
+            let outcome: VaultSearchOutcome? = await Task.detached { [scope, folders, strand] in
                 guard let index = try? source.index() else { return nil }
-                return await VaultSearcher(index: index, scope: scope, folder: folder,
+                return await VaultSearcher(index: index, scope: scope, folders: folders,
                                            strand: strand)
                     .search(typed, expander: expander)
             }.value
             if Task.isCancelled { return }
-            self?.apply(outcome, for: typed, scope: scope, folder: folder, strand: strand)
+            self?.apply(outcome, for: typed, scope: scope, folders: folders, strand: strand)
         }
     }
 
@@ -393,7 +420,8 @@ public final class VaultBrowserModel {
     }
 
     private func apply(_ outcome: VaultSearchOutcome?, for typed: String,
-                       scope: VaultSearchScope, folder: String?, strand: String?) {
+                       scope: VaultSearchScope, folders: VaultFolderSelection,
+                       strand: String?) {
         // The user has typed on since this search started: its answer is about a question
         // nobody is asking any more.
         guard typed == query else { return }
@@ -401,7 +429,7 @@ public final class VaultBrowserModel {
         // search for the whole vault landing on a screen that now says one folder puts
         // rows from outside that folder under a heading naming it, which reads as the
         // narrowing being broken rather than as a stale answer.
-        guard scope == scopeStorage, folder == folderStorage, strand == strandStorage,
+        guard scope == scopeStorage, folders == folderStorage, strand == strandStorage,
               !isSectionMode else { return }
         isSearching = false
         appliedQuery = typed
@@ -421,23 +449,27 @@ public struct VaultBrowserView: View {
     @State private var model: VaultBrowserModel
     @State private var path: [VaultNoteRoute] = []
     @State private var isPickingFolder = false
-    /// The picker's own filter. Not the vault query: this one filters the LIST OF
-    /// FOLDERS by name, and it is reset every time the sheet opens so that a sheet never
-    /// opens already hiding most of what it is there to show.
-    @State private var folderFilter = ""
     @State private var isPickingStrand = false
-    /// The strand picker's own filter, reset on every open for `folderFilter`'s reason.
+    /// The strand picker's own filter, reset on every open so that a sheet never opens
+    /// already hiding most of what it is there to show.
     @State private var strandFilter = ""
     /// The Archived header starts closed: the record is there when asked for, and the
-    /// live strands stay the first thing on the screen.
-    @State private var showsArchived = false
+    /// live notes stay the first thing on the screen.
+    @State private var showsArchived: Bool
 
     /// The shell's "discuss this strand" action, the one thing a strand's menu needs that
     /// this screen cannot do for itself. Nil in a preview; both shells inject it.
     @Environment(\.strandDiscuss) private var discussAction
 
     public init(model: VaultBrowserModel = VaultBrowserModel()) {
+        self.init(model: model, showsArchived: false)
+    }
+
+    /// `showsArchived` is for a render test that needs the section open; the screen
+    /// always starts with it closed.
+    init(model: VaultBrowserModel, showsArchived: Bool) {
         _model = State(initialValue: model)
+        _showsArchived = State(initialValue: showsArchived)
     }
 
     public var body: some View {
@@ -457,7 +489,12 @@ public struct VaultBrowserView: View {
                     ToolbarItem(placement: .primaryAction) { folderButton }
                 }
                 .sheet(isPresented: $isPickingFolder) {
-                    folderPicker
+                    VaultFolderPicker(folders: model.folderCounts, selection: model.folders,
+                                      onDone: { selection in
+                                          model.folders = selection
+                                          isPickingFolder = false
+                                      },
+                                      onCancel: { isPickingFolder = false })
                 }
                 .sheet(isPresented: $isPickingStrand) {
                     strandPicker
@@ -513,10 +550,10 @@ public struct VaultBrowserView: View {
                 // nothing typed it says which notes the recents are drawn from.
                 //
                 // ONE narrowing widget at a time. The segmented control offers curated
-                // views; a picked folder is a raw folder. Showing both at once would put
+                // views; picked folders are raw folders. Showing both at once would put
                 // a control reading "All" above a list that is anything but.
-                if let folder = model.folder {
-                    folderScopeRow(folder)
+                if !model.folders.isEmpty {
+                    folderChips
                 } else {
                     scopeControl
                     if model.scope == .strands { strandControls }
@@ -525,11 +562,13 @@ public struct VaultBrowserView: View {
                     sectionContent
                 } else if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Section {
-                        if model.recents.isEmpty, let folder = model.folder {
+                        if model.recents.isEmpty, let folder = Self.folderSummary(model.folders) {
                             // A folder with nothing in it must still say something: an
                             // empty list under a heading naming the folder reads as a
                             // broken screen rather than as an empty folder.
-                            Text(Self.emptyFolderSentence(folder))
+                            Text(model.archivedRecents.isEmpty
+                                 ? Self.emptyFolderSentence(folder)
+                                 : Self.onlyArchivedSentence(folder))
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
@@ -537,7 +576,8 @@ public struct VaultBrowserView: View {
                             recentRow(file)
                         }
                     } header: {
-                        Text(Self.recentsHeading(model.scope, folder: model.folder))
+                        Text(Self.recentsHeading(model.scope,
+                                                 folder: Self.folderSummary(model.folders)))
                     }
                     if !model.archivedRecents.isEmpty {
                         Section {
@@ -554,7 +594,7 @@ public struct VaultBrowserView: View {
                     Section {
                         Text(model.isSearching
                              ? "Searching…"
-                             : Self.emptyResultSentence(folder: model.folder))
+                             : Self.emptyResultSentence(folder: Self.folderSummary(model.folders)))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -663,7 +703,9 @@ public struct VaultBrowserView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(showsArchived ? "Hide archived strands" : "Show archived strands")
+        .accessibilityLabel(Self.archivedHeaderLabel(showing: showsArchived,
+                                                     strands: model.folders.isEmpty
+                                                        && model.scope == .strands))
     }
 
     /// The Strands scope's own row: one chip per section and the strand token. Shown
@@ -751,11 +793,7 @@ public struct VaultBrowserView: View {
     private var strandPicker: some View {
         NavigationStack {
             List {
-                folderPickerRow(name: "All strands", count: model.strandNotes.count,
-                                isSelected: model.strand == nil) {
-                    model.strand = nil
-                    isPickingStrand = false
-                }
+                allStrandsRow
                 ForEach(filteredStrands, id: \.path) { note in
                     strandPickerRow(note)
                 }
@@ -771,6 +809,34 @@ public struct VaultBrowserView: View {
         #if os(macOS)
         .frame(minWidth: 360, minHeight: 420)
         #endif
+    }
+
+    /// The strand picker's first row: widen back to every strand.
+    private var allStrandsRow: some View {
+        let count = model.strandNotes.count
+        let isSelected = model.strand == nil
+        return Button {
+            model.strand = nil
+            isPickingStrand = false
+        } label: {
+            HStack {
+                Text("All strands")
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text("\(count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Image(systemName: "checkmark")
+                    .font(.caption)
+                    .opacity(isSelected ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("All strands, \(count) notes")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
     private func strandPickerRow(_ note: VaultIndexedFile) -> some View {
@@ -857,9 +923,9 @@ public struct VaultBrowserView: View {
     /// business hopping to the main actor to ask what a heading says.
     nonisolated static func recentsHeading(_ scope: VaultSearchScope,
                                            folder: String? = nil) -> String {
-        // A picked folder is a plain prefix over plain mtime order, so the heading is
-        // the plain one with the folder named. The scope's own wording only applies when
-        // no folder is held, which is enforced by the model rather than assumed here.
+        // Picked folders are listed in plain mtime order, so the heading is the plain
+        // one with the selection named (`folderSummary`). The scope's own wording only
+        // applies when no folder is held, which the model enforces.
         if let folder { return "Recently changed in \(folder)" }
         return scope == .strands ? "Recently updated" : "Recently changed"
     }
@@ -879,6 +945,34 @@ public struct VaultBrowserView: View {
         "Nothing under \(folder) yet."
     }
 
+    /// What a folder selection whose every note is archived says above its Archived
+    /// section: the list is empty on purpose, and the notes are one tap away.
+    nonisolated static func onlyArchivedSentence(_ folder: String) -> String {
+        "Every note in \(folder) is archived."
+    }
+
+    /// How the headings and sentences name a folder selection: the one folder's path,
+    /// or how many folders, or nil for the whole vault.
+    nonisolated static func folderSummary(_ selection: VaultFolderSelection) -> String? {
+        switch selection.count {
+        case 0: return nil
+        case 1: return selection.paths[0]
+        default: return "\(selection.count) folders"
+        }
+    }
+
+    /// The toolbar button's text: the one folder's name, or the first and how many more.
+    nonisolated static func folderButtonTitle(_ selection: VaultFolderSelection) -> String {
+        guard let first = selection.entries.first else { return "All folders" }
+        return selection.count == 1 ? first.name : "\(first.name) +\(selection.count - 1)"
+    }
+
+    /// The Archived header's spoken label: strands under the Strands scope, notes
+    /// everywhere else.
+    nonisolated static func archivedHeaderLabel(showing: Bool, strands: Bool) -> String {
+        "\(showing ? "Hide" : "Show") archived \(strands ? "strands" : "notes")"
+    }
+
     /// The scope control: two segments, and no folder picker.
     private var scopeControl: some View {
         Picker("Scope", selection: Bindable(model).scope) {
@@ -895,7 +989,6 @@ public struct VaultBrowserView: View {
     /// from the screen without opening anything.
     private var folderButton: some View {
         Button {
-            folderFilter = ""
             isPickingFolder = true
         } label: {
             // An HStack rather than a `Label`, and not by preference: a `Label` carrying
@@ -904,91 +997,96 @@ public struct VaultBrowserView: View {
             // assumed. A bare glyph says "something about folders" and not WHICH folder,
             // which is the only part worth a place in the bar.
             HStack(spacing: 4) {
-                Image(systemName: model.folder == nil ? "folder" : "folder.fill")
-                Text(model.folder ?? "All folders")
+                Image(systemName: model.folders.isEmpty ? "folder" : "folder.fill")
+                Text(Self.folderButtonTitle(model.folders))
                     .lineLimit(1)
-                    .truncationMode(.head)
+                    .truncationMode(.middle)
             }
             .font(.callout)
         }
         .disabled(!model.hasFolder)
-        .accessibilityLabel(model.folder.map { "Folder: \($0)" } ?? "Pick a folder")
+        .help(model.folders.paths.joined(separator: ", "))
+        .accessibilityLabel(model.folders.isEmpty
+                            ? "Pick folders"
+                            : "Folders: \(model.folders.paths.joined(separator: ", ")). Change")
     }
 
-    /// Replaces the scope control while a folder is held, and offers the way out.
-    private func folderScopeRow(_ folder: String) -> some View {
-        HStack {
-            Label(folder, systemImage: "folder.fill")
-                .font(.callout)
-                .lineLimit(1)
-                .truncationMode(.head)
-                .accessibilityLabel("Narrowed to \(folder)")
-            Spacer(minLength: 8)
-            Button("Clear") { model.folder = nil }
-                .font(.caption)
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Show every folder")
+    /// Replaces the scope control while folders are held: one chip per folder, each with
+    /// its own way out, and Clear for all of them. Scrolls sideways rather than wrapping,
+    /// so the list below stays where it is however many folders are held.
+    private var folderChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(model.folders.entries) { entry in
+                    folderChip(entry)
+                }
+                Button("Clear") { model.folders = VaultFolderSelection() }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel("Show every folder")
+            }
         }
         .listRowSeparator(.hidden)
     }
 
-    private var filteredFolders: [VaultFolderCount] {
-        let filter = folderFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !filter.isEmpty else { return model.folders }
-        return model.folders.filter { $0.path.localizedCaseInsensitiveContains(filter) }
-    }
-
-    /// The picker. Every folder in the index, its note count, and "All folders" first
-    /// because widening back is the choice a person most often comes here to make.
-    private var folderPicker: some View {
-        NavigationStack {
-            List {
-                folderPickerRow(name: "All folders", count: model.counts.fileCount,
-                                isSelected: model.folder == nil) {
-                    model.folder = nil
-                }
-                ForEach(filteredFolders) { folder in
-                    folderPickerRow(name: folder.path, count: folder.noteCount,
-                                    isSelected: model.folder == folder.path) {
-                        model.folder = folder.path
+    /// One held folder: its name (tap to reopen the picker), a marker when its
+    /// subfolders are in, and a remove button. The context menu widens or narrows it.
+    private func folderChip(_ entry: VaultFolderSelection.Entry) -> some View {
+        HStack(spacing: 0) {
+            Button {
+                isPickingFolder = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.fill")
+                    Text(entry.name)
+                        .lineLimit(1)
+                    if entry.includesSubfolders {
+                        Text("(and subfolders)")
+                            .lineLimit(1)
+                            .opacity(0.85)
                     }
                 }
+                .padding(.leading, 10)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
-            .navigationTitle("Folder")
-            .searchable(text: $folderFilter, prompt: "Filter folders")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { isPickingFolder = false }
+            .buttonStyle(.plain)
+            .help(entry.path)
+            .accessibilityLabel("Folder: \(entry.path)\(entry.includesSubfolders ? ", and subfolders" : ""). Change")
+            .accessibilityActions {
+                Button(entry.includesSubfolders ? "This folder only" : "Include subfolders") {
+                    model.folders.setIncludesSubfolders(!entry.includesSubfolders,
+                                                        for: entry.path)
                 }
             }
-        }
-    }
-
-    private func folderPickerRow(name: String, count: Int, isSelected: Bool,
-                                 choose: @escaping () -> Void) -> some View {
-        Button {
-            choose()
-            isPickingFolder = false
-        } label: {
-            HStack {
-                Text(name)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                Spacer(minLength: 8)
-                Text("\(count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                Image(systemName: "checkmark")
-                    .font(.caption)
-                    .opacity(isSelected ? 1 : 0)
+            Button {
+                model.folders.remove(entry.path)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("Remove \(entry.path)")
+            .accessibilityLabel("Remove \(entry.path)")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(name), \(count) notes")
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .font(.caption)
+        .foregroundStyle(Color.white)
+        .background(Capsule().fill(Color.accentColor).padding(.vertical, 6))
+        .contextMenu {
+            Button {
+                model.folders.setIncludesSubfolders(!entry.includesSubfolders, for: entry.path)
+            } label: {
+                Label(entry.includesSubfolders ? "This folder only" : "Include subfolders",
+                      systemImage: entry.includesSubfolders ? "folder" : "folder.badge.plus")
+            }
+            Button(role: .destructive) {
+                model.folders.remove(entry.path)
+            } label: {
+                Label("Remove", systemImage: "xmark.circle")
+            }
+        }
     }
 
     private var noFolder: some View {

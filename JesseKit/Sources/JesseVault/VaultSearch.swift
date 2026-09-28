@@ -167,9 +167,9 @@ public struct VaultSearcher: Sendable {
     /// after ranking would return the top fifty of the vault and show whichever of them
     /// happened to be in the folder.
     private let scope: VaultSearchScope
-    /// The chosen folder as a path PREFIX (`Strands/`), or nil for no folder narrowing.
-    /// Stored with the trailing slash already on, which is the whole reason `Work` cannot
-    /// match `Workshop/`.
+    /// The folders the Vault tab is narrowed to, each exact or with its subfolders, or
+    /// empty for no folder narrowing. `VaultFolderSelection` adds the trailing slash,
+    /// which is the whole reason `Work` cannot match `Workshop/`.
     ///
     /// Held on the searcher rather than passed to each call, exactly as `scope` is, and
     /// for a reason worth more than the symmetry: `search(_:expander:)` widens by calling
@@ -177,33 +177,38 @@ public struct VaultSearcher: Sendable {
     /// be supplied to the typed query and forgotten on the widening — and an alternate
     /// term would quietly return notes from outside the folder the screen says it is
     /// showing. Held here, that bug cannot be written.
-    private let folderPrefix: String?
+    private let folders: VaultFolderSelection
     /// The one strand note the Strands scope is narrowed to, as a vault relative path,
-    /// or nil for every strand. Held here for `folderPrefix`'s reason.
+    /// or nil for every strand. Held here for `folders`' reason.
     private let strandPath: String?
 
     public init(index: VaultIndex, expansionThreshold: Int = 5, limit: Int = 50,
-                scope: VaultSearchScope = .all, folder: String? = nil,
+                scope: VaultSearchScope = .all,
+                folders: VaultFolderSelection = VaultFolderSelection(),
                 strand: String? = nil) {
         self.index = index
         self.expansionThreshold = expansionThreshold
         self.limit = limit
         self.scope = scope
-        self.folderPrefix = folder.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        self.folders = folders
         self.strandPath = strand
     }
 
-    /// Whether one path survives every narrowing. The scope and the folder are set
+    /// Whether one path survives every narrowing. The scope and the folders are set
     /// exclusively by the screen today, but nothing here depends on that.
     private func includes(_ path: String) -> Bool {
         if let strandPath, path != strandPath { return false }
-        if let folderPrefix, !path.hasPrefix(folderPrefix) { return false }
-        return scope.includes(path)
+        return folders.includes(path) && scope.includes(path)
     }
 
     /// The prefix the SQL is narrowed by: the strand's own path when one is held (a path
-    /// ending `.md` is a prefix of nothing but itself), else the folder, else the scope.
-    private var sqlPrefix: String? { strandPath ?? folderPrefix ?? scope.pathPrefix }
+    /// ending `.md` is a prefix of nothing but itself), else the scope.
+    private var sqlPrefix: String? { strandPath ?? scope.pathPrefix }
+
+    /// Every narrowing this searcher holds, as the one filter the index binds into SQL.
+    private func filter(prefix: String?, archive: VaultArchiveFilter = .any) -> VaultPathFilter {
+        VaultPathFilter(prefix: prefix, folders: folders, archive: archive)
+    }
 
     /// **One section, as lines**: every line under `section` that answers `query`, one
     /// row each and NOT collapsed by file, in `VaultStrandRecord.ordered`'s order. With
@@ -216,7 +221,7 @@ public struct VaultSearcher: Sendable {
     /// small folder read in full.
     public func sectionLines(_ query: String, section: VaultStrandSection) -> [VaultSectionLine] {
         let prefix = sqlPrefix ?? VaultStrandRecord.folder
-        let chunks = index.chunks(underPrefix: prefix).filter { includes($0.path) }
+        let chunks = index.chunks(filter: filter(prefix: prefix)).filter { includes($0.path) }
         guard let expression = VaultSearchQuery.matchExpression(query) else {
             return VaultStrandRecord.log(chunks, section: section)
         }
@@ -224,7 +229,7 @@ public struct VaultSearcher: Sendable {
         // after SQL, and a cap before it would drop a decision because some other
         // section of the same notes ranked higher.
         let matched = index.search(expression: expression, limit: max(chunks.count, limit),
-                                   underPrefix: prefix)
+                                   filter: filter(prefix: prefix))
         var scores: [String: Double] = [:]
         for hit in matched where includes(hit.path) {
             scores["\(hit.path)#\(hit.line)"] = hit.score
@@ -245,12 +250,21 @@ public struct VaultSearcher: Sendable {
         // Ask for more rows than will be shown, because collapsing to one hit per file
         // and re-ranking both happen after SQL: taking exactly `limit` from SQLite would
         // mean a file's second-best chunk crowding out another file's only one.
-        let raw = index.search(expression: expression, limit: limit * 4,
-                               underPrefix: sqlPrefix)
-            .filter { includes($0.path) }
-        let ranked = VaultSearchQuery.ranked(VaultSearchQuery.collapsedByFile(raw),
-                                             tokens: tokens, limit: limit)
-        return VaultSearchOutcome(hits: ranked,
+        func ranked(_ archive: VaultArchiveFilter) -> [VaultSearchHit] {
+            let raw = index.search(expression: expression, limit: limit * 4,
+                                   filter: filter(prefix: sqlPrefix, archive: archive))
+                .filter { includes($0.path) }
+            return VaultSearchQuery.ranked(VaultSearchQuery.collapsedByFile(raw),
+                                           tokens: tokens, limit: limit)
+        }
+        // UNDER A FOLDER SELECTION, LIVE NOTES RANK BEFORE ARCHIVED ONES: demoted, never
+        // dropped, as the offline answerer does. Two queries rather than one sorted after
+        // the fact, so an archive whose chunks fill the scan cannot push a live note out
+        // of it — the recents list's rule, applied to a typed search.
+        let hits = folders.isEmpty
+            ? ranked(.any)
+            : Array((ranked(.live) + ranked(.archived)).prefix(limit))
+        return VaultSearchOutcome(hits: hits,
                                   baseDuration: Date().timeIntervalSince(started))
     }
 
@@ -258,7 +272,7 @@ public struct VaultSearcher: Sendable {
     ///
     /// The chat retrieval path's one query. It lives here rather than in the retriever
     /// so the scope and folder narrowing this type holds apply to it too, for the reason
-    /// `folderPrefix` gives.
+    /// `folders` gives.
     ///
     /// Uncollapsed on purpose: collapsing to one hit per file keeps each file's best
     /// chunk BY BM25, and the caller is about to re-rank by how many concepts a chunk
@@ -272,7 +286,7 @@ public struct VaultSearcher: Sendable {
     /// A ready-made FTS5 expression, under the same scope as every other search here.
     /// For a caller that has built one (`LookupPlan.subjectExpression`).
     public func matching(expression: String, limit scanLimit: Int) -> [VaultSearchHit] {
-        index.search(expression: expression, limit: scanLimit, underPrefix: sqlPrefix)
+        index.search(expression: expression, limit: scanLimit, filter: filter(prefix: sqlPrefix))
             .filter { includes($0.path) }
     }
 
@@ -304,7 +318,15 @@ public struct VaultSearcher: Sendable {
                 added.append(hit)
             }
         }
-        return VaultSearchOutcome(hits: Array((outcome.hits + added).prefix(limit)),
+        // The widening keeps the folder selection's archive rule: under a selection, a
+        // live note an alternate term found still ranks ahead of an archived one the
+        // typed query found. The typed query's hits keep their order among themselves.
+        let union = outcome.hits + added
+        let ordered = folders.isEmpty
+            ? union
+            : union.filter { !VaultArchive.isArchived($0.path) }
+                + union.filter { VaultArchive.isArchived($0.path) }
+        return VaultSearchOutcome(hits: Array(ordered.prefix(limit)),
                                   expansionTerms: contributed,
                                   baseDuration: outcome.baseDuration)
     }

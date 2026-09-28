@@ -181,7 +181,7 @@ final class VaultSearchTests: XCTestCase {
             ("Bicycle/Oven.md", "# Oven\n\nThe bread oven is separate.\n"),
         ])
         let expander = FakeExpander(terms: ["oven"])
-        let searcher = VaultSearcher(index: index, folder: "Strands")
+        let searcher = VaultSearcher(index: index, folders: VaultFolderSelection(folder: "Strands"))
 
         let outcome = await searcher.search("kiln", expander: expander)
 
@@ -215,9 +215,9 @@ final class VaultSearchTests: XCTestCase {
             ("Workshop/Kiln.md", "# Kiln\n\nThe bisque schedule.\n"),
         ])
 
-        XCTAssertEqual(VaultSearcher(index: index, folder: "Work").base("bisque")
+        XCTAssertEqual(VaultSearcher(index: index, folders: VaultFolderSelection(folder: "Work")).base("bisque")
                         .hits.map(\.path), ["Work/Bench.md"])
-        XCTAssertEqual(VaultSearcher(index: index, folder: "Workshop").base("bisque")
+        XCTAssertEqual(VaultSearcher(index: index, folders: VaultFolderSelection(folder: "Workshop")).base("bisque")
                         .hits.map(\.path), ["Workshop/Kiln.md"])
     }
 

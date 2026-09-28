@@ -278,19 +278,32 @@ public final class VaultIndex: @unchecked Sendable {
     /// bound as a parameter and matched with `LIKE … ESCAPE`, so a folder name carrying
     /// a `%` or a `_` cannot widen the query.
     public func recentFiles(limit: Int = 30, underPrefix prefix: String?) -> [VaultIndexedFile] {
+        recentFiles(limit: limit, filter: VaultPathFilter(prefix: prefix))
+    }
+
+    /// The same, narrowed to a folder selection and one side of the archive line — the
+    /// Vault tab's folder filter. Live and archived notes are asked for separately, each
+    /// with its own `LIMIT`, so a large archive can never crowd a live note out.
+    public func recentFiles(limit: Int = 30, in folders: VaultFolderSelection,
+                            archive: VaultArchiveFilter = .any) -> [VaultIndexedFile] {
+        recentFiles(limit: limit, filter: VaultPathFilter(folders: folders, archive: archive))
+    }
+
+    /// Every narrowing in the query, bound, for the reason above.
+    public func recentFiles(limit: Int = 30, filter: VaultPathFilter) -> [VaultIndexedFile] {
         locked {
             var out: [VaultIndexedFile] = []
-            let sql = prefix == nil
-                ? "SELECT path, title, mtime, size FROM files ORDER BY mtime DESC LIMIT ?;"
-                : "SELECT path, title, mtime, size FROM files WHERE path LIKE ? ESCAPE '\\' ORDER BY mtime DESC LIMIT ?;"
+            let predicate = filter.sql("path")
+            let clause = predicate.map { "WHERE \($0.clause) " } ?? ""
+            let sql = "SELECT path, title, mtime, size FROM files \(clause)ORDER BY mtime DESC LIMIT ?;"
             guard let stmt = try? prepare(sql) else { return [] }
             defer { sqlite3_finalize(stmt) }
-            if let prefix {
-                bind(stmt, 1, Self.likePrefix(prefix))
-                sqlite3_bind_int(stmt, 2, Int32(limit))
-            } else {
-                sqlite3_bind_int(stmt, 1, Int32(limit))
+            var slot: Int32 = 1
+            for argument in predicate?.arguments ?? [] {
+                bind(stmt, slot, argument)
+                slot += 1
             }
+            sqlite3_bind_int(stmt, slot, Int32(limit))
             while sqlite3_step(stmt) == SQLITE_ROW {
                 out.append(VaultIndexedFile(
                     path: text(stmt, 0), title: text(stmt, 1),
@@ -455,9 +468,24 @@ public final class VaultIndex: @unchecked Sendable {
     /// `LIMIT 50` would answer a scoped question with an unscoped top fifty.
     public func search(expression: String, limit: Int = 50,
                        underPrefix prefix: String?) -> [VaultSearchHit] {
+        search(expression: expression, limit: limit, filter: VaultPathFilter(prefix: prefix))
+    }
+
+    /// The same, narrowed to a folder selection and one side of the archive line.
+    public func search(expression: String, limit: Int = 50, in folders: VaultFolderSelection,
+                       archive: VaultArchiveFilter = .any) -> [VaultSearchHit] {
+        search(expression: expression, limit: limit,
+               filter: VaultPathFilter(folders: folders, archive: archive))
+    }
+
+    /// Every narrowing in the query, bound: filtering after `LIMIT` would answer a
+    /// narrowed question with an unnarrowed top N.
+    public func search(expression: String, limit: Int = 50,
+                       filter: VaultPathFilter) -> [VaultSearchHit] {
         locked {
             var out: [VaultSearchHit] = []
-            let scope = prefix == nil ? "" : "   AND c.path LIKE ? ESCAPE '\\'\n"
+            let predicate = filter.sql("c.path")
+            let scope = predicate.map { "   AND \($0.clause)\n" } ?? ""
             let sql = """
                 SELECT c.path, c.title, c.heading, c.line_start,
                        snippet(chunk_fts, 0, ?, ?, '…', 14),
@@ -473,12 +501,12 @@ public final class VaultIndex: @unchecked Sendable {
             bind(stmt, 1, VaultSearchHit.markStart)
             bind(stmt, 2, VaultSearchHit.markEnd)
             bind(stmt, 3, expression)
-            if let prefix {
-                bind(stmt, 4, Self.likePrefix(prefix))
-                sqlite3_bind_int(stmt, 5, Int32(limit))
-            } else {
-                sqlite3_bind_int(stmt, 4, Int32(limit))
+            var slot: Int32 = 4
+            for argument in predicate?.arguments ?? [] {
+                bind(stmt, slot, argument)
+                slot += 1
             }
+            sqlite3_bind_int(stmt, slot, Int32(limit))
             while sqlite3_step(stmt) == SQLITE_ROW {
                 out.append(VaultSearchHit(path: text(stmt, 0),
                                           title: text(stmt, 1),
@@ -495,16 +523,32 @@ public final class VaultIndex: @unchecked Sendable {
     /// the Strands scope's section view splits into lines. Unranked and unlimited on
     /// purpose, so it is only asked of a small folder; `Strands/` is a few hundred chunks.
     public func chunks(underPrefix prefix: String) -> [VaultStoredChunk] {
+        chunks(filter: VaultPathFilter(prefix: prefix))
+    }
+
+    /// The same, narrowed to a folder selection and one side of the archive line.
+    public func chunks(in folders: VaultFolderSelection,
+                       archive: VaultArchiveFilter = .any) -> [VaultStoredChunk] {
+        chunks(filter: VaultPathFilter(folders: folders, archive: archive))
+    }
+
+    /// Every chunk the filter admits. Unlimited, so only for a narrow filter.
+    public func chunks(filter: VaultPathFilter) -> [VaultStoredChunk] {
         locked {
             var out: [VaultStoredChunk] = []
+            let predicate = filter.sql("path")
+            let clause = predicate.map { " WHERE \($0.clause)" } ?? ""
             let sql = """
-                SELECT path, title, heading, line_start, body FROM chunks
-                 WHERE path LIKE ? ESCAPE '\\'
+                SELECT path, title, heading, line_start, body FROM chunks\(clause)
                  ORDER BY path, line_start;
                 """
             guard let stmt = try? prepare(sql) else { return [] }
             defer { sqlite3_finalize(stmt) }
-            bind(stmt, 1, Self.likePrefix(prefix))
+            var slot: Int32 = 1
+            for argument in predicate?.arguments ?? [] {
+                bind(stmt, slot, argument)
+                slot += 1
+            }
             while sqlite3_step(stmt) == SQLITE_ROW {
                 out.append(VaultStoredChunk(path: text(stmt, 0), title: text(stmt, 1),
                                             heading: text(stmt, 2),

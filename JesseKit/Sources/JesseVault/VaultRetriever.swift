@@ -195,7 +195,7 @@ public struct VaultRetriever: Sendable {
     /// The one directory that is never retrieved from, with its whole subtree.
     public static let excludedPrefix = "Inbox/"
     /// The directory name that means finished work, anywhere in a path.
-    public static let archiveSegment = "archive"
+    public static let archiveSegment = VaultArchive.segment
 
     private let index: VaultIndex
     private let expander: any VaultQueryExpanding
@@ -448,14 +448,10 @@ public struct VaultRetriever: Sendable {
     /// that report conclude"), so they stay retrievable and simply queue behind every live
     /// note.
     ///
-    /// The test is a PATH SEGMENT, not a substring, for `allowed`'s reason: a note called
-    /// `Archive-Policy.md` is not archived, and neither is `Workshop/archive.md`. Only
-    /// directory components count, folded for case because the same folder is spelled both
-    /// ways across a vault this old.
+    /// The test is `VaultArchive.isArchived`, the one the Vault tab folds its Archived
+    /// section by, so the two can never disagree about what is finished.
     public static func isArchived(_ path: String) -> Bool {
-        path.split(separator: "/").dropLast().contains {
-            $0.caseInsensitiveCompare(archiveSegment) == .orderedSame
-        }
+        VaultArchive.isArchived(path)
     }
 
     /// The lexical order — `byConcept`'s, which the caller has already applied — and the

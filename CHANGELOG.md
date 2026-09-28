@@ -14,6 +14,28 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.158.0] - 2026-09-28
+
+**Every deploy was a new app to macOS, so privacy grants did not survive a deploy.** Root
+cause: the sentinel installed each build with the linker's ad hoc signature, which gives
+every build a new code identity (`Signature=adhoc`, `Identifier=jesse_bridge-<hash>`).
+macOS keys Local Network and Full Disk Access grants to that identity, so each deploy added
+another jesse-bridge row to the Local Network list (about twenty on the Studio) and could
+lose LAN access until someone clicked Allow at the screen.
+
+- **The deploy signs every staged binary** with a configured identity, after the build and
+  before the symlink swap: `codesign -f -s <identity> -i <identifier>`, then `codesign -v`.
+  The bridge's identifier is its launchd label (`JESSE_SENTINEL_LABEL_BRIDGE`);
+  every other binary is `<label>.<name>`. A signing or verification failure (or a
+  `codesign` that runs past 60 s, which is what a keychain waiting on a prompt looks like)
+  fails the deploy in the stage phase with every symlink still on the old build.
+- **The identity is configuration**: `JESSE_SENTINEL_CODESIGN_IDENTITY`, else the first line
+  of `~/.jesse-sentinel/codesign-identity`. Unset, the deploy says in its log that it is
+  shipping ad hoc binaries.
+- Tests at the sentinel's layer, through a `codesign` shim: a configured identity signs and
+  verifies every binary under the right identifier, and a failure of either the sign or
+  the verify step aborts before the swap, the rollback record and the restart.
+
 ## [App 1.0 (182)] - 2026-09-28
 
 **Picking a folder on the Vault tab showed its archive, not its notes.** The folder filter

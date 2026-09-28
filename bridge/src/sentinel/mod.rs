@@ -158,6 +158,9 @@ pub struct Bins {
     /// The deploy verb's compiler. `cargo` is on nobody's launchd PATH, so the rustup shim's
     /// usual home is in the fallbacks — and `JESSE_SENTINEL_CARGO_BIN` pins it outright.
     pub cargo: Option<PathBuf>,
+    /// The deploy verb's signer. Always `/usr/bin/codesign` on a Mac; `None` elsewhere, which
+    /// only matters when a signing identity is configured, and then the deploy fails.
+    pub codesign: Option<PathBuf>,
 }
 
 impl Bins {
@@ -187,6 +190,7 @@ impl Bins {
                     env_string("HOME").unwrap_or_default()
                 )],
             ),
+            codesign: resolve_bin("codesign", &["/usr/bin/codesign"]),
         };
         let mut missing = Vec::new();
         for (name, found) in [
@@ -198,6 +202,7 @@ impl Bins {
             ("qmd", bins.qmd.is_some()),
             ("node", bins.node.is_some()),
             ("cargo", bins.cargo.is_some()),
+            ("codesign", bins.codesign.is_some()),
         ] {
             if !found {
                 missing.push(name);
@@ -293,6 +298,13 @@ pub struct SentinelConfig {
     /// host boots the bridge in a couple of seconds, a loaded one takes longer, and the value
     /// decides whether a slow boot is read as a failure and rolled back.
     pub deploy_health_timeout: Duration,
+    /// The code signing identity every deployed binary is signed with (a SHA-1 hash from
+    /// `security find-identity -v -p codesigning`, or its full name). `None` leaves the
+    /// linker's ad hoc signature, which gives every deploy a NEW code identity: macOS then
+    /// treats each build as a different app, and its Local Network and Full Disk Access
+    /// grants do not carry over. Read from `JESSE_SENTINEL_CODESIGN_IDENTITY`, else from
+    /// [`SentinelConfig::codesign_identity_file`], so it can be set without editing the plist.
+    pub codesign_identity: Option<String>,
 }
 
 impl SentinelConfig {
@@ -323,6 +335,12 @@ impl SentinelConfig {
     /// `<state_dir>/state.json` — the watchdog's memory across restarts.
     pub fn state_file(&self) -> PathBuf {
         self.state_dir.join("state.json")
+    }
+
+    /// `<state_dir>/codesign-identity` — the signing identity, one line, when the environment
+    /// does not name one.
+    pub fn codesign_identity_file(&self) -> PathBuf {
+        self.state_dir.join("codesign-identity")
     }
 
     /// `<state_dir>/sentinel.log` — the verb audit trail.
@@ -379,6 +397,12 @@ impl SentinelConfig {
                 parse_plist_string_key(&xml, "StandardOutPath").map(PathBuf::from)
             });
 
+        let state_dir = env_string("JESSE_SENTINEL_STATE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".jesse-sentinel"));
+        let codesign_identity = env_string("JESSE_SENTINEL_CODESIGN_IDENTITY")
+            .or_else(|| read_codesign_identity(&state_dir.join("codesign-identity")));
+
         Ok(SentinelConfig {
             bind: env_string("JESSE_SENTINEL_BIND").unwrap_or_else(|| "127.0.0.1".to_string()),
             port: env_parse("JESSE_SENTINEL_PORT", DEFAULT_SENTINEL_PORT),
@@ -388,9 +412,7 @@ impl SentinelConfig {
                 .unwrap_or_else(|| "http://127.0.0.1:8765".to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            state_dir: env_string("JESSE_SENTINEL_STATE_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".jesse-sentinel")),
+            state_dir,
             bridge_plist,
             uid: current_uid(),
             labels,
@@ -421,8 +443,20 @@ impl SentinelConfig {
             vault_repo,
             bridge_state_dir,
             autocommit_log,
+            codesign_identity,
         })
     }
+}
+
+/// The first non-blank, non-`#` line of the identity file, trimmed. A missing or empty file
+/// is `None`: signing is off, and every deploy says so in its log.
+pub fn read_codesign_identity(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
 }
 
 /// The two tokens must be DISJOINT.
@@ -904,6 +938,7 @@ mod tests {
             github_repo: "example/example".to_string(),
             ci_job: CI_JOB_NAME.to_string(),
             deploy_health_timeout: DEPLOY_HEALTH_TIMEOUT,
+            codesign_identity: None,
         }
     }
 }

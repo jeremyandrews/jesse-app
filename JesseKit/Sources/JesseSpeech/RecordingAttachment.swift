@@ -81,6 +81,47 @@ public struct RecordingSource: Equatable, Sendable {
     }
 }
 
+/// What makes a run DURABLE: it belongs to a conversation, is written down in a store from
+/// the moment the language is confirmed, and is sent through the Studio path that can name
+/// its upload and be resumed by id. The iPhone's runs are all durable; the Mac's are not,
+/// and behave exactly as they always have.
+public struct DurableRecordingRun: Sendable {
+    public let conversationID: UUID
+    public let store: TranscriptionRunStore
+    public let studio: StudioFirstTranscriber
+
+    public init(conversationID: UUID, store: TranscriptionRunStore, studio: StudioFirstTranscriber) {
+        self.conversationID = conversationID
+        self.store = store
+        self.studio = studio
+    }
+}
+
+/// How a durable run ended, for whoever keeps it.
+public enum RecordingRunEnding: Equatable, Sendable {
+    /// `completed` holds the transcript.
+    case completed
+    /// `errorMessage` holds the sentence.
+    case failed(String)
+    case cancelled
+}
+
+/// What a durable run tells its keeper, on the main actor.
+@MainActor
+public struct RecordingRunEvents {
+    public var started: (TranscriptionRunRecord) -> Void = { _ in }
+    /// The record changed: the Studio answered the upload.
+    public var updated: (TranscriptionRunRecord) -> Void = { _ in }
+    public var progressed: (TranscriptionRunRecord, TranscriptionUpdate) -> Void = { _, _ in }
+    /// The run needs this device's engine and the app is in the background, so it waits.
+    public var waitingForApp: (TranscriptionRunRecord, String) -> Void = { _, _ in }
+    /// Called BEFORE the run's audio and record are deleted, so a completed transcript can
+    /// be delivered first.
+    public var ended: (TranscriptionRunRecord, RecordingRunEnding) -> Void = { _, _ in }
+
+    public init() {}
+}
+
 @MainActor
 @Observable
 public final class RecordingAttachment {
@@ -137,6 +178,13 @@ public final class RecordingAttachment {
     private let readLastLanguage: @Sendable () -> String?
     private let writeLastLanguage: @Sendable (String) -> Void
 
+    /// Set for the iPhone's runs, which outlive their screen; nil for the Mac's.
+    public let durable: DurableRecordingRun?
+    /// What this run tells its keeper. Set by `RecordingRuns`.
+    var events = RecordingRunEvents()
+    /// The durable run's record, while one is in flight.
+    public private(set) var record: TranscriptionRunRecord?
+
     private var source: RecordingSource?
     private var work: Task<Void, Never>?
     /// Bumped every time a run ends. Callbacks carry the generation they were started
@@ -155,8 +203,10 @@ public final class RecordingAttachment {
                 readLastLanguage: @escaping @Sendable () -> String?
                     = { UserDefaults.standard.string(forKey: RecordingAttachment.lastLanguageKey) },
                 writeLastLanguage: @escaping @Sendable (String) -> Void
-                    = { UserDefaults.standard.set($0, forKey: RecordingAttachment.lastLanguageKey) }) {
-        self.transcriber = transcriber
+                    = { UserDefaults.standard.set($0, forKey: RecordingAttachment.lastLanguageKey) },
+                durable: DurableRecordingRun? = nil) {
+        self.durable = durable
+        self.transcriber = durable?.studio ?? transcriber
         self.probe = probe
         self.workingCopy = workingCopy
         self.handoffStore = handoffStore
@@ -267,6 +317,11 @@ public final class RecordingAttachment {
         let language = TranscriptionLocalePolicy.displayName(locale)
         stage = .running(TranscriptionUpdate(phase: .preparing, fraction: 0))
 
+        if let durable {
+            startDurable(durable, source: source, locale: locale, language: language)
+            return
+        }
+
         let transcriber = self.transcriber
         let url = source.workingURL
         let name = source.displayName
@@ -305,6 +360,116 @@ public final class RecordingAttachment {
     private func advance(_ update: TranscriptionUpdate, run: Int) {
         guard run == generation, case .running = stage else { return }
         stage = .running(update)
+        if let record { events.progressed(record, update) }
+    }
+
+    // MARK: - Durable runs
+
+    /// Write the run down and start it. The working copy is MOVED into the store, so the
+    /// one copy of the audio is the store's from here until the run ends; a share hand-off
+    /// has done its job and is discarded now rather than at the end.
+    private func startDurable(_ durable: DurableRecordingRun, source: RecordingSource,
+                              locale: Locale, language: String) {
+        let id = UUID()
+        let fileName: String
+        do {
+            fileName = try durable.store.adopt(moving: source.workingURL, id: id)
+        } catch {
+            fail(.unreadableFile, named: source.displayName, run: generation)
+            return
+        }
+        if let handoff = source.handoff { handoffStore?.discard(handoff) }
+        let record = TranscriptionRunRecord(id: id,
+                                            conversationID: durable.conversationID,
+                                            sourceName: source.displayName,
+                                            durationSeconds: source.durationSeconds,
+                                            language: language,
+                                            localeIdentifier: locale.identifier,
+                                            audioFileName: fileName)
+        self.source = RecordingSource(displayName: source.displayName,
+                                      workingURL: durable.store.audioURL(for: record),
+                                      durationSeconds: source.durationSeconds)
+        durable.store.save(record)
+        self.record = record
+        events.started(record)
+        runDurable(durable, record: record, locale: locale)
+    }
+
+    /// Pick up a run a previous process started. Nothing is asked of the owner: the language
+    /// was chosen then, and the audio is in the store.
+    public func resume(_ record: TranscriptionRunRecord) {
+        guard let durable, stage == .idle else { return }
+        errorMessage = nil
+        notice = nil
+        sourceName = record.sourceName
+        source = RecordingSource(displayName: record.sourceName,
+                                 workingURL: durable.store.audioURL(for: record),
+                                 durationSeconds: record.durationSeconds)
+        self.record = record
+        stage = .running(TranscriptionUpdate(phase: record.studioRunID == nil ? .uploading : .queued,
+                                             fraction: 0, engine: StudioFirstTranscriber.studioName))
+        guard FileManager.default.fileExists(atPath: durable.store.audioURL(for: record).path) else {
+            fail(.unreadableFile, named: record.sourceName, run: generation)
+            return
+        }
+        runDurable(durable, record: record, locale: Locale(identifier: record.localeIdentifier))
+    }
+
+    private func runDurable(_ durable: DurableRecordingRun, record: TranscriptionRunRecord, locale: Locale) {
+        let studio = durable.studio
+        let url = durable.store.audioURL(for: record)
+        let name = record.sourceName
+        let language = record.language
+        let run = generation
+        let options = StudioUploadOptions(tag: record.id.uuidString,
+                                          conversationID: record.conversationID.uuidString,
+                                          notify: true)
+        work = Task { [weak self] in
+            let onProgress: @Sendable (TranscriptionUpdate) -> Void = { update in
+                Task { @MainActor in self?.advance(update, run: run) }
+            }
+            let hooks = StudioRunHooks(
+                onAccepted: { status in Task { @MainActor in self?.accepted(status, run: run) } },
+                onWaitingForApp: { why in Task { @MainActor in self?.waiting(why, run: run) } })
+            do {
+                let result: TranscriptionResult
+                if let runID = record.studioRunID {
+                    result = try await studio.resume(runID: runID, fileAt: url, locale: locale,
+                                                     hooks: hooks, onProgress: onProgress)
+                } else {
+                    result = try await studio.transcribe(fileAt: url, locale: locale, options: options,
+                                                         hooks: hooks, onProgress: onProgress)
+                }
+                self?.succeed(result, language: language, run: run)
+            } catch let failure as TranscriptionFailure {
+                self?.fail(failure, named: name, run: run)
+            } catch is CancellationError {
+                self?.fail(.cancelled, named: name, run: run)
+            } catch {
+                self?.fail(.engineFailed(reason: error.localizedDescription), named: name, run: run)
+            }
+        }
+    }
+
+    /// The Studio answered the upload: write its id down, so a relaunch follows this run
+    /// rather than sending the recording again.
+    private func accepted(_ status: StudioRunStatus, run: Int) {
+        guard run == generation, var record, let durable else { return }
+        record.studioRunID = status.id
+        record.bridgeWillPush = status.notify ?? false
+        durable.store.save(record)
+        self.record = record
+        events.updated(record)
+    }
+
+    private func waiting(_ why: String, run: Int) {
+        guard run == generation, let record else { return }
+        events.waitingForApp(record, why)
+    }
+
+    /// Show a failure that happened while nobody was looking (restored from the store).
+    func present(error message: String) {
+        errorMessage = message
     }
 
     /// The user's Cancel. Stops the engine and deletes the audio; says nothing, because
@@ -312,13 +477,13 @@ public final class RecordingAttachment {
     public func cancel() {
         work?.cancel()
         work = nil
-        settle()
+        settle(.cancelled)
     }
 
     /// The language sheet dismissed without choosing: the same disposal as a cancel.
     public func abandon() {
         guard case .choosingLanguage = stage else { return }
-        settle()
+        settle(.cancelled)
     }
 
     public func dismissError() { errorMessage = nil }
@@ -347,7 +512,7 @@ public final class RecordingAttachment {
         // as long as the user wants to see it.
         notice = result.notice
         work = nil
-        settle()
+        settle(.completed)
     }
 
     private func fail(_ failure: TranscriptionFailure, named name: String, run: Int) {
@@ -355,13 +520,21 @@ public final class RecordingAttachment {
         // A cancel is a decision, not a fault: it deletes the audio and says nothing.
         if failure != .cancelled { errorMessage = failure.message(sourceName: name) }
         work = nil
-        settle()
+        settle(failure == .cancelled ? .cancelled : .failed(failure.message(sourceName: name)))
     }
 
     /// The ONE way a run ends. Deletes the working copy and the hand-off, then returns
     /// to idle. Every terminal path goes through here, which is what makes "no copy of
     /// the audio remains on disk" a property of the type rather than a habit.
-    private func settle() {
+    ///
+    /// A durable run first tells its keeper how it ended (so a transcript is delivered while
+    /// its record still exists), then its record and its audio are deleted from the store.
+    private func settle(_ ending: RecordingRunEnding) {
+        if let record, let durable {
+            events.ended(record, ending)
+            durable.store.remove(record)
+            self.record = nil
+        }
         if let source {
             workingCopy.remove(source.workingURL)
             if let handoff = source.handoff { handoffStore?.discard(handoff) }

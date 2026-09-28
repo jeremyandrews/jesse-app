@@ -4,6 +4,7 @@ import SwiftData
 import JesseCore
 import JesseConversations
 import JesseSearch
+import JesseSpeech
 
 // Root screen: the list of conversations, newest first. Tapping one opens it;
 // `+` starts a fresh one. Starting several and letting them run at once is just
@@ -655,7 +656,8 @@ struct ThreadListView: View {
         where thread.turns.isEmpty && thread.sessionId == nil
                 && thread.id != onScreen
                 && ComposerDraftStore.shared.mayReap(thread.id)
-                && !coordinator.isRunning(thread.id) {
+                && !coordinator.isRunning(thread.id)
+                && !RecordingRunService.shared.runs.isInFlight(thread.id) {
             ComposerDraftStore.shared.delete(thread.id)
             context.delete(thread)
             changed = true

@@ -94,14 +94,18 @@ public struct StudioRunStatus: Decodable, Sendable, Equatable {
     public let disagreements: [Disagreement]
     public let notes: [String]
     public let error: Failure?
+    /// On the upload's answer only: whether the bridge will push this run's ending to the
+    /// device. Nil from a bridge that predates the push, which is the same as false.
+    public let notify: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case id, state, phase, fraction, engine, transcript, engines, disagreements, notes, error
+        case id, state, phase, fraction, engine, transcript, engines, disagreements, notes, error, notify
     }
 
     public init(id: String, state: String, phase: String, fraction: Double = 0,
                 engine: String? = nil, transcript: String? = nil, engines: [Engine] = [],
-                disagreements: [Disagreement] = [], notes: [String] = [], error: Failure? = nil) {
+                disagreements: [Disagreement] = [], notes: [String] = [], error: Failure? = nil,
+                notify: Bool? = nil) {
         self.id = id
         self.state = state
         self.phase = phase
@@ -112,6 +116,7 @@ public struct StudioRunStatus: Decodable, Sendable, Equatable {
         self.disagreements = disagreements
         self.notes = notes
         self.error = error
+        self.notify = notify
     }
 
     /// Lenient in everything but identity, so a bridge that adds a field or omits an empty
@@ -128,6 +133,7 @@ public struct StudioRunStatus: Decodable, Sendable, Equatable {
         disagreements = try c.decodeIfPresent([Disagreement].self, forKey: .disagreements) ?? []
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
         error = try c.decodeIfPresent(Failure.self, forKey: .error)
+        notify = try c.decodeIfPresent(Bool.self, forKey: .notify)
     }
 }
 
@@ -139,6 +145,9 @@ public enum StudioTransportError: Error, Equatable, Sendable {
     case refused(String)
     /// A poll went unanswered. The run may still be going. → Keep asking, within limits.
     case lostContact(String)
+    /// The Studio answered that it no longer has the run: it restarted, or the result
+    /// expired. The recording is still on this device. → Read it here.
+    case gone(String)
 
     /// Sort the bridge's answer to an UPLOAD.
     public static func forUpload(status: Int, body: String) -> StudioTransportError {
@@ -163,15 +172,57 @@ public enum StudioTransportError: Error, Equatable, Sendable {
     }
 }
 
+/// What an upload says about itself beyond the audio: which run it is on this device, and
+/// who the bridge should tell when it ends.
+public struct StudioUploadOptions: Sendable, Equatable {
+    /// This device's own id for the run. It names the upload so the run can be found again
+    /// after the app was suspended or relaunched mid-upload.
+    public var tag: String?
+    /// The conversation the recording was attached in, echoed in the completion push.
+    public var conversationID: String?
+    /// Ask the bridge to push the run's ending to this device.
+    public var notify: Bool
+
+    public init(tag: String? = nil, conversationID: String? = nil, notify: Bool = false) {
+        self.tag = tag
+        self.conversationID = conversationID
+        self.notify = notify
+    }
+
+    /// An upload that asks for nothing: exactly the request an older app sends.
+    public static let plain = StudioUploadOptions()
+}
+
 /// The seam between the transcriber and the network, so the whole Studio path — the
 /// upload, the polling, the fallback — is tested against a fake.
 public protocol StudioTranscriptionTransport: Sendable {
     /// Send the recording. The ONLY call that carries audio.
     func upload(fileAt url: URL, contentType: String, language: String,
                 onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus
+    /// Send the recording, naming it and asking for a completion push. Defaults to the plain
+    /// upload, which is what a transport without a background session does.
+    func upload(fileAt url: URL, contentType: String, language: String, options: StudioUploadOptions,
+                onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus
+    /// An upload started by an earlier run of this process (or one that was suspended since),
+    /// found by its tag: its answer if it finished, or nil when no such upload exists and the
+    /// recording has to be sent again.
+    func reattachUpload(tag: String,
+                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus?
     func status(id: String) async throws -> StudioRunStatus
     /// Best effort: the run is abandoned either way.
     func cancel(id: String) async
+}
+
+public extension StudioTranscriptionTransport {
+    func upload(fileAt url: URL, contentType: String, language: String, options: StudioUploadOptions,
+                onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus {
+        try await upload(fileAt: url, contentType: contentType, language: language, onProgress: onProgress)
+    }
+
+    func reattachUpload(tag: String,
+                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus? {
+        nil
+    }
 }
 
 /// The type the bridge expects for a recording with this extension, or nil for one the
@@ -199,11 +250,17 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
 
     private let endpoint: EndpointProvider
     private let session: URLSession
+    /// Where the audio goes out from, when not the ordinary session: the iPhone's background
+    /// session, which keeps sending while the app is suspended and hands the answer back
+    /// after a relaunch. Status polls and cancels stay on `session` either way.
+    private let uploader: (any StudioAudioUploading)?
 
     public init(endpoint: @escaping EndpointProvider,
-                session: URLSession = URLSessionStudioTransport.defaultSession) {
+                session: URLSession = URLSessionStudioTransport.defaultSession,
+                uploader: (any StudioAudioUploading)? = nil) {
         self.endpoint = endpoint
         self.session = session
+        self.uploader = uploader
     }
 
     /// An upload may take minutes over a slow link, so the RESOURCE bound is hours; but it
@@ -218,11 +275,22 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
     }()
 
     /// THE ONE REQUEST THAT CARRIES AUDIO. Its destination is the paired bridge's own
-    /// transcription route and nothing else; a test pins that.
+    /// transcription route and nothing else; a test pins that, for both sessions that send it.
+    ///
+    /// `options` adds only the completion push's two fields, and only when asked: a plain
+    /// upload is byte for byte the request an older app sends, which an older bridge takes.
     public static func uploadRequest(endpoint: StudioEndpoint, language: String,
-                                     contentType: String) -> URLRequest {
+                                     contentType: String,
+                                     options: StudioUploadOptions = .plain) -> URLRequest {
+        var query = [URLQueryItem(name: "language", value: language)]
+        if options.notify {
+            query.append(URLQueryItem(name: "notify", value: "1"))
+            if let conversation = options.conversationID {
+                query.append(URLQueryItem(name: "conversation_id", value: conversation))
+            }
+        }
         var request = Self.request(endpoint: endpoint, path: "jesse/transcriptions", method: "POST",
-                                   query: [URLQueryItem(name: "language", value: language)])
+                                   query: query)
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         return request
     }
@@ -240,19 +308,50 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
 
     public func upload(fileAt url: URL, contentType: String, language: String,
                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus {
+        try await upload(fileAt: url, contentType: contentType, language: language, options: .plain,
+                         onProgress: onProgress)
+    }
+
+    public func upload(fileAt url: URL, contentType: String, language: String, options: StudioUploadOptions,
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus {
         guard let endpoint = await endpoint() else {
             throw StudioTransportError.unavailable("this device isn’t paired with a Jesse bridge")
         }
-        let request = Self.uploadRequest(endpoint: endpoint, language: language, contentType: contentType)
+        let request = Self.uploadRequest(endpoint: endpoint, language: language, contentType: contentType,
+                                         options: options)
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.upload(for: request, fromFile: url,
-                                                        delegate: UploadProgress(onProgress))
+            if let uploader {
+                (data, response) = try await uploader.upload(request, fromFile: url, tag: options.tag,
+                                                             onProgress: onProgress)
+            } else {
+                (data, response) = try await session.upload(for: request, fromFile: url,
+                                                            delegate: UploadProgress(onProgress))
+            }
         } catch {
             if Self.isCancellation(error) { throw CancellationError() }
             throw StudioTransportError.forTransport(error)
         }
+        return try Self.accepted(data: data, response: response)
+    }
+
+    public func reattachUpload(tag: String,
+                               onProgress: @escaping @Sendable (Double) -> Void) async throws -> StudioRunStatus? {
+        guard let uploader else { return nil }
+        let answer: (Data, URLResponse)?
+        do {
+            answer = try await uploader.reattach(tag: tag, onProgress: onProgress)
+        } catch {
+            if Self.isCancellation(error) { throw CancellationError() }
+            throw StudioTransportError.forTransport(error)
+        }
+        guard let (data, response) = answer else { return nil }
+        return try Self.accepted(data: data, response: response)
+    }
+
+    /// The bridge's answer to an upload, sorted.
+    static func accepted(data: Data, response: URLResponse) throws -> StudioRunStatus {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 202 || status == 200 else {
             throw StudioTransportError.forUpload(status: status, body: String(decoding: data, as: UTF8.self))
@@ -286,7 +385,7 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
                 throw StudioTransportError.lostContact("the bridge’s answer couldn’t be read")
             }
         case 404:
-            throw StudioTransportError.refused("the Studio no longer has this recording’s run — it restarted, or the result expired")
+            throw StudioTransportError.gone("the Studio no longer has this recording’s run — it restarted, or the result expired")
         case let other:
             throw StudioTransportError.lostContact("the bridge answered \(other)")
         }
@@ -298,7 +397,7 @@ public struct URLSessionStudioTransport: StudioTranscriptionTransport {
         _ = try? await session.data(for: request)
     }
 
-    private static func isCancellation(_ error: Error) -> Bool {
+    static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         return (error as? URLError)?.code == .cancelled
     }
@@ -319,31 +418,49 @@ private final class UploadProgress: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
+/// What a run tells whoever is keeping it, beyond progress: the Studio's id for it once the
+/// upload is answered (so a relaunch can follow the same run instead of sending the audio
+/// again), and that it is waiting for the app to come back to the foreground.
+public struct StudioRunHooks: Sendable {
+    public var onAccepted: @Sendable (StudioRunStatus) -> Void
+    public var onWaitingForApp: @Sendable (String) -> Void
+
+    public init(onAccepted: @escaping @Sendable (StudioRunStatus) -> Void = { _ in },
+                onWaitingForApp: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.onAccepted = onAccepted
+        self.onWaitingForApp = onWaitingForApp
+    }
+
+    public static let none = StudioRunHooks()
+}
+
 /// THE STUDIO FIRST, this device only when the Studio cannot be reached.
 public struct StudioFirstTranscriber: AudioFileTranscribing {
     public let studio: any StudioTranscriptionTransport
     public let onDevice: any AudioFileTranscribing
     /// How often a running Studio run is asked how it is doing.
     public let pollInterval: Duration
-    /// How long a run may go unanswered before it is given up on and read here instead.
-    /// Long enough to ride out a lift, a tunnel or a Wi-Fi handover; the run keeps going
-    /// on the Studio meanwhile.
+    /// How long a run may go unanswered IN THE FOREGROUND before it is given up on and read
+    /// here instead. Long enough to ride out a lift, a tunnel or a Wi-Fi handover; the run
+    /// keeps going on the Studio meanwhile. Time the app spends suspended does not count:
+    /// see `ForegroundClock`.
     public let contactTolerance: TimeInterval
     private let sleep: @Sendable (Duration) async throws -> Void
-    private let now: @Sendable () -> TimeInterval
+    private let foreground: any ForegroundGating
 
     public init(studio: any StudioTranscriptionTransport,
                 onDevice: any AudioFileTranscribing = SpeechAnalyzerFileTranscriber(),
                 pollInterval: Duration = .seconds(1),
                 contactTolerance: TimeInterval = 90,
                 sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-                now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+                now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                foreground: (any ForegroundGating)? = nil) {
         self.studio = studio
         self.onDevice = onDevice
         self.pollInterval = pollInterval
         self.contactTolerance = contactTolerance
         self.sleep = sleep
-        self.now = now
+        self.foreground = foreground ?? AlwaysForeground(now: now)
     }
 
     /// What the progress row and the header call the Studio.
@@ -351,71 +468,116 @@ public struct StudioFirstTranscriber: AudioFileTranscribing {
 
     public func transcribe(fileAt url: URL, locale: Locale,
                            onProgress: @escaping @Sendable (TranscriptionUpdate) -> Void) async throws -> TranscriptionResult {
+        try await transcribe(fileAt: url, locale: locale, options: .plain, hooks: .none, onProgress: onProgress)
+    }
+
+    /// Send the recording to the Studio and follow the run to its end, naming it with
+    /// `options` and reporting its Studio id through `hooks`.
+    public func transcribe(fileAt url: URL, locale: Locale, options: StudioUploadOptions,
+                           hooks: StudioRunHooks,
+                           onProgress: @escaping @Sendable (TranscriptionUpdate) -> Void) async throws -> TranscriptionResult {
         guard let contentType = AudioContentType.forFile(url) else {
             return try await fallBack(because: "it doesn’t read .\(url.pathExtension) files",
-                                      url: url, locale: locale, onProgress: onProgress)
+                                      url: url, locale: locale, hooks: hooks, onProgress: onProgress)
         }
         let name = Self.studioName
         onProgress(TranscriptionUpdate(phase: .uploading, fraction: 0, engine: name))
+        let progress: @Sendable (Double) -> Void = { fraction in
+            onProgress(TranscriptionUpdate(phase: .uploading, fraction: fraction, engine: name))
+        }
         let accepted: StudioRunStatus
         do {
-            accepted = try await studio.upload(fileAt: url, contentType: contentType,
-                                               language: Self.languageTag(locale)) { fraction in
-                onProgress(TranscriptionUpdate(phase: .uploading, fraction: fraction, engine: name))
+            // An upload this run already started, before a suspension or a relaunch, is
+            // picked up where it is rather than sent twice.
+            if let tag = options.tag,
+               let reattached = try await studio.reattachUpload(tag: tag, onProgress: progress) {
+                accepted = reattached
+            } else {
+                accepted = try await studio.upload(fileAt: url, contentType: contentType,
+                                                   language: Self.languageTag(locale), options: options,
+                                                   onProgress: progress)
             }
-        } catch StudioTransportError.unavailable(let why) {
-            return try await fallBack(because: why, url: url, locale: locale, onProgress: onProgress)
-        } catch StudioTransportError.lostContact(let why) {
-            return try await fallBack(because: why, url: url, locale: locale, onProgress: onProgress)
-        } catch StudioTransportError.refused(let why) {
-            throw TranscriptionFailure.studioRefused(reason: why)
-        } catch is CancellationError {
-            throw TranscriptionFailure.cancelled
-        } catch {
-            throw TranscriptionFailure.studioFailed(reason: error.localizedDescription)
+        } catch let error {
+            switch error {
+            case StudioTransportError.unavailable(let why), StudioTransportError.lostContact(let why),
+                 StudioTransportError.gone(let why):
+                return try await fallBack(because: why, url: url, locale: locale, hooks: hooks,
+                                          onProgress: onProgress)
+            case StudioTransportError.refused(let why):
+                throw TranscriptionFailure.studioRefused(reason: why)
+            case is CancellationError:
+                throw TranscriptionFailure.cancelled
+            default:
+                throw TranscriptionFailure.studioFailed(reason: error.localizedDescription)
+            }
         }
-        return try await follow(accepted, url: url, locale: locale, onProgress: onProgress)
+        hooks.onAccepted(accepted)
+        return try await follow(accepted, url: url, locale: locale, hooks: hooks, onProgress: onProgress)
+    }
+
+    /// Follow a run the Studio already has, by its id: after a relaunch, or after the app
+    /// was suspended for longer than the Studio took. Nothing is uploaded; if the Studio no
+    /// longer has the run, the recording is read here.
+    public func resume(runID: String, fileAt url: URL, locale: Locale, hooks: StudioRunHooks,
+                       onProgress: @escaping @Sendable (TranscriptionUpdate) -> Void) async throws -> TranscriptionResult {
+        let placeholder = StudioRunStatus(id: runID, state: "running", phase: "queued")
+        return try await follow(placeholder, url: url, locale: locale, hooks: hooks, onProgress: onProgress,
+                                askFirst: true)
     }
 
     /// Poll the run to its end.
-    private func follow(_ first: StudioRunStatus, url: URL, locale: Locale,
-                        onProgress: @escaping @Sendable (TranscriptionUpdate) -> Void) async throws -> TranscriptionResult {
+    ///
+    /// Silence is measured on the FOREGROUND clock: a poll that failed because iOS suspended
+    /// the app is not the Studio going quiet, and must never be what gives up on a run that
+    /// is working perfectly well. Only foreground silence past `contactTolerance` does that.
+    private func follow(_ first: StudioRunStatus, url: URL, locale: Locale, hooks: StudioRunHooks,
+                        onProgress: @escaping @Sendable (TranscriptionUpdate) -> Void,
+                        askFirst: Bool = false) async throws -> TranscriptionResult {
         var status = first
-        var lastContact = now()
+        var lastContact = foreground.now()
+        var skipSleep = askFirst
         while true {
-            if let update = Self.update(from: status) { onProgress(update) }
-            switch status.state {
-            case "done": return try Self.result(from: status)
-            case "failed": throw Self.failure(from: status)
-            case "cancelled": throw TranscriptionFailure.cancelled
-            default: break
+            if !skipSleep {
+                if let update = Self.update(from: status) { onProgress(update) }
+                switch status.state {
+                case "done": return try Self.result(from: status)
+                case "failed": throw Self.failure(from: status)
+                case "cancelled": throw TranscriptionFailure.cancelled
+                default: break
+                }
+                do {
+                    try await sleep(pollInterval)
+                } catch {
+                    abandon(status.id)
+                    throw TranscriptionFailure.cancelled
+                }
             }
-            do {
-                try await sleep(pollInterval)
-            } catch {
-                abandon(status.id)
-                throw TranscriptionFailure.cancelled
-            }
+            skipSleep = false
             do {
                 status = try await studio.status(id: status.id)
-                lastContact = now()
+                lastContact = foreground.now()
             } catch is CancellationError {
                 abandon(status.id)
                 throw TranscriptionFailure.cancelled
+            } catch StudioTransportError.gone(let why) {
+                // The Studio restarted, or kept the result less long than the app was away.
+                // The recording is still here, so it is read here rather than lost.
+                return try await fallBack(because: why, url: url, locale: locale, hooks: hooks,
+                                          onProgress: onProgress)
             } catch StudioTransportError.refused(let why) {
                 throw TranscriptionFailure.studioFailed(reason: why)
             } catch {
                 // Lost contact. The run is most likely still going on the Studio, so keep
-                // asking — until the silence has gone on long enough that reading it here
-                // is the better bet.
+                // asking — until the silence has gone on long enough, in the foreground,
+                // that reading it here is the better bet.
                 if Task.isCancelled {
                     abandon(status.id)
                     throw TranscriptionFailure.cancelled
                 }
-                if now() - lastContact > contactTolerance {
+                if foreground.now() - lastContact > contactTolerance {
                     abandon(status.id)
                     return try await fallBack(because: "contact with it was lost mid-transcription",
-                                              url: url, locale: locale, onProgress: onProgress)
+                                              url: url, locale: locale, hooks: hooks, onProgress: onProgress)
                 }
             }
         }
@@ -428,8 +590,17 @@ public struct StudioFirstTranscriber: AudioFileTranscribing {
     }
 
     /// Read it here instead, and SAY SO.
-    private func fallBack(because why: String, url: URL, locale: Locale,
+    ///
+    /// This device's engine needs the foreground, so when the app is in the background the
+    /// run WAITS for it, having said so through `hooks`, instead of failing or running
+    /// somewhere it cannot.
+    private func fallBack(because why: String, url: URL, locale: Locale, hooks: StudioRunHooks,
                           onProgress: @escaping @Sendable (TranscriptionUpdate) -> Void) async throws -> TranscriptionResult {
+        if !foreground.isActive {
+            hooks.onWaitingForApp(why)
+            await foreground.waitUntilActive()
+            if Task.isCancelled { throw TranscriptionFailure.cancelled }
+        }
         let here = TranscriptionPlace.thisDevice
         var result = try await onDevice.transcribe(fileAt: url, locale: locale) { update in
             var tagged = update

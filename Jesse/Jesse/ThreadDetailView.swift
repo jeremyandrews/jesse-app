@@ -49,20 +49,19 @@ struct ThreadDetailView: View {
     /// paperclip's "Audio Recording", or the share sheet, which opens a conversation and
     /// leaves the hand-off on the coordinator for this view to pick up.
     ///
-    /// One model per conversation, held across the whole flow, because the flow outlives
-    /// every individual sheet in it — the language picker, the progress view, and the
-    /// error line are three views of one run.
+    /// THE RUN BELONGS TO THE CONVERSATION, not to this view: the app-wide
+    /// `RecordingRunService` keeps one model per conversation and writes every confirmed
+    /// run down, so leaving the conversation, locking the phone or the system terminating
+    /// the app never ends it. Only Cancel does. This view only observes the model while it
+    /// is on screen; a transcript that finishes while it is not lands in the
+    /// conversation's saved draft instead.
     ///
     /// STUDIO FIRST: the recording goes to the paired Jesse bridge, which transcribes it on
     /// the Studio with its own, far stronger models and deletes it; this device's engine
     /// reads it only when the Studio cannot be reached, and the composer then says so. The
     /// pairing is read at each recording rather than captured here, so a re-pairing takes
     /// effect at the next one.
-    @State private var recording = RecordingAttachment(
-        transcriber: StudioFirstTranscriber(studio: URLSessionStudioTransport(endpoint: {
-            let config = ConfigStore.load()
-            return StudioEndpoint(baseURL: config.endpoint("/"), token: config.token)
-        })))
+    private var recording: RecordingAttachment { RecordingRunService.shared.runs.model(for: thread.id) }
     /// Whether the composer offers a capture into the vault's `Inbox/`.
     ///
     /// Held in state rather than computed in `body`, deliberately: the decision resolves a
@@ -220,7 +219,12 @@ struct ThreadDetailView: View {
         .onAppear {
             // BEFORE the focus decision and before any edit can be recorded: the composer
             // has to hold the user's unsent text again the instant this view exists.
-            restoreDraft()
+            let restored = restoreDraft()
+            // Then this conversation's recording run knows its composer is on screen, and a
+            // transcript that landed in the draft while a still-open composer was away is
+            // added to the live text. A freshly restored draft already holds it.
+            RecordingRunService.shared.runs.attach(thread.id, restored: restored)
+            claimLandedTranscript()
             if attachedContext != nil && turns.isEmpty { inputFocused = true }
             // Empty in every ordinary launch: a conversation always opens with its folds closed.
             openFolds = TranscriptFoldUITestSeam.initialOpenFolds(for: thread.id)
@@ -254,10 +258,12 @@ struct ThreadDetailView: View {
         // because on a pop the list may have appeared before this fired. See `leaveComposer`.
         .onDisappear {
             leaveComposer()
+            RecordingRunService.shared.runs.detach(thread.id)
             isOnScreen = false
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { captureDraft() }
+            if phase == .active { claimLandedTranscript() }
             // Coming BACK to a conversation left on screen reads it, including whatever
             // landed while the phone was away. Going away never marks anything.
             markReadIfOnScreen()
@@ -1122,13 +1128,14 @@ struct ThreadDetailView: View {
     /// One call into the shared `ComposerDrafts.restore`, which owns the already-sent
     /// check, the notice and the one-shot markers; the only thing local to this shell is
     /// turning the shared file value back into the composer's own chip type.
-    private func restoreDraft() {
+    @discardableResult
+    private func restoreDraft() -> Bool {
         guard !didRestoreDraft else {
             // Appearing AGAIN (an iPad tab switch fires `onDisappear` and then `onAppear` on a
             // composer that never went away). The text is live and must not be restored over,
             // but the composer is open again, and the reapers must know it.
             ComposerDraftStore.shared.composerOpened(thread.id)
-            return
+            return false
         }
         didRestoreDraft = true
         let restored = ComposerDrafts.restore(for: thread, newestUserTurn: newestUserTurn,
@@ -1138,6 +1145,15 @@ struct ThreadDetailView: View {
             JesseAttachment(filename: $0.filename, mime: $0.mime, data: $0.data)
         }
         draftNotice = restored.notice
+        return true
+    }
+
+    /// A recording's transcript that finished while this composer was alive but not in
+    /// front (the phone locked, the iPad tab switched away): it is already in the saved
+    /// draft, and here it joins the live text, after whatever is typed, exactly once.
+    private func claimLandedTranscript() {
+        guard let done = RecordingRunService.shared.runs.claim(thread.id) else { return }
+        input = done.messageBody(typed: input)
     }
 
     /// The visible text and date of this conversation's newest user turn, for the
@@ -1161,7 +1177,9 @@ struct ThreadDetailView: View {
             files: attachments.map {
                 ComposerDraftFile(filename: $0.filename, mime: $0.mime, data: $0.data)
             },
-            pendingRecording: recording.isInFlight ? recording.sourceName : nil,
+            // Nil on the iPhone: a run in flight is no longer lost when the composer goes,
+            // so there is nothing to apologise for on return. See `RecordingRunService`.
+            pendingRecording: nil,
             contextLabel: attachment?.contextLabel)
     }
 

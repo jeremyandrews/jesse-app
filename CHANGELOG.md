@@ -14,6 +14,59 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (180), Bridge 0.157.0] - 2026-09-28
+
+**A recording attached or shared into a conversation had to be transcribed with Jesse open
+and in front the whole time.** Locking the phone, switching apps or leaving the conversation
+could throw the Studio's transcript away. Measured in the simulator on `main` before any change
+(simctl only, a 23 minute fixture, a local branch bridge on the accurate tier):
+
+- **In the background while the Studio worked:** iOS suspended the app about 17
+  seconds. The Studio run went on and finished; nothing on the bridge depends on the phone
+  polling. If the first poll after returning succeeded, the transcript still landed. If it
+  failed (reproduced by holding the bridge for 30 seconds across the return, which is what a
+  tailnet reconnecting after unlock looks like), the suspended minutes had already been
+  counted as silence, so that one timeout gave up on the finished Studio run and fell back
+  to this device's engine.
+- **Terminated by the system mid-run:** the run lived only in the composer's memory. The
+  relaunch purged its working copy and resumed nothing, and the Studio's finished result
+  expired unread an hour later.
+- **Leaving the conversation:** the run was the composer's `@State`, held weakly by its own
+  task, so the transcript was dropped when it arrived, and the restored draft said the
+  transcript was not coming.
+- **In the background during the upload:** the upload was an ordinary session task, which
+  stops with the process; its failure on return read as "the Studio can't be reached".
+- **Screen locked:** the same as the background case (not separately drivable with simctl).
+
+The fix:
+
+- **A run belongs to its conversation.** `RecordingRuns` (JesseKit) holds one model per
+  conversation for the app's lifetime; the composer only observes it. Only Cancel ends a
+  run, and Cancel still stops the Studio run and deletes the audio.
+- **Every confirmed run is written down** (`TranscriptionRunStore`, Application Support,
+  excluded from backup), with the audio moved into the store for exactly the run's
+  lifetime. A relaunch follows the Studio run by its id, reattaches to an upload still in
+  flight, or sends the recording again; it never uploads twice.
+- **The upload goes out on a background `URLSession`** (`BackgroundStudioUploader`), still
+  the one request that carries audio, still to the paired bridge's `jesse/transcriptions`.
+  Polls and cancel stay on the ordinary session.
+- **Silence counts only in the foreground** (`ForegroundClock`). This device's engine runs
+  only in the foreground: when it is needed in the background the run waits and a
+  notification says to open Jesse.
+- **A `BGContinuedProcessingTask`** (`com.tag1.Jesse.transcription.*`) keeps the process
+  working with visible progress; its expiry leaves the run written down and never cancels
+  the Studio.
+- **The bridge keeps a finished result for a day** (`DEFAULT_RESULT_TTL_SECS` 3,600 to
+  86,400) and, when the upload asks with `?notify=1&conversation_id=`, pushes the ending to
+  the registered device: `transcription_id`, `conversation_id`, `outcome` and an alert, no
+  transcript text. The upload's answer says `notify: true|false`, so the app posts its own
+  "Transcript ready" only when no push is coming. An older app sends neither field and gets
+  the old behaviour; an older bridge ignores them and the app still transcribes in front.
+- **A finished transcript lands in the conversation, not the screen:** in the composer when
+  it is on screen, otherwise in that conversation's saved draft with the same header,
+  place line and uncertainty block, never sent.
+- The Mac is unchanged: it builds the same model without a durable run.
+
 ## [App 1.0 (179)] - 2026-09-28
 
 **Offline, "What is my birthday?" was answered "Jamie's birthday is on Tuesday, December 9."**,

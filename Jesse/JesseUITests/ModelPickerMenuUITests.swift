@@ -223,8 +223,15 @@ final class ModelPickerMenuUITests: XCTestCase {
         // The menu is a presented popover; give UIKit a beat to put it up.
         // Fable is never the resolved model in these tests, so its row appears once, in
         // the menu — a stable signal that the popover is up.
-        XCTAssertTrue(app.buttons["Claude Fable 5.1"].waitForExistence(timeout: 15),
-                      "the model menu is presented")
+        // MATCHED BY PREFIX, NEVER BY THE WHOLE LABEL. A row's accessibility label is its
+        // title AND its second line — "Claude Fable 5.1, 5h 23% · week 41%" — and that
+        // second line is the thing these tests are about, so it is the one part of the
+        // string they must not depend on. An equality match went red the day usage
+        // reached the rows, with "the model menu is presented" as its only explanation
+        // while the menu was in fact up and correct.
+        let fable = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Claude Fable 5.1")).firstMatch
+        XCTAssertTrue(fable.waitForExistence(timeout: 15), "the model menu is presented")
     }
 
     // MARK: - Reading the presented menu
@@ -241,17 +248,23 @@ final class ModelPickerMenuUITests: XCTestCase {
         return out
     }
 
-    /// Height of each model row currently on screen, keyed by label. Scoped to the three
-    /// the stub serves so the composer's own controls cannot be mistaken for menu rows.
+    /// Height of each model row currently on screen, keyed by the model's NAME. Scoped to
+    /// the four the stub serves so the composer's own controls cannot be mistaken for menu
+    /// rows.
+    ///
+    /// Matched by prefix: a row's label is its name followed by its second line, and the
+    /// second line is precisely what these tests are measuring. An exact match found no
+    /// rows at all the day usage reached them, and reported it as "rows missing".
     private func modelRowHeights(_ app: XCUIApplication) -> [String: CGFloat] {
-        let wanted = Set(["Claude Opus", "Claude Fable 5.1", "GLM 5.3", "Local Gemma"])
+        let wanted = ["Claude Opus", "Claude Fable 5.1", "GLM 5.3", "Local Gemma"]
         var out: [String: CGFloat] = [:]
-        for el in app.buttons.allElementsBoundByIndex where wanted.contains(el.label) {
+        for el in app.buttons.allElementsBoundByIndex {
+            guard let name = wanted.first(where: { el.label.hasPrefix($0) }) else { continue }
             let f = el.frame
             // The toolbar button carries the resolved model's name too. Menu rows are the
             // wide ones; the toolbar button is a compact glyph-width control.
             guard f.width > 120 else { continue }
-            out[el.label] = max(out[el.label] ?? 0, f.height)
+            out[name] = max(out[name] ?? 0, f.height)
         }
         return out
     }

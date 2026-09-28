@@ -14,6 +14,81 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (181)] - 2026-09-28
+
+**The app's gate was red, and had been for days, so tests could go red unnoticed — and
+four did.** `scripts/local-ci-macos.sh` stops at the first failing step, and it never got
+past `iOS test`: seven UI failures that had been red long enough to read as scenery. Behind
+them, unseen, were a package suite that segfaulted, a coordinator test and a Mac test that
+both went red with App 1.0 (175), and a Mac step the gate had not reached in days. Ten
+failing tests in all, and not one of them a defect in the app: every one was a test
+asserting something that had deliberately changed, depending on state it did not control,
+or leaking a window.
+
+**`RunCoordinatorStreamTests` still expected narration to be part of the answer.** App 1.0
+(175) made a tool call the narration boundary: what streamed before it leaves the answer
+for the Thinking row and the answer starts again. The test emitted a delta, a tool call and
+another delta and asserted the two deltas concatenated. It now asserts the split it should
+have been changed to assert — and it asserts the half nothing else covers, that
+`partialText` and `partialThinking` carry the two halves through the coordinator, which
+`NarrationWireTests` cannot see because it drives `LiveReply` directly.
+
+**`TodayToolbarUITests` opened on whatever segment the last run left behind.** The Today
+tab has two segments and remembers the one this device was last left in, per device, in
+`UserDefaults` — which on a simulator survives between runs. A run that ended on the
+Strands board started the next one there, where the day's sort menu and badge filter do not
+exist, and all three tests failed on their anchor with "the Today navigation bar is up"
+while the app was showing a perfectly good board. They now pin the segment (and the badge
+filter, stored for the same reason) with `-key value` launch arguments, the seam
+`ModelPickerMenuUITests` already uses for the device's default model. It shadows the stored
+value for that launch and writes nothing.
+
+**And `JesseVaultTests` segfaulted, which stopped the gate at its FIRST step.** App 1.0
+(178) added a macOS test that opens an `NSWindow` and closes it. A programmatically
+created window releases itself on close, which under ARC is an over-release: the test
+still holds it. It does not fail where it happens — it corrupts the process and blows up
+later, in `objc_autoreleasePoolPop` at the end of an unrelated test, so `swift test`
+reported `signal code 11` in `VaultBrowserModelTests` or `StrandMenuTests` depending on
+the run. `window.isReleasedWhenClosed = false` is the fix, and it is the same line
+`ComposerTextViewTests` has carried since the Mac composer work, for the same reason.
+
+**`MacConcurrentRunTests` was the same App 1.0 (175) change, on the Mac.** "Two live
+turns, two live texts" yielded a delta and then a tool call into the same conversation and
+expected the delta to still be the answer. It now runs the conversation that calls a tool
+through BOTH halves — what it said before the call is its narration, what it says after is
+its answer — and asserts that neither reaches the other conversation. The narration was
+the one channel that had no non-mixing test at all.
+
+**`ModelPickerMenuUITests` matched a menu row by its whole label.** A row's accessibility
+label is its title AND its second line — `Claude Fable 5.1, 5h 23% · week 41%` — and that
+second line is the thing these tests are about. An equality match stopped finding any row
+the day usage reached them: the menu was up and correct, and the failure read "the model
+menu is presented". Rows are matched by prefix now, in the wait and in the height reader.
+
+### Changed
+
+- `VaultEditorStartTests.testOpeningPutsTheLineAtTheTopOfAnNSTextView`: owns its window
+  (`isReleasedWhenClosed = false`), with the reason written beside it.
+- `MacConcurrentRunTests.testTheTwoConversationsLiveTextNeverMixes`: B narrates, calls a
+  tool and then answers; A's answer, narration and activity line all stay its own.
+- `RunCoordinatorStreamTests.testDeltasSplitAtAToolCallThenOneTurnOnDone` (renamed from
+  `testDeltasBuildPartialThenSingleTurnOnDone`): asserts the narration boundary, that the
+  reset is published immediately rather than coalesced, that the narration stands while the
+  answer streams, and that both are cleared on `done`.
+- `TodayToolbarUITests`: a `launchOnTheDay()` helper pinning `today.segment` and
+  `today.badgeFilter`; all three tests launch through it.
+- `ModelPickerMenuUITests`: `openMenu` waits on a `label BEGINSWITH` predicate and
+  `modelRowHeights` keys by the model's name matched as a prefix.
+
+### Added
+
+- `TodayToolbarUITestContractTests` (JesseTests): pins `TodayViewPreferences.segmentKey`
+  and `badgeFilterKey` against the strings the UI test hardcodes, and pins that `today`,
+  `NO` and `strands` read back the way the launch arguments assume. The sibling of
+  `ModelPickerUITestContractTests`, and there for the same reason: a renamed key would send
+  the argument to a domain nothing reads, and the UI tests would go red again with the same
+  misleading message.
+
 ## [App 1.0 (180), Bridge 0.157.0] - 2026-09-28
 
 **A recording attached or shared into a conversation had to be transcribed with Jesse open

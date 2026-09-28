@@ -559,3 +559,42 @@ enum VaultOwnerRetrievalFixture {
             """, archivedResearch)
     }
 }
+
+// THE 2026-09-27 DECOY: A LIVE NOTE ABOUT SOMEBODY ELSE'S BIRTHDAY THAT NAMES THE OWNER.
+//
+// The day after the fixture above was written, the same question was answered "Jamie's
+// birthday is on Tuesday, December 9", cited from a LIVE trip itinerary titled for another
+// person's birthday: "birthday" five times, the owner's name once, in the list of who went.
+// The archive demotion cannot touch it and the owner's name does not separate it, because it
+// HAS the name. What separates it is WHERE the name is: the answer's heading says the owner's
+// birthday, the decoy only says he was there.
+//
+// Written by its own function rather than inside `write`, because the tests over that corpus
+// assert orders a fifth note would move, and they stay exactly as they were. Invented like the
+// rest: Lucia, Lisbon and the whole trip are made up.
+extension VaultOwnerRetrievalFixture {
+
+    /// A live trip itinerary for another person's birthday, naming the owner once.
+    static let liveDecoy = "Travel/Trips/2025-12-Lisbon/Itinerary.md"
+
+    static func writeLiveDecoy(in root: URL) {
+        VaultFixture.write("""
+            ---
+            title: Lisbon, Lucia's Birthday
+            ---
+
+            # Lisbon, Lucia's Birthday
+
+            A birthday trip. The birthday dinner is on the first night, the birthday
+            presents come at breakfast, and the birthday cake is collected from the bakery
+            on the way back to the flat.
+
+            **Travellers:** Lucia, Jeremy Andrews, Aurora, Arlo
+            **Booking:** JEREMIAH KIRSTEN ANDREWS, four adults
+
+            ### Tuesday, December 9: Lucia's Birthday
+
+            Lunch by the river, booked for one o'clock.
+            """, to: liveDecoy, in: root)
+    }
+}

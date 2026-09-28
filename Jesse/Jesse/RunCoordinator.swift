@@ -988,7 +988,8 @@ final class RunCoordinator {
         }
 
         let reply = Turn(role: .jesse,
-                         text: OfflineLookupReply.body(kind, queued: true))
+                         text: OfflineLookupReply.body(kind, queued: true,
+                                                   notice: offline.ownerNameNotice(for: question)))
         thread.turns.append(reply)
         thread.updatedAt = Date()
 

@@ -251,17 +251,34 @@ public struct VaultRetriever: Sendable {
     ///      vault search use, and only when pass 1 found almost nothing. It can only
     ///      ADD: pass 1's hits keep their place.
     ///
-    /// Then the rank: how many of the plan's concept GROUPS each chunk matches, bm25
-    /// breaking the ties, one chunk per file, and the archive demotion and the embedding
-    /// fusion exactly as they were.
+    /// Ahead of pass 1, for a first-person question with an owner name only, the chunks
+    /// whose title or heading says they are his (`LookupPlan.subjectExpression`).
+    ///
+    /// Then the rank: how many of the plan's concept GROUPS each chunk matches, then
+    /// whether it is the owner's, bm25 breaking the ties, one chunk per file; the owner's
+    /// chunks lead the live ones, and the archive demotion and the embedding fusion are
+    /// exactly as they were.
     public func retrieve(question: String, budget: VaultRetrievalBudget) async -> Result {
         let searcher = VaultSearcher(index: index,
                                      expansionThreshold: Self.expansionThreshold,
                                      limit: Self.searchLimit)
         let plan = LookupPlan.make(question: question, ownerName: ownerName, clock: clock)
 
-        var hits = Self.allowed(searcher.matchingAny(plan.terms,
-                                                     limit: Self.lexicalScanLimit))
+        // THE CHUNKS THAT SAY THEY ARE THE OWNER'S come first, from a query of their own,
+        // because the OR scan below is only so many rows deep and a vault full of the
+        // owner's names can fill every one of them (`LookupPlan.subjectExpression`). First
+        // so that a chunk both queries find carries this query's bm25, and chunks this one
+        // found are compared with each other on one scale.
+        var hits: [VaultSearchHit] = []
+        if let subject = plan.subjectExpression {
+            hits = Self.allowed(searcher.matching(expression: subject,
+                                                  limit: Self.lexicalScanLimit))
+        }
+        var found = Set(hits.map(\.id))
+        for hit in Self.allowed(searcher.matchingAny(plan.terms, limit: Self.lexicalScanLimit))
+        where found.insert(hit.id).inserted {
+            hits.append(hit)
+        }
         if hits.count < Self.expansionThreshold {
             var seen = Set(hits.map(\.id))
             let query = plan.contentWords.joined(separator: " ")
@@ -294,9 +311,15 @@ public struct VaultRetriever: Sendable {
         // ARCHIVED NOTES RANK BEHIND LIVE ONES, ALWAYS. Fusing the two groups separately
         // and concatenating is what makes that absolute: the embedding reorders WITHIN a
         // group and can never lift a finished draft back above a note in use.
+        //
+        // AND A LIVE NOTE ABOUT THE OWNER LEADS THE LIVE ONES, by the same mechanism and for
+        // the same reason: on 2026-09-27 the device's embedding lifted a note that only
+        // mentioned him over the note whose heading is his birthday. `ownerLed` says which.
         let live = bodies.filter { !Self.isArchived($0.hit.path) }
         let archived = bodies.filter { Self.isArchived($0.hit.path) }
-        let ordered = Self.fused(live, question: question, embedding: embedding)
+        let (lead, rest) = Self.ownerLed(live, plan: plan)
+        let ordered = Self.fused(lead, question: question, embedding: embedding)
+            + Self.fused(rest, question: question, embedding: embedding)
             + Self.fused(archived, question: question, embedding: embedding)
         let kept = ordered.prefix(budget.chunkCount)
         let chunks = kept.map { entry in
@@ -331,18 +354,26 @@ public struct VaultRetriever: Sendable {
     /// that is already about what was asked, and cannot carry one that is about nothing
     /// else.
     ///
+    /// THEN WHETHER THE CHUNK IS ABOUT THE OWNER (`namesOwnerAsSubject`, over its title and
+    /// heading), before the group count: among chunks that matched the question's words
+    /// equally, `### Jeremy's Birthday` is his and a travellers line that names him is not.
+    /// It is also what picks the right chunk of a note that lists everyone's birthday.
+    ///
     /// COLLAPSED BY FILE AFTERWARDS, never before: the best chunk of a file is the one
     /// that matched the most concepts, not the one bm25 liked.
     public static func byConcept(_ bodies: [(hit: VaultSearchHit, text: String)],
                                  plan: LookupPlan) -> [(hit: VaultSearchHit, text: String)] {
-        let ranked = bodies.enumerated().map { entry -> (index: Int, content: Int, total: Int) in
+        let ranked = bodies.enumerated().map {
+            entry -> (index: Int, content: Int, subject: Bool, total: Int) in
             let searchable = [entry.element.hit.title, entry.element.hit.heading,
                               entry.element.hit.path, entry.element.text].joined(separator: " ")
             let score = plan.score(inTokens: LookupPlan.tokenize(searchable))
-            return (entry.offset, score.content, score.total)
+            return (entry.offset, score.content, isAboutOwner(entry.element.hit, plan: plan),
+                    score.total)
         }
         let ordered = ranked.sorted { lhs, rhs in
             if lhs.content != rhs.content { return lhs.content > rhs.content }
+            if lhs.subject != rhs.subject { return lhs.subject }
             if lhs.total != rhs.total { return lhs.total > rhs.total }
             let a = bodies[lhs.index].hit, b = bodies[rhs.index].hit
             if a.score != b.score { return a.score < b.score }
@@ -355,6 +386,52 @@ public struct VaultRetriever: Sendable {
             guard seen.insert(body.hit.path).inserted else { return nil }
             return body
         }
+    }
+
+    /// Whether a hit's title or heading says it is the owner's: his name in possessive or
+    /// subject position before a word of the question. Title and heading are read apart,
+    /// so a title that ends in his name and a heading that starts with the word are not
+    /// joined into a claim neither makes.
+    static func isAboutOwner(_ hit: VaultSearchHit, plan: LookupPlan) -> Bool {
+        [hit.title, hit.heading].contains {
+            plan.namesOwnerAsSubject(inTokens: LookupPlan.tokenize($0))
+        }
+    }
+
+    /// THE LIVE HITS SPLIT IN TWO: the ones about the owner that match as many of the
+    /// question's words as any live hit does, and the rest, each keeping `byConcept`'s
+    /// order.
+    ///
+    /// Fused as separate groups for the archive rule's reason: RRF over two orders lets
+    /// an embedding that ranks the owner's heading low lift a decoy one place above it,
+    /// which is what the device's embedding did on 2026-09-27. Splitting is the only way
+    /// that ordering is not up to the embedding.
+    ///
+    /// ONLY AT THE TOP CONTENT COUNT. A chunk about the owner that matched fewer of the
+    /// question's words has answered less of it — "my flight to Paris" is not answered by
+    /// `Jeremy's Flight` to somewhere else over the Paris booking — so the split can only
+    /// break a tie on the question's words, never overturn them. With no owner in the plan
+    /// nothing leads and the order is exactly what it was.
+    static func ownerLed(_ bodies: [(hit: VaultSearchHit, text: String)], plan: LookupPlan)
+        -> (lead: [(hit: VaultSearchHit, text: String)],
+            rest: [(hit: VaultSearchHit, text: String)]) {
+        guard !plan.ownerForms.isEmpty else { return ([], bodies) }
+        let content = bodies.map { body in
+            plan.score(inTokens: LookupPlan.tokenize(
+                [body.hit.title, body.hit.heading, body.hit.path, body.text]
+                    .joined(separator: " "))).content
+        }
+        let top = content.max() ?? 0
+        var lead: [(hit: VaultSearchHit, text: String)] = []
+        var rest: [(hit: VaultSearchHit, text: String)] = []
+        for (index, body) in bodies.enumerated() {
+            if content[index] == top, isAboutOwner(body.hit, plan: plan) {
+                lead.append(body)
+            } else {
+                rest.append(body)
+            }
+        }
+        return (lead, rest)
     }
 
     /// Everything outside `Inbox/`, in the order it arrived.

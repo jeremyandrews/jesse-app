@@ -266,8 +266,13 @@ public struct VaultSearcher: Sendable {
     /// have that chunk thrown away before the rank that would have chosen it.
     public func matchingAny(_ terms: [String], limit scanLimit: Int) -> [VaultSearchHit] {
         guard let expression = VaultSearchQuery.anyMatchExpression(terms) else { return [] }
-        return index.search(expression: expression, limit: scanLimit,
-                            underPrefix: sqlPrefix)
+        return matching(expression: expression, limit: scanLimit)
+    }
+
+    /// A ready-made FTS5 expression, under the same scope as every other search here.
+    /// For a caller that has built one (`LookupPlan.subjectExpression`).
+    public func matching(expression: String, limit scanLimit: Int) -> [VaultSearchHit] {
+        index.search(expression: expression, limit: scanLimit, underPrefix: sqlPrefix)
             .filter { includes($0.path) }
     }
 

@@ -178,6 +178,70 @@ public struct LookupPlan: Equatable, Sendable {
         return (content, total)
     }
 
+    /// How many tokens after the owner's name a question word may stand and still be HIS:
+    /// the possessive's split-off `s` and one more, so `Jeremy's Birthday` and `Jeremy was
+    /// born` both count and `Jeremy, Lucia and the birthday` does not.
+    public static let subjectWindow = 2
+
+    /// WHETHER THE OWNER IS WHAT THIS TEXT IS ABOUT, rather than someone it mentions.
+    ///
+    /// The 2026-09-27 incident: a live trip itinerary titled for another person's birthday
+    /// named the owner once, in its list of travellers, and matched "birthday" and the name
+    /// exactly as the note whose heading reads `Jeremy's Birthday` did. On a group count the
+    /// two tie, and bm25 and the embedding both prefer the one that says "birthday" five
+    /// times. What separates them is WHERE the name stands: immediately before a word of the
+    /// question, in possessive or subject position, it says whose thing this is.
+    ///
+    /// Read over a title or a heading, never a body, by the caller: that is where a note
+    /// says what it is about, and a body that happens to run "Jeremy birthday" in a list is
+    /// not a claim about anything.
+    ///
+    /// The name must come FIRST. `Birthday party with Jeremy` has him as a guest.
+    /// False for a question that is not about the asker, and on a device with no name for
+    /// him, so neither ranks any differently than before.
+    public func namesOwnerAsSubject(inTokens tokens: [String]) -> Bool {
+        guard !ownerForms.isEmpty, !contentWords.isEmpty else { return false }
+        for form in ownerForms {
+            let name = LookupPlan.tokenize(form)
+            guard !name.isEmpty, tokens.count > name.count else { continue }
+            for start in 0...(tokens.count - name.count)
+            where Array(tokens[start..<(start + name.count)]) == name {
+                let from = start + name.count
+                let after = Array(tokens[from..<min(tokens.count, from + Self.subjectWindow)])
+                if contentWords.contains(where: { LookupPlan.matches(term: $0, inTokens: after) }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// THE SUBJECT RULE AS ONE FTS5 QUERY: over the title and heading columns only, every
+    /// spelling of the owner's name NEAR every content word, within `subjectWindow`.
+    ///
+    /// Why the rule needs a query of its own: the one OR query is read `lexicalScanLimit`
+    /// rows deep in bm25 order, and bm25 over `birthday OR Jeremy OR Jeremiah OR Jeremia OR
+    /// Andrews` rewards the notes that say the owner's names most often. Over the real
+    /// vault on 2026-09-27, with the four-spelling setting, those filled every row and the
+    /// chunk under `### Jeremy's Birthday` was not among them, so no ranking of the rows
+    /// could put it first. This query returns only chunks the rule could hold for, and the
+    /// rule (`namesOwnerAsSubject`) still decides: NEAR is unordered and this is only the
+    /// candidate list.
+    ///
+    /// Nil when the plan has no owner or no content word, so no other question pays for it.
+    public var subjectExpression: String? {
+        guard !ownerForms.isEmpty, !contentWords.isEmpty else { return nil }
+        func phrase(_ text: String) -> String {
+            "\"\(VaultSearchQuery.escaped(text))\""
+        }
+        let pairs = ownerForms.flatMap { form in
+            contentWords.map { word in
+                "NEAR(\(phrase(form)) \(phrase(word))*, \(Self.subjectWindow))"
+            }
+        }
+        return "{heading title} : (" + pairs.joined(separator: " OR ") + ")"
+    }
+
     // MARK: - Planning
 
     /// Plan `question` for `ownerName` as of `clock`.

@@ -146,12 +146,23 @@ public protocol VaultAnswerGenerating: Sendable {
     /// stub should not have to mention a date it has no use for.
     func generate(question: String, chunks: [RetrievedChunk],
                   clock: VaultClock) async throws -> VaultAnswerDraft
+
+    /// The same, told WHO IS ASKING: the app's owner-name setting, so the prompt can say
+    /// whose "my" a first-person question means. Defaulted to the clock form for the same
+    /// reason that one is: only the conformance that builds a prompt has a use for it.
+    func generate(question: String, chunks: [RetrievedChunk],
+                  clock: VaultClock, ownerName: String?) async throws -> VaultAnswerDraft
 }
 
 public extension VaultAnswerGenerating {
     func generate(question: String, chunks: [RetrievedChunk],
                   clock: VaultClock) async throws -> VaultAnswerDraft {
         try await generate(question: question, chunks: chunks)
+    }
+
+    func generate(question: String, chunks: [RetrievedChunk],
+                  clock: VaultClock, ownerName: String?) async throws -> VaultAnswerDraft {
+        try await generate(question: question, chunks: chunks, clock: clock)
     }
 }
 
@@ -178,7 +189,8 @@ public struct VaultAnswerer: Sendable {
     public static let instructions = """
         Answer only from the notes given. If they do not contain the answer, set \
         abstain. Cite only the paths given. Today, tomorrow and yesterday mean the date \
-        in the first line. At most 60 words.
+        in the first line. My and I mean the asker; a fact about a different named \
+        person is not an answer. At most 60 words.
         """
 
     /// How many citations the model may return.
@@ -187,13 +199,18 @@ public struct VaultAnswerer: Sendable {
     private let generator: any VaultAnswerGenerating
     private let timeLimit: TimeInterval
     private let clock: VaultClock
+    /// The app's owner-name setting, as `VaultRetriever` takes it. Nil on a device with no
+    /// name for him, where a first-person answer is checked exactly as it always was.
+    private let ownerName: String?
 
     public init(generator: any VaultAnswerGenerating,
                 timeLimit: TimeInterval = VaultAnswerer.defaultTimeLimit,
-                clock: VaultClock = .device) {
+                clock: VaultClock = .device,
+                ownerName: String? = nil) {
         self.generator = generator
         self.timeLimit = timeLimit
         self.clock = clock
+        self.ownerName = ownerName
     }
 
     /// Answer `question` from `chunks`, or say why not.
@@ -203,21 +220,23 @@ public struct VaultAnswerer: Sendable {
 
         let generator = self.generator
         let clock = self.clock
+        let ownerName = self.ownerName
         do {
             let draft = try await Self.withTimeLimit(timeLimit) {
                 do {
                     return try await generator.generate(question: question, chunks: chunks,
-                                                        clock: clock)
+                                                        clock: clock, ownerName: ownerName)
                 } catch VaultAnswerGenerationError.contextWindow {
                     // ONE retry, with half the chunks. Not a loop: if half of a measured
                     // budget still does not fit, the budget is wrong and the right
                     // outcome is an honest abstain rather than four more round trips.
                     let halved = Array(chunks.prefix(max(1, chunks.count / 2)))
                     return try await generator.generate(question: question, chunks: halved,
-                                                        clock: clock)
+                                                        clock: clock, ownerName: ownerName)
                 }
             }
-            return Self.validate(draft, chunks: chunks, question: question)
+            return Self.validate(draft, chunks: chunks, question: question,
+                                 ownerName: ownerName)
         } catch is TimedOut {
             return .unanswered(.timedOut)
         } catch VaultAnswerGenerationError.contextWindow {
@@ -243,9 +262,19 @@ public struct VaultAnswerer: Sendable {
     /// instructions. Unconditional rather than only when the question says "today":
     /// thirty characters, and "is that this week?" is a question about the date that
     /// does not contain the word.
+    ///
+    /// THE ASKER IS THE OTHER LINE, and only for a first-person question with a name set.
+    /// On 2026-09-27 "What is my birthday?" was answered "Jamie's birthday is on Tuesday,
+    /// December 9." from an extract about Jamie: nothing told the model the asker was not
+    /// Jamie. The setting's first spelling, because a sentence needs one name.
     public static func prompt(question: String, chunks: [RetrievedChunk],
-                              clock: VaultClock = .device) -> String {
+                              clock: VaultClock = .device,
+                              ownerName: String? = nil) -> String {
         var out = "Today is \(clock.todaySentence).\n"
+        if LookupQuery.isFirstPerson(question),
+           let asker = LookupQuery.ownerForms(ownerName).first {
+            out += "The asker is \(asker).\n"
+        }
         out += question.trimmingCharacters(in: .whitespacesAndNewlines)
         for chunk in chunks {
             out += "\n\nNOTE \(chunk.reference)\n\(chunk.text)"
@@ -256,7 +285,8 @@ public struct VaultAnswerer: Sendable {
     /// The three checks, over a draft and the chunks it was given.
     public static func validate(_ draft: VaultAnswerDraft,
                                 chunks: [RetrievedChunk],
-                                question: String = "") -> VaultAnswerOutcome {
+                                question: String = "",
+                                ownerName: String? = nil) -> VaultAnswerOutcome {
         // The line to open each cited path at: the highest-ranked chunk from that file,
         // which is the first one in `chunks`.
         var lineFor: [String: Int] = [:]
@@ -287,6 +317,11 @@ public struct VaultAnswerer: Sendable {
         let cited = Set(citations.map(\.path))
         guard isGrounded(text, in: chunks.filter { cited.contains($0.path) },
                          question: question) else {
+            return .unanswered(.abstained)
+        }
+        // …and a question about the asker is not answered by somebody else's fact.
+        if LookupQuery.isFirstPerson(question),
+           isAboutSomebodyElse(text, question: question, ownerName: ownerName) {
             return .unanswered(.abstained)
         }
         return .answered(VaultAnswer(text: text, citations: citations))
@@ -328,6 +363,54 @@ public struct VaultAnswerer: Sendable {
         return words.contains { word in
             chunks.contains { $0.text.localizedStandardContains(word) }
         }
+    }
+
+    /// WHETHER AN ANSWER GIVES THE FACT FOR A NAMED PERSON WHO IS NOT THE OWNER.
+    ///
+    /// The 2026-09-27 reply, "Jamie's birthday is on Tuesday, December 9.", to "What is my
+    /// birthday?": grounded (its words are in the extract), cited (a real path), and about
+    /// the wrong person. Nothing else here looks at WHOSE fact an answer states.
+    ///
+    /// The rule the retriever ranks by (`LookupPlan.namesOwnerAsSubject`), turned around: a
+    /// capitalised name in POSSESSIVE position (`Jamie's`) or opening a sentence (`Jamie
+    /// was born`), followed within `LookupPlan.subjectWindow` tokens by a word of the
+    /// question, states that person's fact. If the name is not a spelling of the owner's,
+    /// the answer is someone else's. No list of names and no list of words: the names come
+    /// from the setting, the words from the question.
+    ///
+    /// A stop word is never a name, so `Your birthday is…` and `The birthday…` pass, and so
+    /// does an answer that names nobody. With no owner name there is nobody to compare
+    /// against and this says false; the reply footer says the name is missing instead.
+    public static func isAboutSomebodyElse(_ answer: String, question: String,
+                                           ownerName: String?) -> Bool {
+        let owner = Set(LookupQuery.ownerForms(ownerName).flatMap { LookupPlan.tokenize($0) })
+        guard !owner.isEmpty else { return false }
+        let asked = LookupPlan.make(question: question, ownerName: nil).contentWords
+        guard !asked.isEmpty else { return false }
+        let sentences = answer.replacingOccurrences(of: "\u{2019}", with: "'")
+            .split(whereSeparator: { ".!?\n".contains($0) })
+        for sentence in sentences {
+            let words = sentence.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+            for (index, word) in words.enumerated() {
+                guard word.first?.isUppercase == true, !LookupQuery.isStopWord(word),
+                      let folded = LookupPlan.tokenize(word).first,
+                      !owner.contains(folded) else { continue }
+                // `Jeremy Andrews's birthday` on a one-name setting: a name straight after
+                // one of his is the rest of HIS name, not somebody else's.
+                if index > 0, let previous = LookupPlan.tokenize(words[index - 1]).first,
+                   owner.contains(previous) { continue }
+                let from = index + 1
+                let possessive = from < words.count && words[from] == "s"
+                guard possessive || index == 0 else { continue }
+                let after = words[from..<min(words.count, from + LookupPlan.subjectWindow)]
+                    .flatMap { LookupPlan.tokenize($0) }
+                if asked.contains(where: { LookupPlan.matches(term: $0, inTokens: after) }) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// A cited path as the model is likely to have written it back.

@@ -174,6 +174,13 @@ public protocol OfflineAnswering: AnyObject {
     func route(reachability: BridgeReachabilityState) -> OfflineSendRoute
     /// Answer one question from the copy of the vault on this device.
     func answer(_ question: String) async -> VaultAnswerOutcome
+    /// The line the reply ends with when this device cannot resolve "my", or nil.
+    func ownerNameNotice(for question: String) -> String?
+}
+
+public extension OfflineAnswering {
+    /// Nothing to say, for a conformance that has no settings to read (the tests' fakes).
+    func ownerNameNotice(for question: String) -> String? { nil }
 }
 
 /// Gate, retrieve, answer.
@@ -285,10 +292,17 @@ public final class OfflineAnswerService: OfflineAnswering {
         }
 
         let outcome = await VaultAnswerer(generator: generator, timeLimit: timeLimit,
-                                          clock: clock)
+                                          clock: clock, ownerName: settings.ownerName)
             .answer(question: question, chunks: retrieved.chunks)
         return finish(outcome, gate: "passed", hits: retrieved.hitCount,
                       chunks: retrieved.chunks.count, characters: retrieved.characters)
+    }
+
+    /// The line an offline reply to `question` ends with when this device cannot tell whose
+    /// "my" it means, or nil. Read from the same setting the retriever just used, so the
+    /// footer can never disagree with the search it describes.
+    public func ownerNameNotice(for question: String) -> String? {
+        OfflineLookupReply.ownerNameNotice(question: question, ownerName: settings.ownerName)
     }
 
     /// Warm the model when a composer on an unreachable device gains focus. Silent

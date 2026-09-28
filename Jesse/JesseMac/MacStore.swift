@@ -594,7 +594,8 @@ final class MacCoordinator {
             // bridge is doing for another conversation keeps its own slot and its own spinner.
             endRun(thread.id)
             let reply = Turn(role: .jesse,
-                             text: OfflineLookupReply.body(.answered(answer), queued: false))
+                             text: OfflineLookupReply.body(.answered(answer), queued: false,
+                                                           notice: offline.ownerNameNotice(for: question)))
             reply.thread = thread
             context.insert(reply)
             thread.updatedAt = Date()
@@ -628,10 +629,12 @@ final class MacCoordinator {
         if case .unanswered(.gateRefused(let refusal)) = outcome {
             note = Turn(role: .jesse,
                         text: OfflineLookupReply.body(.notALookup(because: refusal.because),
-                                                      queued: false))
+                                                      queued: false,
+                                                      notice: offline.ownerNameNotice(for: question)))
         } else {
             note = Turn(role: .jesse,
-                        text: OfflineLookupReply.body(.abstained, queued: false))
+                        text: OfflineLookupReply.body(.abstained, queued: false,
+                                                      notice: offline.ownerNameNotice(for: question)))
         }
         note.thread = thread
         context.insert(note)

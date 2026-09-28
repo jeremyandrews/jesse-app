@@ -108,8 +108,13 @@ final class MacConcurrentRunTests: XCTestCase {
         XCTAssertEqual(b.orderedTurns.map(\.text), ["in B", "answered B"])
     }
 
-    /// Two live turns, two live texts. One shared `streamingText` would have rendered whichever
-    /// conversation spoke last into both transcripts.
+    /// Two live turns, two live texts — and, since App 1.0 (175), two live NARRATIONS. One
+    /// shared `streamingText` would have rendered whichever conversation spoke last into both
+    /// transcripts, and one shared `LiveReply` would do it to the Thinking row as well.
+    ///
+    /// B is the one that calls a tool, so its stream exercises both halves: what it said
+    /// before the call is its narration, what it says after is its answer, and neither may
+    /// appear in A.
     func testTheTwoConversationsLiveTextNeverMixes() async throws {
         let context = try MacTestFixtures.context()
         let a = try newThread(in: context)
@@ -125,14 +130,20 @@ final class MacConcurrentRunTests: XCTestCase {
         await settles("B is streaming") { coord.phase(b.id) == .accepted }
 
         streams.a.continuation.yield(.delta("A's half"))
-        streams.b.continuation.yield(.delta("B's half"))
+        streams.b.continuation.yield(.delta("B's narration"))
         streams.b.continuation.yield(.activity(ToolActivity(name: "Read", refused: false)))
+        streams.b.continuation.yield(.delta("B's half"))
         await settles("both live texts arrived") {
             !coord.streamingText(for: a.id).isEmpty && !coord.streamingText(for: b.id).isEmpty
         }
 
         XCTAssertEqual(coord.streamingText(for: a.id), "A's half")
         XCTAssertEqual(coord.streamingText(for: b.id), "B's half")
+        // B called a tool, so what it said on the way to the call is B's narration — and it
+        // is B's alone. A never narrated anything and must not inherit it.
+        XCTAssertEqual(coord.thinkingText(for: b.id), "B's narration")
+        XCTAssertTrue(coord.thinkingText(for: a.id).isEmpty,
+                      "a narration belongs to the conversation that narrated it")
         XCTAssertTrue(coord.activity(for: a.id).isEmpty,
                       "and an activity line belongs to the conversation that reported it")
         XCTAssertFalse(coord.activity(for: b.id).isEmpty)

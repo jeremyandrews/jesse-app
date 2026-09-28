@@ -76,8 +76,19 @@ final class RunCoordinatorStreamTests: XCTestCase {
     /// Let the coordinator's consume loop process whatever was just yielded.
     private func settle() async throws { try await Task.sleep(for: .milliseconds(30)) }
 
+    /// THE LIVE SPLIT, THROUGH THE COORDINATOR. A tool call closes what streamed before
+    /// it: that text leaves the answer for the Thinking row and the answer restarts.
+    ///
+    /// `LiveReply` is asserted frame by frame in `NarrationWireTests`; what is asserted
+    /// here is the WIRING — that `partialText` and `partialThinking` carry the two halves
+    /// the view draws, and that the coalescer's reset publishes the cut immediately
+    /// rather than leaving the narration on screen as if it were the answer.
+    ///
+    /// This test asserted the opposite until App 1.0 (179): before narration folding it
+    /// expected the two deltas to concatenate across the tool call, and it was left red
+    /// on `main` when that behaviour deliberately changed.
     @MainActor
-    func testDeltasBuildPartialThenSingleTurnOnDone() async throws {
+    func testDeltasSplitAtAToolCallThenOneTurnOnDone() async throws {
         let context = try makeContext()
         let fake = StreamingFakeClient()
         let opened = expectation(description: "stream opened")
@@ -99,18 +110,25 @@ final class RunCoordinatorStreamTests: XCTestCase {
         fake.emit(.activity(ToolActivity(name: "Read")))
         try await settle()
         XCTAssertEqual(coordinator.activity(for: thread.id), "Reading the vault…")
+        // The tool call is the narration boundary: "Hello " was said on the way to the
+        // call, so it moves to the Thinking row and the answer starts empty. A reset is
+        // published immediately rather than coalesced, so this needs no polling.
+        XCTAssertEqual(coordinator.partialThinking(for: thread.id), "Hello")
+        XCTAssertEqual(coordinator.partialText(for: thread.id), "")
 
-        // The observable `partialText` is coalesced to ~10Hz: this second delta
-        // lands inside the first publish's cooldown, so it's surfaced by the
-        // deferred flush at the interval boundary rather than immediately. Poll past
-        // that boundary (the exact concatenation is preserved — nothing is dropped).
+        // The observable `partialText` is coalesced to ~10Hz: this delta lands inside
+        // the reset's cooldown, so it is surfaced by the deferred flush at the interval
+        // boundary rather than immediately. Poll past that boundary (nothing is
+        // dropped — the buffer holds the exact text either way).
         fake.emit(.delta("world"))
         let deadline = Date().addingTimeInterval(3)
-        while coordinator.partialText(for: thread.id) != "Hello world",
-              Date() < deadline {
+        while coordinator.partialText(for: thread.id) != "world", Date() < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertEqual(coordinator.partialText(for: thread.id), "Hello world")
+        XCTAssertEqual(coordinator.partialText(for: thread.id), "world",
+                       "the answer is what streamed since the last tool call")
+        XCTAssertEqual(coordinator.partialThinking(for: thread.id), "Hello",
+                       "the narration stands while the answer streams")
 
         // The authoritative done frame finalizes the turn.
         fake.emit(.done(JesseReply(text: "Hello world", sessionId: "sess-1")))
@@ -121,6 +139,8 @@ final class RunCoordinatorStreamTests: XCTestCase {
         XCTAssertEqual(jesseTurns.first?.text, "Hello world")
         XCTAssertEqual(thread.sessionId, "sess-1")
         XCTAssertNil(coordinator.partialText(for: thread.id), "partial buffer cleared on done")
+        XCTAssertNil(coordinator.partialThinking(for: thread.id),
+                     "the live narration is cleared with it")
         XCTAssertNil(coordinator.activity(for: thread.id))
         XCTAssertFalse(coordinator.isRunning(thread.id))
         XCTAssertNil(coordinator.error(for: thread.id))

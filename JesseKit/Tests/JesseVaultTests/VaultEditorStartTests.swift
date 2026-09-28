@@ -345,6 +345,13 @@ final class VaultEditorStartTests: XCTestCase {
     func testOpeningPutsTheLineAtTheTopOfAnNSTextView() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
                               styleMask: [.titled], backing: .buffered, defer: false)
+        // A programmatically created window RELEASES ITSELF ON CLOSE, which under ARC is
+        // an over-release: the test still holds it. It does not fail here — it corrupts
+        // the process and blows up later, in `objc_autoreleasePoolPop` at the end of some
+        // unrelated test, which is what `swift test` reported as a signal 11 in
+        // `VaultBrowserModelTests` or `StrandMenuTests` depending on the run. Own it here
+        // instead. `ComposerTextViewTests` carries the same line for the same reason.
+        window.isReleasedWhenClosed = false
         defer { window.close() }
         let made = NSTextView.scrollableTextView()
         let view = try XCTUnwrap(made.documentView as? NSTextView)

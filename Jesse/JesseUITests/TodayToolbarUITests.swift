@@ -1,5 +1,14 @@
 import XCTest
 
+/// The `UserDefaults` keys the Today tab's view state lives in, duplicated here because a
+/// UI-test target links no app code. `TodayToolbarUITestContractTests` (JesseTests) pins
+/// both against `TodayViewPreferences`, so a rename cannot quietly turn these tests into
+/// no-ops.
+enum TodayViewPreferencesKey {
+    static let segment = "today.segment"
+    static let badgeFilter = "today.badgeFilter"
+}
+
 /// The Today tab's navigation-bar affordances, driven through the real app.
 ///
 /// The sibling of `ChatsToolbarUITests` and `HealthToolbarUITests`, and here for the
@@ -16,6 +25,28 @@ final class TodayToolbarUITests: XCTestCase {
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
+    }
+
+    /// Launch with the tab's remembered view state PINNED to the day.
+    ///
+    /// The Today tab has two segments and App 1.0 (164) onwards remembers which one this
+    /// device was last left in — deliberately, and per device, so `UserDefaults` carries
+    /// it between launches of the same simulator. A run that ended on the Strands board
+    /// therefore started the next one there, where the day's sort menu and badge filter do
+    /// not exist and cannot: all three tests below then failed on their anchor, reporting
+    /// "the Today navigation bar is up" while the app was showing a perfectly good board.
+    /// The badge filter is pinned for the same reason in miniature — it is stored too, and
+    /// a run that failed mid-toggle left it on.
+    ///
+    /// `-key value` launch arguments land in `NSArgumentDomain`, which `UserDefaults`
+    /// reads before anything the app has written: the same seam `ModelPickerMenuUITests`
+    /// uses to pin the device's default model, and it leaves the stored value alone.
+    private func launchOnTheDay() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += ["-\(TodayViewPreferencesKey.segment)", "today",
+                                "-\(TodayViewPreferencesKey.badgeFilter)", "NO"]
+        app.launch()
+        return app
     }
 
     /// Move to the Today tab and wait for its navigation bar. The sort control is the
@@ -37,8 +68,7 @@ final class TodayToolbarUITests: XCTestCase {
     /// It is not an item buried in an overflow menu, and not a bare glyph the count has
     /// to be inferred from.
     func testTheBadgeFilterIsAVisibleNavigationBarButton() {
-        let app = XCUIApplication()
-        app.launch()
+        let app = launchOnTheDay()
         openTodayTab(app)
 
         let filter = app.navigationBars.buttons["Needs action, 0 items"]
@@ -55,8 +85,7 @@ final class TodayToolbarUITests: XCTestCase {
     /// most-tapped of the Today toolbar's controls, so it takes the rightmost slot. The
     /// sort menu sits to its left. See README, "UI conventions".
     func testTheBadgeFilterSitsRightOfTheSortMenu() {
-        let app = XCUIApplication()
-        app.launch()
+        let app = launchOnTheDay()
         openTodayTab(app)
 
         let sort = app.navigationBars.buttons["Order every section: File order"]
@@ -70,8 +99,7 @@ final class TodayToolbarUITests: XCTestCase {
     /// Tapping toggles the view and says so. Nothing is written by either state: the
     /// filter is a lens over the day, which is asserted in the package's own tests.
     func testTappingItTogglesTheFilterAndAnnouncesTheState() {
-        let app = XCUIApplication()
-        app.launch()
+        let app = launchOnTheDay()
         openTodayTab(app)
 
         let filter = app.navigationBars.buttons["Needs action, 0 items"]

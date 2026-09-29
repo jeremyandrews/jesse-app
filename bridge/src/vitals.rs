@@ -205,7 +205,7 @@ pub fn parse_vitals_body(body: &Value) -> Result<Vec<VitalsDay>, String> {
     Ok(out)
 }
 
-/// A value as its CSV cell: rounded to the metric's decimals, shortest form (`452`, `57.5`).
+/// A value as its CSV cell: rounded to the metric's decimals, shortest form (`431`, `55.5`).
 fn vitals_cell(v: Option<f64>, decimals: u32) -> String {
     match v {
         None => String::new(),
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn a_new_date_into_an_empty_file_writes_the_header_and_one_row() {
         let (out, counts) =
-            upsert_vitals_csv("", &[day("2026-09-27", Some(452.0), Some(106.0))]).unwrap();
+            upsert_vitals_csv("", &[day("2026-09-27", Some(431.0), Some(94.0))]).unwrap();
         assert_eq!(
             counts,
             VitalsUpsert {
@@ -462,7 +462,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            format!("{}\n2026-09-27,452,,,,,106,,,,\n", vitals_header())
+            format!("{}\n2026-09-27,431,,,,,94,,,,\n", vitals_header())
         );
     }
 
@@ -471,8 +471,8 @@ mod tests {
         let (first, _) = upsert_vitals_csv(
             "",
             &[
-                day("2026-09-26", Some(400.0), Some(88.0)),
-                day("2026-09-27", Some(452.0), Some(106.0)),
+                day("2026-09-26", Some(400.0), Some(79.0)),
+                day("2026-09-27", Some(431.0), Some(94.0)),
             ],
         )
         .unwrap();
@@ -492,25 +492,25 @@ mod tests {
             "replaced where it stood"
         );
         assert_eq!(
-            lines[2], "2026-09-27,452,,,,,106,,,,",
+            lines[2], "2026-09-27,431,,,,,94,,,,",
             "the other row untouched"
         );
     }
 
     #[test]
     fn blank_metrics_stay_blank_and_are_omitted_from_the_series() {
-        let (out, _) = upsert_vitals_csv("", &[day("2026-09-27", Some(452.0), None)]).unwrap();
-        assert!(out.contains("2026-09-27,452,,,,,,,,,\n"), "{out}");
+        let (out, _) = upsert_vitals_csv("", &[day("2026-09-27", Some(431.0), None)]).unwrap();
+        assert!(out.contains("2026-09-27,431,,,,,,,,,\n"), "{out}");
         let series = vitals_series(&out);
         assert_eq!(series.len(), 1);
-        assert_eq!(series[0]["sleepMin"], 452.0);
+        assert_eq!(series[0]["sleepMin"], 431.0);
         assert!(series[0].get("hrv").is_none(), "unknown is absent, never 0");
     }
 
     #[test]
     fn a_resend_may_blank_a_metric_the_new_reading_lacks() {
         let (first, _) =
-            upsert_vitals_csv("", &[day("2026-09-27", Some(452.0), Some(106.0))]).unwrap();
+            upsert_vitals_csv("", &[day("2026-09-27", Some(431.0), Some(94.0))]).unwrap();
         let (second, _) =
             upsert_vitals_csv(&first, &[day("2026-09-27", Some(455.0), None)]).unwrap();
         assert!(second.ends_with("2026-09-27,455,,,,,,,,,\n"), "{second}");
@@ -518,14 +518,11 @@ mod tests {
 
     #[test]
     fn values_round_to_each_metrics_decimals() {
-        let mut d = day("2026-09-27", Some(451.6), Some(106.04));
-        d.values[4] = Some(52.96);
-        d.values[9] = Some(36.8749);
+        let mut d = day("2026-09-27", Some(430.6), Some(94.04));
+        d.values[4] = Some(50.96);
+        d.values[9] = Some(36.4249);
         let (out, _) = upsert_vitals_csv("", &[d]).unwrap();
-        assert!(
-            out.ends_with("2026-09-27,452,,,,53,106,,,,36.87\n"),
-            "{out}"
-        );
+        assert!(out.ends_with("2026-09-27,431,,,,51,94,,,,36.42\n"), "{out}");
     }
 
     #[test]
@@ -542,7 +539,7 @@ mod tests {
     fn duplicate_rows_in_an_existing_file_collapse_to_one() {
         let h = vitals_header();
         let content = format!(
-            "{h}\n2026-09-26,400,,,,,,,,,\n2026-09-27,452,,,,,,,,,\n2026-09-26,405,,,,,,,,,\n"
+            "{h}\n2026-09-26,400,,,,,,,,,\n2026-09-27,431,,,,,,,,,\n2026-09-26,405,,,,,,,,,\n"
         );
         let (out, counts) =
             upsert_vitals_csv(&content, &[day("2026-09-28", Some(420.0), None)]).unwrap();
@@ -553,7 +550,7 @@ mod tests {
             vec![
                 h.as_str(),
                 "2026-09-26,405,,,,,,,,,",
-                "2026-09-27,452,,,,,,,,,",
+                "2026-09-27,431,,,,,,,,,",
                 "2026-09-28,420,,,,,,,,,"
             ]
         );
@@ -578,12 +575,12 @@ mod tests {
     #[test]
     fn parse_keeps_known_metrics_ignores_unknown_keys_and_null_is_unknown() {
         let days = parse_vitals_body(&json!({"days": [
-            {"date": "2026-09-27", "sleepMin": 452, "hrv": null, "restingHr": 57, "futureMetric": 3}
+            {"date": "2026-09-27", "sleepMin": 431, "hrv": null, "restingHr": 55, "futureMetric": 3}
         ]}))
         .unwrap();
         assert_eq!(days.len(), 1);
-        assert_eq!(days[0].values[0], Some(452.0));
-        assert_eq!(days[0].values[4], Some(57.0));
+        assert_eq!(days[0].values[0], Some(431.0));
+        assert_eq!(days[0].values[4], Some(55.0));
         assert_eq!(days[0].values[5], None);
     }
 
@@ -614,7 +611,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("vitals-{}-{}", std::process::id(), rand_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
-        write_vitals(&dir, &[day("2026-09-27", Some(452.0), None)]).unwrap();
+        write_vitals(&dir, &[day("2026-09-27", Some(431.0), None)]).unwrap();
         let counts = write_vitals(&dir, &[day("2026-09-27", Some(460.0), None)]).unwrap();
         assert_eq!(
             counts,

@@ -761,41 +761,41 @@ enum HealthAsk {
 
     // MARK: Patterns
 
-    static func patterns(_ report: DietCorrelationReport, anchor: String,
+    static func patterns(_ report: PatternsReport, anchor: String,
                          scope: AskScope) -> AskContext {
-        var children = report.associations.map(HealthFacts.association)
-        if !report.misses.isEmpty {
-            children.append(AskFacts(
-                heading: "Set aside, and why (never hidden)",
-                children: report.misses.map(HealthFacts.patternMiss)))
+        var children: [AskFacts] = []
+        if let audit = report.energyAudit { children.append(HealthFacts.energyAudit(audit)) }
+        for section in Patterns.sections(report) {
+            children.append(AskFacts(heading: Patterns.heading(section.verdict),
+                                     lines: [Patterns.explainer(section.verdict)],
+                                     children: section.rows.map(HealthFacts.patternResult)))
         }
         return AskContext(
             scope: scope, area: .patterns, timeRange: .all(through: anchor),
             title: "Patterns", subject: "these patterns", subjectKey: "patterns",
-            facts: AskFacts(
-                lines: ["\(report.associations.count) association"
-                        + "\(report.associations.count == 1 ? "" : "s") cleared the guardrails"],
-                children: children, note: DietCorrelations.caveat),
+            facts: AskFacts(lines: [Patterns.countsLine(report.counts)],
+                            children: children, note: report.caveat),
             suggestedQuestions: HealthAskStarters.patterns)
     }
 
-    static func association(_ a: DietAssociation, anchor: String) -> AskContext {
+    static func patternResult(_ q: PatternResult, anchor: String) -> AskContext {
         AskContext(
             scope: .item, area: .patterns, timeRange: .all(through: anchor),
-            title: a.title, subject: "this pattern", subjectKey: a.id,
-            facts: AskFacts(children: [HealthFacts.association(a)],
-                                  note: DietCorrelations.caveat),
-            suggestedQuestions: HealthAskStarters.patterns)
+            title: q.title, subject: "this pattern", subjectKey: "pattern-\(q.id)",
+            facts: AskFacts(children: [HealthFacts.patternResult(q)],
+                            note: HealthFacts.patternsCaveat),
+            suggestedQuestions: q.verdict == .watching
+                ? ["What would I have to log to settle this?", "Why isn't this settled yet?"]
+                : HealthAskStarters.patterns)
     }
 
-    static func patternMiss(_ m: DietPairMiss, anchor: String) -> AskContext {
+    static func energyAudit(_ a: EnergyAudit, anchor: String) -> AskContext {
         AskContext(
             scope: .item, area: .patterns, timeRange: .all(through: anchor),
-            title: m.title, subject: "this set-aside pair", subjectKey: m.id,
-            facts: AskFacts(children: [HealthFacts.patternMiss(m)],
-                                  note: DietCorrelations.caveat),
-            suggestedQuestions: ["Why isn't there enough data for this?",
-                                 "What would I have to log to answer it?"])
+            title: "Energy audit", subject: "this energy audit", subjectKey: "energy-audit",
+            facts: AskFacts(children: [HealthFacts.energyAudit(a)], note: a.note),
+            suggestedQuestions: ["Why do my log and the scale disagree?",
+                                 "Is my maintenance estimate reasonable?"])
     }
 }
 

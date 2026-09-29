@@ -14,6 +14,31 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (185), Bridge 0.162.1] - 2026-09-29
+
+**The Patterns screen draws the bridge's report: findings, measured nulls and open
+questions, in units.** Root cause of the old screen's permanent "nothing worth flagging
+yet": the app-side engine correlated intake against day-over-day scale change under a fixed
+`|rho| >= 0.30` floor, and on the real logs all eight of its pairs had enough days (60 to 88)
+and none cleared it. The engine now lives in the bridge (0.162.0); this is the screen.
+
+- **The nav row says something true every time**: the top finding in units ("calorie
+  intake 250 kcal higher on weekend days"), otherwise the counts ("0 findings, 2 ruled out,
+  13 watching"). "Not enough days yet" only when not one question has a paired day. An
+  older bridge sends no report and the row hides, as before; a past day never shows it.
+- **The detail screen**: the energy audit card (implied maintenance with its interval, or
+  why it is withheld), then Findings, Ruled out and Watching. Each row has a two-point chart
+  of the two kinds of day with the difference's interval, and the bridge's own sentence.
+  Same screen on iOS and macOS.
+- **Every row is askable**, and the facts an ask carries now hold the verdict, the effect in
+  units, its 95% interval, both arms' day counts and, for an open question, what it still
+  needs.
+- **The app-side engine is deleted** (`DietCorrelations.swift`, its view and its tests); the
+  rules it guarded (missing days excluded, a minimum per arm before any number, tied ranks,
+  wording that never states a cause) are tested in the bridge's `patterns` suite.
+- **Test fixtures are invented values.** Several vitals tests and a README example from
+  0.161.0 used one real night's numbers; they are replaced with made-up ones.
+
 ## [Bridge 0.162.0] - 2026-09-29
 
 **Patterns moves to the bridge and asks better questions of better outcomes.** Root cause

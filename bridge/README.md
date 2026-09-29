@@ -1111,7 +1111,7 @@ metrics that day knows).
 ```bash
 curl -s -X POST http://127.0.0.1:8765/jesse/diet/vitals \
   -H "Authorization: Bearer $JESSE_TOKEN" -H "Content-Type: application/json" \
-  -d '{"days":[{"date":"2026-07-08","sleepMin":452,"deepMin":72,"restingHr":57,"hrv":106}]}'
+  -d '{"days":[{"date":"2026-07-08","sleepMin":431,"deepMin":64,"restingHr":55,"hrv":94}]}'
 ```
 
 Keys: `sleepMin`, `deepMin`, `remMin`, `awakeMin`, `restingHr`, `hrv` (SDNN, ms),

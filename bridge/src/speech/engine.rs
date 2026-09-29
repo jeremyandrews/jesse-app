@@ -20,7 +20,9 @@
 //!
 //! * GREEDY, not wide beam search: beam search collapsed a whole 47-minute file to one repeated
 //!   non-speech token where greedy read it.
-//! * NO CARRIED CONTEXT: a strong prior from a music intro otherwise poisons later speech.
+//! * NO CARRIED CONTEXT, between calls AND between the windows of one call: a strong prior
+//!   from a music intro otherwise poisons later speech, and a sentence fed back as the next
+//!   window's prompt loops for the rest of the recording.
 //! * NON-SPEECH TOKENS SUPPRESSED and the no-speech / log-probability gates on, so silence and
 //!   music are skipped rather than written down as a music tag or a subtitle credit.
 //! * And, after the engine, [`clean_segments`]: a hallucinated credit is dropped and COUNTED,
@@ -175,7 +177,6 @@ impl SpeechEngine for WhisperEngine {
     }
 
     fn transcribe(&self, run: EngineRun<'_>) -> Result<Vec<Segment>, EngineError> {
-        use whisper_rs::{FullParams, SamplingStrategy};
         let language = run.language.unwrap_or("auto");
         if language != "auto" && whisper_rs::get_lang_id(language).is_none() {
             return Err(EngineError::UnknownLanguage(language.to_string()));
@@ -184,29 +185,7 @@ impl SpeechEngine for WhisperEngine {
             .ctx
             .create_state()
             .map_err(|e| EngineError::Failed(format!("could not start a reading: {e}")))?;
-        let p = STUDIO_DECODE;
-        let mut params = FullParams::new(if p.beam_search {
-            SamplingStrategy::BeamSearch {
-                beam_size: 5,
-                patience: -1.0,
-            }
-        } else {
-            SamplingStrategy::Greedy { best_of: p.best_of }
-        });
-        params.set_language(Some(language));
-        params.set_no_context(!p.carry_context);
-        params.set_suppress_nst(p.suppress_non_speech_tokens);
-        params.set_suppress_blank(true);
-        params.set_no_speech_thold(p.no_speech_threshold);
-        params.set_logprob_thold(p.logprob_threshold);
-        params.set_entropy_thold(p.entropy_threshold);
-        params.set_temperature(0.0);
-        params.set_temperature_inc(p.temperature_increment);
-        params.set_n_threads(self.threads);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_print_special(false);
+        let mut params = decode_params(&STUDIO_DECODE, language, self.threads);
         let progress = run.progress.clone();
         params.set_progress_callback_safe(move |pct: i32| {
             progress(pct.clamp(0, 100) as f64 / 100.0);
@@ -245,6 +224,48 @@ impl SpeechEngine for WhisperEngine {
             })
             .collect())
     }
+}
+
+/// whisper.cpp's parameters for one reading under `p`, callbacks aside.
+///
+/// `carry_context: false` takes TWO settings, because whisper.cpp's `no_context` only clears
+/// the text carried in from a PREVIOUS call. Inside one call, every window's decoded text is
+/// fed to the next window as its prompt unless `n_max_text_ctx` is 0. With the default (16384)
+/// a sentence the model repeated once became the prompt it repeated again, window after
+/// window: hour-long room recordings came back as their first minute and one sentence
+/// collapsed from about 1,700 copies.
+fn decode_params<'a, 'b>(
+    p: &DecodeProfile,
+    language: &'a str,
+    threads: i32,
+) -> whisper_rs::FullParams<'a, 'b> {
+    use whisper_rs::{FullParams, SamplingStrategy};
+    let mut params = FullParams::new(if p.beam_search {
+        SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: -1.0,
+        }
+    } else {
+        SamplingStrategy::Greedy { best_of: p.best_of }
+    });
+    params.set_language(Some(language));
+    params.set_no_context(!p.carry_context);
+    if !p.carry_context {
+        params.set_n_max_text_ctx(0);
+    }
+    params.set_suppress_nst(p.suppress_non_speech_tokens);
+    params.set_suppress_blank(true);
+    params.set_no_speech_thold(p.no_speech_threshold);
+    params.set_logprob_thold(p.logprob_threshold);
+    params.set_entropy_thold(p.entropy_threshold);
+    params.set_temperature(0.0);
+    params.set_temperature_inc(p.temperature_increment);
+    params.set_n_threads(threads);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_print_special(false);
+    params
 }
 
 /// whisper.cpp's abort poll: `user_data` is the `*const CancelFn` installed in
@@ -610,6 +631,20 @@ mod tests {
         assert!(
             p.temperature_increment > 0.0,
             "a stuck segment must be able to fall back"
+        );
+    }
+
+    /// NO CARRIED CONTEXT MEANS NONE, INSIDE THE CALL TOO. `no_context` alone left
+    /// whisper.cpp feeding each window's text to the next, so one repeated sentence looped
+    /// for the rest of an hour-long recording. The raw parameters are only readable through
+    /// their `Debug` form, so that is what this reads.
+    #[test]
+    fn no_carried_context_reaches_whisper_as_no_rolling_prompt() {
+        let raw = format!("{:?}", decode_params(&STUDIO_DECODE, "en", 4));
+        assert!(raw.contains("no_context: true"), "{raw}");
+        assert!(
+            raw.contains("n_max_text_ctx: 0,"),
+            "each window must be decoded with no prompt from the windows before it: {raw}"
         );
     }
 

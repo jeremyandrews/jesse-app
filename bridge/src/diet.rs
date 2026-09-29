@@ -1249,6 +1249,21 @@ pub async fn jesse_diet(
         errors.extend(exercise_errors);
         errors.extend(vitals_errors);
 
+        // patterns: the associations report over all four logs, computed once per LIVE
+        // request. A past day never shows it (the app hides the row when paging back, as it
+        // does every range that would end after the day being read), so a history request
+        // does not pay for it. Today's diet day is still being logged, so its intake is left
+        // out. A missing log is empty to the engine: every question it feeds reads "not
+        // enough days yet".
+        let vitals_csv = std::fs::read_to_string(&vitals_path).unwrap_or_default();
+        let patterns_val = patterns_report(
+            food_csv.unwrap_or(""),
+            exercise_csv.unwrap_or(""),
+            weight_read.as_deref().unwrap_or(""),
+            &vitals_csv,
+            Some(&today_date),
+        );
+
         return Ok(Json(json!({
             "asOf": rfc3339_utc(SystemTime::now()),
             // The diet day it is RIGHT NOW where the caller is standing, and the zone that
@@ -1267,6 +1282,7 @@ pub async fn jesse_diet(
             "sourceSeries": source_series_val,
             "exerciseSeries": exercise_series_val,
             "vitalsSeries": vitals_series_val,
+            "patterns": patterns_val,
             "errors": errors,
             "availableDays": available,
             "historical": false,

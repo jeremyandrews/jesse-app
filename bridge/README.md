@@ -1123,6 +1123,34 @@ one is a failed HealthKit read, and writing it would blank a measured night). A 
 header is not the ledger's is never rewritten (`500`). Writes are atomic and serialized
 in-process. The diet CSVs are never touched.
 
+### Patterns (`patterns` on the live snapshot)
+
+The live `GET /jesse/diet` response (not a `date=` one) carries `patterns`, computed once
+per request by `src/patterns.rs` from `food-log.csv`, `exercise-log.csv`, `weight-log.csv`
+and `vitals-log.csv`. Today's diet day is left out of every intake and training series
+because it is still being logged.
+
+- **A preregistered catalogue of 15 questions**, not a sweep: each names a driver, an
+  outcome, a lag, the direction a mechanism predicts and the smallest effect worth caring
+  about, in the outcome's units (0.5 lb, 20 min of sleep, 5 ms HRV, 2 bpm, 200 kcal, 5 g).
+- **Weight is a residual**: the morning weight minus the mean of the non-artifact weigh-ins
+  over the seven days before it; `Hydration_Artifact = true` mornings are excluded.
+- **Effects in units**: high arm minus low arm (a fixed threshold, or the driver's median),
+  a 95% interval from a moving block bootstrap (7-day blocks, 2,000 resamples, fixed seed,
+  so the same logs give the same report), Spearman rho as a secondary field, and
+  Benjamini-Hochberg across the catalogue at q = 0.10. At least 8 days per arm.
+- **Verdicts**: `finding` (interval excludes zero, passes the FDR cut, same sign in both
+  halves), `ruledOut` (interval inside plus or minus the meaningful effect), `watching`
+  (with `daysNeeded` or a `watchingReason`). Every question carries its own non-causal
+  `sentence` and a `short` form for the nav row.
+- **`energyAudit`**: over the 28 days ending on the last closed day, mean logged intake minus
+  logged exercise against the weight trend at 3,500 kcal per lb, giving an implied
+  maintenance with its interval; `withheld` with the reason when fewer than 21 of the 28
+  days have calories or there are fewer than 14 usable weigh-ins.
+
+A missing log is empty to the engine (its questions read "not enough days yet"), never an
+error.
+
 ## Recent-workouts context (`health_context`)
 
 **`POST /jesse` with an optional `"health_context"` field** — a compact,

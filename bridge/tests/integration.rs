@@ -10997,3 +10997,35 @@ async fn diet_snapshot_without_a_vitals_ledger_serves_an_empty_series_and_no_err
     );
     let _ = std::fs::remove_dir_all(&vault);
 }
+
+// ---- Patterns (`patterns` on the diet snapshot) -------------------------------------------
+
+#[tokio::test]
+async fn diet_snapshot_carries_the_patterns_report_with_every_catalogue_question() {
+    let (st, vault) = diet_state_full();
+    let resp = app(st)
+        .oneshot(diet_request(Some("Bearer test-token")))
+        .await
+        .unwrap();
+    let snap: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let p = &snap["patterns"];
+    let questions = p["questions"].as_array().expect("questions array");
+    assert_eq!(
+        questions.len(),
+        15,
+        "the whole preregistered catalogue, shown"
+    );
+    let counts = &p["counts"];
+    let total = counts["findings"].as_u64().unwrap()
+        + counts["ruledOut"].as_u64().unwrap()
+        + counts["watching"].as_u64().unwrap();
+    assert_eq!(total, 15);
+    // A three-day fixture settles nothing: every question is watching, each with a sentence.
+    for q in questions {
+        assert_eq!(q["verdict"], "watching", "{q}");
+        assert!(!q["sentence"].as_str().unwrap().is_empty());
+    }
+    assert!(p["caveat"].as_str().unwrap().contains("not causes"));
+    assert!(p["energyAudit"]["withheld"].is_string());
+    let _ = std::fs::remove_dir_all(&vault);
+}

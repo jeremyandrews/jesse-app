@@ -14,6 +14,42 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.162.0] - 2026-09-29
+
+**Patterns moves to the bridge and asks better questions of better outcomes.** Root cause
+of the Health tab's permanent "nothing worth flagging yet", measured on the real logs: all
+eight app-side candidates had 60 to 88 paired days and every one sat under the fixed
+`|rho| >= 0.30` floor (largest -0.23 over 69 days). The design guaranteed that: six of the
+eight targeted day-over-day scale change, the noisiest number in the stack; days already
+flagged `Hydration_Artifact` sat in the sample; the floor ignored sample size, so a rho of
+0.25 over 70 days was discarded; a well measured null was thrown away; rest days were
+missing, so the training questions compared training days only with other training days; and
+rho is not a number anyone can act on.
+
+- **`patterns` on the live diet snapshot**, from `src/patterns.rs`, pure and computed once
+  per request: a preregistered catalogue of 15 questions (sodium, carbs and alcohol against
+  next-morning weight; alcohol, a late last meal and afternoon caffeine against sleep; alcohol
+  and training load against next-morning HRV and resting heart rate; sleep against the next
+  day's calories and saturated fat; training days, weekends and alcohol against calories).
+- **Better outcomes**: sleep, HRV and resting heart rate from the vitals ledger, and a weight
+  residual against the trailing seven-day mean with hydration artifacts excluded.
+- **Effects in units with honest uncertainty**: arm difference, moving block bootstrap
+  interval (7-day blocks, fixed seed), Benjamini-Hochberg at q = 0.10 across the catalogue,
+  at least 8 days per arm, and a split-half sign check.
+- **Three verdicts, all shown**: finding, ruled out (the whole interval inside the
+  meaningful effect, a result in its own right), and watching with days still needed.
+- **Rest days exist now**: a day with food logged inside the exercise log's span and no
+  session is 0 kcal of training. Today's open diet day is left out of intake series.
+- **Energy audit**: net logged intake against the 28-day weight trend, giving an implied
+  maintenance with its interval; withheld under 21 logged days. Reported as implied
+  maintenance rather than a "log says X deficit" figure, because the logs carry no
+  maintenance reference to measure a logged deficit against.
+- Tests on synthetic series: a planted effect is found, a planted null with enough days is
+  ruled out, a short series is watching with no number, an effect that flips between halves
+  is never a finding (shown failing with the split-half check removed), missing days are
+  excluded rather than filled, the open day is dropped, the audit recovers a planted deficit
+  and withholds when thin, and no sentence reads as a cause.
+
 ## [App 1.0 (184), Bridge 0.161.0] - 2026-09-29
 
 **The Health tab's Patterns row always said "nothing worth flagging yet", and the one

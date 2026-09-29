@@ -179,6 +179,10 @@ final class BackgroundDelivery {
         await replayQueuedIntents()
         let jobs = inFlightStore.load()
         async let snapshots = refresh([.today, .diet])
+        // The Studio's vitals ledger rides the same wake-up: the last few days of sleep,
+        // resting HR and HRV from Health, so the Patterns engine has them by morning even
+        // when the app was not opened. Its outcome does not decide this task's.
+        async let vitals = VitalsSync.shared.sync()
         async let replies: BackgroundWorkOutcome = {
             var outcome = BackgroundWorkOutcome.noData
             for (_, job) in jobs {
@@ -186,6 +190,7 @@ final class BackgroundDelivery {
             }
             return outcome
         }()
+        _ = await vitals
         return Self.combine(await snapshots, await replies)
     }
 

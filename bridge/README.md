@@ -1033,7 +1033,8 @@ that names its zone is left alone — which also makes it safe to run twice.
 normalized JSON snapshot for the app's **Health** tab. Same bearer auth as
 `/jesse`. The vault agent regenerates these files (`diet-today.js` on every
 food/exercise/weigh-in log; the rest each morning and on weigh-ins) — the bridge
-only reads them; it never writes here.
+only reads them; it never writes here. (The one diet-logs file the bridge writes is the
+vitals ledger below, on the phone's behalf.)
 
 ```bash
 curl -s http://127.0.0.1:8765/jesse/diet \
@@ -1049,6 +1050,7 @@ Files read, all under `$JESSE_VAULT`:
 | `todo-list/diet-coach-notes.js` | `coach` | expected |
 | `todo-list/proposed-diet-today.js` | `proposed` | optional (frequently absent) |
 | `diet-logs/weight-log.csv` | `weightSeries` | expected |
+| `diet-logs/vitals-log.csv` | `vitalsSeries` | optional (missing until the phone first syncs; served as `[]`, not an error) |
 
 The three `.js` files (and the optional one) are **data-only JS literals** — zero
 or more leading `//` comment lines, then one `window.<NAME> = <object-or-array>;`
@@ -1098,6 +1100,28 @@ standing) and `tz` (the effective zone it was resolved in). `asOf` is unchanged 
   "errors": ["progress: json5 parse error at …"]
 }
 ```
+
+### Daily vitals ledger (`POST /jesse/diet/vitals`)
+
+The phone upserts whole days of what Apple Health measured into
+`$JESSE_VAULT/diet-logs/vitals-log.csv`, which `GET /jesse/diet` then serves as
+`vitalsSeries` (the last 120 dates, ascending, each object carrying `date` and only the
+metrics that day knows).
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/jesse/diet/vitals \
+  -H "Authorization: Bearer $JESSE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"days":[{"date":"2026-07-08","sleepMin":452,"deepMin":72,"restingHr":57,"hrv":106}]}'
+```
+
+Keys: `sleepMin`, `deepMin`, `remMin`, `awakeMin`, `restingHr`, `hrv` (SDNN, ms),
+`steps`, `activeKcal`, `respRate`, `wristTempC`; all optional, an absent one is an empty
+cell. A date already in the file is **replaced in place**; a new one is appended. Refused
+with `400` and nothing written: a malformed date, a value outside its plausible range, the
+same date twice, more than 400 days, or a day with no metric at all (the usual source of
+one is a failed HealthKit read, and writing it would blank a measured night). A file whose
+header is not the ledger's is never rewritten (`500`). Writes are atomic and serialized
+in-process. The diet CSVs are never touched.
 
 ## Recent-workouts context (`health_context`)
 

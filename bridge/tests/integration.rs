@@ -10880,3 +10880,120 @@ async fn a_typed_conversation_lists_without_sent_for() {
     }
     let _ = std::fs::remove_file(&fake);
 }
+
+// ---- The daily vitals ledger (`POST /jesse/diet/vitals`, `vitalsSeries`) ----------
+
+fn vitals_state() -> (AppState, std::path::PathBuf) {
+    let vault = make_diet_vault();
+    write_vault_file(&vault, "vault/diet-today.js", FIX_TODAY);
+    let cfg = Config {
+        vault: vault.to_string_lossy().into_owned(),
+        ..test_config()
+    };
+    (AppState::new(cfg), vault)
+}
+
+async fn post_vitals(st: &AppState, auth: Option<&str>, body: &str) -> (StatusCode, Value) {
+    let resp = app(st.clone())
+        .oneshot(vitals_request(auth, body))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let text = body_string(resp).await;
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn vitals_requires_auth_and_writes_nothing_without_it() {
+    let (st, vault) = vitals_state();
+    let (status, _) = post_vitals(
+        &st,
+        None,
+        r#"{"days":[{"date":"2026-07-07","sleepMin":450}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!vault.join("diet-logs/vitals-log.csv").exists());
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[tokio::test]
+async fn vitals_upserts_one_row_per_date_and_the_snapshot_serves_it() {
+    let (st, vault) = vitals_state();
+    let auth = Some("Bearer test-token");
+    let (status, body) = post_vitals(
+        &st,
+        auth,
+        r#"{"days":[{"date":"2026-07-06","sleepMin":430,"hrv":61.24},{"date":"2026-07-07","sleepMin":450,"restingHr":52}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["added"], 2);
+
+    // The resend of a date replaces its row where it stands.
+    let (status, body) = post_vitals(
+        &st,
+        auth,
+        r#"{"days":[{"date":"2026-07-06","sleepMin":435,"hrv":62}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["replaced"], 1);
+    assert_eq!(body["added"], 0);
+
+    let csv = std::fs::read_to_string(vault.join("diet-logs/vitals-log.csv")).unwrap();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines.len(), 3, "header + one row per date:\n{csv}");
+    assert!(lines[1].starts_with("2026-07-06,435,"), "{csv}");
+    assert!(lines[2].starts_with("2026-07-07,450,"), "{csv}");
+    assert!(!csv.contains('\r'), "LF line endings");
+
+    let resp = app(st.clone()).oneshot(diet_request(auth)).await.unwrap();
+    let snap: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let series = snap["vitalsSeries"].as_array().unwrap();
+    assert_eq!(series.len(), 2);
+    assert_eq!(series[0]["date"], "2026-07-06");
+    assert_eq!(series[0]["hrv"], 62.0);
+    assert!(
+        series[1].get("hrv").is_none(),
+        "an unknown metric is absent, never 0"
+    );
+    assert_eq!(series[1]["restingHr"], 52.0);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[tokio::test]
+async fn vitals_malformed_body_is_400_and_an_empty_day_is_never_written() {
+    let (st, vault) = vitals_state();
+    let auth = Some("Bearer test-token");
+    let (status, _) = post_vitals(&st, auth, r#"{"days":[{"date":"2026-07-07"}]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = post_vitals(
+        &st,
+        auth,
+        r#"{"days":[{"date":"07/07/2026","sleepMin":1}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!vault.join("diet-logs/vitals-log.csv").exists());
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[tokio::test]
+async fn diet_snapshot_without_a_vitals_ledger_serves_an_empty_series_and_no_error() {
+    let (st, vault) = vitals_state();
+    let resp = app(st)
+        .oneshot(diet_request(Some("Bearer test-token")))
+        .await
+        .unwrap();
+    let snap: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(snap["vitalsSeries"], serde_json::json!([]));
+    let errors = snap["errors"].as_array().unwrap();
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.as_str().unwrap_or("").starts_with("vitalsSeries")),
+        "a ledger the phone has not written yet is not an error: {errors:?}"
+    );
+    let _ = std::fs::remove_dir_all(&vault);
+}

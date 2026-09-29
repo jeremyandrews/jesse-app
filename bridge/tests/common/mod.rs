@@ -332,6 +332,17 @@ pub fn diet_request(auth: Option<&str>) -> Request<Body> {
     }
     b.body(Body::empty()).unwrap()
 }
+/// `POST /jesse/diet/vitals` with optional auth and a JSON body.
+pub fn vitals_request(auth: Option<&str>, json: &str) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/jesse/diet/vitals")
+        .header("content-type", "application/json");
+    if let Some(a) = auth {
+        b = b.header("authorization", a);
+    }
+    b.body(Body::from(json.to_string())).unwrap()
+}
 /// `GET /jesse/today` with optional auth and `If-None-Match`.
 pub fn today_request(auth: Option<&str>, if_none_match: Option<&str>) -> Request<Body> {
     let mut b = Request::builder().method("GET").uri("/jesse/today");

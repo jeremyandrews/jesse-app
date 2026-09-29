@@ -1174,6 +1174,23 @@ pub async fn jesse_diet(
         ),
     };
 
+    // vitalsSeries: the daily vitals ledger the phone writes (`vitals`). NEW, so a missing
+    // file is the normal state of a vault the phone has not synced to yet: it is `[]` and
+    // NOT an error. A file that exists but cannot be read is one error, like the others.
+    let vitals_path = logs.join(VITALS_LOG);
+    let (vitals_series_val, vitals_errors): (Value, Vec<String>) =
+        match std::fs::read_to_string(&vitals_path) {
+            Ok(content) => (Value::Array(vitals_series(&content)), Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Value::Array(vec![]), vec![]),
+            Err(e) => (
+                Value::Array(vec![]),
+                vec![format!(
+                    "vitalsSeries: cannot read {}: {e}",
+                    vitals_path.display()
+                )],
+            ),
+        };
+
     // availableDays: union of every date the app can page to, sorted + deduped.
     let mut days: BTreeSet<String> = BTreeSet::new();
     if !today_date.is_empty() {
@@ -1230,6 +1247,7 @@ pub async fn jesse_diet(
         errors.extend(nutrient_errors);
         errors.extend(source_errors);
         errors.extend(exercise_errors);
+        errors.extend(vitals_errors);
 
         return Ok(Json(json!({
             "asOf": rfc3339_utc(SystemTime::now()),
@@ -1248,6 +1266,7 @@ pub async fn jesse_diet(
             "nutrientSeries": nutrient_series_val,
             "sourceSeries": source_series_val,
             "exerciseSeries": exercise_series_val,
+            "vitalsSeries": vitals_series_val,
             "errors": errors,
             "availableDays": available,
             "historical": false,
@@ -1309,6 +1328,7 @@ pub async fn jesse_diet(
     errors.extend(nutrient_errors);
     errors.extend(source_errors);
     errors.extend(exercise_errors);
+    errors.extend(vitals_errors);
 
     // Historical requests never carry proposed/progress/coach — those files
     // describe the CURRENT state, so attaching them to a past date would be wrong.
@@ -1325,6 +1345,7 @@ pub async fn jesse_diet(
         "nutrientSeries": nutrient_series_val,
         "sourceSeries": source_series_val,
         "exerciseSeries": exercise_series_val,
+        "vitalsSeries": vitals_series_val,
         "errors": errors,
         "availableDays": available,
         "historical": true,

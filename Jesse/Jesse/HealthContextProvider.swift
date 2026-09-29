@@ -1,5 +1,6 @@
 import Foundation
 import HealthKit
+import JesseNetworking
 
 /// Errors from the windowed metric-series reads. Caught and degraded to `[]` by
 /// `series(for:windowDays:)`, so they never surface — a failed read just means
@@ -815,5 +816,91 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         case .trackAndField: return "Track and field"
         default: return "Workout"
         }
+    }
+}
+
+// MARK: - Daily vitals (the Studio's vitals ledger)
+
+nonisolated extension HealthContextProvider {
+    /// The last `days` local days of vitals, one `VitalsDay` per date that knows anything,
+    /// oldest first. Every rule (night to wake date, averaging, blanks) is `DailyVitals`';
+    /// this only reads.
+    ///
+    /// ALL OR NOTHING, unlike the per-turn gather. The bridge REPLACES a day it is sent, so a
+    /// read that silently failed for one metric would erase that metric from a row that had
+    /// it. Any query error therefore throws and nothing is sent; the next refresh tries
+    /// again. (A locked phone is the common case: HealthKit's store is encrypted then, and
+    /// every query fails.)
+    static func dailyVitals(days: Int, now: Date = Date()) async throws -> [VitalsDay] {
+        guard HKHealthStore.isHealthDataAvailable(), days > 0 else { return [] }
+        let tz = TimeZone.current
+        let dates = DailyVitals.dayKeys(endingAt: now, days: days, timeZone: tz)
+        let bpm = HKUnit.count().unitDivided(by: .minute())
+
+        async let sleep = sleepSamples(days: days, now: now)
+        async let resting = dailyQuantity(.restingHeartRate, unit: bpm,
+                                          options: .discreteAverage, days: days)
+        async let hrv = dailyQuantity(.heartRateVariabilitySDNN, unit: .secondUnit(with: .milli),
+                                      options: .discreteAverage, days: days)
+        async let steps = dailyQuantity(.stepCount, unit: .count(),
+                                        options: .cumulativeSum, days: days)
+        async let kcal = dailyQuantity(.activeEnergyBurned, unit: .kilocalorie(),
+                                       options: .cumulativeSum, days: days)
+        async let resp = endDatedReadings(.respiratoryRate, unit: bpm, days: days, now: now)
+        async let temp = endDatedReadings(.appleSleepingWristTemperature, unit: .degreeCelsius(),
+                                          days: days, now: now)
+
+        func byDay(_ points: [MetricSeriesPoint]) -> [String: Double] {
+            Dictionary(points.map { (DailyVitals.dayKey($0.date, timeZone: tz), $0.value) },
+                       uniquingKeysWith: { _, last in last })
+        }
+        let quantities = DailyVitals.Quantities(
+            restingHr: byDay(try await resting),
+            hrv: byDay(try await hrv),
+            steps: byDay(try await steps),
+            activeKcal: byDay(try await kcal),
+            respRate: DailyVitals.averageByEndDay(try await resp, timeZone: tz),
+            wristTempC: DailyVitals.averageByEndDay(try await temp, timeZone: tz))
+        let nights = SleepReducer.nights(try await sleep, timeZone: tz)
+        return DailyVitals.assemble(dates: dates, nights: nights, quantities: quantities)
+    }
+
+    /// Every sleep sample that could belong to a night waking inside the window: from 18
+    /// hours before its first day, so the first night's evening half is included.
+    private static func sleepSamples(days: Int, now: Date) async throws -> [SleepSample] {
+        let start = Calendar.current.startOfDay(for: now)
+            .addingTimeInterval(-Double(days - 1) * 86_400 - 18 * 3600)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: [])
+        let store = HKHealthStore()
+        let samples: [HKCategorySample] = try await withCheckedThrowingContinuation { cont in
+            let q = HKSampleQuery(sampleType: HKCategoryType(.sleepAnalysis), predicate: predicate,
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, s, error in
+                if let error { cont.resume(throwing: error); return }
+                cont.resume(returning: (s as? [HKCategorySample]) ?? [])
+            }
+            store.execute(q)
+        }
+        return samples.map(sleepSample(from:))
+    }
+
+    /// Each sample of a quantity type ending inside the window, as its end instant and
+    /// value. For the overnight signals, which are dated by the morning they end on.
+    private static func endDatedReadings(_ id: HKQuantityTypeIdentifier, unit: HKUnit,
+                                         days: Int, now: Date) async throws
+        -> [(end: Date, value: Double)] {
+        let start = Calendar.current.startOfDay(for: now)
+            .addingTimeInterval(-Double(days - 1) * 86_400)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: now,
+                                                    options: [.strictEndDate])
+        let store = HKHealthStore()
+        let samples: [HKQuantitySample] = try await withCheckedThrowingContinuation { cont in
+            let q = HKSampleQuery(sampleType: HKQuantityType(id), predicate: predicate,
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, s, error in
+                if let error { cont.resume(throwing: error); return }
+                cont.resume(returning: (s as? [HKQuantitySample]) ?? [])
+            }
+            store.execute(q)
+        }
+        return samples.map { (end: $0.endDate, value: $0.quantity.doubleValue(for: unit)) }
     }
 }

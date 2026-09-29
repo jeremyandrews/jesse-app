@@ -14,6 +14,39 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (184), Bridge 0.161.0] - 2026-09-29
+
+**The Health tab's Patterns row always said "nothing worth flagging yet", and the one
+outcome it could test against was the noisiest number there is.** Root cause, measured on
+the real logs before this change: all eight candidate pairs had enough data (60 to 88
+paired days each) and every one landed below the fixed `|rho| >= 0.30` floor (the largest
+was exercise kcal against next-morning weight change, rho -0.23 over 69 days). Six of the
+eight targeted day-over-day scale change, which water, glycogen and weigh-in timing swing
+by one to two pounds. Sleep, resting heart rate and HRV respond to alcohol, late meals and
+training within a day and are far steadier, but nothing on the Studio kept a daily history
+of any of them: the per-turn health block is read once and never stored. This release
+builds that history; the engine and the screen that use it follow.
+
+- **A daily vitals ledger on the Studio**: `POST /jesse/diet/vitals` upserts whole days
+  into `diet-logs/vitals-log.csv` (sleep, deep, REM and awake minutes, resting HR, HRV
+  SDNN, steps, active kcal, respiratory rate, wrist temperature). One row per date: a
+  resend replaces the row where it stands, a new date is appended, LF line endings, RFC
+  4180 quoting. A metric HealthKit had no sample for is an empty cell, and a day with no
+  metric at all is refused rather than written, so a failed read can never blank a
+  measured night. The diet CSVs are never read or rewritten by it.
+- **`vitalsSeries` on the diet snapshot**: the ledger's last 120 dates, ascending, each
+  carrying only the metrics it knows. A vault with no ledger yet serves `[]` and no error.
+- **The phone feeds it** on every foreground and on the periodic background refresh:
+  120 days the first time it reaches a bridge, the last 3 days after that. It reads only
+  types the app is already authorized for, so no new HealthKit prompt. A night is its
+  wake date's (a 23:10 to 06:40 night is the morning's), through the same interval union
+  and single-source stage rule as the per-turn summary. The read is all or nothing: a
+  locked phone or a failed query sends nothing rather than a partial day.
+- Tests: the CSV upsert (a new date, the same date twice, blank metrics stay blank,
+  duplicates collapse, a foreign header is refused), the route (auth, one row per date,
+  400 with nothing written), the upload's wire shape, and the day aggregation over fixed
+  samples, including a night that crosses midnight.
+
 ## [Bridge 0.160.0] - 2026-09-29
 
 **Hour-long recordings came back as their first minute and one sentence repeated about

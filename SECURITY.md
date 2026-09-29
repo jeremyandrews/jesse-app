@@ -3471,6 +3471,22 @@ the seams that matter here spelled out:
   library); the app parses the ISO-8601 offset strictly before writing, so a
   garbled timestamp fails app-side rather than landing a mis-dated entry.
 
+### Daily vitals ledger (`POST /jesse/diet/vitals`)
+
+- **Same trust class as `/jesse/diet`, and a writer.** Bearer-auth gated like every
+  route. It writes exactly one file, `diet-logs/vitals-log.csv` under the configured vault
+  root; the path is fixed, never taken from the request, and the diet CSVs are never
+  opened for writing.
+- **Validated before anything is written.** Dates must be `YYYY-MM-DD`, every value a
+  finite number inside a per-metric plausible range, at most 400 days, no date twice, and
+  no day with nothing known. Any failure is a `400` and the file is untouched. Unknown keys
+  are ignored, never written.
+- **Never rewrites what is not its own.** A file under that name whose header is not the
+  ledger's is refused (`500`), not reformatted. Writes are atomic (unique temp file,
+  fsync, rename) and serialized in-process. Logs carry counts only, never values.
+- **Personal health data**, like the rest of the diet snapshot: it lives in the vault and
+  is served back only on the authenticated `GET /jesse/diet`.
+
 ### Off-app corrections queue (`POST /jesse/meal-corrections`)
 
 Most logging and **all** corrections happen in non-app sessions (desktop/Cowork

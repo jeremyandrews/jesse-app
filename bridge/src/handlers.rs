@@ -2746,6 +2746,10 @@ pub fn app(state: AppState) -> Router {
         .route("/jesse", post(jesse))
         .route("/jesse/prompts", get(jesse_prompts))
         .route("/jesse/diet", get(jesse_diet))
+        // The DAILY VITALS LEDGER's one writer: the phone upserts whole days of what Apple
+        // Health measured into `diet-logs/vitals-log.csv`, one row per date, replaced in
+        // place on a resend. Never touches the diet CSVs. See `vitals`.
+        .route("/jesse/diet/vitals", post(jesse_diet_vitals))
         // The day file, read-only: the same snapshot posture as /jesse/diet, plus a
         // strong ETag so a poll that changes nothing costs one 304.
         .route("/jesse/today", get(jesse_today))

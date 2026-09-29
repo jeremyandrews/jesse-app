@@ -755,10 +755,14 @@ public struct DietSnapshot: Decodable, Equatable, Sendable {
     /// aggregate over this runs on known contributions only (see `NutrientSources`).
     public var sourceSeries: [SourceDay]?
     /// Per-day exercise aggregate (bridge ≥ 0.28.0), ascending by date, most recent 90
-    /// logged days. Absent on an older bridge → the Correlations affordance hides, no
-    /// crash. A rest day is ABSENT rather than a 0-kcal point, so a missing date is a gap
+    /// logged days. Absent on an older bridge, no crash. A rest day is ABSENT rather than a 0-kcal point, so a missing date is a gap
     /// and never a zero-training day.
     public var exerciseSeries: [ExerciseDay]?
+    /// The Patterns report (bridge 0.162.0 and later), computed on the bridge over the diet
+    /// logs and the daily vitals ledger; only on a live snapshot. Absent on an older bridge
+    /// or a past day, which hides the Patterns row. A malformed report decodes as absent
+    /// rather than failing the whole snapshot.
+    public var patterns: PatternsReport?
     /// Every date the app can page to (union of the logs + archives + today),
     /// sorted ascending. Absent on an old bridge → paging stays disabled.
     public var availableDays: [String]?
@@ -769,7 +773,7 @@ public struct DietSnapshot: Decodable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case asOf, dietDay, todayMtime, today, proposed, progress, coach, weightSeries, errors
-        case nutrientSeries, sourceSeries, exerciseSeries
+        case nutrientSeries, sourceSeries, exerciseSeries, patterns
         case availableDays, historical, fidelity
     }
     public init(from decoder: Decoder) throws {
@@ -786,6 +790,7 @@ public struct DietSnapshot: Decodable, Equatable, Sendable {
         nutrientSeries = try c.decodeIfPresent([NutrientDay].self, forKey: .nutrientSeries)
         sourceSeries = try c.decodeIfPresent([SourceDay].self, forKey: .sourceSeries)
         exerciseSeries = try c.decodeIfPresent([ExerciseDay].self, forKey: .exerciseSeries)
+        patterns = (try? c.decodeIfPresent(PatternsReport.self, forKey: .patterns)) ?? nil
         availableDays = try c.decodeIfPresent([String].self, forKey: .availableDays)
         historical = try c.decodeIfPresent(Bool.self, forKey: .historical)
         fidelity = try c.decodeIfPresent(String.self, forKey: .fidelity)
@@ -798,7 +803,7 @@ public struct DietSnapshot: Decodable, Equatable, Sendable {
          coach: DietCoach? = nil, weightSeries: [WeightPoint]? = nil,
          errors: [String] = [], nutrientSeries: [NutrientDay]? = nil,
          sourceSeries: [SourceDay]? = nil, exerciseSeries: [ExerciseDay]? = nil,
-         availableDays: [String]? = nil,
+         patterns: PatternsReport? = nil, availableDays: [String]? = nil,
          historical: Bool? = nil, fidelity: String? = nil) {
         self.asOf = asOf; self.dietDay = dietDay
         self.todayMtime = todayMtime; self.today = today
@@ -806,6 +811,7 @@ public struct DietSnapshot: Decodable, Equatable, Sendable {
         self.weightSeries = weightSeries; self.errors = errors
         self.nutrientSeries = nutrientSeries
         self.sourceSeries = sourceSeries; self.exerciseSeries = exerciseSeries
+        self.patterns = patterns
         self.availableDays = availableDays; self.historical = historical
         self.fidelity = fidelity
     }

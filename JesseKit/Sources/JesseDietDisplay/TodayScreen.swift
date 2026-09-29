@@ -73,15 +73,10 @@ struct TodayScreen: View {
     private var historySources: [SourceDay]? { snapshot.isHistorical ? nil : snapshot.sourceSeries }
     private var sourcesAvailable: Bool { NutrientSources.isAvailable(historySources) }
 
-    /// The exercise history the Patterns screen reads, under the same past-day rule.
-    private var historyExercise: [ExerciseDay]? { snapshot.isHistorical ? nil : snapshot.exerciseSeries }
-    /// Whether Patterns has all three histories it needs. The exercise field is the one an
-    /// older bridge omits, and its absence hides the row rather than showing a diet-only
-    /// version under a heading that promises training.
-    private var correlationsAvailable: Bool {
-        DietCorrelations.isAvailable(weight: snapshot.weightSeries, nutrients: windowSeries,
-                                     exercise: historyExercise)
-    }
+    /// The bridge's Patterns report, under the same past-day rule: it describes the whole
+    /// history up to today, so paging back hides it. An older bridge sends none, which hides
+    /// the row.
+    private var patternsReport: PatternsReport? { snapshot.isHistorical ? nil : snapshot.patterns }
 
     /// The Sources range that matches the tab's window mode, so a nutrient opened from a 7d
     /// read lands on 7d. The Day mode has no matching range and keeps the 30-day default.
@@ -489,23 +484,17 @@ struct TodayScreen: View {
                     windowDays: sourcesRange, anchor: today.date, scope: .section))
             }
 
-            // Patterns: what moved together across weight, training and intake. Guarded hard
-            // in the engine (a minimum sample, a weak floor, association wording only), and
-            // hidden entirely unless all three histories are present.
-            if correlationsAvailable {
-                let report = DietCorrelations.report(weight: snapshot.weightSeries,
-                                                     nutrients: windowSeries,
-                                                     exercise: historyExercise)
-                if let subtitle = DietCorrelations.subtitle(report) {
-                    NavigationLink {
-                        DietCorrelationsDetail(weightSeries: snapshot.weightSeries ?? [],
-                                               nutrientSeries: windowSeries ?? [],
-                                               exerciseSeries: historyExercise ?? [])
-                    } label: {
-                        NavRow(title: "Patterns", icon: "chart.dots.scatter", subtitle: subtitle)
-                    }
-                    .askable(HealthAsk.patterns(report, anchor: today.date, scope: .section))
+            // Patterns: the bridge's preregistered questions over the diet logs and the vitals
+            // ledger, each a finding, ruled out, or still watching, in units. The subtitle is
+            // the top finding or the three counts; it never reads "nothing yet" while any
+            // question has a day behind it.
+            if let report = patternsReport, let subtitle = Patterns.subtitle(report) {
+                NavigationLink {
+                    PatternsDetail(report: report, anchor: today.date)
+                } label: {
+                    NavRow(title: "Patterns", icon: "chart.dots.scatter", subtitle: subtitle)
                 }
+                .askable(HealthAsk.patterns(report, anchor: today.date, scope: .section))
             }
 
             NavigationLink {

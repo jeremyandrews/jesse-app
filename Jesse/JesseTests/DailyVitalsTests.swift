@@ -68,15 +68,15 @@ final class DailyVitalsTests: XCTestCase {
     }
 
     func testUnknownStaysNilAndAnEmptyDayIsNoRow() {
-        let nights = ["2026-09-27": SleepSummary(totalMinutes: 452, deepMinutes: 72, remMinutes: nil,
-                                                 coreMinutes: 278, awakeMinutes: nil, isNap: false)]
+        let nights = ["2026-09-27": SleepSummary(totalMinutes: 431, deepMinutes: 64, remMinutes: nil,
+                                                 coreMinutes: 260, awakeMinutes: nil, isNap: false)]
         var q = DailyVitals.Quantities()
-        q.restingHr = ["2026-09-26": 53, "2026-09-27": 57]
+        q.restingHr = ["2026-09-26": 51, "2026-09-27": 55]
         let rows = DailyVitals.assemble(dates: ["2026-09-25", "2026-09-26", "2026-09-27"],
                                         nights: nights, quantities: q)
         XCTAssertEqual(rows.map(\.date), ["2026-09-26", "2026-09-27"], "the 25th knew nothing")
         XCTAssertNil(rows[0].sleepMin, "no night recorded is nil, not 0")
-        XCTAssertEqual(rows[1], VitalsDay(date: "2026-09-27", sleepMin: 452, deepMin: 72, restingHr: 57))
+        XCTAssertEqual(rows[1], VitalsDay(date: "2026-09-27", sleepMin: 431, deepMin: 64, restingHr: 55))
     }
 
     func testDayKeysEndOnTodayOldestFirst() {

@@ -14,7 +14,7 @@ import JesseAsk
 // Everything is a pure function of values the view already holds. Nothing here fetches,
 // and nothing here decides a judgement — the bands, the tones, the verdict sentences and
 // the coverage lines all come from `DietSemantics`, `NutrientTrends`, `NutrientSources`,
-// `NutrientStreaks` and `DietCorrelations`, which are the same engines the pixels came
+// `NutrientStreaks` and the bridge's Patterns report, the same sources the pixels came
 // from. That is what guarantees the chat and the screen cannot disagree.
 //
 // UNKNOWN IS NOT ZERO survives into the snapshot. A partial total is written "≥", an
@@ -389,16 +389,41 @@ enum HealthFacts {
                     s.coverageNote])
     }
 
-    /// One association, in the engine's fixed, non-causal wording.
-    static func association(_ a: DietAssociation) -> AskFacts {
-        AskFacts(
-            heading: a.title,
-            lines: ["Spearman \(a.coefficientText) over \(a.pairs) day-pairs (\(a.strengthWord))",
-                    a.sentence])
+    /// The standing caveat for a single pattern ask, fixed beside the facts so the model
+    /// reads it with every number.
+    static let patternsCaveat = "An association between two kinds of day in the owner's own "
+        + "logs, not a cause: something else may drive both."
+
+    /// One Patterns question as the bridge judged it: the verdict, the effect in units with
+    /// its interval, both arms, and the bridge's own non-causal sentence.
+    static func patternResult(_ q: PatternResult) -> AskFacts {
+        let verdict: String
+        switch q.verdict {
+        case .finding: verdict = "Verdict: finding"
+        case .ruledOut:
+            verdict = "Verdict: ruled out (no difference as large as "
+                + "\(Patterns.format(q.meaningful, q)))"
+        case .watching: verdict = "Verdict: watching (not settled)"
+        }
+        var lines = [verdict, q.sentence]
+        if let e = q.effect, let lo = q.ciLow, let hi = q.ciHigh {
+            lines.append("\(q.high.label) minus \(q.low.label): \(Patterns.format(e, q)), "
+                         + "95% interval \(Patterns.format(lo, q)) to \(Patterns.format(hi, q))")
+        }
+        lines.append("\(q.high.label): \(q.high.days) days; \(q.low.label): \(q.low.days) days")
+        if let rho = q.rho {
+            lines.append("Spearman rho \(rho.formatted(.number.precision(.fractionLength(2))))")
+        }
+        if let reason = q.watchingReason { lines.append("Why not settled: \(reason)") }
+        if let more = q.daysNeeded { lines.append("Roughly \(more) more days needed") }
+        return AskFacts(heading: q.title, lines: lines)
     }
 
-    /// One pair the guardrails set aside, named rather than hidden.
-    static func patternMiss(_ m: DietPairMiss) -> AskFacts {
-        AskFacts(heading: m.title, lines: [m.reasonText])
+    /// The energy audit, or why it was withheld.
+    static func energyAudit(_ a: EnergyAudit) -> AskFacts {
+        if let withheld = a.withheld {
+            return AskFacts(heading: "Energy audit", lines: ["Withheld: \(withheld)"])
+        }
+        return AskFacts(heading: "Energy audit", lines: [a.sentence].compactMap { $0 })
     }
 }

@@ -1049,8 +1049,12 @@ async fn pipeline(
     if let Some(note) = reconciled.as_ref().and_then(|r| r.note.clone()) {
         job.note(note);
     }
+    // Where the last new text begins. Far short of `audio=` means the recording's tail came
+    // back as nothing, or as one collapsed loop, which `loops=` alone does not show.
+    let last_text_secs = first.segments.last().map_or(0, |s| s.start_ms / 1000);
     let summary = format!(
-        "audio={duration:.0}s engines={} conditioned={} disagreements={} dropped={} loops={}",
+        "audio={duration:.0}s last_text={last_text_secs}s engines={} conditioned={} \
+         disagreements={} dropped={} loops={}",
         engines
             .iter()
             .map(|e| e.id.as_str())

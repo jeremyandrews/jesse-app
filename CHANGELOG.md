@@ -14,6 +14,29 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.160.0] - 2026-09-29
+
+**Hour-long recordings came back as their first minute and one sentence repeated about
+1,700 times.** Root cause: the Studio decode profile's `carry_context: false` was applied
+as whisper.cpp's `no_context` alone, and in whisper.cpp 1.8.3 that only clears text carried
+in from a previous call. Inside one call, every 30-second window's decoded text was fed to
+the next window as its prompt (`n_max_text_ctx` defaulted to 16384), so a sentence the model
+repeated once on far-field room audio became the prompt it repeated again, window after
+window, to the end of the file. `clean_segments` then collapsed that run to one marked
+segment, so the transcript looked short rather than broken. Seen on four Rotterdam summit
+recordings of 56 to 61 minutes (`[repeated ×1647, collapsed]`, `[repeated ×1750,
+collapsed]`, each with `loops=1` in the log).
+
+- **No carried context now means none**: a reading sets `n_max_text_ctx` to 0 beside
+  `no_context`, so each window is decoded with no prompt from the windows before it, as
+  `STUDIO_DECODE` always said it should be.
+- **The run summary names where the text ends**: `speech DONE` carries
+  `last_text=<N>s`, the start of the last new text, so a transcript whose tail is one
+  collapsed loop reads as `audio=3624s last_text=60s` in the log instead of hiding
+  behind `loops=1`.
+- Test at the engine's layer: the parameters handed to whisper.cpp for the Studio profile
+  carry `no_context: true` and `n_max_text_ctx: 0` (fails on 0.159.0 with 16384).
+
 ## [App 1.0 (183), Bridge 0.159.0] - 2026-09-29
 
 **When the Studio's local speech engines failed, there was no transcript at all, and the

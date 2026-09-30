@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import UIKit
 import JesseCore
 import JesseDietDisplay
 import JesseNetworking
@@ -138,6 +139,16 @@ final class HealthAutoTrigger {
     private var observer: HealthDataObserver?
     private let defaults: UserDefaults
     private let now: () -> Date
+    /// Whether HealthKit's store can be read. It is encrypted while the phone is locked, so
+    /// every query fails and the per-turn gather degrades to an empty block; a workout log
+    /// sent then carries no workouts. Injected so a test can lock the phone.
+    private let protectedDataAvailable: @MainActor () -> Bool
+    /// Whether the app is paired with a bridge. Injected for the same reason.
+    private let isPaired: @MainActor () -> Bool
+    /// The store an automatic turn is staged in.
+    private let context: @MainActor () -> ModelContext
+    /// The unlock observer, registered with the HealthKit observers and removed with them.
+    private var unlockObserver: NSObjectProtocol?
 
     /// Asks iOS for a background refresh no earlier than a moment — set by the app delegate,
     /// which owns the refresh task. Used when a workout burst is waiting out its settle.
@@ -154,9 +165,19 @@ final class HealthAutoTrigger {
     /// other triggers cover every other case.
     private var settleTask: Task<Void, Never>?
 
-    init(defaults: UserDefaults = .standard, now: @escaping () -> Date = { Date() }) {
+    init(defaults: UserDefaults = .standard, now: @escaping () -> Date = { Date() },
+         protectedDataAvailable: @escaping @MainActor () -> Bool = {
+             UIApplication.shared.isProtectedDataAvailable
+         },
+         isPaired: @escaping @MainActor () -> Bool = { ConfigStore.load().isConfigured },
+         context: @escaping @MainActor () -> ModelContext = {
+             AppModelContainer.shared.container.mainContext
+         }) {
         self.defaults = defaults
         self.now = now
+        self.protectedDataAvailable = protectedDataAvailable
+        self.isPaired = isPaired
+        self.context = context
     }
 
     /// Hand over the app-scoped coordinator and the one Health model. Called from
@@ -186,12 +207,21 @@ final class HealthAutoTrigger {
             onWorkouts: { [weak self] in self?.receiveWorkouts($0) })
         self.observer = observer
         observer.start()
+        // A workout log held because the phone was locked goes out on unlock, while the
+        // process is alive. A suspended process catches up on the next foreground instead.
+        unlockObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil,
+            queue: .main) { [weak self] _ in
+                Task { await self?.settleWorkouts() }
+            }
     }
 
     /// Stop both observers and background delivery — the toggle went off.
     func stop() {
         observer?.stop()
         observer = nil
+        if let unlockObserver { NotificationCenter.default.removeObserver(unlockObserver) }
+        unlockObserver = nil
         settleTask?.cancel()
         settleTask = nil
     }
@@ -226,7 +256,7 @@ final class HealthAutoTrigger {
         await model.load()
         let outcome = HealthTurn.startNewDay(
             model: model, coordinator: coordinator,
-            context: AppModelContainer.shared.container.mainContext,
+            context: context(),
             origin: .automatic, dietDay: day, oncePerDay: true, capturedDay: day,
             defaults: defaults)
         Log.health.notice("automatic new-day refresh for \(day): \(String(describing: outcome))")
@@ -263,12 +293,19 @@ final class HealthAutoTrigger {
 
     private func fireWorkoutLog(_ due: [ObservedWorkout]) async {
         guard !firingWorkouts, let (coordinator, model) = ready() else { return }
+        // A locked phone cannot read HealthKit, so the turn would carry no workouts and the
+        // Studio would log nothing, while this marked them logged. Hold them pending instead:
+        // the unlock observer, the foreground and the background refresh all settle again.
+        guard protectedDataAvailable() else {
+            Log.health.notice("automatic workout log for \(due.count) workout(s) held until the phone is unlocked")
+            return
+        }
         firingWorkouts = true
         defer { firingWorkouts = false }
         await model.load()
         let outcome = HealthTurn.logWorkouts(
             model: model, coordinator: coordinator,
-            context: AppModelContainer.shared.container.mainContext,
+            context: context(),
             dietDay: DietDay.stamp(for: now()))
         Log.health.notice("automatic workout log for \(due.count) workout(s): \(String(describing: outcome))")
         // Only a turn that was sent or held marks its workouts fired. A refused one leaves
@@ -294,7 +331,7 @@ final class HealthAutoTrigger {
     /// The coordinator and model, or nil — with the reason logged — when a turn cannot be
     /// sent from here: the app is not paired, or launch has not handed them over.
     private func ready() -> (RunCoordinator, HealthDashboardModel)? {
-        guard ConfigStore.load().isConfigured else {
+        guard isPaired() else {
             Log.health.notice("automatic health turn skipped: the app is not paired")
             return nil
         }

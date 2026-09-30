@@ -1,6 +1,7 @@
 import XCTest
 import HealthKit
 @testable import Jesse
+import JesseCore
 import JesseDietDisplay
 import JesseNetworking
 
@@ -711,6 +712,49 @@ final class HealthContextTests: XCTestCase {
         XCTAssertNotNil(out)
         XCTAssertTrue(out!.contains("Resting HR: 52 bpm"))
         XCTAssertTrue(out!.contains("Swim — 2026-07-04 06:30"))
+    }
+
+    // MARK: - A locked phone
+
+    /// A gather on a locked phone renders one fixed line in place of both subsections,
+    /// through the same formatter every other line goes through, and under the cap.
+    func testLockedSnapshotRendersTheLockedLineAlone() {
+        let block = HealthContextFormatter.block(snapshot: .locked, now: now, timeZone: utc)
+        XCTAssertEqual(block,
+                       "Apple Health unreadable: the phone was locked when this turn was sent.")
+        XCTAssertLessThanOrEqual(block!.utf8.count, HealthContextFormatter.maxBytes)
+        XCTAssertFalse(block!.contains(DailySummaryFormatter.header))
+    }
+
+    /// An unlocked snapshot renders byte for byte what the daily and workouts path always has.
+    func testUnlockedSnapshotIsByteIdenticalToTheOldPath() {
+        let snap = HealthSnapshot(daily: fullDaily(),
+                                  workouts: [swim(start: date(2026, 7, 4, 6, 30))])
+        XCTAssertEqual(
+            HealthContextFormatter.block(snapshot: snap, now: now, timeZone: utc),
+            HealthContextFormatter.block(daily: snap.daily, workouts: snap.workouts,
+                                         now: now, timeZone: utc))
+        XCTAssertNil(HealthContextFormatter.block(snapshot: .empty, now: now, timeZone: utc))
+    }
+
+    /// The resolver attaches the locked line and reports the lock, which is what lets the
+    /// send path hold an automatic workout log.
+    func testResolveLockedAttachesTheLineAndReportsTheLock() async {
+        let out = await HealthContextResolver.resolution(
+            enabled: true, provider: FakeProvider(snap: .locked), now: now, timeZone: utc)
+        XCTAssertEqual(out.block, HealthContextFormatter.lockedLine)
+        XCTAssertTrue(out.locked)
+        let unlocked = await HealthContextResolver.resolution(
+            enabled: true, provider: FakeProvider(snap: .empty), now: now, timeZone: utc)
+        XCTAssertFalse(unlocked.locked)
+    }
+
+    /// Only the workout log is held on a locked phone; any other turn goes out.
+    func testOnlyALockedWorkoutLogIsHeld() {
+        XCTAssertTrue(HealthContextLockHold.shouldHold(text: HealthWorkoutLog.prompt, locked: true))
+        XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthWorkoutLog.prompt, locked: false))
+        XCTAssertFalse(HealthContextLockHold.shouldHold(text: "How did I sleep?", locked: true))
+        XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: true))
     }
 
     // MARK: - Timeout

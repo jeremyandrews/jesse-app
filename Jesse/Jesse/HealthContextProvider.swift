@@ -1,5 +1,6 @@
 import Foundation
 import HealthKit
+import UIKit
 import JesseNetworking
 
 /// Errors from the windowed metric-series reads. Caught and degraded to `[]` by
@@ -66,11 +67,18 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
     /// The best-effort metric reads, injected so tests drive the isolation/timeout
     /// branches without HealthKit data. Defaults to the live HealthKit queries.
     private let fetches: HealthMetricFetches
+    /// Whether HealthKit's store can be read at all. Locked, it is encrypted and every
+    /// query fails, so the gather is skipped and the snapshot says why it is empty.
+    private let protectedDataAvailable: @Sendable () async -> Bool
 
     init(timeout: Duration = .milliseconds(1500),
          window: TimeInterval = WorkoutContextFormatter.windowHours * 3600,
          limit: Int = WorkoutContextFormatter.maxWorkouts,
-         fetches: HealthMetricFetches? = nil) {
+         fetches: HealthMetricFetches? = nil,
+         protectedDataAvailable: @escaping @Sendable () async -> Bool = {
+             await MainActor.run { UIApplication.shared.isProtectedDataAvailable }
+         }) {
+        self.protectedDataAvailable = protectedDataAvailable
         self.timeout = timeout
         self.window = window
         self.limit = limit
@@ -81,7 +89,8 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
     }
 
     func snapshot() async -> HealthSnapshot {
-        await HealthContextTimeout.orEmpty(within: timeout) {
+        guard await protectedDataAvailable() else { return .locked }
+        return await HealthContextTimeout.orEmpty(within: timeout) {
             await HealthContextGather.snapshot(fetches)
         }
     }

@@ -14,6 +14,29 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (186)] - 2026-10-01
+
+**A workout that ends while the phone is locked is still logged.** Root cause: the
+automatic workout log read HealthKit on a locked phone, got nothing, sent anyway and marked
+the workout logged. HealthKit's store is encrypted while the phone is locked, every query
+fails, and the per turn gather degrades each failure to empty, so the turn carried the diet
+rollup and no workouts. On 2026-09-30 a 13:43 walk ended with the phone in a pocket; the log
+fired at 14:28 with no workouts section, the Studio logged nothing, and the walk had left
+`pending` for `fired`, so no later trigger tried it again.
+
+- **The automatic workout log waits for unlock.** `HealthAutoTrigger` checks protected data
+  before it loads or sends anything, and on a locked phone leaves the workouts pending
+  instead of marking them fired. It settles again on unlock (while the process is alive),
+  on the next foreground and on the background refresh, as it already did.
+- **The send path refuses the same case.** A workout log staged unlocked and sent later (an
+  outbox retry, the capture queue replay) is refused in `JesseClient.send` when its health
+  block was gathered locked. The outbox keeps it as a failed message with its usual
+  automatic retries, and the retry every foreground runs sends it with the workouts.
+- **A locked read is visible on every turn.** When the phone is locked at gather time, the
+  health block is one line, `Apple Health unreadable: the phone was locked when this turn
+  was sent.`, in place of the daily summary and workouts sections. An unlocked turn's block
+  is byte for byte what it was.
+
 ## [App 1.0 (185), Bridge 0.162.1] - 2026-09-29
 
 **The Patterns screen draws the bridge's report: findings, measured nulls and open

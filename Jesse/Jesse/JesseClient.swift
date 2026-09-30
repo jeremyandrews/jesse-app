@@ -364,7 +364,7 @@ struct JesseClient: JesseClientProtocol {
         // Resolve the HealthKit block and the diet nutrient rollup concurrently so the
         // extra diet GET doesn't add serial latency, then compose them into the one
         // health_context.
-        async let healthBlock = HealthContextResolver.resolve(
+        async let health = HealthContextResolver.resolution(
             enabled: attach, provider: healthProvider, now: Date())
         async let dietRollup = dietRollupBlock(enabled: attach)
         // The location channel, resolved concurrently with the health one — the two are
@@ -373,8 +373,14 @@ struct JesseClient: JesseClientProtocol {
         // CoreLocation authorization, all checked before the provider is touched, so a
         // revoked permission can never surface a system prompt mid-turn.
         async let locationBlock = resolveLocationContext(text)
+        let resolved = await health
+        // The automatic workout log gathered on a locked phone would log nothing. Refuse it
+        // before it leaves, so the outbox keeps it and retries it once the phone is unlocked.
+        if HealthContextLockHold.shouldHold(text: text, locked: resolved.locked) {
+            throw HealthContextLockedError()
+        }
         let healthContext = DietContextComposer.combine(
-            healthBlock: await healthBlock, dietRollup: await dietRollup)
+            healthBlock: resolved.block, dietRollup: await dietRollup)
         let request = Self.makeRequest(mode: mode, text: text, sessionId: sessionId,
                                        conversationId: conversationId,
                                        voice: voice, instructions: instructions,
@@ -882,5 +888,32 @@ enum BridgeVersionStore {
             return v
         }
         return current
+    }
+}
+
+// MARK: - Holding a locked workout log
+
+/// Whether a turn must not be sent because the phone was locked when its health block
+/// was gathered. Only the automatic workout log: its whole job is to log the workouts that
+/// block carries, so sent without them it logs nothing, and the trigger has already marked
+/// them logged. Every other turn goes out with the locked line and the agent answers
+/// without Health.
+///
+/// A workout log can be staged unlocked and sent later (an outbox retry, the capture queue
+/// replay), which is why this is asked at send time. It is recognized by its prompt text,
+/// because the replayed one is labeled `Automatic` rather than the workout log's own label.
+nonisolated enum HealthContextLockHold {
+    static func shouldHold(text: String, locked: Bool) -> Bool {
+        locked && text.trimmingCharacters(in: .whitespacesAndNewlines)
+            == HealthWorkoutLog.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// The pre-send failure a held workout log takes. It goes through the outbox like any
+/// other one, so the message is kept and retried, and the next retry on an unlocked phone
+/// (every foreground runs one) sends it with the workouts.
+nonisolated struct HealthContextLockedError: LocalizedError, Equatable {
+    var errorDescription: String? {
+        "Held until the phone is unlocked: Apple Health can't be read while it is locked."
     }
 }

@@ -46,6 +46,20 @@ final class HealthContextProviderTests: XCTestCase {
         XCTAssertEqual(snap, .empty, "a gather slower than the bound degrades to empty")
     }
 
+    /// Locked, the provider does not query HealthKit at all and says why it has nothing.
+    func testLockedPhoneSkipsTheGatherAndReportsTheLock() async {
+        let late = swim()
+        var f = HealthMetricFetches.empty
+        f.workouts = { [late] }
+        let provider = HealthContextProvider(fetches: f, protectedDataAvailable: { false })
+        let snap = await provider.snapshot()
+        XCTAssertEqual(snap, .locked)
+        let unlocked = await HealthContextProvider(fetches: f, protectedDataAvailable: { true })
+            .snapshot()
+        XCTAssertEqual(unlocked.workouts.count, 1)
+        XCTAssertFalse(unlocked.protectedDataUnavailable)
+    }
+
     func testEmptyFetchesYieldEmptySnapshot() async {
         let snap = await HealthContextProvider(fetches: .empty).snapshot()
         XCTAssertEqual(snap, .empty)

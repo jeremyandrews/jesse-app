@@ -165,7 +165,12 @@ nonisolated struct DailySummary: Equatable, Sendable {
 nonisolated struct HealthSnapshot: Equatable, Sendable {
     var daily: DailySummary
     var workouts: [WorkoutSummary]
+    /// True when nothing was read because the phone was locked: HealthKit's store is
+    /// encrypted then and every query fails, which would otherwise look exactly like "no
+    /// data". The formatter says so instead of attaching an empty block.
+    var protectedDataUnavailable = false
     static let empty = HealthSnapshot(daily: .empty, workouts: [])
+    static let locked = HealthSnapshot(daily: .empty, workouts: [], protectedDataUnavailable: true)
 }
 
 // MARK: - Classifiers (pure, tested)
@@ -546,6 +551,20 @@ nonisolated enum HealthContextFormatter {
     /// stays well under it even with a full five-workout block.
     static let maxBytes = 4 * 1024
 
+    /// The whole block when the phone was locked at gather time, in place of both
+    /// subsections, so the agent can tell an unreadable Health from an empty one.
+    static let lockedLine = "Apple Health unreadable: the phone was locked when this turn was sent."
+
+    /// The block for a gathered snapshot: the locked line when nothing could be read,
+    /// otherwise exactly `block(daily:workouts:now:timeZone:)`.
+    static func block(snapshot: HealthSnapshot,
+                      now: Date,
+                      timeZone: TimeZone = .current) -> String? {
+        guard !snapshot.protectedDataUnavailable else { return lockedLine }
+        return block(daily: snapshot.daily, workouts: snapshot.workouts,
+                     now: now, timeZone: timeZone)
+    }
+
     static func block(daily: DailySummary,
                       workouts: [WorkoutSummary],
                       now: Date,
@@ -623,15 +642,29 @@ nonisolated enum HealthContextPolicy {
 /// renders, and applies the policy. Pure given the provider, so it is unit-tested
 /// with a fake provider and a fixed clock.
 nonisolated enum HealthContextResolver {
+    /// The block a turn carries, and whether it was gathered on a locked phone.
+    struct Resolution: Equatable, Sendable {
+        var block: String?
+        var locked: Bool
+    }
+
     static func resolve(enabled: Bool,
                         provider: any HealthContextProviding,
                         now: Date,
                         timeZone: TimeZone = .current) async -> String? {
-        guard enabled else { return nil }
+        await resolution(enabled: enabled, provider: provider, now: now, timeZone: timeZone).block
+    }
+
+    static func resolution(enabled: Bool,
+                           provider: any HealthContextProviding,
+                           now: Date,
+                           timeZone: TimeZone = .current) async -> Resolution {
+        guard enabled else { return Resolution(block: nil, locked: false) }
         let snap = await provider.snapshot()
-        let block = HealthContextFormatter.block(daily: snap.daily, workouts: snap.workouts,
-                                                 now: now, timeZone: timeZone)
-        return HealthContextPolicy.shouldAttach(enabled: enabled, block: block) ? block : nil
+        let block = HealthContextFormatter.block(snapshot: snap, now: now, timeZone: timeZone)
+        return Resolution(
+            block: HealthContextPolicy.shouldAttach(enabled: enabled, block: block) ? block : nil,
+            locked: snap.protectedDataUnavailable)
     }
 }
 

@@ -120,6 +120,83 @@ final class HealthTurnTests: XCTestCase {
         XCTAssertEqual(client.count(of: HealthNewDay.prompt), 1)
         XCTAssertEqual(try context.fetch(FetchDescriptor<JesseThread>()).count, 1)
     }
+
+    // MARK: - The automatic workout log on a locked phone
+
+    /// A trigger over this test's defaults, clock and store, paired, with the lock state
+    /// read from `locked` so a test can unlock the phone part way through. The trigger
+    /// holds its coordinator weakly, as the app's does, so the test keeps it alive.
+    private func trigger(defaults: UserDefaults, context: ModelContext, now: Date,
+                         locked: @escaping @MainActor () -> Bool,
+                         client: PromptCountingClient)
+        async -> (HealthAutoTrigger, RunCoordinator) {
+        let trigger = HealthAutoTrigger(defaults: defaults, now: { now },
+                                        protectedDataAvailable: { !locked() },
+                                        isPaired: { true }, context: { context })
+        let coordinator = Self.coordinator(client)
+        trigger.attach(coordinator: coordinator, model: await Self.model(offline: false))
+        return (trigger, coordinator)
+    }
+
+    /// One workout noticed three minutes ago: past the settle, so it is due now.
+    private static func seedPendingWorkout(_ defaults: UserDefaults, now: Date) throws {
+        let noticed = now.addingTimeInterval(-3 * 60)
+        let ledger = WorkoutLedger(pending: ["walk-1343": noticed], burstStartedAt: noticed)
+        defaults.set(try JSONEncoder().encode(ledger), forKey: HealthAutoTrigger.ledgerKey)
+    }
+
+    private static func ledger(_ defaults: UserDefaults) throws -> WorkoutLedger {
+        try JSONDecoder().decode(WorkoutLedger.self,
+                                 from: defaults.data(forKey: HealthAutoTrigger.ledgerKey)!)
+    }
+
+    /// The 2026-09-30 walk: it settled with the phone locked. Nothing is sent, because the
+    /// turn would carry no workouts, and the walk stays pending rather than marked logged.
+    func testALockedPhoneSendsNoWorkoutLogAndKeepsTheWorkoutPending() async throws {
+        let defaults = freshDefaults()
+        let now = Date()
+        try Self.seedPendingWorkout(defaults, now: now)
+        let client = PromptCountingClient()
+        let (trigger, coordinator) = await trigger(defaults: defaults,
+                                                   context: try Self.makeContext(),
+                                                   now: now, locked: { true }, client: client)
+
+        await trigger.settleWorkouts()
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthWorkoutLog.prompt), 0, "no send while locked")
+        let ledger = try Self.ledger(defaults)
+        XCTAssertNotNil(ledger.pending["walk-1343"], "still pending")
+        XCTAssertNil(ledger.fired["walk-1343"], "not marked logged")
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// Unlocked, the next settle sends one workout log and only then marks the walk fired.
+    func testUnlockingThenSettlingSendsOneWorkoutLogAndMarksItFired() async throws {
+        let defaults = freshDefaults()
+        let now = Date()
+        try Self.seedPendingWorkout(defaults, now: now)
+        let client = PromptCountingClient()
+        var locked = true
+        let (trigger, coordinator) = await trigger(defaults: defaults,
+                                                   context: try Self.makeContext(),
+                                                   now: now, locked: { locked }, client: client)
+
+        await trigger.settleWorkouts()
+        await Self.settle()
+        XCTAssertEqual(client.count(of: HealthWorkoutLog.prompt), 0, "held while locked")
+        XCTAssertNotNil(try Self.ledger(defaults).pending["walk-1343"])
+
+        locked = false
+        await trigger.settleWorkouts()
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthWorkoutLog.prompt), 1)
+        let ledger = try Self.ledger(defaults)
+        XCTAssertNil(ledger.pending["walk-1343"])
+        XCTAssertNotNil(ledger.fired["walk-1343"], "marked fired once sent")
+        withExtendedLifetime(coordinator) {}
+    }
 }
 
 // MARK: - Doubles

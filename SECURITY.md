@@ -168,9 +168,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **16 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **19 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit` — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -895,6 +895,7 @@ and read-only). Only the servers named in that config load:
 | `browser` | Headless web fetch, added 2026-08-07 — nineteen `mcp__browser__*` tools in the allowlist above. See [Browser](#browser-headless-2026-08-07) |
 | `homeassistant` | **Full house control**, added 2026-08-07 — all twenty-three `mcp__homeassistant__*` tools. This is the one server granted whole, by explicit operator decision. See [Home Assistant](#home-assistant-full-control-2026-08-07) |
 | `roon` | Music control, added 2026-08-07 — all six `mcp__roon__*` tools. No auth of any kind. See [Roon](#roon-no-auth-2026-08-07) |
+| `rybbit` | tag1.com web analytics, **read only**, added 2026-10-01 — twenty-eight `mcp__rybbit__*` read tools, no write tool. See [Rybbit](#rybbit-web-analytics-read-only-2026-10-01) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1163,6 +1164,80 @@ The token is unscoped: HA long-lived tokens carry the full permissions of the
 user that minted them, so it is *not* a second boundary the way the read-only
 Slack token is. The allowlist and HA's Expose list are the boundaries; the token
 is only a credential.
+
+### Rybbit web analytics (READ ONLY, 2026-10-01)
+
+Bridge 0.163.0 adds Rybbit's hosted MCP server to every main turn on both harnesses: the
+nineteenth server on Claude Code and the sixteenth on Codex. It reads tag1.com's web
+analytics. It is declared as `rybbit`, `type: "http"` (Streamable HTTP), at
+`https://app.rybbit.io/api/mcp`. Tag1 uses the hosted service, so the URL names no
+deployment address; a self-hosted instance would be a source edit and a fresh battery.
+
+#### The key
+
+A Rybbit **personal API key** (Settings, Account, Personal API Keys), supplied as
+`RYBBIT_API_KEY` in the LaunchAgent plist and nowhere else. It reaches the server exactly the
+way `HA_MCP_TOKEN` does: Claude Code gets `"Authorization": "Bearer ${RYBBIT_API_KEY}"` and
+expands it from the child's environment, and Codex is given the variable name
+(`bearer_token_env_var="RYBBIT_API_KEY"`) and reads it itself. The value never appears in a
+config file, a command line, a log line or a test fixture. Golden tests assert that the
+Claude Code config carries the placeholder **unexpanded** and that Codex's argv names the
+variable and never carries the placeholder text.
+
+**The key is scoped, and its scope is the first boundary.** Rybbit keys can be limited by
+resource and action, and the server registers only the tools the key's scopes allow. With
+the deployment's key, a live `tools/list` on 2026-10-01 returned twenty-eight tools, every
+one annotated `readOnlyHint: true, destructiveHint: false`. No write tool is registered at
+all, so the write tools are absent from the child's root, not merely ungranted. That makes
+this credential a real second layer, the way the read-only Slack token is, and unlike the
+Home Assistant token.
+
+#### Granted: twenty-eight read tools, named one by one
+
+`list_sites`, `get_site`, `get_overview`, `get_overview_timeseries`, `get_breakdown`,
+`get_live_stats`, `get_event_names`, `get_errors`, `get_web_vitals`, `get_retention`,
+`get_journeys`, `get_goals`, `get_funnels`, `analyze_funnel`, `list_segments`,
+`apply_segment`, `get_users`, `get_user`, `list_members`, `list_teams`, `get_sessions`,
+`get_session`, `get_events`, `get_query_schema`, `run_query`, `get_annotations`,
+`get_search_console_status`, `get_search_console_data`.
+
+Each one is in `DEFAULT_ALLOWED_TOOLS` by name, never as `mcp__rybbit__*`, and a test pins
+the list by equality. `run_query` runs ClickHouse SQL; the server documents and annotates it
+as read only, and it is granted on that basis.
+
+#### Withheld: every write tool
+
+Rybbit's documentation names write tools for goals, funnels, sites, members, teams and user
+profiles: `create_goal`, `update_goal`, `delete_goal`, `save_funnel`, `delete_funnel`,
+`create_site`, `update_site_config`, `delete_site`, `identify_user`, `update_user_traits`,
+`delete_user`, `add_member`, `update_member_site_access`, `create_team`, `update_team`,
+`delete_team`, and says the server has more than fifty tools in all. None is granted, not
+even ones that sound harmless: `identify_user` and `update_user_traits` write user profiles.
+The full write list cannot be read from the live server, because the key's scope hides it,
+and that is the point. A test asserts that no named write tool, and no tool whose name starts
+with a write verb, is in the allowlist, so a key re-issued with wider scopes would register
+the write tools and still could not call them.
+
+#### What it adds to the risk
+
+- **One new credential**, read only by scope, with Tag1's analytics as its whole blast radius.
+  Analytics include per-user profiles and session timelines, so a prompt-injected turn could
+  read and repeat visitor data. That is a read exposure, not a write one.
+- **One new public host**, `app.rybbit.io`. A tool call carries caller-authored arguments
+  (dates, filters, and `run_query`'s SQL), so it is a low-bandwidth egress channel of the
+  same shape as `maps_search`, accepted rather than mitigated.
+- **A new source of untrusted text.** Page titles, paths, referrers, event names, search
+  queries and user traits are written by whoever visits tag1.com, and they enter the turn at
+  the trust level of the message bodies the chat servers already carry. The server's own
+  instructions say so.
+
+#### An unset key does not stop a turn
+
+If `RYBBIT_API_KEY` is missing from the bridge's environment, the server answers 401, the
+CLI marks `rybbit` failed, and every other server loads. Measured on 2026-10-01 with a child
+spawned from the bridge's real main-turn argv: with the key, all nineteen servers connected
+and `get_overview` for tag1.com returned data; with it unset, `rybbit` was `failed`, the
+other eighteen were `connected`, and the turn answered.
 
 ### Roon (no auth, 2026-08-07)
 
@@ -2210,8 +2285,8 @@ re-recorded.**
 
 | Row | Probe | What is open |
 | --- | --- | --- |
-| `write/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes` | `network_outbound` | `Bash(git:*)` with unrestricted arguments reaches the network (`git ls-remote <url>` was observed arriving at the probe listener). `WebFetch` is denied and `WebSearch` is not granted, so this is the one live route |
-| `write/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes` | `background_process` | The same unrestricted `git` scope can leave a process running past the end of the turn |
+| `write/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit` | `network_outbound` | `Bash(git:*)` with unrestricted arguments reaches the network (`git ls-remote <url>` was observed arriving at the probe listener). `WebFetch` is denied and `WebSearch` is not granted, so this is the one live route |
+| `write/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit` | `background_process` | The same unrestricted `git` scope can leave a process running past the end of the turn |
 
 **Those two are the only `known_open` rows in the record.** `read_escape_parent` was in this
 table until 0.125.0 and is not any more, because the record reads `denied` for it. That is a

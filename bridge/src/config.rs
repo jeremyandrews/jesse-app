@@ -832,6 +832,24 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // A new tool in a future version must be a decision, and moving this list moves
 // `toolset_args`, which costs a live battery re-run — which is the correct price for
 // widening what a turn can do to a cluster.
+//
+// RYBBIT: TWENTY-EIGHT READ TOOLS, AND NO WRITE TOOL AT ANY PRICE.
+//
+// Rybbit's hosted MCP server, reached with a personal API key, registers only the tools the
+// key's scopes allow. On 2026-10-01 a live `tools/list` with the deployment's key returned
+// twenty-eight, every one annotated `readOnlyHint: true, destructiveHint: false`, and all
+// twenty-eight are granted below. `run_query` is among them: it runs ClickHouse SQL, and the
+// server documents and annotates it as read only.
+//
+// The server's documentation names write tools — goals, funnels, sites, members, teams, and
+// user profiles (`identify_user` and `update_user_traits` write too) — and says it has more
+// than fifty tools in all. None is granted, and the KEY'S SCOPE is the first layer that keeps
+// them out: they are absent from the root, not merely ungranted. This list is the second
+// layer, so a key re-issued with wider scopes registers them and still cannot call them.
+//
+// NAMED INDIVIDUALLY, NEVER AS `mcp__rybbit__*`, for the reason every server here is: a
+// wildcard grants whatever the server advertises next, and on this server the next thing
+// advertised could be a write tool.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -972,7 +990,21 @@ mcp__kubernetes__pods_get,mcp__kubernetes__pods_log,mcp__kubernetes__pods_top,\
 mcp__kubernetes__pods_run,mcp__kubernetes__pods_exec,mcp__kubernetes__pods_delete,\
 mcp__kubernetes__resources_list,mcp__kubernetes__resources_get,\
 mcp__kubernetes__resources_create_or_update,mcp__kubernetes__resources_scale,\
-mcp__kubernetes__resources_delete";
+mcp__kubernetes__resources_delete,\
+mcp__rybbit__list_sites,mcp__rybbit__get_site,\
+mcp__rybbit__get_overview,mcp__rybbit__get_overview_timeseries,\
+mcp__rybbit__get_breakdown,mcp__rybbit__get_live_stats,\
+mcp__rybbit__get_event_names,mcp__rybbit__get_errors,\
+mcp__rybbit__get_web_vitals,mcp__rybbit__get_retention,\
+mcp__rybbit__get_journeys,mcp__rybbit__get_goals,\
+mcp__rybbit__get_funnels,mcp__rybbit__analyze_funnel,\
+mcp__rybbit__list_segments,mcp__rybbit__apply_segment,\
+mcp__rybbit__get_users,mcp__rybbit__get_user,\
+mcp__rybbit__list_members,mcp__rybbit__list_teams,\
+mcp__rybbit__get_sessions,mcp__rybbit__get_session,\
+mcp__rybbit__get_events,mcp__rybbit__get_query_schema,mcp__rybbit__run_query,\
+mcp__rybbit__get_annotations,\
+mcp__rybbit__get_search_console_status,mcp__rybbit__get_search_console_data";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -4941,6 +4973,118 @@ mod tests {
     fn the_vault_links_grant_is_recorded_not_left_to_vault_settings() {
         assert!(DEFAULT_ALLOWED_TOOLS.contains("Bash(bin/vault-links:*)"));
         assert!(DEFAULT_ALLOWED_TOOLS.contains("Bash(./bin/vault-links:*)"));
+    }
+
+    /// THE RYBBIT GRANT IS EXACTLY THE TWENTY-EIGHT READ TOOLS THE SERVER REGISTERS FOR THE
+    /// DEPLOYMENT'S KEY, and nothing else.
+    ///
+    /// Taken from a live `tools/list` against `https://app.rybbit.io/api/mcp` on 2026-10-01,
+    /// every tool annotated `readOnlyHint: true`. Equality, so a missing grant and a grant for
+    /// a name the server does not register both fail, and a failure names the tool.
+    #[test]
+    fn the_rybbit_grant_is_the_twenty_eight_read_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__rybbit__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "list_sites",
+            "get_site",
+            "get_overview",
+            "get_overview_timeseries",
+            "get_breakdown",
+            "get_live_stats",
+            "get_event_names",
+            "get_errors",
+            "get_web_vitals",
+            "get_retention",
+            "get_journeys",
+            "get_goals",
+            "get_funnels",
+            "analyze_funnel",
+            "list_segments",
+            "apply_segment",
+            "get_users",
+            "get_user",
+            "list_members",
+            "list_teams",
+            "get_sessions",
+            "get_session",
+            "get_events",
+            "get_query_schema",
+            "run_query",
+            "get_annotations",
+            "get_search_console_status",
+            "get_search_console_data",
+        ]
+        .iter()
+        .map(|t| format!("mcp__rybbit__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the rybbit grant moved — re-probe the server's tools/list and record the decision \
+             before changing this list; it moves `toolset_args`, which costs a live battery run"
+        );
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS.contains("mcp__rybbit__*"),
+            "a wildcard grant on the analytics server is never acceptable"
+        );
+    }
+
+    /// NO RYBBIT WRITE TOOL IS GRANTED, named from the server's own documentation. The key's
+    /// scope keeps these off the root today; this pins the second layer, so that a key
+    /// re-issued with wider scopes still cannot call one. `identify_user` and
+    /// `update_user_traits` are here because they write user profiles, however harmless the
+    /// names sound. Anything that creates, changes or deletes is write.
+    #[test]
+    fn no_rybbit_write_tool_is_granted() {
+        let granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS.split(',').collect();
+        for write in [
+            "create_goal",
+            "update_goal",
+            "delete_goal",
+            "save_funnel",
+            "delete_funnel",
+            "create_site",
+            "update_site_config",
+            "delete_site",
+            "identify_user",
+            "update_user_traits",
+            "delete_user",
+            "add_member",
+            "update_member_site_access",
+            "create_team",
+            "update_team",
+            "delete_team",
+        ] {
+            let name = format!("mcp__rybbit__{write}");
+            assert!(
+                !granted.contains(&name.as_str()),
+                "`{name}` writes to Rybbit and must never be granted"
+            );
+        }
+        // Belt and braces against a write tool the docs did not name: no granted rybbit tool
+        // starts with a write verb.
+        for g in granted.iter().filter(|g| g.starts_with("mcp__rybbit__")) {
+            let tool = &g["mcp__rybbit__".len()..];
+            for verb in [
+                "create_",
+                "update_",
+                "delete_",
+                "save_",
+                "add_",
+                "remove_",
+                "identify_",
+                "set_",
+            ] {
+                assert!(
+                    !tool.starts_with(verb),
+                    "`{g}` looks like a write tool and must not be granted"
+                );
+            }
+        }
     }
 
     /// THE KUBERNETES GRANT IS EXACTLY THE TWENTY TOOLS THE PINNED SERVER REGISTERS.

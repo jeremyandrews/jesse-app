@@ -904,7 +904,13 @@ pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
 /// Claude Code reaches the SAME variable through `${HA_MCP_TOKEN}` expansion in the
 /// `Authorization` header of [`MAIN_CHILD_MCP_CONFIG`] — one variable, two spellings, and
 /// they must not drift apart.
-pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[("homeassistant", "HA_MCP_TOKEN")];
+///
+/// `RYBBIT_API_KEY` is a Rybbit personal API key for tag1.com's analytics, scoped to read,
+/// also set in the plist and reached by Claude Code as `${RYBBIT_API_KEY}` in the same way.
+pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[
+    ("homeassistant", "HA_MCP_TOKEN"),
+    ("rybbit", "RYBBIT_API_KEY"),
+];
 
 /// One server's `enabled_tools` override, in Codex's `-c key=value` spelling.
 ///
@@ -2094,7 +2100,7 @@ impl SpawnedHarness for Codex {
         Box::new(Codex)
     }
 
-    /// The fifteen-server set, `MESSAGES_KUBERNETES_MCP_CONFIG`: every server Claude Code's main
+    /// The sixteen-server set, `MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG`: every server Claude Code's main
     /// turn carries EXCEPT the three named in [`CODEX_WITHHELD_MCP_SERVERS`] — `build` (0.86.0),
     /// `places` (0.100.0) and `inbound` (0.115.0). Each server's entry is the same one Claude
     /// Code spawns, spelled once and assembled into both sets, and the per-server tool lists come
@@ -2122,13 +2128,16 @@ impl SpawnedHarness for Codex {
     /// emptying [`CODEX_WITHHELD_MCP_SERVERS`] is still a separate decision, and it is now cheaper
     /// than it was — the signatures are already being re-taken.
     ///
+    /// 0.163.0 paid the same cost a seventh time for `rybbit`, on the owner's decision of
+    /// 2026-10-01: the labels moved to `…+kubernetes+rybbit` and both blocks must be re-signed.
+    ///
     /// **WHAT A SHARED SERVER LIST DOES NOT MAKE SHARED.** Codex's `workspace-write` sandbox scopes
     /// WRITES only; it has no readable-roots equivalent, so a Codex child can read anything the
     /// bridge's unix user can read, at every level, while a Claude Code child is held to its
     /// `Read(./**)` allowlist. Same tools, different read boundary. The only remedy is unix-user
     /// isolation — a dedicated, sandboxed user for the child — which is not implemented.
     fn main_mcp_config(&self) -> &'static str {
-        MESSAGES_KUBERNETES_MCP_CONFIG
+        MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG
     }
 
     /// Codex names nothing directly — see [`apply_patch_targets`].
@@ -3432,6 +3441,48 @@ mod tests {
             !flat.contains("HassTurnOff"),
             "an ungranted tool leaked into the child's argv: {args:?}"
         );
+    }
+
+    /// THE RYBBIT KEY REACHES CODEX BY NAME, against the SHIPPED main set rather than a
+    /// hand-written config, so a change to the declaration or to [`CODEX_MCP_BEARER_ENV`] that
+    /// drops the credential, or bakes a value in, fails here.
+    #[test]
+    fn the_shipped_rybbit_server_travels_with_its_key_named_not_valued() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            Codex.main_mcp_config(),
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped Codex main set renders");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.rybbit.url="https://app.rybbit.io/api/mcp""#),
+            "{args:?}"
+        );
+        assert!(
+            flat.contains(r#"mcp_servers.rybbit.bearer_token_env_var="RYBBIT_API_KEY""#),
+            "{args:?}"
+        );
+        assert!(!flat.contains("mcp_servers.rybbit.command"), "{args:?}");
+        assert!(!flat.contains("mcp_servers.rybbit.env_vars"), "{args:?}");
+        // The Claude Code spelling must not leak through: Codex has no header expansion, so a
+        // literal `${RYBBIT_API_KEY}` here would be sent to the server as the token itself.
+        assert!(!flat.contains("${RYBBIT_API_KEY}"), "{args:?}");
+        // Read tools only, and the grant is the same list Claude Code's turn gets.
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.rybbit.enabled_tools="))
+            .expect("rybbit carries an enabled_tools override");
+        assert!(enabled.contains(r#""get_overview""#), "{enabled}");
+        assert!(enabled.contains(r#""run_query""#), "{enabled}");
+        for write in [
+            "identify_user",
+            "create_goal",
+            "delete_site",
+            "update_site_config",
+        ] {
+            assert!(!enabled.contains(write), "{write} reached Codex: {enabled}");
+        }
     }
 
     /// A transport neither harness can express is REFUSED, never silently dropped — a child

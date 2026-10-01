@@ -276,6 +276,24 @@ pub enum McpSet {
     /// gains the same server on [`McpSet::MessagesKubernetes`], so for the first time since
     /// 0.76.0 a widening moved a Codex label. See [`crate::CODEX_SHIPPED_ROWS`].
     MessagesBuildPlacesInboundKubernetes,
+    /// The Codex kubernetes set PLUS **`rybbit`** ([`MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG`]):
+    /// every **Codex** main turn from bridge 0.163.0. Sixteen servers.
+    ///
+    /// **THE ROW LABELS MOVED FOR A SEVENTH TIME AND IT COST THE SAME TWO SIGNATURES**, on the
+    /// owner's decision of 2026-10-01 to give both harnesses the analytics server rather than
+    /// one. Both `[[accepted]]` blocks in `containment-codex.toml` must be re-signed against a
+    /// fresh live Codex battery. See [`McpSet::contains_rybbit`] for what the row adds.
+    MessagesKubernetesRybbit,
+    /// The Claude Code kubernetes set PLUS **`rybbit`** ([`MAIN_CHILD_MCP_CONFIG`]): every
+    /// **Claude Code** main turn from bridge 0.163.0. Nineteen servers.
+    ///
+    /// **WHAT IS NEW IS READ ACCESS TO TAG1.COM'S WEB ANALYTICS**, on Rybbit's hosted service,
+    /// over HTTPS with a personal API key. Every granted tool is annotated read only by the
+    /// server, and the key itself is scoped so that the server registers no write tool at
+    /// all. It is a distinct row rather than a widening of
+    /// [`McpSet::MessagesBuildPlacesInboundKubernetes`] for the standing reason: the record
+    /// must be able to say which rows held which credential.
+    MessagesBuildPlacesInboundKubernetesRybbit,
     /// **The six servers the owner's own replies arrive on, and NOTHING else**
     /// ([`REPLIES_MCP_CONFIG`]): `google`, `google-perseido`, `fastmail`, `slack`, `whatsapp`
     /// and `imcp`. The TODAY-BRIEF child, when sent-message search is switched on.
@@ -372,6 +390,18 @@ const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_LABEL: &str = "qmd+slack+browser+
 roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+\
 inbound+kubernetes";
 
+/// The label for [`McpSet::MessagesKubernetesRybbit`], written ONCE for the reason every label
+/// above it is. It is the string whose arrival orphaned both Codex `[[accepted]]` blocks in
+/// 0.163.0; do not edit it without going back for that decision.
+const MESSAGES_KUBERNETES_RYBBIT_LABEL: &str = "qmd+slack+browser+homeassistant+roon+google+\
+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+kubernetes+rybbit";
+
+/// The label for [`McpSet::MessagesBuildPlacesInboundKubernetesRybbit`], written ONCE for the
+/// reason every label above it is.
+const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_LABEL: &str = "qmd+slack+browser+\
+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+\
+build+places+inbound+kubernetes+rybbit";
+
 /// The label for [`McpSet::Replies`], written ONCE for the reason every label above it is: a
 /// typo in the `parse` arm would fail the round trip for exactly the row a startup gate needs
 /// to resolve, and it would fail it by returning `None` rather than by failing to compile.
@@ -401,6 +431,10 @@ impl McpSet {
             McpSet::MessagesBuildPlacesInboundKubernetes => {
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_LABEL
             }
+            McpSet::MessagesKubernetesRybbit => MESSAGES_KUBERNETES_RYBBIT_LABEL,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbit => {
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_LABEL
+            }
             McpSet::Replies => REPLIES_LABEL,
         }
     }
@@ -424,6 +458,10 @@ impl McpSet {
             MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_LABEL => {
                 Some(McpSet::MessagesBuildPlacesInboundKubernetes)
             }
+            MESSAGES_KUBERNETES_RYBBIT_LABEL => Some(McpSet::MessagesKubernetesRybbit),
+            MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_LABEL => {
+                Some(McpSet::MessagesBuildPlacesInboundKubernetesRybbit)
+            }
             REPLIES_LABEL => Some(McpSet::Replies),
             _ => None,
         }
@@ -446,7 +484,11 @@ impl McpSet {
             McpSet::MessagesBuildPlaces => MESSAGES_BUILD_PLACES_MCP_CONFIG,
             McpSet::MessagesBuildPlacesInbound => MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
             McpSet::MessagesKubernetes => MESSAGES_KUBERNETES_MCP_CONFIG,
-            McpSet::MessagesBuildPlacesInboundKubernetes => MAIN_CHILD_MCP_CONFIG,
+            McpSet::MessagesBuildPlacesInboundKubernetes => {
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG
+            }
+            McpSet::MessagesKubernetesRybbit => MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbit => MAIN_CHILD_MCP_CONFIG,
             McpSet::Replies => REPLIES_MCP_CONFIG,
         }
     }
@@ -458,7 +500,7 @@ impl McpSet {
     /// It is a literal array rather than something derived, so adding a variant without adding
     /// it here is caught by [`every_set_round_trips_through_its_config`] rather than silently
     /// making that set unresolvable from a spawn site's config string.
-    pub const ALL: [McpSet; 13] = [
+    pub const ALL: [McpSet; 15] = [
         McpSet::None,
         McpSet::Qmd,
         McpSet::QmdSlack,
@@ -471,6 +513,8 @@ impl McpSet {
         McpSet::MessagesBuildPlacesInbound,
         McpSet::MessagesKubernetes,
         McpSet::MessagesBuildPlacesInboundKubernetes,
+        McpSet::MessagesKubernetesRybbit,
+        McpSet::MessagesBuildPlacesInboundKubernetesRybbit,
         McpSet::Replies,
     ];
 
@@ -513,10 +557,12 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -539,11 +585,11 @@ impl McpSet {
             | McpSet::House
             | McpSet::Morning
             | McpSet::Messages
-            | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetes | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             // `Replies` loads Slack for the owner's own sent messages. Its SEND tools are
             // registered by the server and withheld by the allowlist ALONE — see the variant.
             | McpSet::Replies => true,
@@ -560,10 +606,12 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -585,10 +633,12 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -605,10 +655,12 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -623,11 +675,11 @@ impl McpSet {
             | McpSet::House => false,
             McpSet::Morning
             | McpSet::Messages
-            | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetes | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             // `Replies` loads it for the work mailbox. Read-only at three layers: the
             // `--read-only` server flag, `*.readonly` OAuth scopes, and the allowlist —
             // which grants the GMAIL READ TOOLS ONLY, not Drive and not Calendar.
@@ -647,10 +699,12 @@ impl McpSet {
             McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -664,11 +718,11 @@ impl McpSet {
             | McpSet::House => false,
             McpSet::Morning
             | McpSet::Messages
-            | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetes | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             // `Replies` loads it for the personal mailbox. The server registers three tools
             // and all three read: there is no write tool to withhold here.
             | McpSet::Replies => true,
@@ -690,11 +744,11 @@ impl McpSet {
             | McpSet::Replies => false,
             McpSet::Morning
             | McpSet::Messages
-            | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetes | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -711,10 +765,12 @@ impl McpSet {
             McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -733,11 +789,11 @@ impl McpSet {
             | McpSet::Replies => false,
             McpSet::Morning
             | McpSet::Messages
-            | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetes | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -755,10 +811,12 @@ impl McpSet {
             | McpSet::Morning => false,
             McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
             | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             | McpSet::Replies => true,
         }
     }
@@ -789,10 +847,12 @@ impl McpSet {
             | McpSet::Morning => false,
             McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
             | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             | McpSet::Replies => true,
         }
     }
@@ -814,10 +874,12 @@ impl McpSet {
             | McpSet::Morning => false,
             McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
             | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             | McpSet::Replies => true,
         }
     }
@@ -840,11 +902,13 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::Replies => false,
             McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -867,11 +931,13 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::Replies => false,
             McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
-            | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -893,12 +959,13 @@ impl McpSet {
             | McpSet::Morning
             | McpSet::Messages
             | McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
             | McpSet::MessagesBuild
             | McpSet::MessagesBuildPlaces
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInbound | McpSet::MessagesBuildPlacesInboundKubernetes => {
-                true
-            }
+            McpSet::MessagesBuildPlacesInbound
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -929,7 +996,38 @@ impl McpSet {
             | McpSet::MessagesBuildPlaces
             | McpSet::MessagesBuildPlacesInbound
             | McpSet::Replies => false,
-            McpSet::MessagesKubernetes | McpSet::MessagesBuildPlacesInboundKubernetes => true,
+            McpSet::MessagesKubernetes
+            | McpSet::MessagesKubernetesRybbit
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
+        }
+    }
+
+    /// Whether this set loads the **rybbit** server — same exhaustiveness rule as every
+    /// sibling above, and never a `_` arm.
+    ///
+    /// A `true` means the row holds a Rybbit personal API key for tag1.com's web analytics and
+    /// can READ that data: traffic, sessions, events, user profiles, and read-only SQL over all
+    /// of it. It cannot write, by the key's scope and by the allowlist. What it also means is
+    /// a new source of untrusted text in the turn, written by whoever visits the site: page
+    /// titles, paths, referrers, event names and user traits.
+    pub fn contains_rybbit(&self) -> bool {
+        match self {
+            McpSet::None
+            | McpSet::Qmd
+            | McpSet::QmdSlack
+            | McpSet::QmdSlackBrowser
+            | McpSet::House
+            | McpSet::Morning
+            | McpSet::Messages
+            | McpSet::MessagesBuild
+            | McpSet::MessagesBuildPlaces
+            | McpSet::MessagesBuildPlacesInbound
+            | McpSet::MessagesKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::Replies => false,
+            McpSet::MessagesKubernetesRybbit
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => true,
         }
     }
 
@@ -991,6 +1089,9 @@ impl McpSet {
         }
         if self.contains_kubernetes() {
             out.push("kubernetes");
+        }
+        if self.contains_rybbit() {
+            out.push("rybbit");
         }
         out
     }
@@ -1062,11 +1163,11 @@ pub const CLAUDE_CODE_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetes,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbit,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetes,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbit,
     },
     // The TODAY-BRIEF child with sent-message search on. A THIRD `Read` containment, which is
     // the whole reason a row is keyed on (capability, MCP set): this one reads the owner's own
@@ -1115,11 +1216,11 @@ pub const CODEX_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesKubernetes,
+        mcp: McpSet::MessagesKubernetesRybbit,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesKubernetes,
+        mcp: McpSet::MessagesKubernetesRybbit,
     },
     // The brief child on Codex, for the standing reason a capability lands on every harness in
     // the same change. Its LABEL is the same as Claude Code's — the set is one set — so unlike
@@ -1831,7 +1932,7 @@ mod tests {
         // The corrected row key: `Read` names TWO containments (the main read-only turn with
         // qmd, the vault-QA child with no servers), so one `Read` row would describe a
         // posture that was never probed.
-        // Claude Code's main rows carry the EIGHTEEN-server set; Codex's carry the fifteen-
+        // Claude Code's main rows carry the NINETEEN-server set; Codex's carry the sixteen-
         // server one. The asymmetry is still the point of the assertion: one harness
         // gaining a server — a code-execution one in 0.86.0, a network one in 0.100.0, a
         // document-fetching one in 0.115.0 — must not silently re-key the other harness's
@@ -1842,8 +1943,8 @@ mod tests {
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_LABEL}"),
-                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_LABEL}"),
+                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_LABEL}"),
+                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );
@@ -1861,6 +1962,10 @@ mod tests {
             // set and Codex's fourteen-server one. A record written before that version —
             // including the one this build ships until the battery is re-run — names them.
             MESSAGES_BUILD_PLACES_INBOUND_LABEL,
+            // Retired in 0.163.0 when `rybbit` landed: Claude Code's eighteen-server set and
+            // Codex's fifteen-server one.
+            MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_LABEL,
+            MESSAGES_KUBERNETES_LABEL,
         ] {
             let set = McpSet::parse(label).unwrap_or_else(|| panic!("{label} must parse"));
             assert_eq!(set.label(), label, "the label must round-trip exactly");
@@ -1914,7 +2019,40 @@ mod tests {
                 "`{withheld}` is withheld from Codex but reached its main set"
             );
         }
-        // Codex is on the FIFTEEN-server set from 0.146.0. The two lists were identical from
+
+        // THE TWO 0.163.0 SETS: each is its kubernetes predecessor plus `rybbit` and nothing
+        // else, and `rybbit` is on both harnesses, so the predicate is asserted on both.
+        assert!(!McpSet::MessagesBuildPlacesInboundKubernetes.contains_rybbit());
+        assert!(!McpSet::MessagesKubernetes.contains_rybbit());
+        assert!(McpSet::MessagesBuildPlacesInboundKubernetesRybbit.contains_rybbit());
+        assert!(McpSet::MessagesKubernetesRybbit.contains_rybbit());
+        for (with, without) in [
+            (
+                McpSet::MessagesBuildPlacesInboundKubernetesRybbit,
+                McpSet::MessagesBuildPlacesInboundKubernetes,
+            ),
+            (McpSet::MessagesKubernetesRybbit, McpSet::MessagesKubernetes),
+        ] {
+            let mut expected = without.server_names();
+            expected.push("rybbit");
+            assert_eq!(with.server_names(), expected, "{}", with.label());
+        }
+        assert_eq!(
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbit
+                .server_names()
+                .len(),
+            19
+        );
+        assert_eq!(McpSet::MessagesKubernetesRybbit.server_names().len(), 16);
+        for withheld in crate::CODEX_WITHHELD_MCP_SERVERS {
+            assert!(
+                !McpSet::MessagesKubernetesRybbit
+                    .server_names()
+                    .contains(&withheld),
+                "`{withheld}` is withheld from Codex but reached its main set"
+            );
+        }
+        // Codex is on the SIXTEEN-server set from 0.163.0 (fifteen from 0.146.0). The two lists were identical from
         // 0.73.0 until the build server landed on Claude Code alone, and THIS IS THE ASSERTION
         // THAT KEEPS THAT HONEST: a shared assertion would quietly re-key one harness's rows
         // when the other grew. 0.146.0 re-keyed Codex's DELIBERATELY — `kubernetes` landed on
@@ -1929,8 +2067,8 @@ mod tests {
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_KUBERNETES_LABEL}"),
-                &format!("write/{MESSAGES_KUBERNETES_LABEL}"),
+                &format!("read/{MESSAGES_KUBERNETES_RYBBIT_LABEL}"),
+                &format!("write/{MESSAGES_KUBERNETES_RYBBIT_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );

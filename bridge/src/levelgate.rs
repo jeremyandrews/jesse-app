@@ -1926,8 +1926,9 @@ mod tests {
         // this label has a PASSING `read` row in the committed record, and only the set the
         // main turn actually spawns is re-probed on every battery. Pinning a retired label
         // here would quietly stop testing anything the moment the main set moved — which is
-        // exactly what 0.146.0 did to `MessagesBuildPlacesInbound`.
-        let main_turn = McpSet::MessagesBuildPlacesInboundKubernetes.label();
+        // exactly what 0.146.0 did to `MessagesBuildPlacesInbound` and 0.163.0 to
+        // `MessagesBuildPlacesInboundKubernetes`.
+        let main_turn = McpSet::MessagesBuildPlacesInboundKubernetesRybbit.label();
         assert!(
             read_row_passes(&record(), &format!("read/{main_turn}")),
             "precondition: the main-turn read row passes, which is why the rule cannot be \

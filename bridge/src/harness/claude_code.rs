@@ -768,8 +768,8 @@ macro_rules! morning_servers {
 }
 /// The fourteen servers that were the COMMON CORE of both harnesses' main turns from 0.73.0:
 /// the morning set plus the two message sources and the second Google account. Both main sets
-/// are still assembled from this — Codex adds `kubernetes` and `rybbit`, and Claude Code adds
-/// `build`, `places`, `inbound`, `kubernetes` and `rybbit` — so it is no longer what either turn carries on its
+/// are still assembled from this — Codex adds `kubernetes`, and Claude Code adds `build`,
+/// `places`, `inbound`, `kubernetes` and `rybbit` — so it is no longer what either turn carries on its
 /// own. It stays a macro rather than being folded into its two callers because
 /// `MESSAGES_MCP_CONFIG` is a RETIRED ROW LABEL that must keep meaning what it meant.
 macro_rules! messages_servers {
@@ -788,7 +788,11 @@ macro_rules! messages_servers {
 
 /// The servers Claude Code's main turn carries and Codex's does NOT — the WHOLE remaining
 /// asymmetry between the two harnesses' server sets, in one place, in the order they landed:
-/// `build` (0.86.0), `places` (0.100.0), `inbound` (0.115.0).
+/// `build` (0.86.0), `places` (0.100.0), `inbound` (0.115.0), `rybbit` (0.163.0).
+///
+/// `rybbit` is withheld for the label cost alone, on the owner's decision of 2026-10-01 to ship
+/// it on Claude Code first: its Codex form is already wired (`bearer_token_env_var` in
+/// `CODEX_MCP_BEARER_ENV`) and only the Codex battery is outstanding.
 ///
 /// Each was kept off Codex for the same reason, and it is not about the server: adding one moves
 /// Codex's row labels (`…+google-perseido` becomes a new string), which orphans BOTH operator
@@ -797,7 +801,7 @@ macro_rules! messages_servers {
 /// Closing the gap is emptying this list, pointing `CODEX_SHIPPED_ROWS` at the full set, running
 /// that battery and taking that decision; `the_two_harnesses_carry_the_same_mcp_servers_except_the_named_withheld_ones`
 /// makes sure nothing else can differ in the meantime.
-pub const CODEX_WITHHELD_MCP_SERVERS: [&str; 3] = ["build", "places", "inbound"];
+pub const CODEX_WITHHELD_MCP_SERVERS: [&str; 4] = ["build", "places", "inbound", "rybbit"];
 
 /// qmd + Slack + browser + Home Assistant + Roon — the main turn's server set from bridge
 /// 0.67.0 until the morning-routine servers were added in 0.68.0. No shipped spawn site uses
@@ -1134,23 +1138,6 @@ pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
     "}}"
 );
 
-/// The fifteen-server Codex set PLUS **`rybbit`** — every **Codex** main turn from bridge
-/// 0.163.0. Sixteen servers.
-///
-/// **THE CODEX LABELS MOVED AGAIN AND IT COST THE SAME TWO SIGNATURES**, on the owner's
-/// decision of 2026-10-01: analytics on both harnesses rather than one. Both `[[accepted]]`
-/// blocks in `containment-codex.toml` must be re-signed against a fresh live Codex battery
-/// before a Codex-backed turn is served. See [`CODEX_SHIPPED_ROWS`].
-pub const MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    "}}"
-);
-
 /// The seventeen-server set PLUS **`kubernetes`** — every **Claude Code** main turn from
 /// bridge 0.146.0 until `rybbit` landed in 0.163.0. Eighteen servers.
 ///
@@ -1222,7 +1209,8 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: &str = concat!(
 /// What it also adds is a new source of UNTRUSTED TEXT: page titles, paths, referrers, event
 /// names, search queries and user traits are written by whoever visits tag1.com, and they
 /// enter the turn at the same trust level as the message bodies this set already carries.
-/// Codex gets the same server on [`MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG`].
+/// Codex does NOT get it yet: `rybbit` is on [`CODEX_WITHHELD_MCP_SERVERS`] until a live Codex
+/// battery is re-run, because adding it moves Codex's row labels.
 pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -1551,7 +1539,6 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlaces
         | McpSet::MessagesBuildPlacesInbound
         | McpSet::MessagesKubernetes
-        | McpSet::MessagesKubernetesRybbit
         | McpSet::MessagesBuildPlacesInboundKubernetes
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => READ_ALLOWED_TOOLS,
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
@@ -3818,25 +3805,15 @@ mod tests {
             ("MESSAGES_MCP_CONFIG", MESSAGES_MCP_CONFIG, {
                 let mut v = CODEX_WITHHELD_MCP_SERVERS.to_vec();
                 v.push("kubernetes");
-                v.push("rybbit");
                 v
             }),
+            // Codex's CURRENT set, which is the main set minus exactly the withheld four.
+            // Listed here rather than only in the harness-level form below because this loop
+            // also asserts every shared server is declared BYTE-IDENTICALLY, and Codex's set
+            // is the one place `kubernetes` is spelled a second time.
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,
-                {
-                    let mut v = CODEX_WITHHELD_MCP_SERVERS.to_vec();
-                    v.push("rybbit");
-                    v
-                },
-            ),
-            // Codex's CURRENT set, which is the main set minus exactly the withheld three.
-            // Listed here rather than only in the harness-level form below because this loop
-            // also asserts every shared server is declared BYTE-IDENTICALLY, and Codex's set
-            // is the one place `kubernetes` and `rybbit` are spelled a second time.
-            (
-                "MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG",
-                MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG,
                 CODEX_WITHHELD_MCP_SERVERS.to_vec(),
             ),
         ] {

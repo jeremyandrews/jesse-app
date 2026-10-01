@@ -120,15 +120,12 @@
 //! it moved Codex's row labels and orphaned both operator `[[accepted]]` blocks in
 //! `containment-codex.toml`. See the 0.146.0 changelog entry.
 //!
-//! **REGENERATED AGAIN, in bridge 0.163.0, for `rybbit`, and it moved exactly what 0.146.0
-//! moved.** The same six sites changed (`main-read`, `main-write`, `main-write-resume` on each
-//! harness) and `diet`, `title` and `vaultqa` are byte for byte identical on both. Claude Code
-//! gained and lost no argument: the `--mcp-config` digest moved on all three sites and the
-//! `--allowedTools` digest on the two write sites only, while `main-read` keeps its grant
-//! digest because a read-row child still gets qmd's four tools. Codex grew by eight arguments
-//! per site, four `-c mcp_servers.rybbit.*` pairs, the key named as
-//! `bearer_token_env_var="RYBBIT_API_KEY"` and never valued, `enabled_tools` a literal `[]` on
-//! `main-read`.
+//! **REGENERATED AGAIN, in bridge 0.163.0, for `rybbit`, and only on Claude Code.** Three
+//! sites moved (`main-read`, `main-write`, `main-write-resume`) and gained or lost no argument:
+//! the `--mcp-config` digest moved on all three and the `--allowedTools` digest on the two
+//! write sites only, while `main-read` keeps its grant digest because a read-row child still
+//! gets qmd's four tools. Every Codex row is byte for byte unchanged, because `rybbit` is
+//! withheld from Codex until its battery is re-run.
 //!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test

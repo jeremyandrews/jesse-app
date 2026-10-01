@@ -548,8 +548,8 @@ Residual risks, none of which the sandbox closes:
 
 #### Codex does not get this
 
-`Harness::main_mcp_config` is per harness. Claude Code's main turn carries three servers
-Codex's does not — `build` (this one), `places` and `inbound` — and they are named in ONE
+`Harness::main_mcp_config` is per harness. Claude Code's main turn carries four servers
+Codex's does not — `build` (this one), `places`, `inbound` and `rybbit` — and they are named in ONE
 place, `CODEX_WITHHELD_MCP_SERVERS`; a test fails the build if the two harnesses differ by
 anything else. Every other server's entry is spelled once and shared by both.
 
@@ -1167,8 +1167,9 @@ is only a credential.
 
 ### Rybbit web analytics (READ ONLY, 2026-10-01)
 
-Bridge 0.163.0 adds Rybbit's hosted MCP server to every main turn on both harnesses: the
-nineteenth server on Claude Code and the sixteenth on Codex. It reads tag1.com's web
+Bridge 0.163.0 adds Rybbit's hosted MCP server to every Claude Code main turn, as its
+nineteenth server. **Codex does not get it yet**: `rybbit` is on `CODEX_WITHHELD_MCP_SERVERS`
+because adding it moves Codex's row labels, which needs a live Codex battery first. It reads tag1.com's web
 analytics. It is declared as `rybbit`, `type: "http"` (Streamable HTTP), at
 `https://app.rybbit.io/api/mcp`. Tag1 uses the hosted service, so the URL names no
 deployment address; a self-hosted instance would be a source edit and a fresh battery.
@@ -1178,8 +1179,9 @@ deployment address; a self-hosted instance would be a source edit and a fresh ba
 A Rybbit **personal API key** (Settings, Account, Personal API Keys), supplied as
 `RYBBIT_API_KEY` in the LaunchAgent plist and nowhere else. It reaches the server exactly the
 way `HA_MCP_TOKEN` does: Claude Code gets `"Authorization": "Bearer ${RYBBIT_API_KEY}"` and
-expands it from the child's environment, and Codex is given the variable name
-(`bearer_token_env_var="RYBBIT_API_KEY"`) and reads it itself. The value never appears in a
+expands it from the child's environment, and Codex, once the server is released to it, is
+given the variable name (`bearer_token_env_var="RYBBIT_API_KEY"`, already wired) and reads it
+itself. The value never appears in a
 config file, a command line, a log line or a test fixture. Golden tests assert that the
 Claude Code config carries the placeholder **unexpanded** and that Codex's argv names the
 variable and never carries the placeholder text.

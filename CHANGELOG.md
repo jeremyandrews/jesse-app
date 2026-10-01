@@ -19,14 +19,14 @@ CI both run it). See the "Versioning" section of `bridge/README.md`.
 **Bridge turns can read tag1.com's web analytics.** Root cause of the gap: a bridge child
 gets MCP servers only from the compiled `--strict-mcp-config` set and tools only from the
 allowlist, and Rybbit was in neither, so no turn could see it. Rybbit's hosted MCP server is
-now on every main turn on both harnesses (Claude Code 18 to 19 servers, Codex 15 to 16), read
-only.
+now on every Claude Code main turn (18 to 19 servers), read only. Codex does not get it yet.
 
 - **Declared like Home Assistant.** `rybbit` is `type: "http"` at
   `https://app.rybbit.io/api/mcp`. Claude Code gets `Authorization: Bearer
-  ${RYBBIT_API_KEY}` and expands it from the child's environment; Codex gets
-  `bearer_token_env_var="RYBBIT_API_KEY"`. The key lives only in the LaunchAgent plist, and
-  golden tests pin the placeholder unexpanded on Claude Code and the variable name on Codex.
+  ${RYBBIT_API_KEY}` and expands it from the child's environment. The Codex form,
+  `bearer_token_env_var="RYBBIT_API_KEY"`, is wired and tested. The key lives only in the
+  LaunchAgent plist, and golden tests pin the placeholder unexpanded on Claude Code and the
+  variable name on Codex.
 - **Twenty-eight read tools granted, by name.** Taken from a live `tools/list` with the
   deployment's key, every tool annotated `readOnlyHint: true`. The key's scope keeps every
   write tool off the server's tool list, and the allowlist withholds them again: a test
@@ -36,15 +36,14 @@ only.
   main-turn argv: with the key, all nineteen servers connected and `get_overview` for
   tag1.com returned data; without it, `rybbit` reported `failed`, the other eighteen
   connected, and the turn answered.
-- **New row labels on both harnesses.** `McpSet::MessagesBuildPlacesInboundKubernetesRybbit`
-  (Claude Code) and `McpSet::MessagesKubernetesRybbit` (Codex); the eighteen- and
-  fifteen-server sets are kept as retired labels so older records still parse.
-  `containment.toml` is re-recorded live. The argv fixture is regenerated: the same six main
-  sites moved as in 0.146.0, and diet, title and vaultqa did not.
-- **Codex's acceptances.** The two `[[accepted]]` blocks in `containment-codex.toml` were
-  already orphaned by 0.146.0 and still name the pre-kubernetes labels. This change moves the
-  labels again and does not re-sign them; that is the owner's decision against a fresh live
-  Codex battery.
+- **New Claude Code row label.** `McpSet::MessagesBuildPlacesInboundKubernetesRybbit`; the
+  eighteen-server set is kept as a retired label so older records still parse.
+  `containment.toml` is re-recorded live: gate pass, $17.63, 5 rows x 22 probes on claude
+  2.1.286, and only the two main row labels moved. The argv fixture moved on Claude Code's
+  three main sites only.
+- **Withheld from Codex for now.** `rybbit` joins `CODEX_WITHHELD_MCP_SERVERS`, so Codex's
+  labels, argv and `containment-codex.toml` are untouched. Adding it moves Codex's row labels,
+  which needs a live Codex battery first; that is the follow-up.
 
 ## [App 1.0 (186)] - 2026-10-01
 

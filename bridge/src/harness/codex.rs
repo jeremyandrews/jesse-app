@@ -2100,7 +2100,7 @@ impl SpawnedHarness for Codex {
         Box::new(Codex)
     }
 
-    /// The sixteen-server set, `MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG`: every server Claude Code's main
+    /// The fifteen-server set, `MESSAGES_KUBERNETES_MCP_CONFIG`: every server Claude Code's main
     /// turn carries EXCEPT the three named in [`CODEX_WITHHELD_MCP_SERVERS`] — `build` (0.86.0),
     /// `places` (0.100.0) and `inbound` (0.115.0). Each server's entry is the same one Claude
     /// Code spawns, spelled once and assembled into both sets, and the per-server tool lists come
@@ -2128,8 +2128,8 @@ impl SpawnedHarness for Codex {
     /// emptying [`CODEX_WITHHELD_MCP_SERVERS`] is still a separate decision, and it is now cheaper
     /// than it was — the signatures are already being re-taken.
     ///
-    /// 0.163.0 paid the same cost a seventh time for `rybbit`, on the owner's decision of
-    /// 2026-10-01: the labels moved to `…+kubernetes+rybbit` and both blocks must be re-signed.
+    /// `rybbit` (0.163.0) is withheld too, for the same label cost; its Codex form is wired in
+    /// [`CODEX_MCP_BEARER_ENV`] and waits only on a live Codex battery.
     ///
     /// **WHAT A SHARED SERVER LIST DOES NOT MAKE SHARED.** Codex's `workspace-write` sandbox scopes
     /// WRITES only; it has no readable-roots equivalent, so a Codex child can read anything the
@@ -2137,7 +2137,7 @@ impl SpawnedHarness for Codex {
     /// `Read(./**)` allowlist. Same tools, different read boundary. The only remedy is unix-user
     /// isolation — a dedicated, sandboxed user for the child — which is not implemented.
     fn main_mcp_config(&self) -> &'static str {
-        MESSAGES_KUBERNETES_RYBBIT_MCP_CONFIG
+        MESSAGES_KUBERNETES_MCP_CONFIG
     }
 
     /// Codex names nothing directly — see [`apply_patch_targets`].
@@ -3443,17 +3443,18 @@ mod tests {
         );
     }
 
-    /// THE RYBBIT KEY REACHES CODEX BY NAME, against the SHIPPED main set rather than a
-    /// hand-written config, so a change to the declaration or to [`CODEX_MCP_BEARER_ENV`] that
-    /// drops the credential, or bakes a value in, fails here.
+    /// THE RYBBIT KEY REACHES CODEX BY NAME, rendered from the SHIPPED declaration (the Claude
+    /// Code main set, since Codex withholds the server until its battery is re-run) rather
+    /// than a hand-written config, so a change to the declaration or to
+    /// [`CODEX_MCP_BEARER_ENV`] that drops the credential, or bakes a value in, fails here.
     #[test]
     fn the_shipped_rybbit_server_travels_with_its_key_named_not_valued() {
         let args = codex_mcp_args(
             CODEX_ID,
-            Codex.main_mcp_config(),
+            MAIN_CHILD_MCP_CONFIG,
             crate::DEFAULT_ALLOWED_TOOLS,
         )
-        .expect("the shipped Codex main set renders");
+        .expect("the shipped main set renders for Codex");
         let flat = args.join("\n");
         assert!(
             flat.contains(r#"mcp_servers.rybbit.url="https://app.rybbit.io/api/mcp""#),

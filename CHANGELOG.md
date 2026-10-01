@@ -14,6 +14,37 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.163.0] - 2026-10-01
+
+**Bridge turns can read tag1.com's web analytics.** Root cause of the gap: a bridge child
+gets MCP servers only from the compiled `--strict-mcp-config` set and tools only from the
+allowlist, and Rybbit was in neither, so no turn could see it. Rybbit's hosted MCP server is
+now on every Claude Code main turn (18 to 19 servers), read only. Codex does not get it yet.
+
+- **Declared like Home Assistant.** `rybbit` is `type: "http"` at
+  `https://app.rybbit.io/api/mcp`. Claude Code gets `Authorization: Bearer
+  ${RYBBIT_API_KEY}` and expands it from the child's environment. The Codex form,
+  `bearer_token_env_var="RYBBIT_API_KEY"`, is wired and tested. The key lives only in the
+  LaunchAgent plist, and golden tests pin the placeholder unexpanded on Claude Code and the
+  variable name on Codex.
+- **Twenty-eight read tools granted, by name.** Taken from a live `tools/list` with the
+  deployment's key, every tool annotated `readOnlyHint: true`. The key's scope keeps every
+  write tool off the server's tool list, and the allowlist withholds them again: a test
+  fails on any documented Rybbit write tool (`identify_user` included) or any granted name
+  starting with a write verb.
+- **An unset key does not stop a turn.** Measured with a child spawned from the bridge's real
+  main-turn argv: with the key, all nineteen servers connected and `get_overview` for
+  tag1.com returned data; without it, `rybbit` reported `failed`, the other eighteen
+  connected, and the turn answered.
+- **New Claude Code row label.** `McpSet::MessagesBuildPlacesInboundKubernetesRybbit`; the
+  eighteen-server set is kept as a retired label so older records still parse.
+  `containment.toml` is re-recorded live: gate pass, $17.63, 5 rows x 22 probes on claude
+  2.1.286, and only the two main row labels moved. The argv fixture moved on Claude Code's
+  three main sites only.
+- **Withheld from Codex for now.** `rybbit` joins `CODEX_WITHHELD_MCP_SERVERS`, so Codex's
+  labels, argv and `containment-codex.toml` are untouched. Adding it moves Codex's row labels,
+  which needs a live Codex battery first; that is the follow-up.
+
 ## [App 1.0 (186)] - 2026-10-01
 
 **A workout that ends while the phone is locked is still logged.** Root cause: the

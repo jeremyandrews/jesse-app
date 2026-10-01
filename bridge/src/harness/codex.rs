@@ -904,7 +904,13 @@ pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
 /// Claude Code reaches the SAME variable through `${HA_MCP_TOKEN}` expansion in the
 /// `Authorization` header of [`MAIN_CHILD_MCP_CONFIG`] — one variable, two spellings, and
 /// they must not drift apart.
-pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[("homeassistant", "HA_MCP_TOKEN")];
+///
+/// `RYBBIT_API_KEY` is a Rybbit personal API key for tag1.com's analytics, scoped to read,
+/// also set in the plist and reached by Claude Code as `${RYBBIT_API_KEY}` in the same way.
+pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[
+    ("homeassistant", "HA_MCP_TOKEN"),
+    ("rybbit", "RYBBIT_API_KEY"),
+];
 
 /// One server's `enabled_tools` override, in Codex's `-c key=value` spelling.
 ///
@@ -2121,6 +2127,9 @@ impl SpawnedHarness for Codex {
     /// The three servers above stay withheld. This release pays the cost once, for one server;
     /// emptying [`CODEX_WITHHELD_MCP_SERVERS`] is still a separate decision, and it is now cheaper
     /// than it was — the signatures are already being re-taken.
+    ///
+    /// `rybbit` (0.163.0) is withheld too, for the same label cost; its Codex form is wired in
+    /// [`CODEX_MCP_BEARER_ENV`] and waits only on a live Codex battery.
     ///
     /// **WHAT A SHARED SERVER LIST DOES NOT MAKE SHARED.** Codex's `workspace-write` sandbox scopes
     /// WRITES only; it has no readable-roots equivalent, so a Codex child can read anything the
@@ -3432,6 +3441,49 @@ mod tests {
             !flat.contains("HassTurnOff"),
             "an ungranted tool leaked into the child's argv: {args:?}"
         );
+    }
+
+    /// THE RYBBIT KEY REACHES CODEX BY NAME, rendered from the SHIPPED declaration (the Claude
+    /// Code main set, since Codex withholds the server until its battery is re-run) rather
+    /// than a hand-written config, so a change to the declaration or to
+    /// [`CODEX_MCP_BEARER_ENV`] that drops the credential, or bakes a value in, fails here.
+    #[test]
+    fn the_shipped_rybbit_server_travels_with_its_key_named_not_valued() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG,
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped main set renders for Codex");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.rybbit.url="https://app.rybbit.io/api/mcp""#),
+            "{args:?}"
+        );
+        assert!(
+            flat.contains(r#"mcp_servers.rybbit.bearer_token_env_var="RYBBIT_API_KEY""#),
+            "{args:?}"
+        );
+        assert!(!flat.contains("mcp_servers.rybbit.command"), "{args:?}");
+        assert!(!flat.contains("mcp_servers.rybbit.env_vars"), "{args:?}");
+        // The Claude Code spelling must not leak through: Codex has no header expansion, so a
+        // literal `${RYBBIT_API_KEY}` here would be sent to the server as the token itself.
+        assert!(!flat.contains("${RYBBIT_API_KEY}"), "{args:?}");
+        // Read tools only, and the grant is the same list Claude Code's turn gets.
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.rybbit.enabled_tools="))
+            .expect("rybbit carries an enabled_tools override");
+        assert!(enabled.contains(r#""get_overview""#), "{enabled}");
+        assert!(enabled.contains(r#""run_query""#), "{enabled}");
+        for write in [
+            "identify_user",
+            "create_goal",
+            "delete_site",
+            "update_site_config",
+        ] {
+            assert!(!enabled.contains(write), "{write} reached Codex: {enabled}");
+        }
     }
 
     /// A transport neither harness can express is REFUSED, never silently dropped — a child

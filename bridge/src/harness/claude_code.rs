@@ -705,6 +705,31 @@ macro_rules! mcp_kubernetes {
     };
 }
 
+/// **The Rybbit analytics server: tag1.com's web analytics, READ ONLY.** Rybbit's hosted
+/// MCP endpoint, `type: "http"` (Streamable HTTP), reached exactly the way `homeassistant` is:
+/// the bearer token arrives by ENV EXPANSION, `${RYBBIT_API_KEY}`, which the CLI substitutes
+/// from the child's environment. The literal key is absent from this const, from the
+/// `--mcp-config` argument, and from any file; the variable is set in the LaunchAgent plist.
+///
+/// The URL is a PUBLIC HTTPS host, so none of the Local Network privacy reasoning that forced
+/// Home Assistant onto a tailnet address applies, and it names no deployment: Tag1 uses the
+/// hosted service, and a self-hosted instance would be a source edit and a fresh battery.
+///
+/// **READ ONLY AT TWO LAYERS.** The personal API key is scoped so that the server registers
+/// only read tools (twenty-eight, measured 2026-10-01 by `tools/list`, every one annotated
+/// `readOnlyHint: true`), and [`crate::DEFAULT_ALLOWED_TOOLS`] grants those twenty-eight by
+/// name and nothing else. A key re-issued with wider scopes would REGISTER the write tools,
+/// and the allowlist alone would still withhold them. Read SECURITY.md before widening this.
+///
+/// **AN UNSET KEY DOES NOT STOP A TURN.** If `RYBBIT_API_KEY` is absent from the child's
+/// environment the CLI sends the placeholder unexpanded, the server answers 401, Claude Code
+/// marks this one server failed and every other server loads. Measured, not assumed.
+macro_rules! mcp_rybbit {
+    () => {
+        r#""rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}}"#
+    };
+}
+
 /// The five house servers, in order.
 macro_rules! house_servers {
     () => {
@@ -743,8 +768,8 @@ macro_rules! morning_servers {
 }
 /// The fourteen servers that were the COMMON CORE of both harnesses' main turns from 0.73.0:
 /// the morning set plus the two message sources and the second Google account. Both main sets
-/// are still assembled from this — Codex adds `kubernetes` and Claude Code adds `build`,
-/// `places`, `inbound` and `kubernetes` — so it is no longer what either turn carries on its
+/// are still assembled from this — Codex adds `kubernetes`, and Claude Code adds `build`,
+/// `places`, `inbound`, `kubernetes` and `rybbit` — so it is no longer what either turn carries on its
 /// own. It stays a macro rather than being folded into its two callers because
 /// `MESSAGES_MCP_CONFIG` is a RETIRED ROW LABEL that must keep meaning what it meant.
 macro_rules! messages_servers {
@@ -763,7 +788,11 @@ macro_rules! messages_servers {
 
 /// The servers Claude Code's main turn carries and Codex's does NOT — the WHOLE remaining
 /// asymmetry between the two harnesses' server sets, in one place, in the order they landed:
-/// `build` (0.86.0), `places` (0.100.0), `inbound` (0.115.0).
+/// `build` (0.86.0), `places` (0.100.0), `inbound` (0.115.0), `rybbit` (0.163.0).
+///
+/// `rybbit` is withheld for the label cost alone, on the owner's decision of 2026-10-01 to ship
+/// it on Claude Code first: its Codex form is already wired (`bearer_token_env_var` in
+/// `CODEX_MCP_BEARER_ENV`) and only the Codex battery is outstanding.
 ///
 /// Each was kept off Codex for the same reason, and it is not about the server: adding one moves
 /// Codex's row labels (`…+google-perseido` becomes a new string), which orphans BOTH operator
@@ -772,7 +801,7 @@ macro_rules! messages_servers {
 /// Closing the gap is emptying this list, pointing `CODEX_SHIPPED_ROWS` at the full set, running
 /// that battery and taking that decision; `the_two_harnesses_carry_the_same_mcp_servers_except_the_named_withheld_ones`
 /// makes sure nothing else can differ in the meantime.
-pub const CODEX_WITHHELD_MCP_SERVERS: [&str; 3] = ["build", "places", "inbound"];
+pub const CODEX_WITHHELD_MCP_SERVERS: [&str; 4] = ["build", "places", "inbound", "rybbit"];
 
 /// qmd + Slack + browser + Home Assistant + Roon — the main turn's server set from bridge
 /// 0.67.0 until the morning-routine servers were added in 0.68.0. No shipped spawn site uses
@@ -1110,7 +1139,12 @@ pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
 );
 
 /// The seventeen-server set PLUS **`kubernetes`** — every **Claude Code** main turn from
-/// bridge 0.146.0. Eighteen servers.
+/// bridge 0.146.0 until `rybbit` landed in 0.163.0. Eighteen servers.
+///
+/// **RETIRED AS THE MAIN SET IN 0.163.0**, and split out rather than grown in place for the
+/// reason every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetes`] still
+/// names it, and growing it would silently re-point that row label at a set that also holds
+/// an analytics credential.
 ///
 /// # What it adds: `cluster-admin` on the home k3s cluster
 ///
@@ -1150,6 +1184,33 @@ pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
 ///
 /// **UNLIKE ITS THREE PREDECESSORS THIS SET IS NOT CLAUDE CODE'S ALONE.** Codex gets the same
 /// server on [`MESSAGES_KUBERNETES_MCP_CONFIG`], at the cost of its two operator signatures.
+pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: &str = concat!(
+    r#"{"mcpServers":{"#,
+    messages_servers!(),
+    ",",
+    mcp_build!(),
+    ",",
+    mcp_places!(),
+    ",",
+    mcp_inbound!(),
+    ",",
+    mcp_kubernetes!(),
+    "}}"
+);
+
+/// The eighteen-server set PLUS **`rybbit`** — every **Claude Code** main turn from bridge
+/// 0.163.0. Nineteen servers.
+///
+/// What it adds is READ access to tag1.com's web analytics on Rybbit's hosted service: one
+/// new credential (`RYBBIT_API_KEY`, in the plist, expanded by the CLI), one new public host
+/// (`app.rybbit.io`), and no write tool, withheld both by the key's scope and by the
+/// allowlist. See the `mcp_rybbit!` declaration and SECURITY.md.
+///
+/// What it also adds is a new source of UNTRUSTED TEXT: page titles, paths, referrers, event
+/// names, search queries and user traits are written by whoever visits tag1.com, and they
+/// enter the turn at the same trust level as the message bodies this set already carries.
+/// Codex does NOT get it yet: `rybbit` is on [`CODEX_WITHHELD_MCP_SERVERS`] until a live Codex
+/// battery is re-run, because adding it moves Codex's row labels.
 pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -1161,6 +1222,8 @@ pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     mcp_inbound!(),
     ",",
     mcp_kubernetes!(),
+    ",",
+    mcp_rybbit!(),
     "}}"
 );
 
@@ -1476,7 +1539,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlaces
         | McpSet::MessagesBuildPlacesInbound
         | McpSet::MessagesKubernetes
-        | McpSet::MessagesBuildPlacesInboundKubernetes => READ_ALLOWED_TOOLS,
+        | McpSet::MessagesBuildPlacesInboundKubernetes
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbit => READ_ALLOWED_TOOLS,
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
         // row-keyed argv exists for; see [`REPLIES_ALLOWED_TOOLS`].
         McpSet::Replies => REPLIES_ALLOWED_TOOLS,
@@ -2790,10 +2854,23 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                18,
+                19,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
-                 google-perseido, build, places, inbound and kubernetes and nothing else: \
+                 google-perseido, build, places, inbound, kubernetes and rybbit and nothing \
+                 else: {mcp:?}"
+            );
+            // THE RYBBIT KEY IS A PLACEHOLDER, NEVER A VALUE. The header must carry the
+            // literal `${RYBBIT_API_KEY}` for the CLI to expand from the child's environment;
+            // anything else is either a key baked into argv or a server with no credential.
+            assert_eq!(
+                servers["rybbit"],
+                serde_json::json!({
+                    "type": "http",
+                    "url": "https://app.rybbit.io/api/mcp",
+                    "headers": {"Authorization": "Bearer ${RYBBIT_API_KEY}"}
+                }),
+                "{label}: the rybbit server is declared with an unexpanded key placeholder: \
                  {mcp:?}"
             );
             // THE BUILD SERVER IS THE ONE THAT RUNS CODE, so it is asserted BY NAME on top of
@@ -3665,7 +3742,7 @@ mod tests {
     const GOLDEN_QMD_MCP: &str = concat!(
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         home_assistant_mcp_url!(),
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]}}}"#
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}}}}"#
     );
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
 
@@ -3706,29 +3783,34 @@ mod tests {
         let main = servers(MAIN_CHILD_MCP_CONFIG);
         for (label, older, added) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
+                vec!["rybbit"],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["kubernetes"],
+                vec!["rybbit", "kubernetes"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["kubernetes", "inbound"],
+                vec!["rybbit", "kubernetes", "inbound"],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 MESSAGES_BUILD_MCP_CONFIG,
-                vec!["kubernetes", "inbound", "places"],
+                vec!["rybbit", "kubernetes", "inbound", "places"],
             ),
             ("MESSAGES_MCP_CONFIG", MESSAGES_MCP_CONFIG, {
                 let mut v = CODEX_WITHHELD_MCP_SERVERS.to_vec();
                 v.push("kubernetes");
                 v
             }),
-            // Codex's CURRENT set, which is the main set minus exactly the withheld three.
+            // Codex's CURRENT set, which is the main set minus exactly the withheld four.
             // Listed here rather than only in the harness-level form below because this loop
             // also asserts every shared server is declared BYTE-IDENTICALLY, and Codex's set
-            // is now the one place `kubernetes` is spelled a second time.
+            // is the one place `kubernetes` is spelled a second time.
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,

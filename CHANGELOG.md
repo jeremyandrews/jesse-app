@@ -14,6 +14,33 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.164.0] - 2026-10-02
+
+**Bridge turns can read tag1.com through Tag1's own MCP server.** Root cause of the gap: a
+bridge child gets MCP servers only from the compiled `--strict-mcp-config` set and tools only
+from the allowlist, and `tag1` was in neither, so a phone turn asked to use it on 2026-10-02
+could not. Tag1's public MCP server is now on every Claude Code main turn (19 to 20 servers),
+read only. Codex does not get it yet.
+
+- **Declared with no credential.** `tag1` is `type: "http"` at `https://www.tag1.com/mcp`, no
+  headers, nothing in the plist. It must be the `www` host: the bare `tag1.com` redirects and
+  the connection fails. A golden test pins the declaration.
+- **Six read tools granted, by name.** Taken from a live `initialize` and `tools/list` on
+  2026-10-02, every tool annotated `readOnlyHint: true`: `search_tag1`, `get_page`,
+  `list_case_studies`, `list_services`, `list_products`, `find_expert`. Tests pin the grant
+  by equality, refuse a `mcp__tag1__*` wildcard, and refuse `mcp__tag1__request_contact`.
+- **New Claude Code row label.** `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1`;
+  the nineteen-server set is kept as a retired label so older records still parse.
+  `containment.toml` is re-recorded live: gate pass, $14.13, 5 rows x 22 probes on claude
+  2.1.287. Only the two main row labels moved; every probe's class, verdict and status is
+  unchanged, and the main rows' roots gained exactly the six `mcp__tag1__*` tools. The argv fixture moved on Claude Code's three main sites only, the same
+  digests as 0.163.0.
+- **Withheld from Codex for now.** `tag1` joins `CODEX_WITHHELD_MCP_SERVERS`, so Codex's
+  labels, argv and `containment-codex.toml` are untouched. Its Codex form (a bare URL with
+  the six tools enabled) is wired and tested for the follow-up.
+- **SECURITY.md** records the new public host and the new untrusted text source: anyone who
+  can get content published on tag1.com controls text the turn reads.
+
 ## [Bridge 0.163.0] - 2026-10-01
 
 **Bridge turns can read tag1.com's web analytics.** Root cause of the gap: a bridge child

@@ -127,6 +127,10 @@
 //! gets qmd's four tools. Every Codex row is byte for byte unchanged, because `rybbit` is
 //! withheld from Codex until its battery is re-run.
 //!
+//! **AND AGAIN, in bridge 0.164.0, for `tag1`, on Claude Code only, on the same three sites
+//! and the same two digests per site as 0.163.0.** Every Codex row is byte for byte unchanged:
+//! `tag1` is withheld from Codex too.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

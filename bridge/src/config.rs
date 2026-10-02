@@ -850,6 +850,15 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // NAMED INDIVIDUALLY, NEVER AS `mcp__rybbit__*`, for the reason every server here is: a
 // wildcard grants whatever the server advertises next, and on this server the next thing
 // advertised could be a write tool.
+//
+// TAG1: SIX READ TOOLS ON TAG1'S PUBLIC WEBSITE, AND NO CONTACT OR WRITE TOOL.
+//
+// Tag1's public MCP server at `https://www.tag1.com/mcp` is stateless and unauthenticated. On
+// 2026-10-02 a live `initialize` and `tools/list` returned six tools, every one annotated
+// `readOnlyHint: true`: `search_tag1`, `get_page`, `list_case_studies`, `list_services`,
+// `list_products` and `find_expert`. All six are granted below, by name. A tool that writes
+// or sends anything, a `request_contact` form above all, is never granted: a phone-injectable
+// turn must not be able to submit a contact request to Tag1 in the owner's name.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1004,7 +1013,10 @@ mcp__rybbit__list_members,mcp__rybbit__list_teams,\
 mcp__rybbit__get_sessions,mcp__rybbit__get_session,\
 mcp__rybbit__get_events,mcp__rybbit__get_query_schema,mcp__rybbit__run_query,\
 mcp__rybbit__get_annotations,\
-mcp__rybbit__get_search_console_status,mcp__rybbit__get_search_console_data";
+mcp__rybbit__get_search_console_status,mcp__rybbit__get_search_console_data,\
+mcp__tag1__search_tag1,mcp__tag1__get_page,\
+mcp__tag1__list_case_studies,mcp__tag1__list_services,mcp__tag1__list_products,\
+mcp__tag1__find_expert";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5085,6 +5097,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// THE TAG1 GRANT IS EXACTLY THE SIX READ TOOLS THE SITE'S SERVER REGISTERS, and nothing
+    /// else.
+    ///
+    /// Taken from a live `tools/list` against `https://www.tag1.com/mcp` on 2026-10-02, every
+    /// tool annotated `readOnlyHint: true`. Equality, so a missing grant and a grant for a name
+    /// the server does not register both fail, and a failure names the tool.
+    #[test]
+    fn the_tag1_grant_is_the_six_read_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__tag1__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "search_tag1",
+            "get_page",
+            "list_case_studies",
+            "list_services",
+            "list_products",
+            "find_expert",
+        ]
+        .iter()
+        .map(|t| format!("mcp__tag1__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the tag1 grant moved — re-probe the server's tools/list and record the decision \
+             before changing this list; it moves `toolset_args`, which costs a live battery run"
+        );
+    }
+
+    /// NO WILDCARD ON THE TAG1 SERVER: a wildcard grants whatever the site advertises next.
+    #[test]
+    fn no_tag1_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__tag1__*" || e == "mcp__tag1"),
+            "a wildcard grant on the tag1 server is never acceptable"
+        );
+        assert!(!DEFAULT_ALLOWED_TOOLS.contains("mcp__tag1__*"));
+    }
+
+    /// THE CONTACT FORM IS NEVER GRANTED. A `request_contact` tool would send a message to Tag1
+    /// from a turn that reads attacker-authored text; outbound communication is the owner's
+    /// alone.
+    #[test]
+    fn the_tag1_contact_tool_is_never_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__tag1__request_contact"),
+            "`mcp__tag1__request_contact` sends a message and must never be granted"
+        );
     }
 
     /// THE KUBERNETES GRANT IS EXACTLY THE TWENTY TOOLS THE PINNED SERVER REGISTERS.

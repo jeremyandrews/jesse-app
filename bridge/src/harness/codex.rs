@@ -2129,7 +2129,8 @@ impl SpawnedHarness for Codex {
     /// than it was — the signatures are already being re-taken.
     ///
     /// `rybbit` (0.163.0) is withheld too, for the same label cost; its Codex form is wired in
-    /// [`CODEX_MCP_BEARER_ENV`] and waits only on a live Codex battery.
+    /// [`CODEX_MCP_BEARER_ENV`] and waits only on a live Codex battery. `tag1` (0.164.0) is
+    /// withheld for the same reason; it has no credential, so its Codex form is its URL alone.
     ///
     /// **WHAT A SHARED SERVER LIST DOES NOT MAKE SHARED.** Codex's `workspace-write` sandbox scopes
     /// WRITES only; it has no readable-roots equivalent, so a Codex child can read anything the
@@ -3484,6 +3485,49 @@ mod tests {
         ] {
             assert!(!enabled.contains(write), "{write} reached Codex: {enabled}");
         }
+    }
+
+    /// THE TAG1 SERVER REACHES CODEX AS A BARE URL, rendered from the SHIPPED declaration (the
+    /// Claude Code main set, since Codex withholds the server until its battery is re-run). It
+    /// has no credential, so no bearer variable may be attached to it, and its grant is the
+    /// same six read tools Claude Code's turn gets.
+    #[test]
+    fn the_shipped_tag1_server_travels_as_a_bare_url_with_read_tools_only() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG,
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped main set renders for Codex");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.tag1.url="https://www.tag1.com/mcp""#),
+            "{args:?}"
+        );
+        assert!(
+            !flat.contains("mcp_servers.tag1.bearer_token_env_var"),
+            "{args:?}"
+        );
+        assert!(!flat.contains("mcp_servers.tag1.command"), "{args:?}");
+        assert!(!flat.contains("mcp_servers.tag1.env_vars"), "{args:?}");
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.tag1.enabled_tools="))
+            .expect("tag1 carries an enabled_tools override");
+        for read in [
+            "search_tag1",
+            "get_page",
+            "list_case_studies",
+            "list_services",
+            "list_products",
+            "find_expert",
+        ] {
+            assert!(
+                enabled.contains(&format!(r#""{read}""#)),
+                "{read}: {enabled}"
+            );
+        }
+        assert!(!enabled.contains("request_contact"), "{enabled}");
     }
 
     /// A transport neither harness can express is REFUSED, never silently dropped — a child

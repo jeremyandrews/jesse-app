@@ -168,9 +168,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **19 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **20 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1` — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -548,8 +548,8 @@ Residual risks, none of which the sandbox closes:
 
 #### Codex does not get this
 
-`Harness::main_mcp_config` is per harness. Claude Code's main turn carries four servers
-Codex's does not — `build` (this one), `places`, `inbound` and `rybbit` — and they are named in ONE
+`Harness::main_mcp_config` is per harness. Claude Code's main turn carries five servers
+Codex's does not — `build` (this one), `places`, `inbound`, `rybbit` and `tag1` — and they are named in ONE
 place, `CODEX_WITHHELD_MCP_SERVERS`; a test fails the build if the two harnesses differ by
 anything else. Every other server's entry is spelled once and shared by both.
 
@@ -896,6 +896,7 @@ and read-only). Only the servers named in that config load:
 | `homeassistant` | **Full house control**, added 2026-08-07 — all twenty-three `mcp__homeassistant__*` tools. This is the one server granted whole, by explicit operator decision. See [Home Assistant](#home-assistant-full-control-2026-08-07) |
 | `roon` | Music control, added 2026-08-07 — all six `mcp__roon__*` tools. No auth of any kind. See [Roon](#roon-no-auth-2026-08-07) |
 | `rybbit` | tag1.com web analytics, **read only**, added 2026-10-01 — twenty-eight `mcp__rybbit__*` read tools, no write tool. See [Rybbit](#rybbit-web-analytics-read-only-2026-10-01) |
+| `tag1` | Tag1's public website, **read only**, added 2026-10-02 — six `mcp__tag1__*` read tools, no credential, no write or contact tool. See [tag1.com](#tag1com-public-site-read-only-2026-10-02) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1240,6 +1241,47 @@ CLI marks `rybbit` failed, and every other server loads. Measured on 2026-10-01 
 spawned from the bridge's real main-turn argv: with the key, all nineteen servers connected
 and `get_overview` for tag1.com returned data; with it unset, `rybbit` was `failed`, the
 other eighteen were `connected`, and the turn answered.
+
+### tag1.com public site (READ ONLY, 2026-10-02)
+
+Bridge 0.164.0 adds Tag1 Consulting's own public MCP server to every Claude Code main turn,
+as its twentieth server. **Codex does not get it yet**: `tag1` is on
+`CODEX_WITHHELD_MCP_SERVERS` because adding it moves Codex's row labels, which needs a live
+Codex battery first. It is declared as `tag1`, `type: "http"` (Streamable HTTP), at
+`https://www.tag1.com/mcp`. It must be the `www` host: the bare `tag1.com` redirects and the
+connection fails.
+
+#### No credential
+
+The server is public, stateless and unauthenticated. There is no header, no environment
+variable and nothing in the plist, and a golden test pins the declaration with no headers.
+
+#### Granted: six read tools, named one by one
+
+A live `initialize` and `tools/list` on 2026-10-02 returned six tools, every one annotated
+`readOnlyHint: true`: `search_tag1`, `get_page`, `list_case_studies`, `list_services`,
+`list_products` and `find_expert`. Each is in `DEFAULT_ALLOWED_TOOLS` by name, never as
+`mcp__tag1__*`, and a test pins the list by equality.
+
+#### Withheld: anything that writes or sends
+
+The live server registers no write tool. A tool that sends anything, a `request_contact`
+form above all, is never granted: a test fails if `mcp__tag1__request_contact` reaches the
+allowlist, and the equality test fails on any other new name. A phone-injectable turn must
+not be able to submit a message to Tag1 in the owner's name.
+
+#### What it adds to the risk
+
+- **One new public host**, `www.tag1.com`. A tool call carries caller-authored arguments
+  (search terms, page paths, topics), so it is a low-bandwidth egress channel of the same
+  shape as `maps_search` and `app.rybbit.io`, accepted rather than mitigated.
+- **No new credential.** The blast radius of the server itself is reading what tag1.com
+  already publishes to anyone.
+- **A new source of untrusted text.** Page bodies, search results, case studies and team
+  bios are whatever is published on tag1.com, so **anyone who can get content published on
+  tag1.com controls text the turn reads**: an author, a compromised editor account, or a
+  defacement. That text enters the turn at the trust level of the message bodies the chat
+  servers and Rybbit's visitor-written fields already carry, and it is treated the same way.
 
 ### Roon (no auth, 2026-08-07)
 

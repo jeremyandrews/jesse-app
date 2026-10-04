@@ -14,6 +14,49 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.166.0] - 2026-10-05
+
+**Bridge turns can search the owner's Plex library and manage its collections and playlists,
+on both harnesses.** Root cause of the gap: a bridge child gets MCP servers only from the
+compiled `--strict-mcp-config` set and tools only from the allowlist, and no Plex server was in
+either, so a phone turn asked on 2026-10-04 to add movies to the "Halloween" collection could
+not. The third party `plex-mcp-server` is now the twenty-first server on every main turn,
+Claude Code and Codex in the same change.
+
+- **Declared as a bare launcher with no credential.** `plex` is stdio, command `plex-mcp`, no
+  arguments, resolved off the bridge `PATH` like `mcp-proxmox`. The host launcher exports
+  `PLEX_URL` and `PLEX_TOKEN` from a `0600` env file and `exec`s the pinned server, so the token
+  is on no argv, in no plist, record, fixture or log, and nothing is forwarded on Codex. A
+  golden test pins the declaration; a Codex test asserts no `env_vars`, no `env` and no
+  `PLEX_TOKEN` on the argv. The launcher shape is in SECURITY.md's deployment notes.
+- **Forty of fifty-five tools granted, by name.** From a live `tools/list` against
+  `plex-mcp-server` 1.1.7 on 2026-10-04; the server annotates none of them. Granted: every
+  library, media, user, session, server status and client read; every collection and playlist
+  edit including deleting a collection or playlist (a grouping, never a file); and
+  `media_edit_metadata`. Tests pin the forty by equality and refuse a wildcard.
+- **Fifteen withheld, each tested.** Deletes media: `media_delete`, `server_empty_trash`.
+  Server maintenance: `server_optimize_database`, `server_clean_bundles`,
+  `server_run_butler_task`, `library_refresh`, `library_scan`. Sharing:
+  `playlist_copy_to_user`. The bridge host's filesystem: `media_get_artwork` (writes any
+  `output_dir`), `media_set_artwork` and `playlist_upload_poster` (read any local path).
+  Playback, out of scope: `client_start_playback`, `client_control_playback`,
+  `client_navigate`, `client_set_streams`.
+- **New row label on both harnesses.** `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex`;
+  the twenty-server set is kept as a retired label. Both records were re-recorded live from the
+  bridge LaunchAgent's environment: every probe on every row kept its id, class, verdict and
+  status, only the two main row labels moved, and the main roots gained exactly the fifty-five
+  registered `mcp__plex__*` tools. Claude Code: gate pass, 5 rows x 22 probes on claude
+  2.1.287. Codex: 5 x 22 on codex-cli 0.153.4; the file-level gate stays `fail` for the standing
+  `basic/none` reason (Codex cannot express `basic`), and every hard gate on the main rows
+  passes. Its two main-row `[[accepted]]` blocks are re-pointed to the new labels under the
+  owner's written authorization, conditioned on that identical-probe result; earlier
+  rationale unchanged below the new paragraph. The Claude Code record has no acceptance block.
+- **The argv fixture** moved on both harnesses' three main sites only; Codex's grew by eight
+  arguments each.
+- **SECURITY.md** records the new credential, the LAN host, the collection and playlist edit
+  surface, the residual host read through `collection_edit`'s poster paths, and the new
+  untrusted text source (library metadata).
+
 ## [Bridge 0.165.0] - 2026-10-04
 
 **Codex turns get every MCP server and every tool Claude Code turns have, and a test makes the

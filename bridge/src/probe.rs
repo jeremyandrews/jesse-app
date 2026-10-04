@@ -3584,45 +3584,31 @@ mod tests {
         );
     }
 
-    /// THE DIVERGENCE ITSELF, named rather than implied by the equality above.
-    ///
-    /// Codex stays on [`McpSet::Messages`] while Claude Code's set grows; that asymmetry is
-    /// deliberate and argued in `containment`. If a change ever gives Codex `build`,
-    /// `places` or `inbound`, this test fails and the Codex battery has to be re-run on
-    /// purpose — which is the point, because its row LABELS would move and its `[[accepted]]`
-    /// blocks are keyed by them.
+    /// CODEX AND CLAUDE CODE SHIP THE SAME ROWS, from 0.165.0. Until then Codex stayed on a
+    /// smaller set while Claude Code's grew, and this test asserted the opposite. The two
+    /// records are still separate files: a verdict describes a (harness, capability, MCP set)
+    /// triple, and nothing recorded for one harness says anything about the other.
     #[test]
-    fn codex_ships_none_of_claude_codes_extra_servers() {
-        for row in shipped_rows_for(CODEX_ID) {
-            let label = row.label();
-            for extra in ["build", "places", "inbound"] {
-                assert!(
-                    !label.contains(extra),
-                    "codex must not ship `{extra}`: {label}"
-                );
-            }
-        }
-        // …and the two lists really are different, so the check above is not vacuous.
-        assert_ne!(
+    fn codex_and_claude_code_ship_the_same_rows() {
+        assert_eq!(
             shipped_rows_for(CODEX_ID).to_vec(),
-            shipped_rows_for(CLAUDE_CODE_ID).to_vec(),
-            "if these ever match again this guard stops proving anything"
+            shipped_rows_for(CLAUDE_CODE_ID).to_vec()
         );
     }
 
     /// A row belonging to ANOTHER harness is refused; a SUBSET of this one's is not.
     #[test]
     fn rows_are_validated_against_the_harness_being_probed() {
-        let claude_only: Vec<ContainmentRow> = shipped_rows_for(CLAUDE_CODE_ID)
+        let direct_only: Vec<ContainmentRow> = shipped_rows_for(DIRECT_ID)
             .iter()
             .copied()
             .filter(|r| !shipped_rows_for(CODEX_ID).contains(r))
             .collect();
         assert!(
-            !claude_only.is_empty(),
-            "the premise: Claude Code ships rows Codex does not"
+            !direct_only.is_empty(),
+            "the premise: the direct harness ships rows Codex does not"
         );
-        let err = validate_rows_for_harness(CODEX_ID, &claude_only)
+        let err = validate_rows_for_harness(CODEX_ID, &direct_only)
             .expect_err("another harness's rows must be refused");
         assert!(err.contains("does not ship"), "{err}");
 
@@ -3638,19 +3624,37 @@ mod tests {
     /// Claude Code's rows as a complete Codex battery — the run that corrupted Codex's record
     /// walked straight through it. A count is the one property a wrong list is most likely to
     /// share with the right one.
+    ///
+    /// From 0.165.0 Codex and Claude Code ship the SAME rows, so the wrong list is built here
+    /// rather than borrowed: Codex's own rows with its two main rows put back on the RETIRED
+    /// set it shipped until then. Right count, wrong rows — the same shape as the defect.
     #[test]
     fn the_write_guard_rejects_the_right_number_of_the_wrong_rows() {
         let claude = shipped_rows_for(CLAUDE_CODE_ID);
         let codex = shipped_rows_for(CODEX_ID);
+        let stale: Vec<ContainmentRow> = codex
+            .iter()
+            .map(|r| {
+                if r.mcp == McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1 {
+                    ContainmentRow {
+                        capability: r.capability,
+                        mcp: McpSet::MessagesKubernetes,
+                    }
+                } else {
+                    *r
+                }
+            })
+            .collect();
         assert_eq!(
-            claude.len(),
+            stale.len(),
             codex.len(),
             "the premise of the defect: the counts match, the lists do not"
         );
+        assert_ne!(stale, codex.to_vec());
 
-        // The shape that used to pass: right count, wrong harness.
-        let err = records_the_whole_battery(CODEX_ID, claude, None)
-            .expect_err("a full run of ANOTHER harness's rows is not a record");
+        // The shape that used to pass: right count, wrong rows.
+        let err = records_the_whole_battery(CODEX_ID, &stale, None)
+            .expect_err("a full run of rows this harness does not ship is not a record");
         assert!(err.contains("does not ship"), "{err}");
 
         // The real thing passes.

@@ -3349,12 +3349,8 @@ serde = { version = "1", features = ["derive"] }
     #[test]
     fn every_mcp_server_this_repo_builds_is_in_the_deploy_manifest() {
         let bins = embedded_deploy_bins();
-        // BOTH harnesses' CURRENT main sets. `MESSAGES_MCP_CONFIG` was Codex's until 0.146.0
-        // and is now a retired label; checking it would stop covering what Codex spawns.
-        for config in [
-            crate::MAIN_CHILD_MCP_CONFIG,
-            crate::MESSAGES_KUBERNETES_MCP_CONFIG,
-        ] {
+        // BOTH harnesses' main set: one const from 0.165.0, when Codex moved onto it.
+        for config in [crate::MAIN_CHILD_MCP_CONFIG] {
             for (server, command) in crate::stdio_commands(config) {
                 if !command.starts_with("jesse-") || HOST_LAUNCHERS.contains(&command.as_str()) {
                     continue;
@@ -3381,13 +3377,10 @@ serde = { version = "1", features = ["derive"] }
             );
             // It must also actually be a server this deployment spawns, so a name that stops
             // being used is caught here rather than sitting as a permanent hole.
-            let spawned = [
-                crate::MAIN_CHILD_MCP_CONFIG,
-                crate::MESSAGES_KUBERNETES_MCP_CONFIG,
-            ]
-            .iter()
-            .flat_map(|c| crate::stdio_commands(c))
-            .any(|(_, command)| command == launcher);
+            let spawned = [crate::MAIN_CHILD_MCP_CONFIG]
+                .iter()
+                .flat_map(|c| crate::stdio_commands(c))
+                .any(|(_, command)| command == launcher);
             assert!(
                 spawned,
                 "`{launcher}` is excepted from the deploy manifest but no shipped set spawns it"

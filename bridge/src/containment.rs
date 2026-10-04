@@ -190,14 +190,12 @@ pub enum McpSet {
     /// 0.66.0, 0.67.0 and 0.69.0. See [`CODEX_SHIPPED_ROWS`].
     Messages,
     /// The messages set PLUS **`kubernetes`** ([`MESSAGES_KUBERNETES_MCP_CONFIG`]): every
-    /// **Codex** main turn from bridge 0.146.0. Fifteen servers.
+    /// **Codex** main turn from bridge 0.146.0 until 0.165.0. Fifteen servers. RETIRED: from
+    /// 0.165.0 Codex's main turn is [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1`],
+    /// the same set Claude Code's is.
     ///
-    /// **THE ROW LABELS MOVED FOR A SIXTH TIME AND IT COST THE SAME TWO SIGNATURES.** Every
-    /// widening since 0.66.0 that touched Codex's main set orphaned the two operator
-    /// `[[accepted]]` blocks in `containment-codex.toml`, and that cost is exactly why
-    /// `build`, `places` and `inbound` were each kept off Codex. It is PAID here, on the
-    /// owner's decision of 2026-09-22, rather than shipping a cluster capability that exists
-    /// on one harness only. The blocks must be re-signed against a fresh live Codex battery.
+    /// The row labels moved for a sixth time here, on the owner's decision of 2026-09-22,
+    /// rather than ship a cluster capability that existed on one harness only.
     ///
     /// What the row carries that no Codex row before it did is `cluster-admin` on the home
     /// k3s cluster — see [`McpSet::contains_kubernetes`].
@@ -277,9 +275,7 @@ pub enum McpSet {
     /// 0.76.0 a widening moved a Codex label. See [`crate::CODEX_SHIPPED_ROWS`].
     MessagesBuildPlacesInboundKubernetes,
     /// The Claude Code kubernetes set PLUS **`rybbit`** ([`MAIN_CHILD_MCP_CONFIG`]): every
-    /// **Claude Code** main turn from bridge 0.163.0. Nineteen servers. Codex stays on
-    /// [`McpSet::MessagesKubernetes`]: `rybbit` is on [`crate::CODEX_WITHHELD_MCP_SERVERS`]
-    /// until a live Codex battery is re-run, so no Codex label moved.
+    /// **Claude Code** main turn from bridge 0.163.0 until 0.164.0. Nineteen servers.
     ///
     /// **WHAT IS NEW IS READ ACCESS TO TAG1.COM'S WEB ANALYTICS**, on Rybbit's hosted service,
     /// over HTTPS with a personal API key. Every granted tool is annotated read only by the
@@ -289,9 +285,10 @@ pub enum McpSet {
     /// must be able to say which rows held which credential.
     MessagesBuildPlacesInboundKubernetesRybbit,
     /// The Claude Code rybbit set PLUS **`tag1`** ([`MAIN_CHILD_MCP_CONFIG`]): every **Claude
-    /// Code** main turn from bridge 0.164.0. Twenty servers. Codex stays on
-    /// [`McpSet::MessagesKubernetes`]: `tag1` is on [`crate::CODEX_WITHHELD_MCP_SERVERS`] until
-    /// a live Codex battery is re-run, so no Codex label moved.
+    /// Code** main turn from bridge 0.164.0, and every **Codex** main turn from 0.165.0. Twenty
+    /// servers. THE FIRST ROW BOTH HARNESSES' MAIN TURNS SHARE since 0.86.0: the five servers
+    /// Codex had been kept off (`build`, `places`, `inbound`, `rybbit`, `tag1`) landed on it
+    /// together in 0.165.0, and the parity test in `claude_code.rs` keeps the two equal.
     ///
     /// **WHAT IS NEW IS READ ACCESS TO TAG1'S PUBLIC WEBSITE**, through the site's own public
     /// MCP server at `https://www.tag1.com/mcp`: no credential, six read tools granted by name,
@@ -1220,26 +1217,27 @@ pub const CLAUDE_CODE_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
 ];
 
-/// Codex's rows. Its main turn loads the fourteen-server common core PLUS `kubernetes` as of
-/// 0.146.0 — fifteen. Claude Code carries three more; see [`CODEX_WITHHELD_MCP_SERVERS`].
+/// Codex's rows. From 0.165.0 its main turn loads the SAME twenty-server set Claude Code's does,
+/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1`], so its main rows carry the same
+/// labels as Claude Code's (in a different record).
 ///
 /// THE ROW LABELS HAVE NOW MOVED SIX TIMES, AND EACH TIME IT COST THE SAME TWO SIGNATURES.
 /// Until 0.66.0 Codex's main turn was `qmd` alone (`read/qmd`, `write/qmd`); 0.66.0 made it
 /// `qmd+slack+browser`; 0.67.0 made it [`McpSet::House`]; 0.69.0 made it
 /// [`McpSet::Morning`]; 0.73.0 made it [`McpSet::Messages`]; 0.76.0 moved `+imessage+` to
-/// `+imcp+`; 0.146.0 makes it [`McpSet::MessagesKubernetes`]. Each rename orphans the two
+/// `+imcp+`; 0.146.0 made it [`McpSet::MessagesKubernetes`]; 0.165.0 makes it
+/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1`]. Each rename orphans the two
 /// operator `[[accepted]]` blocks in `containment-codex.toml`, because acceptances match by
 /// `ContainmentRow::label` — so no such change can be made unilaterally. Every time, the
 /// six `read_*` known-opens were re-signed under the new labels by the owner, on the same
 /// record: the read boundary is the OS read-only sandbox, and an MCP server — which runs
 /// OUTSIDE that sandbox but reads nothing on the child's behalf — does not widen it.
 ///
-/// **0.146.0 IS THE FIRST OF THESE THAT WAS NOT FORCED BY A SERVER CLAUDE CODE ALREADY HAD.**
-/// The three servers on [`CODEX_WITHHELD_MCP_SERVERS`] were each withheld PRECISELY to avoid
-/// this cost. `kubernetes` was added anyway, on the owner's decision of 2026-09-22, because a
-/// cluster capability that exists on one harness and not the other is a posture that changes
-/// with model routing. Both blocks are orphaned and must be re-signed against a fresh live
-/// battery before a Codex-backed turn is served.
+/// **0.165.0 PAYS THAT COST ONCE FOR EVERY SERVER CODEX HAD BEEN KEPT OFF.** `build`, `places`,
+/// `inbound`, `rybbit` and `tag1` were each withheld from Codex to avoid exactly this re-signing,
+/// which left a posture that changed with model routing. They landed together, the withheld list
+/// was deleted, and `codex_and_claude_code_main_turns_have_identical_servers_and_tools` now fails
+/// the build if the two harnesses' main turns ever differ by a server or a tool again.
 ///
 /// THAT RATIONALE IS ABOUT READS, AND IT SURVIVES 0.73.0, but note twice over what it does
 /// NOT cover. Home Assistant's granted intents WRITE to the physical world, and the two
@@ -1258,11 +1256,11 @@ pub const CODEX_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesKubernetes,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesKubernetes,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1,
     },
     // The brief child on Codex, for the standing reason a capability lands on every harness in
     // the same change. Its LABEL is the same as Claude Code's — the set is one set — so unlike
@@ -2051,20 +2049,13 @@ mod tests {
             "fifteen servers: {:?}",
             McpSet::MessagesKubernetes.server_names()
         );
-        // The Codex set is the messages set plus kubernetes and NOTHING ELSE — it must not
-        // have quietly acquired one of the withheld servers along the way.
-        for withheld in crate::CODEX_WITHHELD_MCP_SERVERS {
-            assert!(
-                !McpSet::MessagesKubernetes
-                    .server_names()
-                    .contains(&withheld),
-                "`{withheld}` is withheld from Codex but reached its main set"
-            );
-        }
+        // The retired Codex set is the messages set plus kubernetes and NOTHING ELSE: a retired
+        // label must keep meaning what it meant when it was probed.
+        let mut expected = McpSet::Messages.server_names();
+        expected.push("kubernetes");
+        assert_eq!(McpSet::MessagesKubernetes.server_names(), expected);
 
         // THE 0.163.0 SET: Claude Code's kubernetes set plus `rybbit` and nothing else.
-        // `rybbit` is WITHHELD from Codex until its battery is re-run, so Codex's set must
-        // not carry it.
         assert!(!McpSet::MessagesBuildPlacesInboundKubernetes.contains_rybbit());
         assert!(!McpSet::MessagesKubernetes.contains_rybbit());
         assert!(McpSet::MessagesBuildPlacesInboundKubernetesRybbit.contains_rybbit());
@@ -2081,8 +2072,7 @@ mod tests {
             19
         );
 
-        // THE 0.164.0 SET: Claude Code's rybbit set plus `tag1` and nothing else. `tag1` is
-        // WITHHELD from Codex until its battery is re-run, so Codex's set must not carry it.
+        // THE 0.164.0 SET: Claude Code's rybbit set plus `tag1` and nothing else.
         assert!(!McpSet::MessagesBuildPlacesInboundKubernetesRybbit.contains_tag1());
         assert!(!McpSet::MessagesKubernetes.contains_tag1());
         assert!(McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1.contains_tag1());
@@ -2098,23 +2088,19 @@ mod tests {
                 .len(),
             20
         );
-        // Codex is on the FIFTEEN-server set from 0.146.0. The two lists were identical from
-        // 0.73.0 until the build server landed on Claude Code alone, and THIS IS THE ASSERTION
-        // THAT KEEPS THAT HONEST: a shared assertion would quietly re-key one harness's rows
-        // when the other grew. 0.146.0 re-keyed Codex's DELIBERATELY — `kubernetes` landed on
-        // both harnesses at once — which orphaned the two operator `[[accepted]]` blocks keyed
-        // by the OLD labels. Codex IS armed at `write` on this deployment, so those blocks must
-        // be re-signed against a fresh live battery before a Codex turn is served. The three
-        // servers it still does not get are `CODEX_WITHHELD_MCP_SERVERS`; why is on
-        // `Codex::main_mcp_config`.
+        // Codex is on the SAME twenty-server set as Claude Code from 0.165.0. 0.146.0 re-keyed
+        // Codex's rows when `kubernetes` landed on both harnesses; 0.165.0 re-keys them once more
+        // when the five servers Codex had been kept off land together, and the two operator
+        // `[[accepted]]` blocks keyed by the old labels are re-pointed against a fresh live
+        // battery. Codex IS armed at `write` on this deployment.
         let cx: Vec<String> = CODEX_SHIPPED_ROWS.iter().map(|r| r.label()).collect();
         assert_eq!(
             cx,
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_KUBERNETES_LABEL}"),
-                &format!("write/{MESSAGES_KUBERNETES_LABEL}"),
+                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_LABEL}"),
+                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );

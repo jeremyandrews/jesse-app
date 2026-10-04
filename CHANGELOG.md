@@ -14,6 +14,50 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.165.0] - 2026-10-04
+
+**Codex turns get every MCP server and every tool Claude Code turns have, and a test makes the
+gap impossible.** Root cause: the rule that every tool lands on both harnesses in the same
+change had a written exception, `CODEX_WITHHELD_MCP_SERVERS`, and it was used five times
+(`build` 0.86.0, `places` 0.100.0, `inbound` 0.115.0, `rybbit` 0.163.0, `tag1` 0.164.0), each
+to avoid re-running the Codex battery. The withheld list is gone; Codex's main turn is
+`MAIN_CHILD_MCP_CONFIG`, the same twenty-server set as Claude Code's, with the same 271 granted
+MCP tools at `Write` (it had 231).
+
+- **The parity test.** `codex_and_claude_code_main_turns_have_identical_servers_and_tools`
+  asserts that the two harnesses' main turns name the same servers, declared byte for byte,
+  and grant the same MCP tools at `Read` and at `Write`, read from each harness's own
+  `capability_args`. It has no exception list. Checked by removing one tool from Codex's grant:
+  it fails.
+- **Each server works on Codex, not just appears.** Codex scrubs an MCP child's environment,
+  so `CODEX_MCP_ENV_PASSTHROUGH` now forwards, by name, `JESSE_VAULT` to `build`; the
+  `JESSE_PLACES_*` settings, the Google key and `JESSE_STATE_DIR` to `places`; and
+  `JESSE_VAULT`, the mail credentials and the `JESSE_INBOUND_*` / `JESSE_VISION_*` settings to
+  `inbound`. `rybbit` keeps its `bearer_token_env_var`. New `CODEX_MCP_ENV_FIXED` starts
+  `inbound` with `JESSE_INBOUND_HARNESS=codex` (`env` key, checked with `--strict-config`), so a
+  staged PDF is prepared for Codex's `view_image`. No credential is on an argv.
+- **Codex's row labels moved** from `…+google-perseido+kubernetes` to the shared
+  `…+kubernetes+rybbit+tag1`; `McpSet::MessagesKubernetes` is kept as a retired label.
+  `containment-codex.toml` is re-recorded live on codex-cli 0.153.4: 5 rows x 22 probes,
+  $0.00 (subscription auth), 683s. Every one of the 110 probes kept its class, verdict and
+  status; only the two main row labels and their observed roots moved, and the `Write` root
+  now lists all 271 granted MCP tools. The file-level gate is still `fail` for the standing
+  reason (Codex cannot express `basic`: `read_vault_file` and `search_vault` at `basic/none`).
+  `containment.toml` is untouched.
+- **Both operator acceptance blocks re-pointed** onto the new `read` and `write` labels under
+  the owner's written authorization of 2026-10-03, conditioned on exactly that result. They
+  had also never been re-pointed after the `kubernetes` move of 0.146.0. With them, the only
+  known-open probes no acceptance covers are the six at `basic/none`, a row Codex is never
+  granted.
+- **Tests that assumed the two harnesses ship different rows** now assert they ship the same
+  ones; the row-validation and write-guard tests build their wrong lists from the direct
+  harness and from the retired Codex set. The argv fixture moved on Codex's three main sites
+  only (+46 arguments each).
+- **SECURITY.md**: every "Codex does not get this" statement is gone, replaced by one section
+  recording that Codex carries all twenty servers at `Write` on this deployment, and the
+  attacker-influenced text each of the five adds on both harnesses (tag1.com content, Rybbit
+  visitor-written rows, inbound attachment bytes, places results).
+
 ## [Bridge 0.164.0] - 2026-10-02
 
 **Bridge turns can read tag1.com through Tag1's own MCP server.** Root cause of the gap: a

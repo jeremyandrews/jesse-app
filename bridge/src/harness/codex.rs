@@ -746,6 +746,17 @@ pub fn codex_mcp_args(
                         rendered.join(", ")
                     ));
                 }
+                if let Some((_, pairs)) = CODEX_MCP_ENV_FIXED.iter().find(|(s, _)| *s == name) {
+                    let rendered: Vec<String> = pairs
+                        .iter()
+                        .map(|(k, v)| format!("{k}={}", toml_string(v)))
+                        .collect();
+                    args.push("-c".to_string());
+                    args.push(format!(
+                        "mcp_servers.{name}.env={{{}}}",
+                        rendered.join(", ")
+                    ));
+                }
             }
             "http" => {
                 let Some(url) = spec.get("url").and_then(|v| v.as_str()) else {
@@ -885,7 +896,76 @@ pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
         "routeros",
         &["ROUTEROS_DEVICES_CONFIG", "ROUTEROS_SSH_PORT"],
     ),
+    // THE BRIDGE'S OWN THREE SERVERS read the bridge's own `JESSE_*` names, and every name
+    // each one reads is listed, not only the ones this deployment's plist sets today: Claude
+    // Code's children inherit the whole environment, so a variable an operator adds later
+    // reaches them, and naming it here is what makes it reach Codex's too. An unset name is
+    // simply not forwarded.
+    //
+    // `build` constructs the bridge's `Config` but reads only the vault and the home from it;
+    // `HOME` survives Codex's scrub, `JESSE_VAULT` does not.
+    ("build", &["JESSE_VAULT"]),
+    // `places` without `JESSE_PLACES_GOOGLE_API_KEY` still registers its two tools and answers
+    // from OpenStreetMap alone, so a missing key here would be a silent downgrade rather than
+    // a missing server. `JESSE_STATE_DIR` locates the Google spend ledger.
+    (
+        "places",
+        &[
+            "JESSE_PLACES_OVERPASS_URL",
+            "JESSE_PLACES_NOMINATIM_URL",
+            "JESSE_PLACES_USER_AGENT",
+            "JESSE_PLACES_MIN_INTERVAL_MS",
+            "JESSE_PLACES_CACHE_TTL_SECS",
+            "JESSE_PLACES_HTTP_TIMEOUT_SECS",
+            "JESSE_PLACES_TIMEZONE",
+            "JESSE_PLACES_PROVIDER",
+            "JESSE_PLACES_GOOGLE_API_KEY",
+            "JESSE_PLACES_GOOGLE_BASE_URL",
+            "JESSE_PLACES_GOOGLE_MAX_CALLS",
+            "JESSE_PLACES_GOOGLE_MAX_RICH_CALLS",
+            "JESSE_PLACES_GOOGLE_WINDOW_SECS",
+            "JESSE_PLACES_GOOGLE_LEDGER",
+            "JESSE_STATE_DIR",
+        ],
+    ),
+    // `inbound` fetches attachments with the SAME mail credentials `google` and `fastmail`
+    // read, and stages them under the vault. Without `JESSE_VAULT` it would stage into its own
+    // cwd; without the mail names it would list attachments it could not fetch.
+    (
+        "inbound",
+        &[
+            "JESSE_VAULT",
+            "JESSE_INBOUND_TTL_SECS",
+            "JESSE_INBOUND_MAX_DOCUMENT_BYTES",
+            "JESSE_INBOUND_HTTP_TIMEOUT_SECS",
+            "JESSE_INBOUND_WHATSAPP_API",
+            "JESSE_INBOUND_WHATSAPP_MEDIA_ROOT",
+            "JESSE_INBOUND_GMAIL_PERSEIDO_CREDS",
+            "WORKSPACE_MCP_CREDENTIALS_DIR",
+            "JMAP_SESSION_URL",
+            "JMAP_TOKEN",
+            "JESSE_VISION_PDF_PAGE_CAP",
+            "JESSE_VISION_PDF_DPI",
+            "JESSE_VISION_MAX_TOKENS",
+            "JESSE_VISION_TIMEOUT_SECS",
+        ],
+    ),
 ];
+
+/// Fixed, NON-SECRET environment values a stdio server is started with on Codex, set with
+/// Codex's `env` key rather than forwarded from the bridge's environment.
+///
+/// One entry, and it exists because the bridge's process environment is shared by every
+/// harness and so cannot say which one a child serves. `jesse-inbound-mcp` prepares a staged
+/// attachment for the harness that will open it — a PDF that Claude Code's `Read` takes
+/// directly has to become page images for Codex's `view_image` — and it learns which from
+/// `JESSE_INBOUND_HARNESS`, defaulting to Claude Code when unset. This table is what makes
+/// that default correct on both harnesses.
+///
+/// **NEVER A CREDENTIAL.** A value here is on the child's argv and in `ps`. Anything secret is
+/// forwarded BY NAME through [`CODEX_MCP_ENV_PASSTHROUGH`] or [`CODEX_MCP_BEARER_ENV`].
+pub const CODEX_MCP_ENV_FIXED: &[(&str, &[(&str, &str)])] =
+    &[("inbound", &[("JESSE_INBOUND_HARNESS", CODEX_ID)])];
 
 /// The environment variable holding each HTTP MCP server's BEARER TOKEN, BY NAME.
 ///
@@ -2100,37 +2180,12 @@ impl SpawnedHarness for Codex {
         Box::new(Codex)
     }
 
-    /// The fifteen-server set, `MESSAGES_KUBERNETES_MCP_CONFIG`: every server Claude Code's main
-    /// turn carries EXCEPT the three named in [`CODEX_WITHHELD_MCP_SERVERS`] — `build` (0.86.0),
-    /// `places` (0.100.0) and `inbound` (0.115.0). Each server's entry is the same one Claude
-    /// Code spawns, spelled once and assembled into both sets, and the per-server tool lists come
-    /// from the same `DEFAULT_ALLOWED_TOOLS` (see [`codex_mcp_args`]); the agreement test in
-    /// `claude_code.rs` fails the build if the two harnesses ever differ by anything but that
-    /// named list.
-    ///
-    /// # 0.146.0 PAID THE LABEL COST RATHER THAN AVOIDING IT
-    ///
-    /// Giving Codex a server moves its row labels, and both operator `[[accepted]]` blocks in
-    /// `containment-codex.toml` — the `read` acceptance and the signed `write` acceptance this
-    /// deployment's `codex-write` model runs on — are keyed by those labels. That is the whole
-    /// reason `build`, `places` and `inbound` were each withheld: nothing at boot or in CI would
-    /// notice the orphaning, and the record would simply stop vouching for the posture Codex runs
-    /// at.
-    ///
-    /// `kubernetes` was nonetheless added to BOTH harnesses in 0.146.0, on the owner's decision of
-    /// 2026-09-22, because a cluster capability that exists on one harness only is a posture that
-    /// changes with model routing. The labels moved from `…+google-perseido` to
-    /// `…+google-perseido+kubernetes` and both blocks were orphaned, for the sixth time since
-    /// 0.66.0. **They must be re-signed against a fresh live Codex battery before a Codex-backed
-    /// turn is served**; see [`CODEX_SHIPPED_ROWS`].
-    ///
-    /// The three servers above stay withheld. This release pays the cost once, for one server;
-    /// emptying [`CODEX_WITHHELD_MCP_SERVERS`] is still a separate decision, and it is now cheaper
-    /// than it was — the signatures are already being re-taken.
-    ///
-    /// `rybbit` (0.163.0) is withheld too, for the same label cost; its Codex form is wired in
-    /// [`CODEX_MCP_BEARER_ENV`] and waits only on a live Codex battery. `tag1` (0.164.0) is
-    /// withheld for the same reason; it has no credential, so its Codex form is its URL alone.
+    /// [`MAIN_CHILD_MCP_CONFIG`]: the SAME twenty-server set Claude Code's main turn carries,
+    /// from 0.165.0. The two harnesses differ only in how each spells a server on its command
+    /// line — [`codex_mcp_args`] translates the shared entries — and the per-server tool lists
+    /// come from the same grant Claude Code is handed. The test
+    /// `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the build if the
+    /// two harnesses' server sets or granted tools ever differ, and it has no exception list.
     ///
     /// **WHAT A SHARED SERVER LIST DOES NOT MAKE SHARED.** Codex's `workspace-write` sandbox scopes
     /// WRITES only; it has no readable-roots equivalent, so a Codex child can read anything the
@@ -2138,7 +2193,7 @@ impl SpawnedHarness for Codex {
     /// `Read(./**)` allowlist. Same tools, different read boundary. The only remedy is unix-user
     /// isolation — a dedicated, sandboxed user for the child — which is not implemented.
     fn main_mcp_config(&self) -> &'static str {
-        MESSAGES_KUBERNETES_MCP_CONFIG
+        MAIN_CHILD_MCP_CONFIG
     }
 
     /// Codex names nothing directly — see [`apply_patch_targets`].

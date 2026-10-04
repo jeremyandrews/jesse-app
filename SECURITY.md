@@ -546,23 +546,18 @@ Residual risks, none of which the sandbox closes:
 - **The dedicated unix user is still not implemented** — the same gap named for the message
   servers above, now load-bearing for a second capability.
 
-#### Codex does not get this
+#### Both harnesses carry it
 
-`Harness::main_mcp_config` is per harness. Claude Code's main turn carries five servers
-Codex's does not — `build` (this one), `places`, `inbound`, `rybbit` and `tag1` — and they are named in ONE
-place, `CODEX_WITHHELD_MCP_SERVERS`; a test fails the build if the two harnesses differ by
-anything else. Every other server's entry is spelled once and shared by both.
+From 0.165.0 Codex's main turn carries `build` too, with the same two tools granted; see
+[Codex carries every server Claude Code does](#codex-carries-every-server-claude-code-does-0165).
+The build runs under the same sandbox profile whichever harness asked for it, because the
+sandbox is the BRIDGE's (`jesse-build-mcp` launches it), not the harness's. On Codex the
+server gets `JESSE_VAULT` forwarded by name; it reads nothing else from the bridge's
+environment.
 
-Giving Codex any of the three would move Codex's row labels and orphan BOTH operator
-`[[accepted]]` blocks in `containment-codex.toml`, which are keyed by those labels — including
-the signed `write` acceptance the `codex-write` model on this deployment runs on. A re-record
-carries acceptances across by label, so it would leave every known-open unsigned: green in CI,
-and no longer vouched for. Closing the gap is the owner re-signing against a fresh live battery,
-not a code change. The asymmetry is deliberate and recorded rather than introduced quietly.
-
-Separately, and not closable by any server list: Codex's sandbox scopes writes only, so a Codex
-child can read whatever the bridge's unix user can read. The remedy is the same dedicated unix
-user named above.
+Not closable by any server list: Codex's sandbox scopes writes only, so a Codex child can read
+whatever the bridge's unix user can read. The remedy is the same dedicated unix user named
+above.
 
 #### Deployment
 
@@ -652,7 +647,13 @@ not a geocoder. A caller that knows the category should say the category.
 
 OSM is a publicly editable wiki, so a place name or an `opening_hours` value is untrusted text
 arriving in a turn's context. That is the same trust level as any page the browser server
-fetches, which this set has carried since 0.66.0.
+fetches, which this set has carried since 0.66.0. Google Places results are no better: names,
+editorial summaries and review text are written by business owners and the public. From
+0.165.0 those results reach **both harnesses'** main turns, including Codex at `Write`. On
+Codex the server gets its `JESSE_PLACES_*` settings, the Google key and `JESSE_STATE_DIR`
+forwarded by name, never by value; without the key it would still register both tools and
+quietly answer from OpenStreetMap alone, so the forwarding is checked by a live call, not by
+the tool listing.
 
 It is also why the hours parser **fails loudly rather than guessing**. `opening_hours` is its
 own small grammar with a very long tail (month ranges, week numbers, `sunrise`/`sunset`, nth
@@ -1169,9 +1170,8 @@ is only a credential.
 ### Rybbit web analytics (READ ONLY, 2026-10-01)
 
 Bridge 0.163.0 adds Rybbit's hosted MCP server to every Claude Code main turn, as its
-nineteenth server. **Codex does not get it yet**: `rybbit` is on `CODEX_WITHHELD_MCP_SERVERS`
-because adding it moves Codex's row labels, which needs a live Codex battery first. It reads tag1.com's web
-analytics. It is declared as `rybbit`, `type: "http"` (Streamable HTTP), at
+nineteenth server, and 0.165.0 adds it to every Codex main turn with the same twenty-eight
+read tools. It reads tag1.com's web analytics. It is declared as `rybbit`, `type: "http"` (Streamable HTTP), at
 `https://app.rybbit.io/api/mcp`. Tag1 uses the hosted service, so the URL names no
 deployment address; a self-hosted instance would be a source edit and a fresh battery.
 
@@ -1232,7 +1232,10 @@ the write tools and still could not call them.
 - **A new source of untrusted text.** Page titles, paths, referrers, event names, search
   queries and user traits are written by whoever visits tag1.com, and they enter the turn at
   the trust level of the message bodies the chat servers already carry. The server's own
-  instructions say so.
+  instructions say so. **Anyone can write these rows**: requesting a tag1.com URL with a
+  crafted path, referrer, query string or event name puts text of their choosing into the
+  analytics, and from 0.165.0 that text reaches **both harnesses'** main turns, including
+  Codex at `Write`.
 
 #### An unset key does not stop a turn
 
@@ -1245,9 +1248,8 @@ other eighteen were `connected`, and the turn answered.
 ### tag1.com public site (READ ONLY, 2026-10-02)
 
 Bridge 0.164.0 adds Tag1 Consulting's own public MCP server to every Claude Code main turn,
-as its twentieth server. **Codex does not get it yet**: `tag1` is on
-`CODEX_WITHHELD_MCP_SERVERS` because adding it moves Codex's row labels, which needs a live
-Codex battery first. It is declared as `tag1`, `type: "http"` (Streamable HTTP), at
+as its twentieth server, and 0.165.0 adds it to every Codex main turn with the same six read
+tools and nothing else (no `request_contact`). It is declared as `tag1`, `type: "http"` (Streamable HTTP), at
 `https://www.tag1.com/mcp`. It must be the `www` host: the bare `tag1.com` redirects and the
 connection fails.
 
@@ -1282,6 +1284,7 @@ not be able to submit a message to Tag1 in the owner's name.
   tag1.com controls text the turn reads**: an author, a compromised editor account, or a
   defacement. That text enters the turn at the trust level of the message bodies the chat
   servers and Rybbit's visitor-written fields already carry, and it is treated the same way.
+  From 0.165.0 it reaches **both harnesses'** main turns, including Codex at `Write`.
 
 ### Roon (no auth, 2026-08-07)
 
@@ -1569,6 +1572,44 @@ isolation, not tool selection.
 has been the named residual mitigation since 0.69.0 and it remains deferred. Jeremy is
 accepting this exposure knowingly in order to get the read reach; it is recorded here rather
 than gated, on the same basis as the Home Assistant and Proxmox decisions before it.
+
+### Codex carries every server Claude Code does (0.165)
+
+From bridge 0.165.0 the two harnesses' main turns carry **one server set**,
+`MAIN_CHILD_MCP_CONFIG`, and grant **the same MCP tools** at every capability. There is no
+withheld list. `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the
+build if a server or a granted tool is ever on one harness and not the other, and it has no
+exception list to add a name to.
+
+Until 0.165.0, five servers were Claude Code's alone, each withheld from Codex to avoid
+re-running the Codex battery: `build` (0.86.0), `places` (0.100.0), `inbound` (0.115.0),
+`rybbit` (0.163.0) and `tag1` (0.164.0). That left a posture that changed with model routing.
+All five landed on Codex together, against a fresh live Codex battery.
+
+**Codex runs at `Write` on this deployment**, so every attacker-influenced source above reaches
+a Codex child that can write the vault, actuate the house and reconfigure the network, exactly
+as it reaches a Claude Code one. The sources these five add:
+
+| Server | Who chooses the text |
+|---|---|
+| `tag1` | anyone who can publish on tag1.com: page bodies, search results, team bios |
+| `rybbit` | anyone who can request a tag1.com URL: crafted paths, referrers, query strings, event names |
+| `inbound` | anyone who can send Jeremy an email or a WhatsApp message: the attachment's bytes |
+| `places` | OpenStreetMap editors, business owners and Google reviewers: names, hours, review text |
+| `build` | no outside party; what it adds is code execution, covered in [The build capability](#the-build-capability-typed-tools-inside-a-sandbox-2026-08-21) |
+
+**How Codex reaches each credential.** Codex starts every MCP subprocess with a scrubbed
+environment, so a server that reads a variable gets it only if it is forwarded, and a server
+missing one starts, registers its tools or none, and says nothing. Every forward is BY NAME
+(`env_vars` for a stdio server, `bearer_token_env_var` for `rybbit`), so no credential is on an
+argv, in the record or in a log. The one literal value is `inbound`'s
+`JESSE_INBOUND_HARNESS=codex`, which is not a secret. Every granted tool is auto-approved
+(`default_tools_approval_mode = "approve"`), because `approval_policy = "never"` otherwise
+cancels a call to any tool its server annotates as destructive.
+
+**What the shared set does not make shared** is the read boundary: a Codex child reads whatever
+the bridge's unix user can read, and a Claude Code child is held to its `Read` allowlist. The
+remedy is the dedicated sandboxed unix user, still not implemented.
 
 ### iMessage needs NO Full Disk Access — it reads through the iMCP app (0.76.0)
 
@@ -3330,7 +3371,15 @@ tools that RETURN A PATH; it gains no ability to put bytes anywhere.
 - **What IS new** is that a received file's CONTENTS enter a turn's context. That content is
   attacker-authored in the ordinary way any received file is — the same trust level as the
   message bodies the two chat servers have carried since 0.73.0, and the accepted risk in
-  "The prompt-injection surface, stated plainly" covers it unchanged.
+  "The prompt-injection surface, stated plainly" covers it unchanged. **Anyone who can send
+  Jeremy an email or a WhatsApp message chooses those bytes.** From 0.165.0 they reach **both
+  harnesses'** main turns, including Codex at `Write`.
+- **On Codex** the server is started with `JESSE_INBOUND_HARNESS=codex`, a fixed non-secret
+  value on its argv, so a staged PDF is prepared as page images Codex's `view_image` can
+  open. Its mail credentials (`JMAP_TOKEN`, `WORKSPACE_MCP_CREDENTIALS_DIR`) and `JESSE_VAULT`
+  are forwarded by name, never by value. Codex's read sandbox is unscoped, so the staging
+  directory's placement under the workspace is a Claude Code boundary only; on Codex the
+  child could read a staged file wherever it was.
 
 ### The staging directory
 

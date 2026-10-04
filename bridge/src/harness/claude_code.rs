@@ -785,11 +785,11 @@ macro_rules! morning_servers {
     };
 }
 /// The fourteen servers that were the COMMON CORE of both harnesses' main turns from 0.73.0:
-/// the morning set plus the two message sources and the second Google account. Both main sets
-/// are still assembled from this — Codex adds `kubernetes`, and Claude Code adds `build`,
-/// `places`, `inbound`, `kubernetes`, `rybbit` and `tag1` — so it is no longer what either turn carries on its
-/// own. It stays a macro rather than being folded into its two callers because
-/// `MESSAGES_MCP_CONFIG` is a RETIRED ROW LABEL that must keep meaning what it meant.
+/// the morning set plus the two message sources and the second Google account. The main set
+/// is still assembled from this — adding `build`, `places`, `inbound`, `kubernetes`, `rybbit`
+/// and `tag1` — so it is no longer what either harness's turn carries on its own. It stays a
+/// macro rather than being folded into its callers because `MESSAGES_MCP_CONFIG` is a RETIRED
+/// ROW LABEL that must keep meaning what it meant.
 macro_rules! messages_servers {
     () => {
         concat!(
@@ -803,25 +803,6 @@ macro_rules! messages_servers {
         )
     };
 }
-
-/// The servers Claude Code's main turn carries and Codex's does NOT — the WHOLE remaining
-/// asymmetry between the two harnesses' server sets, in one place, in the order they landed:
-/// `build` (0.86.0), `places` (0.100.0), `inbound` (0.115.0), `rybbit` (0.163.0), `tag1`
-/// (0.164.0).
-///
-/// `rybbit` is withheld for the label cost alone, on the owner's decision of 2026-10-01 to ship
-/// it on Claude Code first: its Codex form is already wired (`bearer_token_env_var` in
-/// `CODEX_MCP_BEARER_ENV`) and only the Codex battery is outstanding. `tag1` is withheld for the
-/// same reason on 2026-10-02; it needs no credential, so its Codex form is just its URL.
-///
-/// Each was kept off Codex for the same reason, and it is not about the server: adding one moves
-/// Codex's row labels (`…+google-perseido` becomes a new string), which orphans BOTH operator
-/// `[[accepted]]` blocks in `containment-codex.toml` — acceptances are keyed by row label — and
-/// the posture could only be restored by the owner re-signing them against a fresh live battery.
-/// Closing the gap is emptying this list, pointing `CODEX_SHIPPED_ROWS` at the full set, running
-/// that battery and taking that decision; `the_two_harnesses_carry_the_same_mcp_servers_except_the_named_withheld_ones`
-/// makes sure nothing else can differ in the meantime.
-pub const CODEX_WITHHELD_MCP_SERVERS: [&str; 5] = ["build", "places", "inbound", "rybbit", "tag1"];
 
 /// qmd + Slack + browser + Home Assistant + Roon — the main turn's server set from bridge
 /// 0.67.0 until the morning-routine servers were added in 0.68.0. No shipped spawn site uses
@@ -1131,25 +1112,17 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG: &str = concat!(
 );
 
 /// The fourteen-server set PLUS **`kubernetes`** — every **Codex** main turn from bridge
-/// 0.146.0. Fifteen servers.
+/// 0.146.0 until 0.165.0. Fifteen servers.
 ///
-/// # This is the FIRST server the two harnesses gained in the same release since 0.73.0
+/// **RETIRED AS CODEX'S MAIN SET IN 0.165.0**, when Codex moved onto [`MAIN_CHILD_MCP_CONFIG`]
+/// and the two harnesses' main turns became one server set. It stays because
+/// [`crate::McpSet::MessagesKubernetes`] still names it, and a retired row label must keep
+/// meaning what it meant when somebody probed it.
 ///
-/// `build` (0.86.0), `places` (0.100.0) and `inbound` (0.115.0) each landed on Claude Code
-/// alone and are still withheld from Codex by [`CODEX_WITHHELD_MCP_SERVERS`], for a reason
-/// that was never about the servers: adding one moves Codex's row labels, and both operator
-/// `[[accepted]]` blocks in `containment-codex.toml` are keyed by those labels.
-///
-/// **THAT COST IS PAID HERE RATHER THAN AVOIDED.** Adding `kubernetes` to Codex's main set
-/// moves `read/…+google-perseido` and `write/…+google-perseido` to
-/// `read/…+google-perseido+kubernetes` and `write/…+google-perseido+kubernetes`, which
-/// orphans both blocks exactly as 0.66.0, 0.67.0, 0.69.0, 0.73.0 and 0.76.0 did. The owner
-/// took that decision on 2026-09-22 rather than accept a cluster capability that exists on
-/// one harness only; the blocks must be re-signed against a fresh live Codex battery before
-/// a Codex-backed turn is served. See [`CODEX_SHIPPED_ROWS`].
-///
-/// The three servers above stay withheld: this release pays the label cost once, for one
-/// server, and closing the rest of the gap is still a separate decision.
+/// It was the first server the two harnesses gained in the same release since 0.73.0. Adding
+/// `kubernetes` moved Codex's labels from `…+google-perseido` to `…+google-perseido+kubernetes`
+/// on the owner's decision of 2026-09-22, rather than accept a cluster capability that existed
+/// on one harness only.
 pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -1202,8 +1175,7 @@ pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
 /// sandboxed unix user, which is still not implemented; the exposure is recorded and accepted
 /// rather than fixed.
 ///
-/// **UNLIKE ITS THREE PREDECESSORS THIS SET IS NOT CLAUDE CODE'S ALONE.** Codex gets the same
-/// server on [`MESSAGES_KUBERNETES_MCP_CONFIG`], at the cost of its two operator signatures.
+/// Codex got the same server in the same release, on [`MESSAGES_KUBERNETES_MCP_CONFIG`].
 pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -1233,8 +1205,6 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: &str = concat!(
 /// What it also adds is a new source of UNTRUSTED TEXT: page titles, paths, referrers, event
 /// names, search queries and user traits are written by whoever visits tag1.com, and they
 /// enter the turn at the same trust level as the message bodies this set already carries.
-/// Codex does NOT get it yet: `rybbit` is on [`CODEX_WITHHELD_MCP_SERVERS`] until a live Codex
-/// battery is re-run, because adding it moves Codex's row labels.
 pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -1252,7 +1222,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = con
 );
 
 /// The nineteen-server set PLUS **`tag1`** — every **Claude Code** main turn from bridge
-/// 0.164.0. Twenty servers.
+/// 0.164.0, and every **Codex** main turn from 0.165.0. Twenty servers.
 ///
 /// What it adds is READ access to Tag1 Consulting's public website through the site's own MCP
 /// server: one new public host (`www.tag1.com`), no credential, and six read tools, granted by
@@ -1261,8 +1231,12 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = con
 /// What it also adds is a new source of UNTRUSTED TEXT: page bodies, search results and team
 /// bios are whatever is published on tag1.com, so anyone who can get content published there
 /// controls text the turn reads, at the same trust level as the message bodies this set
-/// already carries. Codex does NOT get it yet: `tag1` is on [`CODEX_WITHHELD_MCP_SERVERS`]
-/// until a live Codex battery is re-run, because adding it moves Codex's row labels.
+/// already carries.
+///
+/// **BOTH HARNESSES' MAIN SET** from bridge 0.165.0: Codex's main turn names this const too,
+/// so the two harnesses carry one server set and differ only in how each spells it on its
+/// command line. `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the
+/// build if that ever stops being true.
 pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -3870,19 +3844,15 @@ mod tests {
                 MESSAGES_BUILD_MCP_CONFIG,
                 vec!["tag1", "rybbit", "kubernetes", "inbound", "places"],
             ),
-            ("MESSAGES_MCP_CONFIG", MESSAGES_MCP_CONFIG, {
-                let mut v = CODEX_WITHHELD_MCP_SERVERS.to_vec();
-                v.push("kubernetes");
-                v
-            }),
-            // Codex's CURRENT set, which is the main set minus exactly the withheld five.
-            // Listed here rather than only in the harness-level form below because this loop
-            // also asserts every shared server is declared BYTE-IDENTICALLY, and Codex's set
-            // is the one place `kubernetes` is spelled a second time.
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,
-                CODEX_WITHHELD_MCP_SERVERS.to_vec(),
+                vec!["tag1", "rybbit", "inbound", "places", "build"],
+            ),
+            (
+                "MESSAGES_MCP_CONFIG",
+                MESSAGES_MCP_CONFIG,
+                vec!["tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
             ),
         ] {
             let older = servers(older);
@@ -3899,33 +3869,99 @@ mod tests {
                 "{label} should be the main set minus {added:?}"
             );
         }
+    }
 
-        // THE HARNESS-LEVEL FORM: what each harness actually SPAWNS, not the consts they happen
-        // to name today. Every server Codex's main turn carries is declared byte-identically on
-        // Claude Code's, and the servers Claude Code's carries beyond it are exactly the named
-        // `CODEX_WITHHELD_MCP_SERVERS` — so a server added to one harness and not the other
-        // fails here unless somebody wrote down that it was withheld, and why.
-        let claude = servers(ClaudeCode.main_mcp_config());
-        let codex = servers(Codex.main_mcp_config());
-        for (name, spec) in &codex {
+    /// **CODEX AND CLAUDE CODE MAIN TURNS CARRY ONE SERVER SET AND ONE GRANT.** No exception
+    /// list and no allowlist: the two harnesses' main turns must name exactly the same MCP
+    /// servers, and at every capability grant exactly the same MCP tools.
+    ///
+    /// Every tool addition lands on both harnesses in the same change. Until 0.165.0 that rule
+    /// had a written exception, `CODEX_WITHHELD_MCP_SERVERS`, and it was used five times
+    /// (`build`, `places`, `inbound`, `rybbit`, `tag1`), each to avoid re-running the Codex
+    /// battery. This test is what removed it, so it must never grow one back: a server or a
+    /// tool on one harness and not the other fails here, and the only fix is to give it to both.
+    ///
+    /// It reads what each harness actually SPAWNS rather than the consts it happens to name
+    /// today: the server set from `main_mcp_config`, and the grant from the same
+    /// `capability_args` the containment record commits and the startup gate compares. Claude
+    /// Code's grant is the `mcp__*` entries of its `--allowedTools`; Codex's is its per-server
+    /// `enabled_tools`, rendered back into the same `mcp__<server>__<tool>` names.
+    #[test]
+    fn codex_and_claude_code_main_turns_have_identical_servers_and_tools() {
+        use std::collections::BTreeSet;
+
+        let server_names = |cfg: &str| -> BTreeSet<String> {
+            serde_json::from_str::<serde_json::Value>(cfg)
+                .expect("every MCP config const must be JSON")
+                .get("mcpServers")
+                .and_then(|v| v.as_object())
+                .expect("… with an mcpServers object")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let claude_set = ClaudeCode.main_mcp_config();
+        let codex_set = Codex.main_mcp_config();
+        assert_eq!(
+            server_names(claude_set),
+            server_names(codex_set),
+            "Codex and Claude Code main turns must carry exactly the same MCP servers"
+        );
+        // Declared identically too, byte for byte: one entry per server, shared by both
+        // harnesses, which differ only in how each spells it on its own command line.
+        assert_eq!(
+            claude_set, codex_set,
+            "the two harnesses' main sets must be one const"
+        );
+
+        let claude_granted = |args: &[String]| -> BTreeSet<String> {
+            let at = args
+                .iter()
+                .position(|a| a == "--allowedTools")
+                .expect("Claude Code's capability argv always names --allowedTools");
+            args[at + 1]
+                .split(',')
+                .map(str::trim)
+                .filter(|t| t.starts_with("mcp__"))
+                .map(str::to_string)
+                .collect()
+        };
+        let codex_granted = |args: &[String]| -> BTreeSet<String> {
+            let mut out = BTreeSet::new();
+            for arg in args {
+                let Some(rest) = arg.strip_prefix("mcp_servers.") else {
+                    continue;
+                };
+                let Some((server, list)) = rest.split_once(".enabled_tools=") else {
+                    continue;
+                };
+                let parsed: toml::Value = toml::from_str(&format!("v = {list}"))
+                    .expect("an enabled_tools override is a TOML array");
+                for tool in parsed["v"].as_array().expect("… of strings") {
+                    let tool = tool.as_str().expect("… of strings");
+                    out.insert(format!("mcp__{server}__{tool}"));
+                }
+            }
+            out
+        };
+
+        let cfg = test_config();
+        let claude_mcp =
+            McpSet::from_config(claude_set).expect("Claude Code's main set is shipped");
+        let codex_mcp = McpSet::from_config(codex_set).expect("Codex's main set is shipped");
+        for capability in [Capability::Read, Capability::Write] {
+            let claude = claude_granted(&ClaudeCode.capability_args(&cfg, capability, claude_mcp));
+            let codex = codex_granted(&Codex.capability_args(&cfg, capability, codex_mcp));
+            assert!(
+                !claude.is_empty(),
+                "{capability:?}: a main turn that grants no MCP tool proves nothing"
+            );
             assert_eq!(
-                claude.get(name),
-                Some(spec),
-                "the two harnesses declare the `{name}` server differently"
+                claude, codex,
+                "{capability:?}: Codex and Claude Code main turns must grant exactly the same \
+                 MCP tools (left: Claude Code, right: Codex)"
             );
         }
-        let mut only_claude: Vec<&str> = claude
-            .keys()
-            .filter(|k| !codex.contains_key(k.as_str()))
-            .map(String::as_str)
-            .collect();
-        only_claude.sort_unstable();
-        let mut withheld = CODEX_WITHHELD_MCP_SERVERS.to_vec();
-        withheld.sort_unstable();
-        assert_eq!(
-            only_claude, withheld,
-            "a server on one harness and not the other must be named in CODEX_WITHHELD_MCP_SERVERS"
-        );
     }
 
     /// The two argv strings a main-turn site now carries ahead of its MCP flags: the read

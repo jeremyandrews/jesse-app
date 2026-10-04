@@ -51,10 +51,10 @@ async fn main() {
         }
     };
     let vision = resolve_vision_config();
-    // WHICH HARNESS'S `Read` A STAGED FILE IS PREPARED FOR. This server ships in Claude
-    // Code's MCP set only, so that is the default; the variable exists so a deployment that
-    // ever loads it elsewhere converts correctly rather than handing a Codex child a PDF its
-    // `view_image` cannot open.
+    // WHICH HARNESS'S `Read` A STAGED FILE IS PREPARED FOR. Claude Code is the default; the
+    // Codex harness starts this server with `JESSE_INBOUND_HARNESS=codex` (its
+    // `CODEX_MCP_ENV_FIXED`), so a Codex child is never handed a PDF its `view_image` cannot
+    // open.
     let harness_id =
         std::env::var("JESSE_INBOUND_HARNESS").unwrap_or_else(|_| CLAUDE_CODE_ID.to_string());
     let support = attachment_support_for(&harness_id);

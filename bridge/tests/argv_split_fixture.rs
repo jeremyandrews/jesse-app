@@ -131,6 +131,15 @@
 //! and the same two digests per site as 0.163.0.** Every Codex row is byte for byte unchanged:
 //! `tag1` is withheld from Codex too.
 //!
+//! **AND AGAIN, in bridge 0.165.0, on Codex only, when the five servers it had been kept off
+//! landed together.** `codex/main-read`, `codex/main-write` and `codex/main-write-resume` each
+//! grew by forty-six arguments (143 → 189, 151 → 197, 151 → 197): the `-c mcp_servers.*` lines
+//! for `build`, `places`, `inbound`, `rybbit` and `tag1`. `env_vars` and `bearer_token_env_var`
+//! name variables and never carry a value; the one literal is `inbound`'s
+//! `env={JESSE_INBOUND_HARNESS="codex"}`. `enabled_tools` is `[]` on `main-read`, as for every
+//! server but qmd. Every Claude Code row and every non-main Codex row is byte for byte
+//! unchanged.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

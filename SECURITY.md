@@ -168,9 +168,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **20 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **21 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex` — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -898,6 +898,7 @@ and read-only). Only the servers named in that config load:
 | `roon` | Music control, added 2026-08-07 — all six `mcp__roon__*` tools. No auth of any kind. See [Roon](#roon-no-auth-2026-08-07) |
 | `rybbit` | tag1.com web analytics, **read only**, added 2026-10-01 — twenty-eight `mcp__rybbit__*` read tools, no write tool. See [Rybbit](#rybbit-web-analytics-read-only-2026-10-01) |
 | `tag1` | Tag1's public website, **read only**, added 2026-10-02 — six `mcp__tag1__*` read tools, no credential, no write or contact tool. See [tag1.com](#tag1com-public-site-read-only-2026-10-02) |
+| `plex` | The owner's LAN Plex server, added 2026-10-04: forty of fifty-five `mcp__plex__*` tools: reads, search, and collection, playlist and metadata edits. Nothing that deletes media, runs maintenance, shares, plays back or touches the host's files. See [Plex](#plex-lan-media-server-reads-and-collection-edits-2026-10-04) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1286,6 +1287,119 @@ not be able to submit a message to Tag1 in the owner's name.
   servers and Rybbit's visitor-written fields already carry, and it is treated the same way.
   From 0.165.0 it reaches **both harnesses'** main turns, including Codex at `Write`.
 
+### Plex (LAN media server, reads and collection edits, 2026-10-04)
+
+Bridge 0.166.0 adds the owner's Plex Media Server to every main turn on **both harnesses in the
+same change**, as the twenty-first server. It is the third party `plex-mcp-server` (PyPI,
+Vladimir Tutin's), stdio transport, declared as `plex` with the bare command `plex-mcp` and no
+arguments, resolved off the bridge `PATH` like `mcp-proxmox`. It is the same package Claude
+Desktop on the Studio already runs; that setup is untouched.
+
+#### The credential lives in the launcher, never in the bridge
+
+The server needs `PLEX_URL` and `PLEX_TOKEN`. Neither is in the repo, the plist, an argv, a
+record or a fixture: the `plex-mcp` launcher exports both from an env file and `exec`s the
+server. A golden test pins the declaration as the bare command with an empty `args` array, so
+a `--plex-token` argument cannot creep in, and a Codex test asserts `PLEX_TOKEN` appears
+nowhere on the rendered argv and that no `env_vars` or `env` is attached. Codex scrubs an MCP
+child's environment, and that is harmless here because the launcher sets both variables
+itself after the scrub.
+
+A Plex token is **owner-level on that server**. It is not scoped by the token; it is scoped
+only by the allowlist below.
+
+#### Granted: forty tools, named one by one
+
+A live `initialize` and `tools/list` against `plex-mcp-server` 1.1.7 on 2026-10-04 returned
+fifty-five tools, and **not one carries an annotation**, so every class below is a decision
+taken from the tool's name, description and parameters, not from a hint. Each granted tool is in
+`DEFAULT_ALLOWED_TOOLS` by name, never `mcp__plex__*`, and a test pins the forty by equality.
+
+- **Library reads and search:** `library_list`, `library_get_stats`, `library_get_details`,
+  `library_get_recently_added`, `library_get_contents`, `media_search`, `media_get_details`,
+  `media_list_available_artwork`.
+- **User and session reads:** `user_search_users`, `user_list_all_users`, `user_get_info`,
+  `user_get_on_deck`, `user_get_continue_watching`, `user_get_watch_history`,
+  `user_get_statistics`, `sessions_get_active`, `sessions_get_media_playback_history`. These
+  read household viewing data; none changes a user.
+- **Server status reads:** `server_get_info`, `server_get_bandwidth`,
+  `server_get_current_resources`, `server_get_butler_tasks`, `server_get_alerts`,
+  `server_get_plex_logs`. Plex masks tokens in its own logs, but the logs carry client IPs and
+  device names.
+- **Client reads:** `client_list`, `client_get_details`, `client_get_timelines`.
+- **Collection edits:** `collection_list`, `collection_create`, `collection_add_to`,
+  `collection_remove_from`, `collection_edit`, `collection_delete`.
+- **Playlist edits:** `playlist_list`, `playlist_get_contents`, `playlist_create`,
+  `playlist_edit`, `playlist_add_to`, `playlist_remove_from`, `playlist_delete`.
+- **Metadata edits:** `media_edit_metadata`.
+
+Deleting a **collection** or a **playlist** is granted on purpose: it removes a grouping, never a
+media file, and managing collections is the capability asked for.
+
+#### Withheld: fifteen tools, each for a stated reason
+
+A test fails if any of these reaches the allowlist.
+
+| Tool | Why withheld |
+|---|---|
+| `media_delete` | deletes a media item from the library |
+| `server_empty_trash` | permanently removes trashed items: deletion |
+| `server_optimize_database` | server maintenance |
+| `server_clean_bundles` | server maintenance; removes files on the server |
+| `server_run_butler_task` | runs any scheduled maintenance task on demand |
+| `library_refresh` | triggers a metadata refresh across a library: maintenance |
+| `library_scan` | triggers a filesystem scan of a library path: maintenance |
+| `playlist_copy_to_user` | copies a playlist into another user's account: sharing |
+| `media_get_artwork` | **writes** image files to any `output_dir` on the bridge host, around every workspace boundary |
+| `media_set_artwork` | **reads** any local `filepath` on the bridge host and uploads it to Plex |
+| `playlist_upload_poster` | **reads** any local `poster_filepath` on the bridge host and uploads it to Plex |
+| `client_start_playback` | playback control on a client device, out of scope for this change |
+| `client_control_playback` | playback control on a client device, out of scope |
+| `client_navigate` | drives a client device's UI, out of scope |
+| `client_set_streams` | changes a client's audio or subtitle stream, out of scope |
+
+#### What it adds to the risk
+
+- **One new credential**, owner-level on the Plex server, held by the launcher.
+- **One new LAN host**, the Plex server. A Claude Code child reaches it through an MCP
+  subprocess, which runs outside the child's sandbox, as every stdio server here does.
+- **A destructive edit surface that is not deletion of media.** A phone-injected turn can
+  delete or rewrite any collection or playlist and rewrite any item's title, summary, genres
+  and tags. None of that destroys a file, and all of it is curation the owner may have spent
+  time on. Plex has no undo for it. Accepted, because managing collections is the point.
+- **A residual host read through `collection_edit`.** It is the server's only collection
+  editor, and it accepts a local `poster_path` and `background_path`, which the server reads
+  and uploads to Plex. That lets a turn copy a file the bridge user can read into the Plex
+  server's artwork store, outside the `Read` allowlist. The destination is the owner's own LAN
+  server and the bytes must parse as an image to be stored usefully, so it is accepted rather
+  than mitigated; the two tools whose only purpose is that read are withheld above.
+- **A new source of untrusted text.** Titles, summaries, tags and collection names are whatever
+  the library's metadata agents fetched or anyone with write access to the server set, and
+  they enter the turn at the same trust level as message bodies.
+
+#### Deployment
+
+`plex-mcp` must be on the bridge's `PATH`, in the launchers directory beside `mcp-proxmox` and
+`jesse-k8s-mcp`. **It is host setup, not repo content.** The launcher must:
+
+- export `PLEX_URL` and `PLEX_TOKEN` from an env file that is mode `0600`, in a directory that
+  is mode `0700`, both owned by the bridge's unix user, and set nothing else;
+- `exec uvx plex-mcp-server==<pinned version> --transport stdio`, **never** be a symlink to it
+  (the Proxmox rule), and pin the version so an upgrade is a deliberate edit plus a re-probe
+  of `tools/list` against `DEFAULT_ALLOWED_TOOLS`;
+- never pass `--plex-url` or `--plex-token`: an argument is visible in `ps`.
+
+Handshake it from a bare environment before trusting it, because a server that starts and
+registers zero tools looks identical to one that works:
+
+```sh
+env -i PATH="$(launchctl getenv PATH)" HOME="$HOME" plex-mcp
+```
+
+The Plex server is on the LAN, so on macOS the process tree that reaches it needs the Local
+Network grant. A turn that gets `EHOSTUNREACH` to the Plex host is missing that grant, not
+broken.
+
 ### Roon (no auth, 2026-08-07)
 
 `unified-hifi-control` (open-horizon-labs), reached over Streamable HTTP on the
@@ -1606,6 +1720,14 @@ argv, in the record or in a log. The one literal value is `inbound`'s
 `JESSE_INBOUND_HARNESS=codex`, which is not a secret. Every granted tool is auto-approved
 (`default_tools_approval_mode = "approve"`), because `approval_policy = "never"` otherwise
 cancels a call to any tool its server annotates as destructive.
+
+**`plex` (0.166.0) is the first server since then, and it landed on both harnesses in one
+change**, under the rule this section states. It needs nothing forwarded: the `plex-mcp`
+launcher reads `PLEX_URL` and `PLEX_TOKEN` from its own env file after Codex's scrub, so
+Codex's form is the bare command with its forty-tool `enabled_tools` and the same
+auto-approve. None of its tools is annotated at all, so the auto-approve changes nothing for
+it today; it is there so a future release that annotates its edit tools as destructive does
+not silently cancel them on Codex alone.
 
 **What the shared set does not make shared** is the read boundary: a Codex child reads whatever
 the bridge's unix user can read, and a Claude Code child is held to its `Read` allowlist. The

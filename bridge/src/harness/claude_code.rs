@@ -748,6 +748,27 @@ macro_rules! mcp_tag1 {
     };
 }
 
+/// **The Plex server: the owner's LAN media library, READ plus collection, playlist and
+/// metadata EDITS.** The third party `plex-mcp-server` (PyPI), stdio, reached through the bare
+/// host launcher `plex-mcp` resolved off the bridge `PATH`, like `mcp-proxmox`.
+///
+/// **NO URL AND NO TOKEN HERE.** The launcher exports `PLEX_URL` and `PLEX_TOKEN` from a file
+/// readable only by the bridge user and then `exec`s the pinned server with stdio transport,
+/// so the token never reaches argv, the plist, a record or this repo, and Codex's scrub of an
+/// MCP child's environment cannot lose it. It must `exec` the real program, never be a
+/// symlink to it.
+///
+/// **FORTY OF FIFTY-FIVE TOOLS.** A live `tools/list` against `plex-mcp-server` 1.1.7 on
+/// 2026-10-04 returned fifty-five tools carrying no annotations at all, and
+/// [`crate::DEFAULT_ALLOWED_TOOLS`] grants forty by name. Withheld: everything that deletes
+/// media, runs server maintenance, shares with another user, controls playback, or reads or
+/// writes a file on the bridge host. Read SECURITY.md before widening this.
+macro_rules! mcp_plex {
+    () => {
+        r#""plex":{"type":"stdio","command":"plex-mcp","args":[]}"#
+    };
+}
+
 /// The five house servers, in order.
 macro_rules! house_servers {
     () => {
@@ -1222,7 +1243,12 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = con
 );
 
 /// The nineteen-server set PLUS **`tag1`** — every **Claude Code** main turn from bridge
-/// 0.164.0, and every **Codex** main turn from 0.165.0. Twenty servers.
+/// 0.164.0, and every **Codex** main turn from 0.165.0, until `plex` landed in 0.166.0. Twenty
+/// servers.
+///
+/// **RETIRED AS THE MAIN SET IN 0.166.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1`]
+/// still names it.
 ///
 /// What it adds is READ access to Tag1 Consulting's public website through the site's own MCP
 /// server: one new public host (`www.tag1.com`), no credential, and six read tools, granted by
@@ -1233,10 +1259,42 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = con
 /// controls text the turn reads, at the same trust level as the message bodies this set
 /// already carries.
 ///
-/// **BOTH HARNESSES' MAIN SET** from bridge 0.165.0: Codex's main turn names this const too,
-/// so the two harnesses carry one server set and differ only in how each spells it on its
-/// command line. `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the
-/// build if that ever stops being true.
+/// It was **BOTH HARNESSES' MAIN SET** from bridge 0.165.0 until 0.166.0.
+pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: &str = concat!(
+    r#"{"mcpServers":{"#,
+    messages_servers!(),
+    ",",
+    mcp_build!(),
+    ",",
+    mcp_places!(),
+    ",",
+    mcp_inbound!(),
+    ",",
+    mcp_kubernetes!(),
+    ",",
+    mcp_rybbit!(),
+    ",",
+    mcp_tag1!(),
+    "}}"
+);
+
+/// The twenty-server set PLUS **`plex`**: every main turn on BOTH harnesses from bridge
+/// 0.166.0. Twenty-one servers.
+///
+/// What it adds is the owner's Plex media server on the LAN: one new credential (a Plex token,
+/// held by the `plex-mcp` launcher and never by the bridge), one new LAN host, read access to
+/// the library, watch history and server status, and the power to create, edit and delete
+/// collections and playlists and to edit item metadata. See the `mcp_plex!` declaration and
+/// SECURITY.md.
+///
+/// What it also adds is a new source of UNTRUSTED TEXT: titles, summaries, tags and collection
+/// names are whatever the library's metadata agents fetched or anyone with write access to the
+/// server set, at the same trust level as the message bodies this set already carries.
+///
+/// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
+/// carry one server set and differ only in how each spells it on its command line.
+/// `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the build if that
+/// ever stops being true.
 pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     r#"{"mcpServers":{"#,
     messages_servers!(),
@@ -1252,6 +1310,8 @@ pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     mcp_rybbit!(),
     ",",
     mcp_tag1!(),
+    ",",
+    mcp_plex!(),
     "}}"
 );
 
@@ -1569,7 +1629,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesKubernetes
         | McpSet::MessagesBuildPlacesInboundKubernetes
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1 => READ_ALLOWED_TOOLS,
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex => READ_ALLOWED_TOOLS,
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
         // row-keyed argv exists for; see [`REPLIES_ALLOWED_TOOLS`].
         McpSet::Replies => REPLIES_ALLOWED_TOOLS,
@@ -2883,11 +2944,19 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                20,
+                21,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
-                 google-perseido, build, places, inbound, kubernetes, rybbit and tag1 and \
-                 nothing else: {mcp:?}"
+                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1 and plex \
+                 and nothing else: {mcp:?}"
+            );
+            // THE PLEX SERVER IS THE BARE LAUNCHER WITH NO ARGUMENTS. Its URL and token live in
+            // the host launcher; an argument here would be a value on argv, in `ps` and in the
+            // committed record.
+            assert_eq!(
+                servers["plex"],
+                serde_json::json!({"type": "stdio", "command": "plex-mcp", "args": []}),
+                "{label}: the plex server is the bare launcher with no arguments: {mcp:?}"
             );
             // THE TAG1 SERVER IS THE `www` HOST AND CARRIES NO CREDENTIAL. The bare `tag1.com`
             // redirects and the connection fails; a header here would be a credential nobody
@@ -3779,7 +3848,7 @@ mod tests {
     const GOLDEN_QMD_MCP: &str = concat!(
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         home_assistant_mcp_url!(),
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"}}}"#
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]}}}"#
     );
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
 
@@ -3820,39 +3889,52 @@ mod tests {
         let main = servers(MAIN_CHILD_MCP_CONFIG);
         for (label, older, added) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
+                vec!["plex"],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["tag1"],
+                vec!["plex", "tag1"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["tag1", "rybbit"],
+                vec!["plex", "tag1", "rybbit"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["tag1", "rybbit", "kubernetes"],
+                vec!["plex", "tag1", "rybbit", "kubernetes"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["tag1", "rybbit", "kubernetes", "inbound"],
+                vec!["plex", "tag1", "rybbit", "kubernetes", "inbound"],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 MESSAGES_BUILD_MCP_CONFIG,
-                vec!["tag1", "rybbit", "kubernetes", "inbound", "places"],
+                vec!["plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,
-                vec!["tag1", "rybbit", "inbound", "places", "build"],
+                vec!["plex", "tag1", "rybbit", "inbound", "places", "build"],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 MESSAGES_MCP_CONFIG,
-                vec!["tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
+                vec![
+                    "plex",
+                    "tag1",
+                    "rybbit",
+                    "kubernetes",
+                    "inbound",
+                    "places",
+                    "build",
+                ],
             ),
         ] {
             let older = servers(older);

@@ -3542,8 +3542,7 @@ mod tests {
         }
     }
 
-    /// THE TAG1 SERVER REACHES CODEX AS A BARE URL, rendered from the SHIPPED declaration (the
-    /// Claude Code main set, since Codex withholds the server until its battery is re-run). It
+    /// THE TAG1 SERVER REACHES CODEX AS A BARE URL, rendered from the SHIPPED declaration. It
     /// has no credential, so no bearer variable may be attached to it, and its grant is the
     /// same six read tools Claude Code's turn gets.
     #[test]
@@ -3583,6 +3582,65 @@ mod tests {
             );
         }
         assert!(!enabled.contains("request_contact"), "{enabled}");
+    }
+
+    /// THE PLEX SERVER REACHES CODEX AS THE BARE LAUNCHER, with NOTHING forwarded and NOTHING
+    /// fixed. The `plex-mcp` launcher reads its URL and token from its own env file, so Codex's
+    /// scrub of an MCP child's environment cannot lose them and no variable needs naming here;
+    /// naming one would only widen what the subprocess inherits. Its grant is the same forty
+    /// tools Claude Code's turn gets, and none of the fifteen withheld ones.
+    #[test]
+    fn the_shipped_plex_server_travels_as_a_bare_launcher_with_the_decided_grant() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG,
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped main set renders for Codex");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.plex.command="plex-mcp""#),
+            "{args:?}"
+        );
+        assert!(flat.contains("mcp_servers.plex.args=[]"), "{args:?}");
+        assert!(!flat.contains("mcp_servers.plex.env_vars"), "{args:?}");
+        assert!(!flat.contains("mcp_servers.plex.env="), "{args:?}");
+        assert!(!flat.contains("PLEX_TOKEN"), "{args:?}");
+        assert!(
+            flat.contains(r#"mcp_servers.plex.default_tools_approval_mode="approve""#),
+            "{args:?}"
+        );
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.plex.enabled_tools="))
+            .expect("plex carries an enabled_tools override");
+        for granted in [
+            "media_search",
+            "collection_list",
+            "collection_add_to",
+            "collection_edit",
+            "playlist_create",
+            "media_edit_metadata",
+        ] {
+            assert!(
+                enabled.contains(&format!(r#""{granted}""#)),
+                "{granted}: {enabled}"
+            );
+        }
+        for withheld in [
+            "media_delete",
+            "server_empty_trash",
+            "playlist_copy_to_user",
+            "media_get_artwork",
+            "media_set_artwork",
+            "playlist_upload_poster",
+            "client_start_playback",
+        ] {
+            assert!(
+                !enabled.contains(&format!(r#""{withheld}""#)),
+                "{withheld}: {enabled}"
+            );
+        }
     }
 
     /// A transport neither harness can express is REFUSED, never silently dropped — a child

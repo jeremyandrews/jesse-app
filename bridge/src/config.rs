@@ -859,6 +859,27 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `list_products` and `find_expert`. All six are granted below, by name. A tool that writes
 // or sends anything, a `request_contact` form above all, is never granted: a phone-injectable
 // turn must not be able to submit a contact request to Tag1 in the owner's name.
+//
+// PLEX: FORTY OF FIFTY-FIVE TOOLS ON THE OWNER'S LAN MEDIA SERVER.
+//
+// `plex-mcp-server` 1.1.7, behind the `plex-mcp` host launcher. A live `tools/list` on
+// 2026-10-04 returned fifty-five tools and NOT ONE CARRIES AN ANNOTATION, so nothing here was
+// taken from a hint: each tool was classed by its name, description and parameters. Granted:
+// every read and search tool, and every collection, playlist and item-metadata edit, deletes
+// of a COLLECTION or a PLAYLIST included, because those remove a grouping and never a file.
+// Withheld, fifteen, each named in SECURITY.md with its reason:
+//   * media deletion and server maintenance: `media_delete`, `server_empty_trash`,
+//     `server_optimize_database`, `server_clean_bundles`, `server_run_butler_task`,
+//     `library_refresh`, `library_scan`;
+//   * sharing with another user: `playlist_copy_to_user`;
+//   * the bridge host's filesystem: `media_get_artwork` WRITES to any `output_dir`, and
+//     `media_set_artwork` and `playlist_upload_poster` READ any local file path and upload it,
+//     which would make a Plex call a read and write path around every workspace boundary;
+//   * playback on a client: `client_start_playback`, `client_control_playback`,
+//     `client_navigate`, `client_set_streams`.
+// `collection_edit` is granted although it too takes a local `poster_path` and
+// `background_path`; it is the one collection editor the server has, and SECURITY.md records
+// that residual read path.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1016,7 +1037,24 @@ mcp__rybbit__get_annotations,\
 mcp__rybbit__get_search_console_status,mcp__rybbit__get_search_console_data,\
 mcp__tag1__search_tag1,mcp__tag1__get_page,\
 mcp__tag1__list_case_studies,mcp__tag1__list_services,mcp__tag1__list_products,\
-mcp__tag1__find_expert";
+mcp__tag1__find_expert,\
+mcp__plex__library_list,mcp__plex__library_get_stats,mcp__plex__library_get_details,\
+mcp__plex__library_get_recently_added,mcp__plex__library_get_contents,\
+mcp__plex__user_search_users,mcp__plex__user_list_all_users,mcp__plex__user_get_info,\
+mcp__plex__user_get_on_deck,mcp__plex__user_get_continue_watching,\
+mcp__plex__user_get_watch_history,mcp__plex__user_get_statistics,\
+mcp__plex__sessions_get_active,mcp__plex__sessions_get_media_playback_history,\
+mcp__plex__server_get_plex_logs,mcp__plex__server_get_info,mcp__plex__server_get_bandwidth,\
+mcp__plex__server_get_current_resources,mcp__plex__server_get_butler_tasks,\
+mcp__plex__server_get_alerts,\
+mcp__plex__playlist_list,mcp__plex__playlist_get_contents,mcp__plex__playlist_create,\
+mcp__plex__playlist_edit,mcp__plex__playlist_add_to,mcp__plex__playlist_remove_from,\
+mcp__plex__playlist_delete,\
+mcp__plex__collection_list,mcp__plex__collection_create,mcp__plex__collection_add_to,\
+mcp__plex__collection_remove_from,mcp__plex__collection_edit,mcp__plex__collection_delete,\
+mcp__plex__media_search,mcp__plex__media_get_details,mcp__plex__media_edit_metadata,\
+mcp__plex__media_list_available_artwork,\
+mcp__plex__client_list,mcp__plex__client_get_details,mcp__plex__client_get_timelines";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5154,6 +5192,112 @@ mod tests {
                 .any(|e| e == "mcp__tag1__request_contact"),
             "`mcp__tag1__request_contact` sends a message and must never be granted"
         );
+    }
+
+    /// THE PLEX GRANT IS EXACTLY THE FORTY TOOLS DECIDED ON 2026-10-04, and nothing else.
+    ///
+    /// Taken from a live `tools/list` against `plex-mcp-server` 1.1.7, which annotates none of
+    /// its fifty-five tools. Equality, so a missing grant and a grant for a name the server
+    /// does not register both fail, and a failure names the tool.
+    #[test]
+    fn the_plex_grant_is_the_forty_decided_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__plex__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "library_list",
+            "library_get_stats",
+            "library_get_details",
+            "library_get_recently_added",
+            "library_get_contents",
+            "user_search_users",
+            "user_list_all_users",
+            "user_get_info",
+            "user_get_on_deck",
+            "user_get_continue_watching",
+            "user_get_watch_history",
+            "user_get_statistics",
+            "sessions_get_active",
+            "sessions_get_media_playback_history",
+            "server_get_plex_logs",
+            "server_get_info",
+            "server_get_bandwidth",
+            "server_get_current_resources",
+            "server_get_butler_tasks",
+            "server_get_alerts",
+            "playlist_list",
+            "playlist_get_contents",
+            "playlist_create",
+            "playlist_edit",
+            "playlist_add_to",
+            "playlist_remove_from",
+            "playlist_delete",
+            "collection_list",
+            "collection_create",
+            "collection_add_to",
+            "collection_remove_from",
+            "collection_edit",
+            "collection_delete",
+            "media_search",
+            "media_get_details",
+            "media_edit_metadata",
+            "media_list_available_artwork",
+            "client_list",
+            "client_get_details",
+            "client_get_timelines",
+        ]
+        .iter()
+        .map(|t| format!("mcp__plex__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the plex grant moved; re-probe the server's tools/list and record the decision \
+             before changing this list; it moves `toolset_args`, which costs a live battery run"
+        );
+    }
+
+    /// NO WILDCARD ON THE PLEX SERVER: a wildcard grants whatever the next release registers.
+    #[test]
+    fn no_plex_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__plex__*" || e == "mcp__plex"),
+            "a wildcard grant on the plex server is never acceptable"
+        );
+        assert!(!DEFAULT_ALLOWED_TOOLS.contains("mcp__plex__*"));
+    }
+
+    /// THE FIFTEEN WITHHELD PLEX TOOLS ARE NEVER GRANTED: deleting media, server maintenance,
+    /// sharing with another user, the bridge host's filesystem, and playback on a client.
+    #[test]
+    fn the_withheld_plex_tools_are_never_granted() {
+        for withheld in [
+            "media_delete",
+            "server_empty_trash",
+            "server_optimize_database",
+            "server_clean_bundles",
+            "server_run_butler_task",
+            "library_refresh",
+            "library_scan",
+            "playlist_copy_to_user",
+            "media_get_artwork",
+            "media_set_artwork",
+            "playlist_upload_poster",
+            "client_start_playback",
+            "client_control_playback",
+            "client_navigate",
+            "client_set_streams",
+        ] {
+            let tool = format!("mcp__plex__{withheld}");
+            assert!(
+                !DEFAULT_ALLOWED_TOOLS.split(',').any(|e| e == tool),
+                "`{tool}` is withheld by decision and must never be granted"
+            );
+        }
     }
 
     /// THE KUBERNETES GRANT IS EXACTLY THE TWENTY TOOLS THE PINNED SERVER REGISTERS.

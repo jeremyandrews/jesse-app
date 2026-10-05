@@ -46,9 +46,10 @@ public func searchSnippet(for thread: JesseThread,
 public nonisolated func searchSnippet(sources: [String],
                                       queries: [String],
                                       contextWords: Int = 4) -> SearchSnippet? {
-    let tokens = snippetTokens(from: queries)
-    guard !tokens.isEmpty else { return nil }
+    let all = snippetTokens(from: queries)
+    guard !all.isEmpty else { return nil }
     for source in sources {
+        let tokens = tokensPresent(all, in: source)
         guard let first = firstMatchRange(in: source, tokens: tokens) else { continue }
         return windowedSnippet(from: source, around: first, tokens: tokens,
                                contextWords: contextWords)
@@ -78,6 +79,18 @@ private nonisolated func snippetTokens(from queries: [String]) -> [SnippetToken]
         }
     }
     return out
+}
+
+/// The tokens that occur in `source` at all, decided over the folded bytes the search
+/// pass uses. A locale-aware `range(of:)` for a token that is absent walks the whole
+/// source, and an expansion hit carries a dozen alternatives, most of them absent from
+/// any one text: looking each one up that way cost a visible row over a millisecond.
+/// One fold and a `memmem` per token is the cheap presence test; the ranged search then
+/// runs only for tokens that will be found. A single token is passed through untested.
+private nonisolated func tokensPresent(_ tokens: [SnippetToken], in source: String) -> [SnippetToken] {
+    guard tokens.count > 1 else { return tokens }
+    let folded = searchFold(source)
+    return tokens.filter { byteSearch(folded, searchFold($0.text), wordStart: false) != nil }
 }
 
 /// Every range of `token` in `text` (case/diacritic-insensitive), keeping only word

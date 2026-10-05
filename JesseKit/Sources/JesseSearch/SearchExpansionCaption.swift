@@ -1,11 +1,12 @@
 import SwiftUI
+import JesseVault
 
 /// The line under the search field that says what the on-device tier is doing, shared
 /// by the iPhone list and the Mac sidebar.
 ///
-/// While the model works it reads "Expanding search…"; once terms land it names them
-/// ("Also searching: span, overpass"), which is what explains a row that contains none
-/// of the typed words. When the tier is off, the model is unavailable, or the query is
+/// While the model works it reads "Expanding search…"; once concepts land it names the
+/// alternatives grouped by the word they replace ("Also searching: misplaced, missing ·
+/// key, keychain"), which is what explains a row that contains none of the typed words. When the tier is off, the model is unavailable, or the query is
 /// too short to expand, it shows nothing: Settings is where those states are explained.
 public struct SearchExpansionCaption: View {
     private let model: ThreadSearchModel
@@ -17,8 +18,9 @@ public struct SearchExpansionCaption: View {
     }
 
     public var body: some View {
-        if searchActive && model.result.isActive && !model.result.terms.isEmpty {
-            Text("Also searching: \(model.result.terms.joined(separator: ", "))")
+        if searchActive && model.result.isActive
+            && SearchQueryRules.hasAlternatives(model.result.concepts) {
+            Text("Also searching: \(SearchQueryRules.caption(model.result.concepts))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

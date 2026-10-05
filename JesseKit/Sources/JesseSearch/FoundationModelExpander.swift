@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import JesseVault
 import os
 
 // Tier 2's on-device query expander: the ONLY file in JesseSearch that imports
@@ -19,6 +20,14 @@ import os
 // is how expansion went silent. Now every call gets a fresh session holding only the
 // instructions; the one `prewarm` builds serves the first call and is then dropped.
 //
+// ONE GROUP PER WORD, NOT WHOLE QUERIES. Asked for "alternative search terms for the
+// same thing", the model paraphrased around the strongest noun and kept it: `lost keys`
+// gave `missing keys`, `keys not found`, `search for keys`, `found keys`, every one of
+// them repeating `keys` and none bringing a new word for it. It is now asked, for each
+// significant word of the query, for other words that mean the same thing or name the
+// same object, never containing the word itself, and `SearchQueryRules.filterConcepts`
+// enforces that deterministically whatever the model returns.
+//
 // FoundationModels ships on iOS 26 and macOS 26, so this same expander backs both
 // the iPhone and the Mac search. Availability here is about whether the *model* is
 // usable at runtime, not whether the framework is present.
@@ -28,13 +37,22 @@ import os
 /// the app target's logging.
 private let searchLog = Logger(subsystem: "com.tag1.jesse", category: "search")
 
-/// Guided-generation output: a small, count-bounded list of alternate search
-/// terms. `@Generable` + `@Guide` constrain the model to return exactly this shape.
+/// Guided-generation output: one group per query word. `@Generable` + `@Guide`
+/// constrain the model to return exactly this shape.
 @Generable
-private struct ExpansionTerms {
-    @Guide(description: "2 to 4 alternative search terms for the same thing, synonyms, rephrasings, or more/less specific variants",
-           .count(2...4))
-    var terms: [String]
+private struct ExpansionGroups {
+    @Guide(description: "One group for each listed word of the query, in the order listed",
+           .maximumCount(8))
+    var groups: [ExpansionGroup]
+}
+
+@Generable
+private struct ExpansionGroup {
+    @Guide(description: "The query word this group replaces, exactly as listed")
+    var word: String
+    @Guide(description: "Up to 4 other words or short phrases that mean the same thing or name the same object, including the singular or plural and common variants. Never containing the query word itself.",
+           .maximumCount(4))
+    var alternatives: [String]
 }
 
 /// One expansion conversation with the model: the seam a test stubs to see what each
@@ -42,7 +60,8 @@ private struct ExpansionTerms {
 @MainActor
 public protocol ExpansionSession: AnyObject, Sendable {
     func prewarm()
-    func respond(to prompt: String) async throws -> [String]
+    /// The model's groups, unfiltered.
+    func respond(to prompt: String) async throws -> [ExpansionConcept]
 }
 
 /// The real session: a `LanguageModelSession` holding only the instructions.
@@ -53,8 +72,9 @@ private final class LanguageModelExpansionSession: ExpansionSession {
 
     func prewarm() { session.prewarm() }
 
-    func respond(to prompt: String) async throws -> [String] {
-        try await session.respond(to: prompt, generating: ExpansionTerms.self).content.terms
+    func respond(to prompt: String) async throws -> [ExpansionConcept] {
+        try await session.respond(to: prompt, generating: ExpansionGroups.self).content.groups
+            .map { ExpansionConcept(word: $0.word, alternatives: $0.alternatives) }
     }
 }
 
@@ -63,9 +83,15 @@ public final class FoundationModelExpander: QueryExpanding {
     public typealias SessionFactory = @MainActor () -> any ExpansionSession
 
     static let instructions = """
-    You expand a search query into a few alternative search terms for the same \
-    thing, synonyms, rephrasings, or more/less specific variants. Reply with the \
-    terms only, no explanations.
+    You help search a list of past conversations. You are given the words of a search \
+    query. For each word, give up to 4 other words or short phrases that mean the same \
+    thing or name the same object, including the singular or plural and common \
+    variants. An alternative must never contain the word it replaces, and must never \
+    repeat the rest of the query: give replacements for one word, not rewritten queries.
+
+    Example. Query: "lost keys". Words: lost, keys.
+    lost: misplaced, missing, can't find, forgot
+    keys: key, keychain, fob, car key
     """
 
     private let makeSession: SessionFactory
@@ -129,34 +155,38 @@ public final class FoundationModelExpander: QueryExpanding {
         warmed = session
     }
 
-    /// Alternate search terms for `query`, or `[]` when the model is unavailable, the
-    /// call fails, or it takes longer than the timeout. Never throws: the search tier
-    /// treats `[]` as "no expansion".
-    public func expand(_ query: String) async -> [String] {
+    /// One concept per significant word of `query`, filtered, or `[]` when the model is
+    /// unavailable, the query has no word worth expanding, the call fails, or it takes
+    /// longer than the timeout. Never throws: the search tier treats `[]` as "no
+    /// expansion".
+    public func expand(_ query: String) async -> [ExpansionConcept] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         guard availability.isAvailable else {
             searchLog.info("expansion query=\(trimmed, privacy: .public) outcome=unavailable")
             return []
         }
+        let words = SearchQueryRules.conceptWords(trimmed)
+        guard !words.isEmpty else {
+            searchLog.info("expansion query=\(trimmed, privacy: .public) outcome=nowords")
+            return []
+        }
 
         // A clean transcript for every call: the prewarmed session once, else a new one.
         let session = warmed ?? makeSession()
         warmed = nil
-        let prompt = """
-        Give 2 to 4 alternative search terms for this query, for finding the \
-        same thing in a list of past conversations. Terms only. Query: "\(trimmed)"
-        """
+        let prompt = Self.prompt(query: trimmed, words: words)
         let clock = ContinuousClock()
         let started = clock.now
         let outcome = await respond(session, prompt)
         let ms = Int((clock.now - started) / .milliseconds(1))
 
         switch outcome {
-        case .terms(let raw):
-            let terms = filterExpansionTerms(raw, original: trimmed)
-            searchLog.info("expansion query=\(trimmed, privacy: .public) terms=\(terms.joined(separator: ", "), privacy: .public) latency=\(ms)ms outcome=\(terms.isEmpty ? "empty" : "terms", privacy: .public)")
-            return terms
+        case .groups(let raw):
+            let concepts = SearchQueryRules.filterConcepts(raw, query: trimmed)
+            let useful = SearchQueryRules.hasAlternatives(concepts)
+            searchLog.info("expansion query=\(trimmed, privacy: .public) groups=\(SearchQueryRules.logDescription(concepts), privacy: .public) latency=\(ms)ms outcome=\(useful ? "groups" : "empty", privacy: .public)")
+            return useful ? concepts : []
         case .timedOut:
             searchLog.info("expansion query=\(trimmed, privacy: .public) latency=\(ms)ms outcome=timeout")
             return []
@@ -166,15 +196,23 @@ public final class FoundationModelExpander: QueryExpanding {
         }
     }
 
+    /// The per-call prompt: the query and the words to give groups for.
+    static func prompt(query: String, words: [String]) -> String {
+        """
+        Query: "\(query)". Words: \(words.joined(separator: ", ")).
+        For each word, give up to 4 alternatives that never contain that word.
+        """
+    }
+
     private enum Outcome: Sendable {
-        case terms([String])
+        case groups([ExpansionConcept])
         case timedOut
         case failed(any Error)
     }
 
     /// One model call, its error kept as a value.
     private static func attempt(_ session: any ExpansionSession, _ prompt: String) async -> Outcome {
-        do { return .terms(try await session.respond(to: prompt)) } catch { return .failed(error) }
+        do { return .groups(try await session.respond(to: prompt)) } catch { return .failed(error) }
     }
 
     /// The model call raced against the timeout; whichever finishes first wins and the
@@ -192,29 +230,4 @@ public final class FoundationModelExpander: QueryExpanding {
             return first
         }
     }
-}
-
-/// Pure result-filtering for expansion terms: the unit-testable core of the model
-/// path (the real model is unavailable in CI / the Simulator). Trims each term,
-/// drops blanks, drops any term equal (case-insensitively) to the original query,
-/// de-duplicates case-insensitively, and caps at `maxTerms`. Empty in -> empty out.
-///
-/// Foundation-only and free of any FoundationModels type, so it is testable from a
-/// target that never imports the model framework.
-// `nonisolated` explicitly: JesseSearch compiles under `.defaultIsolation(MainActor.self)`
-// for the model and the expander, and this pure helper is the documented exception. Same
-// convention as the pure declarations in `FlagSync.swift`.
-public nonisolated func filterExpansionTerms(_ raw: [String], original: String, maxTerms: Int = 4) -> [String] {
-    let originalKey = original.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    var out: [String] = []
-    for term in raw {
-        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { continue }
-        let key = trimmed.lowercased()
-        if key == originalKey { continue }
-        if out.contains(where: { $0.lowercased() == key }) { continue }
-        out.append(trimmed)
-        if out.count == maxTerms { break }
-    }
-    return out
 }

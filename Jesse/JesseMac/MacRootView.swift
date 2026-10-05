@@ -302,8 +302,10 @@ struct MacRootView: View {
         List(selection: $selection) {
             if let found = listModel.searchRows(threads) {
                 // A search: one flat list in rank order, snippets on visible rows.
-                let queries = listModel.search.result.queries
-                ForEach(found, id: \.thread.id) { row($0.thread, hit: $0.hit, queries: queries) }
+                let result = listModel.search.result
+                ForEach(found, id: \.thread.id) {
+                    row($0.thread, hit: $0.hit, queries: result.queries(for: $0.hit))
+                }
             } else {
                 switch layout {
                 case .flat(let threads):
@@ -641,7 +643,7 @@ struct MacThreadRow: View {
     /// This row's search hit while searching, nil when idle: set, the second line is the
     /// highlighted matched snippet instead of the latest answer.
     var searchHit: ThreadSearchHit? = nil
-    /// The query list the hit was matched with (typed query + expansion terms).
+    /// The query entries this row's snippet highlights (`ThreadSearchResult.queries(for:)`).
     var searchQueries: [String] = []
     /// Star / unstar this conversation (the parent persists the context).
     let onToggleFavorite: () -> Void

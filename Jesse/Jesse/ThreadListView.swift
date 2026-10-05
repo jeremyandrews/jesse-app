@@ -98,13 +98,13 @@ struct ThreadListView: View {
     // which this app cannot see, so a second run for a delta stays one tap away.
     @AppStorage(MorningRoutine.lastFiredDayKey) private var morningRoutineLastFiredDay = ""
 
-    // Orchestrates the on-device expansion tier (debounce / gate / cache / cancel).
-    // Injects the FoundationModels-backed expander in production; degrades silently
-    // to Tier-1 when the model is unavailable or disabled.
+    // Orchestrates search: the debounced pass over the index, off the main actor, and
+    // the on-device expansion tier on top (gate / cache / cancel). Injects the
+    // FoundationModels-backed expander in production; degrades to the typed query
+    // alone when the model is unavailable or disabled. Its index is attached on appear,
+    // once the store is known.
     @State private var searchModel = ThreadSearchModel(expander: FoundationModelExpander())
-    // Prewarm the model once per search session (on the first keystroke), reset
-    // when the query clears — SwiftUI's `.searchable` focus isn't directly
-    // observable here, and prewarm is idempotent.
+    // Prewarm the model once per search session, reset when the query clears.
     @State private var didPrewarm = false
 
     // Which month folders the user has opened, keyed by section identity. Month
@@ -124,31 +124,20 @@ struct ThreadListView: View {
             .filter { threadMatchesOrigin($0, scope: originScope) }
     }
 
-    /// Base (Tier-1) matches for the TYPED query alone — used only to gate and feed
-    /// the expansion tier's base count. A blank query matches everything.
-    private var searched: [JesseThread] {
-        visible.filter { threadMatches($0, query: searchText) }
-    }
-
-    /// The active alternate terms, or none when the tier is disabled.
-    private var activeTerms: [String] {
-        searchExpansionEnabled ? searchModel.activeTerms : []
-    }
-
-    /// The UNION query list the layout and row snippets filter on: the typed query
-    /// plus any active expansion terms. With no terms this is just `[searchText]`,
-    /// which reduces to Tier-1-only.
-    private var activeQueries: [String] { [searchText] + activeTerms }
-
     /// Whether search is active (the typed query is non-blank).
     private var searchActive: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// The union match set (query + terms) — what actually shows; drives the
-    /// no-results empty state so an expansion-only match still counts as a result.
-    private var unionMatched: [JesseThread] {
-        visible.filter { threadMatchesAny($0, queries: activeQueries) }
+    /// The settled search answer, once the first pass for this search has landed.
+    /// Until then (and while idle) the list shows its ordinary layout. Matching never
+    /// happens here: the pass ran off the main actor in `ThreadSearchIndex`, and this
+    /// only narrows its ranked hits to the scope.
+    private var searchRows: [(thread: JesseThread, hit: ThreadSearchHit)]? {
+        let result = searchModel.result
+        guard searchActive, result.isActive else { return nil }
+        return threadSearchLayout(threads, result: result, favoritesOnly: favoritesOnly,
+                                  originScope: originScope, archivedOnly: archivedOnly)
     }
 
     var body: some View {
@@ -175,25 +164,13 @@ struct ThreadListView: View {
             }
             // When the on-device tier widens the search, explain the extra rows:
             // a related conversation containing none of the typed words is here
-            // because of these alternate terms. Clears with the query / no terms.
-            if searchActive && !activeTerms.isEmpty {
-                Text("Also searching: \(activeTerms.joined(separator: ", "))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
-            }
+            // because of these alternate terms; while the model works, say so.
+            SearchExpansionCaption(model: searchModel, searchActive: searchActive)
+                .padding(.horizontal)
+                .padding(.bottom, searchActive ? 6 : 0)
             content
         }
-        .searchable(text: $searchText, prompt: "Search conversations")
-        .onChange(of: searchText) { _, newValue in
-            driveSearchExpansion(for: newValue)
-        }
-        .onChange(of: searchExpansionEnabled) { _, _ in
-            // Toggling the tier re-drives the model (which clears itself when off).
-            driveSearchExpansion(for: searchText)
-        }
+        .modifier(searchDriving)
         .navigationTitle("Jesse")
         // DECLARATION ORDER IS LEFT-TO-RIGHT, and the trailing items are ordered by how
         // often they are tapped: the most-used sits farthest right, nearest the thumb.
@@ -263,6 +240,17 @@ struct ThreadListView: View {
         .onReceive(NotificationCenter.default.publisher(for: ComposerDrafts.composerLeft)) { _ in
             pruneEmpty()
         }
+    }
+
+    /// The search field and everything that drives the search model from it. A
+    /// modifier of its own so `body` stays within what the type checker can solve.
+    private var searchDriving: SearchFieldDriving {
+        SearchFieldDriving(text: $searchText,
+                           threadCount: threads.count, newestStamp: threads.first?.updatedAt,
+                           expansionEnabled: searchExpansionEnabled,
+                           onFocus: prepareSearch,
+                           onQuery: driveSearchExpansion(for:),
+                           onThreadsChanged: { searchModel.threadsChanged(threads) })
     }
 
     /// "Can't reach the bridge" bar atop the list — the phone's echo of the watch's
@@ -340,11 +328,21 @@ struct ThreadListView: View {
                     Text("Swipe a conversation and tap Favorite to star it.")
                 }
             }
-        } else if unionMatched.isEmpty {
-            // Search is active (a blank query would keep `visible`) but nothing
-            // in this tab matches — not the typed query nor any expansion term.
-            // Clearing the query restores the full list.
-            ContentUnavailableView.search(text: searchText)
+        } else if let found = searchRows {
+            if found.isEmpty {
+                // The settled search found nothing in this tab, neither the typed
+                // query nor any expansion term. Clearing the query restores the list.
+                ContentUnavailableView.search(text: searchText)
+            } else {
+                // A search: one flat list in rank order (title hits, body hits, then
+                // expansion only hits, each newest first), snippets on visible rows.
+                List(selection: $selection) {
+                    rows(found.map(\.thread),
+                         hits: Dictionary(found.map { ($0.thread.id, $0.hit) },
+                                          uniquingKeysWith: { a, _ in a }),
+                         queries: searchModel.result.queries)
+                }
+            }
         } else {
             List(selection: $selection) {
                 switch layout {
@@ -400,19 +398,23 @@ struct ThreadListView: View {
         }
     }
 
-    /// The shared row list for a set of threads — used by both the flat Favorites
-    /// list and each date section, so swipe-to-favorite and delete behave the same.
+    /// The shared row list for a set of threads — used by the flat Favorites list, each
+    /// date section and the search results, so swipe-to-favorite and delete behave the
+    /// same everywhere.
     @ViewBuilder
-    private func rows(_ threads: [JesseThread]) -> some View {
+    private func rows(_ threads: [JesseThread],
+                      hits: [UUID: ThreadSearchHit] = [:],
+                      queries: [String] = []) -> some View {
         ForEach(threads) { thread in
             NavigationLink(value: thread) {
-                // Pass the active query list ONLY while searching, so the row shows
-                // its matched-snippet second line during search and reverts to
-                // title+time when idle (the search-only exception to #22).
+                // A search hit ONLY while searching, so the row shows its matched
+                // snippet second line during search and reverts to title+time when
+                // idle (the search-only exception to #22).
                 ThreadRow(thread: thread,
                           running: coordinator.isRunning(thread.id),
                           hasFailedOutbox: threadsWithFailedOutbox.contains(thread.id),
-                          searchQueries: searchActive ? activeQueries : [])
+                          searchHit: hits[thread.id],
+                          searchQueries: queries)
             }
             // Lazily mint/refresh this visible row's AI title. Idempotent and
             // non-blocking: it no-ops when the cached title is current or a
@@ -561,40 +563,46 @@ struct ThreadListView: View {
         path.append(thread)
     }
 
-    /// The list's presentation: flat for the Favorites tab, date-sectioned with
-    /// collapsible month folders for All. Pure `threadListLayout` does the
-    /// grouping/folding; `now` is read once here so every thread is classified
-    /// against the same instant. Favorite-filtering and search happen inside the
-    /// pure function, so `visible`/`searched` above just feed the empty-state
-    /// checks.
+    /// The list's presentation when not searching: flat for the Favorites tab,
+    /// date-sectioned with collapsible month folders for All. Pure `threadListLayout`
+    /// does the grouping/folding; `now` is read once here so every thread is classified
+    /// against the same instant. A search never comes through here: its ranked list is
+    /// `searchRows`.
     private var layout: ThreadListLayout {
         threadListLayout(threads,
                          favoritesOnly: favoritesOnly,
                          originScope: originScope,
                          archivedOnly: archivedOnly,
-                         searchQueries: activeQueries,
+                         searchQueries: [],
                          expanded: expandedFolders,
                          now: Date.now,
                          calendar: .current)
     }
 
-    /// Feed the live query into the expansion model: prewarm once per session on
-    /// the first keystroke, then debounce/gate/cache/cancel inside the model. The
-    /// base-match count is the Tier-1 hit count for the typed query, so the model
-    /// only spends the on-device model when direct results are thin. When the tier
-    /// is disabled this is a no-op (pure Tier-1 search, zero `expand` calls).
-    private func driveSearchExpansion(for query: String) {
-        // Keep the model's master switch in sync with Settings; when off it clears
-        // itself and `update` becomes a no-op (zero expander calls).
-        searchModel.isEnabled = searchExpansionEnabled
-        guard searchExpansionEnabled else { didPrewarm = false; return }
-        if query.isEmpty {
-            didPrewarm = false
-        } else if !didPrewarm {
+    /// Give the search model its index and build it in the background, once the field
+    /// gains focus (or the first keystroke lands), and warm the on-device model.
+    private func prepareSearch() {
+        searchModel.attach(context.container)
+        searchModel.prepare(threads)
+        if searchExpansionEnabled && !didPrewarm {
             searchModel.prewarm()
             didPrewarm = true
         }
-        searchModel.update(query: query, baseMatchCount: searched.count)
+    }
+
+    /// Feed the live query into the search model. Cheap on every keystroke: the model
+    /// debounces, runs the pass off the main actor, and gates, caches and cancels the
+    /// expansion tier. With the tier off in Settings the pass still runs, on the typed
+    /// query alone, and the expander is never called.
+    private func driveSearchExpansion(for query: String) {
+        // Keep the model's master switch in sync with Settings; off drops any terms.
+        searchModel.isEnabled = searchExpansionEnabled
+        if query.isEmpty {
+            didPrewarm = false
+        } else {
+            prepareSearch()
+        }
+        searchModel.update(query: query, threads: threads)
     }
 
     private func delete(_ offsets: IndexSet, in sectionThreads: [JesseThread]) {
@@ -674,7 +682,7 @@ struct ThreadListView: View {
 
 /// A list row. Idle, it's one primary line (the resolved title) and the relative
 /// last-activity time — nothing else (PR #22). While a search is active
-/// (`searchQueries` non-empty) the second line becomes a matched-text SNIPPET with
+/// (`searchHit` set) the second line becomes a matched-text SNIPPET with
 /// the matched range(s) highlighted, so a hit — including one surfaced only by an
 /// expansion term — explains itself; this is a deliberate search-only exception,
 /// not a permanent preview line. The title is `displayTitle`: the cached AI title
@@ -686,12 +694,16 @@ struct ThreadRow: View {
     /// Whether this thread has any undelivered (`.failed`) outbox message — shows a
     /// small orange badge so the list surfaces "something didn't send" at a glance.
     var hasFailedOutbox: Bool = false
-    /// The active query list (typed query + expansion terms) while searching; empty
-    /// when search is idle. Non-empty switches the second line to the snippet.
+    /// This row's search hit while searching, nil when idle. Set switches the second
+    /// line to the snippet.
+    var searchHit: ThreadSearchHit?
+    /// The query list the hit was matched with (typed query + expansion terms).
     var searchQueries: [String] = []
 
+    /// Cut lazily, only for rows on screen, from the one source text the search pass
+    /// recorded: never a rescan or a re-sort of the thread's turns.
     private var snippet: SearchSnippet? {
-        searchSnippet(for: thread, queries: searchQueries)
+        searchHit.flatMap { searchSnippet(for: $0, queries: searchQueries) }
     }
 
     /// The width the unread dot's slot always occupies, whether or not a dot is in it.

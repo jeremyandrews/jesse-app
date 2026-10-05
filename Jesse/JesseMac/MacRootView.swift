@@ -164,8 +164,8 @@ struct MacRootView: View {
     }
 
     /// The sidebar shape, computed by the shared pure function so the Mac matches iOS.
-    /// Reads `listModel.searchQueries`, which reads the shared model's `activeTerms`,
-    /// so the list widens automatically when on-device expansion terms arrive.
+    /// While a search shows it is the settled ranked result, which the shared model
+    /// republishes when expansion terms arrive, so the list widens by itself.
     private var layout: ThreadListLayout {
         listModel.layout(threads, now: .now, calendar: .current)
     }
@@ -184,17 +184,26 @@ struct MacRootView: View {
         }
     }
 
-    /// Feed the live query into the shared expansion model: prewarm once per session
-    /// on the first keystroke, then let the model debounce/gate/cache/cancel. The
-    /// base-match count is the Tier-1 hit count within the current scope, so the model
-    /// only spends the on-device model when direct results are thin. A no-op for the
-    /// tier when Settings has it off (pure Tier-1 search, zero `expand` calls).
-    private func driveSearch() {
-        if !searchExpansionEnabled || listModel.searchText.isEmpty {
-            didPrewarm = false
-        } else if !didPrewarm {
+    /// Give the search model its index and build it in the background, once the field
+    /// gains focus (or the first keystroke lands), and warm the on-device model.
+    private func prepareSearch() {
+        listModel.search.attach(context.container)
+        listModel.search.prepare(threads)
+        if searchExpansionEnabled && !didPrewarm {
             listModel.search.prewarm()
             didPrewarm = true
+        }
+    }
+
+    /// Feed the live query into the shared search model. Cheap on every keystroke: the
+    /// model debounces, runs the pass off the main actor, and gates, caches and cancels
+    /// the expansion tier. With the tier off in Settings the pass still runs on the
+    /// typed query alone and the expander is never called.
+    private func driveSearch() {
+        if listModel.searchText.isEmpty {
+            didPrewarm = false
+        } else {
+            prepareSearch()
         }
         listModel.updateSearch(threads, enabled: searchExpansionEnabled)
     }
@@ -291,32 +300,49 @@ struct MacRootView: View {
 
     private var sidebar: some View {
         List(selection: $selection) {
-            switch layout {
-            case .flat(let threads):
-                // Favorites scope: one flat, newest-first list, no folder chrome.
-                ForEach(threads) { row($0) }
-            case .sectioned(let sections):
-                ForEach(sections) { rendered in
-                    if rendered.isFolder {
-                        folderSection(rendered)
-                    } else {
-                        // Loose day rows: today / yesterday / the one weekday.
-                        Section(rendered.section.title()) {
-                            ForEach(rendered.threads) { row($0) }
+            if let found = listModel.searchRows(threads) {
+                // A search: one flat list in rank order, snippets on visible rows.
+                let queries = listModel.search.result.queries
+                ForEach(found, id: \.thread.id) { row($0.thread, hit: $0.hit, queries: queries) }
+            } else {
+                switch layout {
+                case .flat(let threads):
+                    // Favorites scope: one flat, newest-first list, no folder chrome.
+                    ForEach(threads) { row($0) }
+                case .sectioned(let sections):
+                    ForEach(sections) { rendered in
+                        if rendered.isFolder {
+                            folderSection(rendered)
+                        } else {
+                            // Loose day rows: today / yesterday / the one weekday.
+                            Section(rendered.section.title()) {
+                                ForEach(rendered.threads) { row($0) }
+                            }
                         }
                     }
                 }
             }
         }
-        .safeAreaInset(edge: .top) { scopePicker }
+        .safeAreaInset(edge: .top) {
+            VStack(spacing: 0) {
+                scopePicker
+                // What the on-device tier is doing: expanding, or the terms it added.
+                SearchExpansionCaption(model: listModel.search, searchActive: isSearching)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, isSearching ? 4 : 0)
+            }
+        }
         .overlay { emptyState }
-        // Live sidebar search, matching the iPhone: instant Tier-1 token matching,
-        // widened by Tier-2 on-device query expansion when available. On the first
+        // Live sidebar search, matching the iPhone: a debounced pass off the main actor,
+        // widened by on-device query expansion when available. On the first
         // keystroke the model is prewarmed; every keystroke re-drives it.
-        .searchable(text: $listModel.searchText, placement: .sidebar,
-                    prompt: "Search conversations")
-        .onChange(of: listModel.searchText) { _, _ in driveSearch() }
-        .onChange(of: searchExpansionEnabled) { _, _ in driveSearch() }
+        .modifier(SearchFieldDriving(
+            text: $listModel.searchText, placement: .sidebar,
+            threadCount: threads.count, newestStamp: threads.first?.updatedAt,
+            expansionEnabled: searchExpansionEnabled,
+            onFocus: prepareSearch,
+            onQuery: { _ in driveSearch() },
+            onThreadsChanged: { listModel.search.threadsChanged(threads) }))
         .navigationTitle("Jesse")
         // DECLARATION ORDER IS LEFT-TO-RIGHT, ordered by taps per day exactly as on the
         // iPhone: New Chat is the most-used action here so it is declared LAST and sits
@@ -458,9 +484,12 @@ struct MacRootView: View {
     /// One sidebar row, with a star affordance plus context-menu and swipe toggles,
     /// mirroring the iPhone. Selection stays tagged by thread id so restoring the
     /// selected conversation across relaunches keeps working.
-    private func row(_ thread: JesseThread) -> some View {
+    private func row(_ thread: JesseThread, hit: ThreadSearchHit? = nil,
+                     queries: [String] = []) -> some View {
         MacThreadRow(thread: thread,
                      running: coordinator.isRunning(thread.id),
+                     searchHit: hit,
+                     searchQueries: queries,
                      onToggleFavorite: { toggleFavorite(thread) })
             .tag(thread.id)
             .contextMenu {
@@ -609,6 +638,11 @@ struct MacRootView: View {
 struct MacThreadRow: View {
     let thread: JesseThread
     let running: Bool
+    /// This row's search hit while searching, nil when idle: set, the second line is the
+    /// highlighted matched snippet instead of the latest answer.
+    var searchHit: ThreadSearchHit? = nil
+    /// The query list the hit was matched with (typed query + expansion terms).
+    var searchQueries: [String] = []
     /// Star / unstar this conversation (the parent persists the context).
     let onToggleFavorite: () -> Void
 
@@ -643,7 +677,15 @@ struct MacThreadRow: View {
                     Spacer(minLength: 0)
                 }
                 // The latest ANSWER, never a prompt the owner did not type and never narration.
-                if let last = thread.lastAnswerText {
+                if let hit = searchHit,
+                   let snippet = searchSnippet(for: hit, queries: searchQueries) {
+                    // Search only: the matched excerpt, cut from the one text the pass
+                    // recorded, the matched terms emphasized.
+                    Text(highlighted(snippet))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if let last = thread.lastAnswerText {
                     Text(last)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -702,5 +744,22 @@ struct MacStoreErrorBanner: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.red)
+    }
+}
+
+extension MacThreadRow {
+    /// An `AttributedString` from a snippet, the matched range(s) emphasized (bold +
+    /// accent tint) so the term that caused the match stands out. Same as the phone's row.
+    fileprivate func highlighted(_ snippet: SearchSnippet) -> AttributedString {
+        var attributed = AttributedString(snippet.text)
+        for range in snippet.ranges {
+            guard let lo = AttributedString.Index(range.lowerBound, within: attributed),
+                  let hi = AttributedString.Index(range.upperBound, within: attributed) else {
+                continue
+            }
+            attributed[lo..<hi].font = .caption.bold()
+            attributed[lo..<hi].foregroundColor = .accentColor
+        }
+        return attributed
     }
 }

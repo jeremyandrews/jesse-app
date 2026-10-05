@@ -15,7 +15,7 @@ import Foundation
 // The only place all three can reach is a leaf, and this target is the leaf.
 //
 // The two public entry points callers already know — `significantTokens(_:)` in
-// JesseConversations and `shouldExpand(query:baseMatchCount:threshold:)` in
+// JesseConversations and `shouldExpand(query:enabled:available:)` in
 // JesseSearch — are now one-line forwarders to these. One rule, one implementation,
 // three callers.
 
@@ -32,16 +32,18 @@ public enum SearchQueryRules {
         trimmed.split(whereSeparator: \.isWhitespace).filter { $0.count >= 2 }
     }
 
-    /// Whether the query-expansion tier is worth invoking.
+    /// Whether the query-expansion tier is worth invoking: a trimmed query of three or
+    /// more characters, with expansion enabled and the model available.
     ///
-    /// True only when the trimmed query is a real token (length >= 3, so a one or two
-    /// character query never spends the on-device model) AND the base matcher already
-    /// found fewer than `threshold` results (so a plentiful result set is never
-    /// widened). Pure and deterministic.
-    public static func shouldExpand(query: String, baseMatchCount: Int, threshold: Int) -> Bool {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 3 else { return false }
-        return baseMatchCount < threshold
+    /// The base match count is deliberately NOT a condition. It used to be (expand only
+    /// below five direct hits), and almost every real query finds five, so the model was
+    /// almost never asked and the "Also searching" caption almost never appeared.
+    /// Expansion only widens the set, and its hits rank below every direct hit, so a
+    /// plentiful direct set loses nothing to it. Pure and deterministic.
+    public static func shouldExpand(query: String, enabled: Bool = true,
+                                    available: Bool = true) -> Bool {
+        guard enabled, available else { return false }
+        return query.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3
     }
 }
 

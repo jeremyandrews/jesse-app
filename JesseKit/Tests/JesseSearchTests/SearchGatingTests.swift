@@ -7,14 +7,14 @@ import XCTest
 final class SearchGatingTests: XCTestCase {
 
     func testShouldExpandGating() {
-        // Trivial (short) query: never expand, regardless of base count.
-        XCTAssertFalse(shouldExpand(query: "hi", baseMatchCount: 0, threshold: 5))
-        XCTAssertFalse(shouldExpand(query: "  a ", baseMatchCount: 0, threshold: 5))
-        // Real word but plentiful base results: no need to widen.
-        XCTAssertFalse(shouldExpand(query: "bridge", baseMatchCount: 5, threshold: 5))
-        XCTAssertFalse(shouldExpand(query: "bridge", baseMatchCount: 9, threshold: 5))
-        // Real word, thin/zero base: expand.
-        XCTAssertTrue(shouldExpand(query: "bridge", baseMatchCount: 0, threshold: 5))
-        XCTAssertTrue(shouldExpand(query: "bridge", baseMatchCount: 4, threshold: 5))
+        // Trivial (short) query: never expand.
+        XCTAssertFalse(shouldExpand(query: "hi"))
+        XCTAssertFalse(shouldExpand(query: "  a "))
+        // A real query: expand, however many direct hits it has.
+        XCTAssertTrue(shouldExpand(query: "dog"))
+        XCTAssertTrue(shouldExpand(query: "bridge"))
+        // Off in Settings, or no model to ask: never.
+        XCTAssertFalse(shouldExpand(query: "bridge", enabled: false))
+        XCTAssertFalse(shouldExpand(query: "bridge", available: false))
     }
 }

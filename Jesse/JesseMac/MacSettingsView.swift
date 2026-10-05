@@ -1,6 +1,7 @@
 import SwiftUI
 import JesseNetworking
 import JesseOps
+import JesseSearch
 import JesseVault
 import UniformTypeIdentifiers
 
@@ -123,8 +124,17 @@ struct MacSettingsView: View {
                 } header: {
                     Text("Search")
                 } footer: {
-                    Text("Widens sidebar search with related terms suggested by the on-device model. Everything stays on this Mac; turn it off to match only what you type.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Why the tier is idle, when it is: off, or the model's own reason.
+                        if let status = SearchExpansionStatus.explanation(
+                            enabled: searchExpansionEnabled,
+                            availability: FoundationModelExpander.systemAvailability()) {
+                            Text(status).foregroundStyle(.orange)
+                        }
+                        Text("Widens sidebar search with related terms suggested by the on-device model. Everything stays on this Mac; turn it off to match only what you type.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
                 }
 
                 vaultFolderSection

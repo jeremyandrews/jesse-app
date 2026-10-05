@@ -170,7 +170,7 @@ let package = Package(
         ),
         .testTarget(
             name: "JesseSearchTests",
-            dependencies: ["JesseSearch"],
+            dependencies: ["JesseSearch", "JesseConversations", "JesseCore"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

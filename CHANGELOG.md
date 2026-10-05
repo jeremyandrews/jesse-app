@@ -14,6 +14,59 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (187)] - 2026-10-05
+
+**Conversation search answers instantly, and the on-device expansion runs on ordinary
+queries and says so.** Three root causes, each measured on a 500 conversation fixture in
+the simulator before it was changed:
+
+1. **Unbounded main thread rescans per keystroke.** The list filtered from computed view
+   properties: the expansion gate's base count, the union match set and the layout each
+   walked every turn of every thread through `localizedStandardContains` on the main
+   actor, with no debounce and nothing cached, faulting every turn body on the way. An
+   ordinary query cost 140 to 170 ms of main thread work per keystroke.
+2. **The base count gate suppressed expansion.** `shouldExpand` only asked the model when
+   the typed query found fewer than five threads. Almost every real query finds five, so
+   the model was almost never asked and "Also searching" almost never appeared.
+3. **The expander's session grew forever.** One `LanguageModelSession` served every query,
+   so each call carried every earlier prompt and answer; each expansion was slower than the
+   last, and once the context window filled every call threw and was swallowed to `[]`.
+
+- **One search pass per settled query, off the main actor.** `ThreadSearchModel` debounces
+  the field (120 ms), cancels stale passes, and runs the pass in the new
+  `ThreadSearchIndex` actor; the list keeps the previous result until the new one lands.
+  The index holds each thread's title and every turn's searchable text, case, diacritic
+  and width folded once into bytes, and rebuilds only threads whose title or `updatedAt`
+  changed, reading them through its own `ModelContext`. It is built in the background when
+  the search field gains focus. An in memory index meets the budget (a settled pass of 1
+  to 10 ms), so SQLite FTS5 was not needed.
+- **Short queries stay cheap.** One character matches word starts in titles only; two
+  characters match word starts in titles and bodies; three or more keep the old substring
+  semantics, and a test asserts the index finds exactly the threads `threadMatches` found.
+- **Ranked results.** While searching, the list (iPhone and Mac) is flat: title hits, then
+  body hits, then expansion only hits, each newest first. Snippets are cut lazily for
+  visible rows from the one source text the pass recorded; the Mac sidebar now shows them
+  too.
+- **Every real query expands.** `shouldExpand` is now: three or more characters, the tier
+  enabled, the model available. The vault search shares the gate, its alternate hits still
+  follow every direct hit, and it now obeys the Settings toggle as well.
+- **A clean session per expansion,** a 2 s timeout that yields no terms, and one `search`
+  log line per expansion with the query, terms, latency and outcome.
+- **Expansion is visible.** "Expanding search…" shows while the model works and "Also
+  searching: …" when its terms land, on the iPhone and the Mac. Settings says when the tier
+  is off or why the model is unavailable.
+
+| Query | Main thread per keystroke, before | After | Settled pass after the debounce |
+|---|---|---|---|
+| `j` | 28 ms (111 ms cold) | 1.7 ms | 0.6 ms |
+| `je` | 141 ms | 1.9 ms | 6.1 ms |
+| `jes` | 142 ms | 1.8 ms | 6.1 ms |
+| `bridge` | 150 ms | 1.9 ms | 7.4 ms |
+| `run bridge` | 167 ms | 1.6 ms | 10.1 ms |
+
+Debug build, iPhone simulator on the Mac Studio. The index's first build takes about
+750 ms, off the main actor, once per launch.
+
 ## [Bridge 0.166.0] - 2026-10-05
 
 **Bridge turns can search the owner's Plex library and manage its collections and playlists,

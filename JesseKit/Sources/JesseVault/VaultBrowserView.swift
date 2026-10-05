@@ -5,8 +5,8 @@ import SwiftUI
 // THE VAULT AS A SCREEN: a field, a list, and a note one tap away — with the bridge off.
 //
 // The orchestration is the conversation list's, deliberately: debounce the typing, run the
-// typed query alone first, and only ask the on-device model for alternates when the direct
-// hits are thin (`SearchQueryRules.shouldExpand`). What is different is where the answer
+// typed query alone first, then ask the on-device model for alternates for any query of
+// three or more characters (`SearchQueryRules.shouldExpand`), ranked after the direct hits. What is different is where the answer
 // comes from — an FTS5 index over the folder on this device rather than a scan of rows in
 // memory — and that the empty state is USEFUL: with nothing typed it shows the 30 most
 // recently modified notes, which on any given morning is most of what a person wants.

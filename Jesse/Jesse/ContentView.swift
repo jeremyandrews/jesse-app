@@ -3,6 +3,7 @@ import SwiftData
 import JesseAsk
 import JesseCore
 import JesseOps
+import JesseSearch
 import JesseSpeech
 import JesseVault
 
@@ -694,7 +695,15 @@ struct SettingsView: View {
                 } header: {
                     Text("Search")
                 } footer: {
-                    Text("When on, search also finds conversations that match synonyms or rephrasings of your words, using Apple Intelligence entirely on-device. Off uses exact word matching only. Requires a device with Apple Intelligence; otherwise search works the same as off.")
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Why the tier is idle, when it is: off, or the model's own reason.
+                        if let status = SearchExpansionStatus.explanation(
+                            enabled: searchExpansionEnabled,
+                            availability: FoundationModelExpander.systemAvailability()) {
+                            Text(status).foregroundStyle(.orange)
+                        }
+                        Text("When on, search also finds conversations that match synonyms or rephrasings of your words, using Apple Intelligence entirely on-device. Off uses exact word matching only. Requires a device with Apple Intelligence; otherwise search works the same as off.")
+                    }
                 }
 
                 Section {

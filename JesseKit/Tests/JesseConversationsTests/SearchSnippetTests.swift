@@ -1,6 +1,6 @@
 import XCTest
-@testable import Jesse
 import JesseCore
+import JesseConversations
 
 // Pure tests for `searchSnippet(for:queries:)` — the windowed, highlighted excerpt
 // shown on a row while a search is active. No UI: the snippet is a plain value

@@ -209,3 +209,33 @@ private func compactDateRange(from lo: Date, to hi: Date,
     // "Dec 28 2025–Jan 3 2026" — spell out both years across a boundary.
     return "\(string(lo, "MMM d yyyy"))–\(string(hi, "MMM d yyyy"))"
 }
+
+/// The list while a search is active: the ranked hits of `result` (title hits, then body
+/// hits, then expansion only hits, each newest first), narrowed to the scope the list
+/// is showing. A flat list, because a ranking split across date folders is no ranking.
+///
+/// The scope filters are the ones `threadListLayout` applies, in the same order, so a
+/// search never shows a thread its scope hides. Linear in the thread count and touches
+/// no turn: the matching already happened, off the main actor, in `ThreadSearchIndex`.
+public func threadSearchLayout(_ threads: [JesseThread],
+                               result: ThreadSearchResult,
+                               favoritesOnly: Bool,
+                               originScope: ThreadOriginScope = .all,
+                               archivedOnly: Bool = false) -> [(thread: JesseThread, hit: ThreadSearchHit)] {
+    var scoped: [UUID: JesseThread] = [:]
+    scoped.reserveCapacity(threads.count)
+    for thread in threads
+    where (archivedOnly ? thread.isArchived : !thread.isArchived)
+        && (!favoritesOnly || thread.isFavorite)
+        && threadMatchesOrigin(thread, scope: originScope) {
+        scoped[thread.id] = thread
+    }
+    return result.hits.compactMap { hit in scoped[hit.id].map { ($0, hit) } }
+}
+
+extension ThreadSearchStamp {
+    /// The stamp for a thread: its identity and change stamp, no turn touched.
+    public init(_ thread: JesseThread) {
+        self.init(id: thread.id, title: thread.title, updatedAt: thread.updatedAt)
+    }
+}

@@ -273,7 +273,7 @@ extension Turn {
     /// Every text this turn holds, for search: the whole `text` (a folded prompt's full body
     /// included) and a reply's stored narration. Folding hides text from the screen, never
     /// from search.
-    public var searchableTexts: [String] {
+    nonisolated public var searchableTexts: [String] {
         if let thinking = thinkingText, !thinking.isEmpty { return [text, thinking] }
         return [text]
     }

@@ -1,15 +1,16 @@
 import XCTest
+import SwiftData
 import JesseCore
 import JesseConversations
 import JesseSearch
 @testable import Jesse_Mac
 
-// Mac sidebar SEARCH wiring, not pixels: with a fake `QueryExpanding` injected,
-// typing a query narrows the shared `threadListLayout` to the Tier-1 matches
-// immediately, and once the on-device expansion terms arrive the layout WIDENS to
-// include a thread surfaced only by an expansion term. The debounce/gate/cache
-// behavior itself is covered once in JesseSearchTests; here we assert only the Mac
-// model's union of typed query + `activeTerms` and that it feeds the same layout.
+// Mac sidebar SEARCH wiring, not pixels: with a fake `QueryExpanding` injected and the
+// search index attached to an in-memory store, typing a query lands the ranked direct
+// matches, and once the on-device expansion terms arrive the layout WIDENS to include a
+// thread surfaced only by an expansion term, ranked below the direct hit. The debounce,
+// gate and cache behavior itself is covered once in JesseSearchTests; here we assert
+// only that the Mac model feeds the shared search and layout.
 @MainActor
 final class MacThreadSearchTests: XCTestCase {
 
@@ -24,6 +25,15 @@ final class MacThreadSearchTests: XCTestCase {
         }
     }
 
+    private var container: ModelContainer!
+
+    override func setUp() async throws {
+        container = try ModelContainer(
+            for: jesseCurrentSchema,
+            configurations: ModelConfiguration(schema: jesseCurrentSchema,
+                                               isStoredInMemoryOnly: true))
+    }
+
     private let calendar: Calendar = {
         var c = Calendar(identifier: .gregorian)
         c.timeZone = TimeZone(identifier: "UTC")!
@@ -36,18 +46,27 @@ final class MacThreadSearchTests: XCTestCase {
         let t = JesseThread(mode: .ask)
         t.title = title
         t.updatedAt = now   // same day, so all land in a loose (always-expanded) section
+        container.mainContext.insert(t)
         return t
     }
 
-    private func memberIDs(_ layout: ThreadListLayout) -> Set<UUID> {
+    private func makeModel(_ fake: FakeExpander, enabled: Bool) throws -> MacThreadListModel {
+        try container.mainContext.save()
+        let model = MacThreadListModel(searchExpander: fake, searchEnabled: enabled,
+                                       searchDebounce: .zero, passDebounce: .zero)
+        model.search.attach(container)
+        return model
+    }
+
+    private func memberIDs(_ layout: ThreadListLayout) -> [UUID] {
         switch layout {
-        case .flat(let t): return Set(t.map(\.id))
-        case .sectioned(let s): return Set(s.flatMap { $0.threads.map(\.id) })
+        case .flat(let t): return t.map(\.id)
+        case .sectioned(let s): return s.flatMap { $0.threads.map(\.id) }
         }
     }
 
-    // Typing narrows to Tier-1 immediately, then WIDENS when expansion terms arrive.
-    func testTypingNarrowsThenExpansionWidens() async {
+    // The direct match lands first, then the expansion term WIDENS the list.
+    func testTypingNarrowsThenExpansionWidens() async throws {
         let fake = FakeExpander()
         fake.termsByQuery = ["dog": ["canine"]]   // "canine" reaches the second thread
 
@@ -56,63 +75,54 @@ final class MacThreadSearchTests: XCTestCase {
         let grocery = thread("grocery list")             // matches neither
         let all = [dog, canine, grocery]
 
-        var model = MacThreadListModel(searchExpander: fake, searchEnabled: true,
-                                       searchDebounce: .zero)
+        var model = try makeModel(fake, enabled: true)
         model.searchText = "dog"
         model.updateSearch(all, enabled: true)
+        await model.search.settle()
 
-        // Tier 1, synchronously: only the typed query applies, list narrows to "dog".
-        XCTAssertEqual(model.searchQueries, ["dog"])
-        XCTAssertEqual(memberIDs(model.layout(all, now: now, calendar: calendar)), [dog.id],
-                       "before expansion, only the direct match shows")
-
-        // Tier 2 settles: the expansion term joins the union and the list widens.
-        await model.search.awaitPendingExpansion()
         XCTAssertEqual(fake.callCount, 1)
-        XCTAssertEqual(model.searchQueries, ["dog", "canine"])
+        XCTAssertEqual(model.search.result.terms, ["canine"])
         XCTAssertEqual(memberIDs(model.layout(all, now: now, calendar: calendar)),
                        [dog.id, canine.id],
-                       "the expansion term surfaces the related thread; the unrelated one stays out")
+                       "the expansion term surfaces the related thread, below the direct hit; the unrelated one stays out")
     }
 
     // With the tier disabled (Settings toggle off), the expander is never called and
-    // the list stays at the Tier-1 match set.
-    func testDisabledTierStaysTierOne() async {
+    // the list stays at the direct match set.
+    func testDisabledTierStaysTierOne() async throws {
         let fake = FakeExpander()
         fake.termsByQuery = ["dog": ["canine"]]
         let dog = thread("dog walk plan")
         let canine = thread("canine companion notes")
         let all = [dog, canine]
 
-        var model = MacThreadListModel(searchExpander: fake, searchEnabled: false,
-                                       searchDebounce: .zero)
+        var model = try makeModel(fake, enabled: false)
         model.searchText = "dog"
         model.updateSearch(all, enabled: false)
-        await model.search.awaitPendingExpansion()
+        await model.search.settle()
 
         XCTAssertEqual(fake.callCount, 0, "a disabled tier never calls the expander")
-        XCTAssertEqual(model.searchQueries, ["dog"])
+        XCTAssertEqual(model.search.result.terms, [])
         XCTAssertEqual(memberIDs(model.layout(all, now: now, calendar: calendar)), [dog.id],
-                       "disabled tier -> pure Tier-1, no widening")
+                       "disabled tier -> the typed query alone, no widening")
     }
 
     // Search composes with scope: within Favorites, an expansion match that is not a
-    // favorite must NOT appear (scope is applied before the search filter).
-    func testSearchComposesWithFavoritesScope() async {
+    // favorite must NOT appear (scope is applied to the ranked hits).
+    func testSearchComposesWithFavoritesScope() async throws {
         let fake = FakeExpander()
         fake.termsByQuery = ["dog": ["canine"]]
         let dog = thread("dog walk plan"); dog.setFavorite(true, now: now)
         let canine = thread("canine companion notes")   // matches expansion but NOT a favorite
         let all = [dog, canine]
 
-        var model = MacThreadListModel(searchExpander: fake, searchEnabled: true,
-                                       searchDebounce: .zero)
+        var model = try makeModel(fake, enabled: true)
         model.scope = .favorites
         model.searchText = "dog"
         model.updateSearch(all, enabled: true)
-        await model.search.awaitPendingExpansion()
+        await model.search.settle()
 
-        XCTAssertEqual(model.searchQueries, ["dog", "canine"])
+        XCTAssertEqual(model.search.result.terms, ["canine"])
         XCTAssertEqual(memberIDs(model.layout(all, now: now, calendar: calendar)), [dog.id],
                        "the non-favorite expansion match is excluded by the Favorites scope")
     }

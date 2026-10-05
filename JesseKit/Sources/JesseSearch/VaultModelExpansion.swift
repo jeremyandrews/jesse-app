@@ -27,7 +27,17 @@ public struct VaultModelExpansion: VaultQueryExpanding {
 
     /// Forwards, hopping to the main actor where the session lives. Total, like the
     /// protocol it satisfies: an unavailable model comes back as `[]`, never as a throw.
+    ///
+    /// The Settings toggle (`searchExpansionEnabled`, default on) gates it here, so the
+    /// vault search obeys the same switch the conversation list does: off means the
+    /// model is never asked.
     public func expand(_ query: String) async -> [String] {
-        await expander.expand(query)
+        guard UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true else {
+            return []
+        }
+        return await expander.expand(query)
     }
+
+    /// The Settings key both apps store the expansion toggle under.
+    public static let enabledKey = "searchExpansionEnabled"
 }

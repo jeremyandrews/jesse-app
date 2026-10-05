@@ -151,7 +151,7 @@ final class VaultSearchTests: XCTestCase {
         return index
     }
 
-    /// FEWER THAN FIVE HITS: the tier is worth the model, and its terms WIDEN the result
+    /// A REAL QUERY spends the model, and its terms WIDEN the result
     /// set rather than replacing it.
     func testAThinResultSetAsksTheExpanderAndTheTermsOnlyAddRows() async throws {
         let index = try indexed([
@@ -221,19 +221,24 @@ final class VaultSearchTests: XCTestCase {
                         .hits.map(\.path), ["Workshop/Kiln.md"])
     }
 
-    /// AT FIVE HITS the model is never spent: a plentiful result set is never widened. The
-    /// same threshold the conversation list uses, and the same `shouldExpand` deciding it.
-    func testAPlentifulResultSetNeverSpendsTheModel() async throws {
+    /// A PLENTIFUL RESULT SET STILL EXPANDS. Five direct hits used to mean the model was
+    /// never asked, and almost every real query has five, so expansion almost never ran.
+    /// The same `shouldExpand` the conversation list uses now asks for any real query;
+    /// the direct hits keep their place and the alternate term's hits follow them.
+    func testAPlentifulResultSetStillExpandsBelowTheDirectHits() async throws {
         var notes: [(String, String)] = []
         for i in 1...5 { notes.append(("N/Note-\(i).md", "# Note \(i)\n\nThe kiln again.\n")) }
+        notes.append(("N/Oven.md", "# Oven\n\nThe wood oven.\n"))
         let index = try indexed(notes)
         let expander = FakeExpander(terms: ["oven"])
 
         let outcome = await VaultSearcher(index: index).search("kiln", expander: expander)
 
-        XCTAssertEqual(outcome.hits.count, 5)
-        XCTAssertTrue(expander.calls.isEmpty, "five hits is plenty; the model is not asked")
-        XCTAssertNil(outcome.expansionCaption)
+        XCTAssertEqual(expander.calls, ["kiln"], "five hits no longer suppress the model")
+        XCTAssertEqual(outcome.hits.count, 6)
+        XCTAssertEqual(outcome.hits.last?.path, "N/Oven.md",
+                       "the alternate term's hit follows every direct hit")
+        XCTAssertNotNil(outcome.expansionCaption)
     }
 
     /// A one or two character query never spends the model either, however few hits it has.
@@ -244,10 +249,8 @@ final class VaultSearchTests: XCTestCase {
         _ = await VaultSearcher(index: index).search("ki", expander: expander)
 
         XCTAssertTrue(expander.calls.isEmpty)
-        XCTAssertTrue(SearchQueryRules.shouldExpand(query: "kil", baseMatchCount: 0,
-                                                    threshold: 5))
-        XCTAssertFalse(SearchQueryRules.shouldExpand(query: "ki", baseMatchCount: 0,
-                                                     threshold: 5))
+        XCTAssertTrue(SearchQueryRules.shouldExpand(query: "kil"))
+        XCTAssertFalse(SearchQueryRules.shouldExpand(query: "ki"))
     }
 
     /// An expander that returns nothing leaves the result set exactly as the typed query

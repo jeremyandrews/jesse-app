@@ -189,8 +189,9 @@ public struct VaultRetriever: Sendable {
     /// one more page of the index and a body read each; the alternative is a query per
     /// term, which is what this replaced.
     public static let lexicalScanLimit = 120
-    /// Below this many base hits the expansion tier is worth spending — the same
-    /// threshold the conversation list and the vault search already use.
+    /// Below this many base hits retrieval asks the expansion tier for more. Retrieval.s
+    /// own budget rule: the shared gate no longer counts hits, and this pass only needs
+    /// alternates when the lexical passes came back thin.
     public static let expansionThreshold = 5
     /// The one directory that is never retrieved from, with its whole subtree.
     public static let excludedPrefix = "Inbox/"
@@ -247,8 +248,8 @@ public struct VaultRetriever: Sendable {
     ///      of the owner's name, and every absolute form of the day a relative word
     ///      named. Nothing is required, so no single word can empty the result — which
     ///      is what "today" and the owner's name each did before this.
-    ///   2. The app's own expander, on the same threshold the conversation list and the
-    ///      vault search use, and only when pass 1 found almost nothing. It can only
+    ///   2. The app's own expander, only when pass 1 found almost nothing (below
+    ///      `expansionThreshold`). It can only
     ///      ADD: pass 1's hits keep their place.
     ///
     /// Ahead of pass 1, for a first-person question with an owner name only, the chunks
@@ -259,9 +260,7 @@ public struct VaultRetriever: Sendable {
     /// chunks lead the live ones, and the archive demotion and the embedding fusion are
     /// exactly as they were.
     public func retrieve(question: String, budget: VaultRetrievalBudget) async -> Result {
-        let searcher = VaultSearcher(index: index,
-                                     expansionThreshold: Self.expansionThreshold,
-                                     limit: Self.searchLimit)
+        let searcher = VaultSearcher(index: index, limit: Self.searchLimit)
         let plan = LookupPlan.make(question: question, ownerName: ownerName, clock: clock)
 
         // THE CHUNKS THAT SAY THEY ARE THE OWNER'S come first, from a query of their own,

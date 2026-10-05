@@ -10,12 +10,11 @@ import JesseSearch
 // the full sectioned view and the flat favorites view, and `expandedFolders`
 // drives month-folder disclosure through the same pure helper the tests pin.
 //
-// It also owns the two-tier search the iPhone has: `searchText` is the typed query
-// (Tier 1, instant), and `search` is the shared `ThreadSearchModel` that widens the
-// match set with on-device query expansion (Tier 2). `searchQueries` unions the two
-// exactly as the iPhone does, and feeds the same `threadListLayout`, so searching
-// composes with the favorites / archived scopes for free (the layout applies scope
-// before the search filter). The expander is injected so tests use a fake and never
+// It also owns the search the iPhone has: `searchText` is the typed query, and `search`
+// is the shared `ThreadSearchModel` that runs the pass off the main actor and widens it
+// with on-device query expansion. The settled, ranked answer is narrowed to the scope by
+// the same `threadSearchLayout` the iPhone uses, so searching composes with the
+// favorites / archived scopes for free. The expander is injected so tests use a fake and never
 // depend on a real on-device model.
 struct MacThreadListModel {
 
@@ -57,56 +56,51 @@ struct MacThreadListModel {
     /// `ThreadSearchModel`). The Mac view constructs with `FoundationModelExpander()`.
     init(searchExpander: QueryExpanding = NoExpansion(),
          searchEnabled: Bool = true,
-         searchDebounce: Duration = .milliseconds(300)) {
+         searchDebounce: Duration = .milliseconds(300),
+         passDebounce: Duration = .milliseconds(120)) {
         self.search = ThreadSearchModel(expander: searchExpander,
                                         isEnabled: searchEnabled,
-                                        debounce: searchDebounce)
+                                        debounce: searchDebounce,
+                                        searchDebounce: passDebounce)
     }
 
-    /// The UNION query list the layout filters on: the typed query plus any active
-    /// on-device expansion terms (only while the tier is enabled). With no terms this
-    /// is just `[searchText]`, which reduces to Tier-1-only; a blank typed query with
-    /// no terms is "search inactive" and the layout shows everything in scope.
-    var searchQueries: [String] {
-        [searchText] + (search.isEnabled ? search.activeTerms : [])
+    /// The settled search answer narrowed to the active scope, in rank order (title hits,
+    /// body hits, then expansion only hits, each newest first), or nil when no search
+    /// has landed (idle, or the first pass for this search is still running, when the
+    /// sidebar keeps its ordinary layout). Matching never happens here: the pass ran off
+    /// the main actor in `ThreadSearchIndex`.
+    func searchRows(_ threads: [JesseThread]) -> [(thread: JesseThread, hit: ThreadSearchHit)]? {
+        let typed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty, search.result.isActive else { return nil }
+        return threadSearchLayout(threads, result: search.result,
+                                  favoritesOnly: scope == .favorites,
+                                  archivedOnly: scope == .archived)
     }
 
-    /// Build the sidebar layout from the stored threads via the shared pure
-    /// function. `.favorites` collapses to the flat starred list; `.archived` to the
-    /// flat hidden list; `.all` is the full date-sectioned layout with collapsible
-    /// month folders. The union `searchQueries` filters within the active scope
-    /// (scope is applied before search), and an active query force-expands every
-    /// month folder so no match hides behind a collapsed header. `now`/`calendar` are
+    /// Build the sidebar layout. While a search shows, it is the flat ranked list from
+    /// `searchRows`. Otherwise it is the shared pure layout: `.favorites` collapses to
+    /// the flat starred list, `.archived` to the flat hidden list, and `.all` is the
+    /// full date-sectioned layout with collapsible month folders. `now`/`calendar` are
     /// injected so classification is deterministic in tests (and read live in the view).
     func layout(_ threads: [JesseThread], now: Date, calendar: Calendar) -> ThreadListLayout {
-        threadListLayout(threads,
-                         favoritesOnly: scope == .favorites,
-                         archivedOnly: scope == .archived,
-                         searchQueries: searchQueries,
-                         expanded: expandedFolders,
-                         now: now,
-                         calendar: calendar)
+        if let found = searchRows(threads) { return .flat(found.map(\.thread)) }
+        return threadListLayout(threads,
+                                favoritesOnly: scope == .favorites,
+                                archivedOnly: scope == .archived,
+                                searchQueries: [],
+                                expanded: expandedFolders,
+                                now: now,
+                                calendar: calendar)
     }
 
-    /// The threads matching the TYPED query alone within the active scope, used only
-    /// to gate/feed the expansion tier's base count (mirroring the iPhone's `searched`
-    /// off `visible`). Scope is applied first (archive, then favorites) so the count
-    /// reflects exactly what the layout will search.
-    func baseMatches(_ threads: [JesseThread]) -> [JesseThread] {
-        let archiveScoped = threads.filter { scope == .archived ? $0.isArchived : !$0.isArchived }
-        let scoped = scope == .favorites ? archiveScoped.filter(\.isFavorite) : archiveScoped
-        return scoped.filter { threadMatches($0, query: searchText) }
-    }
-
-    /// Feed the live query into the shared expansion model: keep its master switch in
-    /// sync with Settings, then debounce/gate/cache/cancel inside the model. The base
-    /// count is the Tier-1 hit count for the typed query within scope, so the model
-    /// only spends the on-device model when direct results are thin. When the tier is
-    /// disabled this is a no-op (pure Tier-1 search, zero `expand` calls). Mutates the
-    /// `search` reference, not this struct.
+    /// Feed the live query into the shared search model: keep the expansion tier's
+    /// master switch in sync with Settings, then let the model debounce, run the pass
+    /// off the main actor, and gate, cache and cancel the expansion. With the tier off
+    /// the pass still runs on the typed query alone and the expander is never called.
+    /// Mutates the `search` reference, not this struct.
     func updateSearch(_ threads: [JesseThread], enabled: Bool) {
         search.isEnabled = enabled
-        search.update(query: searchText, baseMatchCount: baseMatches(threads).count)
+        search.update(query: searchText, threads: threads)
     }
 
     /// Flip the favorites filter (the keyboard-shortcut / segmented-control action).

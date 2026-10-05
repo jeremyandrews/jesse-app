@@ -158,9 +158,6 @@ public struct VaultSearchOutcome: Equatable, Sendable {
 /// Search over one index. A value, so a caller holds it wherever it holds the index.
 public struct VaultSearcher: Sendable {
     private let index: VaultIndex
-    /// The hit count at or above which the expansion tier is not worth spending. Five,
-    /// the conversation list's own threshold.
-    private let expansionThreshold: Int
     private let limit: Int
     /// The folder every hit must be under, or nil for the whole vault. The Vault tab's
     /// scope control, carried HERE rather than applied to the answer: a scope filtered
@@ -182,12 +179,11 @@ public struct VaultSearcher: Sendable {
     /// or nil for every strand. Held here for `folders`' reason.
     private let strandPath: String?
 
-    public init(index: VaultIndex, expansionThreshold: Int = 5, limit: Int = 50,
+    public init(index: VaultIndex, limit: Int = 50,
                 scope: VaultSearchScope = .all,
                 folders: VaultFolderSelection = VaultFolderSelection(),
                 strand: String? = nil) {
         self.index = index
-        self.expansionThreshold = expansionThreshold
         self.limit = limit
         self.scope = scope
         self.folders = folders
@@ -298,9 +294,7 @@ public struct VaultSearcher: Sendable {
     public func search(_ query: String, expander: any VaultQueryExpanding) async
         -> VaultSearchOutcome {
         let outcome = base(query)
-        guard SearchQueryRules.shouldExpand(query: query,
-                                            baseMatchCount: outcome.hits.count,
-                                            threshold: expansionThreshold) else {
+        guard SearchQueryRules.shouldExpand(query: query) else {
             return outcome
         }
         let alternates = await expander.expand(query)

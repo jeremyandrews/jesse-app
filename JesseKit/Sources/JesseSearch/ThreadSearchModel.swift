@@ -2,12 +2,13 @@ import Foundation
 import Observation
 import JesseCore
 import JesseConversations
+import JesseVault
 import SwiftData
 
 // Search orchestration for the conversation list, shared by iOS and macOS: the one
 // search pass per settled query, and the query-expansion tier on top of it. Sits between
 // the live search field and the index: it debounces typing, runs the pass OFF the main
-// actor, decides WHEN to ask the injected `QueryExpanding` for alternate terms, caches,
+// actor, decides WHEN to ask the injected `QueryExpanding` for concepts, caches,
 // cancels stale work, and publishes the ranked `result` the list draws.
 //
 // The contract is a field that never blocks:
@@ -23,14 +24,17 @@ import SwiftData
 //   * CACHE     a session-scoped LRU keyed by the normalized query, so a repeat or a
 //     backspaced-then-retyped query is expanded at most once.
 //   * PUBLISH   `result` is the ranked answer (title hits, body hits, expansion only
-//     hits) with the terms it applied; `isExpanding` is true while the model works.
+//     hits) with the concepts it applied; `isExpanding` is true while the model works.
 @MainActor
 @Observable
 public final class ThreadSearchModel {
-    /// Alternate search terms for the live query, as the expander returned them. Empty
+    /// The expansion concepts for the live query, as the expander returned them. Empty
     /// when idle, gated off, or the expander returned nothing. The list draws
-    /// `result.terms`, the terms its rows were actually matched with.
-    public private(set) var activeTerms: [String] = []
+    /// `result.concepts`, the concepts its rows were actually matched with.
+    public private(set) var activeConcepts: [ExpansionConcept] = []
+
+    /// Every alternative in `activeConcepts`, flattened in concept order.
+    public var activeTerms: [String] { SearchQueryRules.alternatives(activeConcepts) }
 
     /// True from the moment an expansion is scheduled for the live query until its terms
     /// land (or it is cancelled): the "expanding" state under the search field.
@@ -56,9 +60,9 @@ public final class ThreadSearchModel {
     private let searchDebounce: Duration
     private let cacheCapacity: Int
 
-    /// LRU cache of normalized query to expansion terms. `lruOrder` is most-recent
+    /// LRU cache of normalized query to expansion concepts. `lruOrder` is most-recent
     /// last; on capacity the front (least-recent) entry is evicted.
-    private var cache: [String: [String]] = [:]
+    private var cache: [String: [ExpansionConcept]] = [:]
     private var lruOrder: [String] = []
 
     /// The live query: trimmed as typed (what a result answers), and normalized (the
@@ -104,7 +108,7 @@ public final class ThreadSearchModel {
             task = nil
             taskQuery = nil
             isExpanding = false
-            activeTerms = []
+            activeConcepts = []
         }
         let queryChanged = trimmed != typedQuery
         currentQuery = normalized
@@ -161,7 +165,7 @@ public final class ThreadSearchModel {
         searchTask = nil
         currentQuery = ""
         typedQuery = ""
-        activeTerms = []
+        activeConcepts = []
         isExpanding = false
         result = .inactive
     }
@@ -183,18 +187,18 @@ public final class ThreadSearchModel {
     private func updateExpansion(_ normalized: String) {
         // Tier disabled (Settings toggle off) or search idle -> never call the model.
         guard isEnabled, !normalized.isEmpty else {
-            activeTerms = []
+            activeConcepts = []
             return
         }
         // Gate: a trivial query, or no model to ask.
         guard shouldExpand(query: normalized, enabled: isEnabled,
                            available: expander.availability.isAvailable) else {
-            activeTerms = []
+            activeConcepts = []
             return
         }
-        // Cache hit -> apply immediately, no expander call; the pass picks the terms up.
-        if let cached = cachedTerms(for: normalized) {
-            activeTerms = cached
+        // Cache hit -> apply immediately, no expander call; the pass picks the concepts up.
+        if let cached = cachedConcepts(for: normalized) {
+            activeConcepts = cached
             return
         }
         // Already expanding exactly this query -> let it finish (no duplicate call).
@@ -207,21 +211,21 @@ public final class ThreadSearchModel {
             guard let self else { return }
             try? await Task.sleep(for: self.debounce)
             if Task.isCancelled { return }
-            let terms = await self.expander.expand(normalized)
+            let concepts = await self.expander.expand(normalized)
             if Task.isCancelled { return }
-            self.applyExpansion(terms, for: normalized)
+            self.applyExpansion(concepts, for: normalized)
         }
     }
 
     /// Fold the expander's result into the cache and, if the user is still on this
     /// query, publish it and re-run the pass so the widened set lands.
-    private func applyExpansion(_ terms: [String], for query: String) {
-        store(terms, for: query)
+    private func applyExpansion(_ concepts: [ExpansionConcept], for query: String) {
+        store(concepts, for: query)
         guard query == currentQuery else { return }
         taskQuery = nil
         isExpanding = false
-        activeTerms = terms
-        if !terms.isEmpty { scheduleSearch(after: .zero) }
+        activeConcepts = concepts
+        if SearchQueryRules.hasAlternatives(concepts) { scheduleSearch(after: .zero) }
     }
 
     /// The tier was switched off: drop terms and re-run the pass without them.
@@ -230,8 +234,8 @@ public final class ThreadSearchModel {
         task = nil
         taskQuery = nil
         isExpanding = false
-        let hadTerms = !activeTerms.isEmpty || !result.terms.isEmpty
-        activeTerms = []
+        let hadTerms = !activeConcepts.isEmpty || !result.concepts.isEmpty
+        activeConcepts = []
         if hadTerms { scheduleSearch(after: .zero) }
     }
 
@@ -250,21 +254,21 @@ public final class ThreadSearchModel {
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard let self, !Task.isCancelled else { return }
             let stamps = self.threads.map(ThreadSearchStamp.init)
-            let terms = self.activeTerms
-            let answer = await index.search(stamps, query: query, terms: terms)
+            let concepts = self.activeConcepts
+            let answer = await index.search(stamps, query: query, concepts: concepts)
             guard !Task.isCancelled, query == self.typedQuery else { return }
             self.result = answer
         }
     }
 
-    private func cachedTerms(for key: String) -> [String]? {
-        guard let terms = cache[key] else { return nil }
+    private func cachedConcepts(for key: String) -> [ExpansionConcept]? {
+        guard let concepts = cache[key] else { return nil }
         touch(key)
-        return terms
+        return concepts
     }
 
-    private func store(_ terms: [String], for key: String) {
-        cache[key] = terms
+    private func store(_ concepts: [ExpansionConcept], for key: String) {
+        cache[key] = concepts
         touch(key)
         // Evict least-recently-used entries beyond capacity.
         while lruOrder.count > cacheCapacity {

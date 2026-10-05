@@ -25,8 +25,11 @@ public struct VaultModelExpansion: VaultQueryExpanding {
         self.expander = expander
     }
 
-    /// Forwards, hopping to the main actor where the session lives. Total, like the
-    /// protocol it satisfies: an unavailable model comes back as `[]`, never as a throw.
+    /// Asks the expander for concepts, hopping to the main actor where the session lives,
+    /// and turns them into whole alternate queries for the vault's string contract: the
+    /// typed query with one word replaced at a time, best first, at most four
+    /// (`SearchQueryRules.substitutionQueries`). Total, like the protocol it satisfies:
+    /// an unavailable model comes back as `[]`, never as a throw.
     ///
     /// The Settings toggle (`searchExpansionEnabled`, default on) gates it here, so the
     /// vault search obeys the same switch the conversation list does: off means the
@@ -35,7 +38,8 @@ public struct VaultModelExpansion: VaultQueryExpanding {
         guard UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true else {
             return []
         }
-        return await expander.expand(query)
+        let concepts = await expander.expand(query)
+        return SearchQueryRules.substitutionQueries(query, concepts: concepts, limit: 4)
     }
 
     /// The Settings key both apps store the expansion toggle under.

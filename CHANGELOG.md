@@ -14,6 +14,46 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (188)] - 2026-10-05
+
+**Query expansion adds new words instead of rephrasing the query.** On 1.0 (187) `lost
+keys` expanded to `missing keys`, `keys not found`, `search for keys`, `found keys`: every
+term repeated `keys`, none brought a new word for it, and a thread that said `keychain` or
+`fob` could never be found. Three root causes:
+
+1. **Expansion asked for paraphrased queries.** The instructions and the `@Guide` asked
+   for "alternative search terms for the same thing, synonyms, rephrasings", and a small
+   model answers that by rewriting the query around its strongest noun, kept verbatim.
+2. **Each alternative ANDed its own tokens.** Every term was compiled like a typed query,
+   so `keys not found` needed `keys`, `not` and `found`. Every alternative was a subset of
+   the threads containing `keys`: expansion could only narrow inside the original words.
+3. **Function words were required.** `significantTokens` keeps any token of two or more
+   characters, so `for` in a model term was a mandatory needle.
+
+- **One group per word.** The model is now asked, for each significant word of the query
+  (stop words removed with `LookupQuery.isStopWord`), for up to four words or short phrases
+  that mean the same thing or name the same object, never containing the word, with a
+  worked example (`lost: misplaced, missing, can't find, forgot`; `keys: key, keychain,
+  fob, car key`). The fresh session per call, prewarm, the 2 s timeout and the cache stay.
+- **A deterministic filter** (`SearchQueryRules.filterConcepts`, replacing
+  `filterExpansionTerms`): trims, folds case and diacritics, drops blanks, single stop
+  words, and any alternative containing its own word or another word of the query; keeps
+  an alternative the word contains (`key` for `keys`); dedupes; caps four per word and
+  twelve overall, round robin. The observed `lost keys` output now filters to nothing.
+- **AND across words, OR within a word.** `CompiledConceptQuery` in `ThreadSearchIndex`:
+  an expansion hit contains, for every query word, the word or one of its alternatives
+  (matched whole, as a phrase, either apostrophe), at least one of them an alternative. A
+  thread saying only `misplaced my keychain` is now found for `lost keys`. The typed query
+  and its semantics are unchanged; ranking stays title, body, expansion.
+- **The vault search gets the same idea** through its unchanged `[String]` contract:
+  alternate queries with one word substituted at a time (`misplaced keys`, `lost key`,
+  ...), best first, at most four.
+- **"Also searching:" groups by word** (`misplaced, missing · key, keychain`) on the
+  iPhone and the Mac, and the `search` log line records the groups.
+- **A quality check against the real model** (`ExpansionQualityTests`) runs the production
+  expander over six fixed queries and prints the groups; it skips where the model is
+  unavailable.
+
 ## [App 1.0 (187)] - 2026-10-05
 
 **Conversation search answers instantly, and the on-device expansion runs on ordinary

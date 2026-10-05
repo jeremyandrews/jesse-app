@@ -23,7 +23,7 @@ import JesseVault
 //   * The rebuild reads the store through its OWN `ModelContext` on this actor, off the
 //     main actor, so even the first build never faults a turn body on the main thread.
 //   * Ranking is title hits, then body hits, then threads found only through an
-//     expansion term; each group newest first.
+//     expansion concept (`CompiledConceptQuery`); each group newest first.
 //
 // MATCH SEMANTICS, by the trimmed query's length:
 //   * 1 character: a word start in the TITLE only. "j" matching "just" in every reply
@@ -149,6 +149,73 @@ public nonisolated struct CompiledThreadQuery: Sendable {
     }
 }
 
+/// An expansion, compiled to folded needles: one concept per significant word of the
+/// query, each its word plus its alternatives.
+///
+/// AND ACROSS CONCEPTS, OR WITHIN ONE. A thread matches when, for every concept, it
+/// contains the word or one of its alternatives, and at least one concept was met only
+/// through an alternative (otherwise the thread is a direct hit, or a near miss the typed
+/// query rejected for a stop word it required). An alternative is matched whole, as a
+/// phrase: `can't find` is one needle, not `can't` AND `find`. That is the point of the
+/// concept form: the old shape matched each alternative query as an AND of its own
+/// tokens, so `keys not found` required `keys`, `not` and `found`, and expansion could
+/// only ever narrow inside the threads containing `keys`.
+public nonisolated struct CompiledConceptQuery: Sendable {
+    /// Per concept: the word's needle first, then its alternatives' needles. An
+    /// alternative with an apostrophe also gets its curly spelling, since replies are
+    /// typeset with `’` and the fold does not straighten it.
+    let concepts: [(word: [UInt8], alternatives: [[UInt8]])]
+
+    /// Nil when no concept carries an alternative: there is nothing to widen with.
+    public init?(_ concepts: [ExpansionConcept]) {
+        guard SearchQueryRules.hasAlternatives(concepts) else { return nil }
+        self.concepts = concepts.map { concept in
+            var needles: [[UInt8]] = []
+            for alt in concept.alternatives {
+                needles.append(searchFold(alt))
+                if alt.contains("'") {
+                    needles.append(searchFold(alt.replacingOccurrences(of: "'", with: "\u{2019}")))
+                }
+            }
+            return (searchFold(concept.word), needles)
+        }
+    }
+
+    /// The source the earliest body match sits in (0, the title, when every concept was
+    /// met in the title), or nil when the thread is not an expansion hit.
+    func match(_ doc: ThreadSearchDocument) -> Int? {
+        var usedAlternative = false
+        var allInTitle = true
+        var firstBody: Int?
+        for concept in concepts {
+            if byteSearch(doc.foldedTitle, concept.word, wordStart: false) != nil { continue }
+            if let at = byteSearch(doc.foldedBody, concept.word, wordStart: false) {
+                allInTitle = false
+                firstBody = min(firstBody ?? at, at)
+                continue
+            }
+            var met = false
+            for alt in concept.alternatives {
+                if byteSearch(doc.foldedTitle, alt, wordStart: false) != nil {
+                    met = true
+                    break
+                }
+                if let at = byteSearch(doc.foldedBody, alt, wordStart: false) {
+                    allInTitle = false
+                    firstBody = min(firstBody ?? at, at)
+                    met = true
+                    break
+                }
+            }
+            guard met else { return nil }
+            usedAlternative = true
+        }
+        guard usedAlternative else { return nil }
+        if allInTitle { return 0 }
+        return doc.sourceIndex(forBodyOffset: firstBody ?? 0)
+    }
+}
+
 // MARK: - Result
 
 /// Why a thread is in a search result, which is also its rank group.
@@ -168,38 +235,52 @@ public nonisolated struct ThreadSearchHit: Sendable, Equatable {
     public let snippetSource: String
 }
 
-/// The answer to one settled query: the ranked hits, with the terms that produced them.
+/// The answer to one settled query: the ranked hits, with the expansion that produced
+/// them.
 public nonisolated struct ThreadSearchResult: Sendable, Equatable {
     /// The typed query this result answers, trimmed; empty means search is inactive.
     public let query: String
-    /// The expansion terms that were applied.
-    public let terms: [String]
+    /// The expansion concepts that were applied, one per significant query word.
+    public let concepts: [ExpansionConcept]
     /// Title hits, then body hits, then expansion only hits, each newest first.
     public let hits: [ThreadSearchHit]
 
-    public init(query: String, terms: [String], hits: [ThreadSearchHit]) {
+    public init(query: String, concepts: [ExpansionConcept], hits: [ThreadSearchHit]) {
         self.query = query
-        self.terms = terms
+        self.concepts = concepts
         self.hits = hits
     }
 
-    public static let inactive = ThreadSearchResult(query: "", terms: [], hits: [])
+    public static let inactive = ThreadSearchResult(query: "", concepts: [], hits: [])
 
     public var isActive: Bool { !query.isEmpty }
 
-    /// Every query entry the snippets highlight: the typed query plus the terms.
+    /// Every alternative the expansion applied, flattened in concept order.
+    public var terms: [String] { SearchQueryRules.alternatives(concepts) }
+
+    /// Every query entry the result was matched with: the typed query plus the
+    /// alternatives.
     public var queries: [String] { [query] + terms }
+
+    /// The query entries one hit's snippet highlights. A direct hit matched the typed
+    /// words, so only they are looked for; an expansion hit also carries the
+    /// alternatives, which is what it matched through. Scanning a long reply for a dozen
+    /// alternatives it cannot contain cost every visible direct row a full pass per
+    /// alternative, which broke the keystroke budget.
+    public func queries(for hit: ThreadSearchHit) -> [String] {
+        hit.kind == .expansion ? queries : [query]
+    }
 }
 
 /// The one search pass: match every document against the typed query and the
-/// expansion terms, then rank. Pure, and checks for cancellation as it goes, so a
+/// expansion concepts, then rank. Pure, and checks for cancellation as it goes, so a
 /// stale pass stops early (its partial answer is never published).
 public nonisolated func searchThreads(_ docs: [ThreadSearchDocument],
                                       query: String,
-                                      terms: [String]) -> ThreadSearchResult {
+                                      concepts: [ExpansionConcept]) -> ThreadSearchResult {
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let typed = CompiledThreadQuery(trimmed) else { return .inactive }
-    let alternates = terms.compactMap(CompiledThreadQuery.init)
+    let expansion = CompiledConceptQuery(concepts)
 
     var found: [(doc: ThreadSearchDocument, kind: ThreadMatchKind, source: Int)] = []
     for (i, doc) in docs.enumerated() {
@@ -208,11 +289,8 @@ public nonisolated func searchThreads(_ docs: [ThreadSearchDocument],
             found.append((doc, m.kind, m.snippetSource))
             continue
         }
-        for alt in alternates {
-            if let m = alt.match(doc) {
-                found.append((doc, .expansion, m.snippetSource))
-                break
-            }
+        if let source = expansion?.match(doc) {
+            found.append((doc, .expansion, source))
         }
     }
     found.sort {
@@ -221,7 +299,7 @@ public nonisolated func searchThreads(_ docs: [ThreadSearchDocument],
         return $0.doc.id.uuidString < $1.doc.id.uuidString
     }
     return ThreadSearchResult(
-        query: trimmed, terms: terms,
+        query: trimmed, concepts: concepts,
         hits: found.map { ThreadSearchHit(id: $0.doc.id, kind: $0.kind,
                                           snippetSource: $0.doc.sources[$0.source]) })
 }
@@ -306,7 +384,7 @@ public actor ThreadSearchIndex {
     /// Bring the documents for `stamps` up to date, then run the one search pass.
     /// The result's hits are limited to the stamped threads.
     public func search(_ stamps: [ThreadSearchStamp], query: String,
-                       terms: [String]) -> ThreadSearchResult {
+                       concepts: [ExpansionConcept]) -> ThreadSearchResult {
         refresh(stamps)
         if Task.isCancelled { return .inactive }
         var docs: [ThreadSearchDocument] = []
@@ -314,7 +392,7 @@ public actor ThreadSearchIndex {
         for stamp in stamps {
             if let doc = documents[stamp.id] { docs.append(doc) }
         }
-        return searchThreads(docs, query: query, terms: terms)
+        return searchThreads(docs, query: query, concepts: concepts)
     }
 
     /// Rebuild the documents whose stamp changed, and drop those for threads gone.

@@ -3,6 +3,7 @@ import SwiftData
 import JesseCore
 import JesseConversations
 import JesseSearch
+import JesseVault
 @testable import Jesse_Mac
 
 // Mac sidebar SEARCH wiring, not pixels: with a fake `QueryExpanding` injected and the
@@ -19,9 +20,11 @@ final class MacThreadSearchTests: XCTestCase {
     final class FakeExpander: QueryExpanding {
         var termsByQuery: [String: [String]] = [:]
         private(set) var callCount = 0
-        func expand(_ query: String) async -> [String] {
+        /// The scripted terms, as the one concept of a one word query.
+        func expand(_ query: String) async -> [ExpansionConcept] {
             callCount += 1
-            return termsByQuery[query.lowercased()] ?? []
+            let terms = termsByQuery[query.lowercased()] ?? []
+            return terms.isEmpty ? [] : [ExpansionConcept(word: query, alternatives: terms)]
         }
     }
 

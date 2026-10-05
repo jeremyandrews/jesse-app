@@ -1,4 +1,5 @@
 import XCTest
+import JesseVault
 @testable import JesseSearch
 
 /// A scripted, call-counting `QueryExpanding` fake so the orchestration model's
@@ -17,10 +18,12 @@ final class FakeQueryExpander: QueryExpanding {
     var defaultTerms: [String] = ["alt-term"]
     var availability: QueryExpansionAvailability = .available
 
-    func expand(_ query: String) async -> [String] {
+    /// The scripted terms, as the one concept of a one word query.
+    func expand(_ query: String) async -> [ExpansionConcept] {
         callCount += 1
         calledQueries.append(query)
-        return termsByQuery[query] ?? defaultTerms
+        let terms = termsByQuery[query] ?? defaultTerms
+        return terms.isEmpty ? [] : [ExpansionConcept(word: query, alternatives: terms)]
     }
 }
 

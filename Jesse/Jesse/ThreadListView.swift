@@ -340,7 +340,7 @@ struct ThreadListView: View {
                     rows(found.map(\.thread),
                          hits: Dictionary(found.map { ($0.thread.id, $0.hit) },
                                           uniquingKeysWith: { a, _ in a }),
-                         queries: searchModel.result.queries)
+                         result: searchModel.result)
                 }
             }
         } else {
@@ -404,7 +404,7 @@ struct ThreadListView: View {
     @ViewBuilder
     private func rows(_ threads: [JesseThread],
                       hits: [UUID: ThreadSearchHit] = [:],
-                      queries: [String] = []) -> some View {
+                      result: ThreadSearchResult = .inactive) -> some View {
         ForEach(threads) { thread in
             NavigationLink(value: thread) {
                 // A search hit ONLY while searching, so the row shows its matched
@@ -414,7 +414,7 @@ struct ThreadListView: View {
                           running: coordinator.isRunning(thread.id),
                           hasFailedOutbox: threadsWithFailedOutbox.contains(thread.id),
                           searchHit: hits[thread.id],
-                          searchQueries: queries)
+                          searchQueries: hits[thread.id].map(result.queries(for:)) ?? [])
             }
             // Lazily mint/refresh this visible row's AI title. Idempotent and
             // non-blocking: it no-ops when the cached title is current or a
@@ -697,7 +697,7 @@ struct ThreadRow: View {
     /// This row's search hit while searching, nil when idle. Set switches the second
     /// line to the snippet.
     var searchHit: ThreadSearchHit?
-    /// The query list the hit was matched with (typed query + expansion terms).
+    /// The query entries this row's snippet highlights (`ThreadSearchResult.queries(for:)`).
     var searchQueries: [String] = []
 
     /// Cut lazily, only for rows on screen, from the one source text the search pass

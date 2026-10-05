@@ -1,11 +1,12 @@
 import Foundation
+import JesseVault
 
 // The query-expansion seam (Tier 2, framework-agnostic half). Kept Foundation-only
 // and free of any model import so the orchestration model and its tests never pull
 // in FoundationModels, mirroring how JesseClientProtocol isolates the network.
 //
-// A `QueryExpanding` turns one search query into a handful of alternate search
-// terms (synonyms, rephrasings, more/less specific variants). It is deliberately
+// A `QueryExpanding` turns one search query into concepts: for each significant word,
+// the words that may stand in for it (`ExpansionConcept`). It is deliberately
 // TOTAL: it NEVER throws to the caller. Unavailable, disabled, or failed all
 // collapse to `[]`, so the search tier above can treat "no expansion" and "the
 // model isn't here" identically and degrade silently to the multi-token base match.
@@ -25,9 +26,9 @@ public nonisolated enum QueryExpansionAvailability: Equatable, Sendable {
 // conformers) are main-actor-isolated; `expand` is `async` so it still suspends,
 // letting a query change cancel an in-flight expansion, without blocking the list.
 public protocol QueryExpanding {
-    /// Alternate search terms for `query`. Returns `[]` when expansion is
-    /// unavailable or fails, never throws.
-    func expand(_ query: String) async -> [String]
+    /// One concept per significant word of `query`, alternatives filtered. Returns `[]`
+    /// when expansion is unavailable, fails, or found nothing to add; never throws.
+    func expand(_ query: String) async -> [ExpansionConcept]
 
     /// Warm any expensive backing resource (e.g. an on-device model session) ahead
     /// of the first real query, called when the search field gains focus. Optional:
@@ -52,5 +53,5 @@ extension QueryExpanding {
 /// `FoundationModelExpander` explicitly.
 public struct NoExpansion: QueryExpanding {
     public init() {}
-    public func expand(_ query: String) async -> [String] { [] }
+    public func expand(_ query: String) async -> [ExpansionConcept] { [] }
 }

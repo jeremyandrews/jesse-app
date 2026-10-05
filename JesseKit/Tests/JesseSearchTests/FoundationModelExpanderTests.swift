@@ -1,4 +1,5 @@
 import XCTest
+import JesseVault
 @testable import JesseSearch
 
 /// A stub model session that behaves like a real one in the way that matters here: it
@@ -7,15 +8,15 @@ import XCTest
 final class StubExpansionSession: ExpansionSession {
     private(set) var transcript: [String] = []
     private(set) var prewarmed = false
-    var terms: [String] = ["alpha", "beta"]
+    var groups: [ExpansionConcept] = [ExpansionConcept(word: "bridge", alternatives: ["span", "overpass"])]
     var delay: Duration = .zero
 
     func prewarm() { prewarmed = true }
 
-    func respond(to prompt: String) async throws -> [String] {
+    func respond(to prompt: String) async throws -> [ExpansionConcept] {
         transcript.append(prompt)
         if delay > .zero { try await Task.sleep(for: delay) }
-        return terms
+        return groups
     }
 }
 
@@ -84,12 +85,59 @@ final class FoundationModelExpanderTests: XCTestCase {
         XCTAssertEqual(e.availability, .unavailable(reason: "off"))
     }
 
-    /// Terms come back filtered: trimmed, deduplicated, never the query itself.
-    func testTermsAreFiltered() async {
+    /// Groups come back filtered: trimmed, deduplicated, never the word itself.
+    func testGroupsAreFiltered() async {
         let e = expander()
         e.prewarm()
-        made[0].terms = ["Bridge", " span ", "span", "overpass"]
-        let terms = await e.expand("bridge")
-        XCTAssertEqual(terms, ["span", "overpass"])
+        made[0].groups = [ExpansionConcept(word: "bridge",
+                                           alternatives: ["Bridge", " span ", "span", "overpass"])]
+        let concepts = await e.expand("bridge")
+        XCTAssertEqual(concepts, [ExpansionConcept(word: "bridge", alternatives: ["span", "overpass"])])
+    }
+
+    /// THE OBSERVED EXPANSION, App 1.0 (187). The model was asked for whole alternative
+    /// queries and paraphrased around `keys`: `missing keys`, `keys not found`, `search
+    /// for keys`, `found keys`. Each restates a query word, so nothing survives and the
+    /// expander reports no expansion rather than four ways to narrow inside `keys`.
+    func testTheObservedRestatementsYieldNoExpansion() async {
+        let e = expander()
+        e.prewarm()
+        let observed = ["missing keys", "keys not found", "search for keys", "found keys"]
+        made[0].groups = [ExpansionConcept(word: "lost", alternatives: observed),
+                          ExpansionConcept(word: "keys", alternatives: observed)]
+        let concepts = await e.expand("lost keys")
+        XCTAssertEqual(concepts, [], "no group may only restate `keys`")
+    }
+
+    /// The model is asked per word: the prompt lists the query's concept words, never a
+    /// stop word, and the instructions carry the worked example.
+    func testThePromptAsksPerWord() async {
+        let e = expander()
+        e.prewarm()
+        made[0].groups = []
+        _ = await e.expand("search for keys")
+        XCTAssertEqual(made[0].transcript.count, 1)
+        XCTAssertTrue(made[0].transcript[0].contains("Words: search, keys."))
+        XCTAssertTrue(FoundationModelExpander.instructions.contains("keys: key, keychain, fob, car key"))
+        XCTAssertTrue(FoundationModelExpander.instructions.contains("never contain the word"))
+    }
+
+    /// A query of nothing but stop words has no concept to expand: no session is spent.
+    func testAQueryOfOnlyStopWordsAsksNothing() async {
+        let e = expander()
+        let concepts = await e.expand("what is it")
+        XCTAssertEqual(concepts, [])
+        XCTAssertTrue(made.isEmpty)
+    }
+
+    /// The vault search keeps its string contract: it is handed whole queries with one
+    /// word replaced at a time, best first, at most four.
+    func testTheVaultIsHandedSubstitutedQueries() async {
+        let e = expander()
+        e.prewarm()
+        made[0].groups = [ExpansionConcept(word: "lost", alternatives: ["misplaced", "missing"]),
+                          ExpansionConcept(word: "keys", alternatives: ["keychain", "fob"])]
+        let queries = await VaultModelExpansion(e).expand("lost keys")
+        XCTAssertEqual(queries, ["misplaced keys", "lost keychain", "missing keys", "lost fob"])
     }
 }

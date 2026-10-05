@@ -183,6 +183,114 @@ nonisolated enum SplitReducer {
     }
 }
 
+// MARK: - Route elevation
+
+/// One altitude reading from a workout route, as plain Foundation values.
+/// `HealthContextProvider` lifts ONLY these two numbers out of each `CLLocation`;
+/// the coordinates never leave the HealthKit boundary, so nothing downstream of
+/// this type can log or send a position.
+nonisolated struct AltitudeSample: Equatable, Sendable {
+    /// Meters above sea level.
+    var altitude: Double
+    /// `CLLocation.verticalAccuracy` in meters. Negative means the altitude is
+    /// invalid (Core Location's own convention).
+    var verticalAccuracy: Double
+}
+
+/// The four numbers a route's altitude profile is reduced to. Nothing else about
+/// the route is kept.
+nonisolated struct RouteElevation: Equatable, Sendable {
+    /// Cumulative climb, meters.
+    var ascentM: Double
+    /// Cumulative drop, meters.
+    var descentM: Double
+    /// Lowest usable altitude, meters.
+    var minAltitudeM: Double
+    /// Highest usable altitude, meters.
+    var maxAltitudeM: Double
+}
+
+/// Reduces a route's altitude readings to ascent, descent and range. Pure and
+/// Foundation-only, the way `SplitReducer` and `SwimLapReducer` own their rules.
+///
+/// A third-party recorder (Runna, for one) saves the GPS route but never writes the
+/// elevation metadata Apple's Workout app does, so for those workouts the route is
+/// the only elevation HealthKit holds.
+nonisolated enum RouteElevationReducer {
+    /// Readings whose vertical accuracy is worse than this are dropped. An Apple
+    /// Watch fuses the barometric altimeter into route altitude and reports a
+    /// vertical accuracy of a few meters on a normal outdoor run; GPS-only altitude
+    /// sits well above 10 m. 10 m keeps the fused readings and drops the ones that
+    /// would put tens of meters of noise into the min and max, which take no
+    /// smoothing.
+    static let maxVerticalAccuracyM: Double = 10
+
+    /// A change of direction counts only once altitude has come back this far from
+    /// the running peak or trough (hysteresis). GPS and barometric jitter on flat
+    /// ground is a few meters peak to peak; summed sample to sample it adds tens of
+    /// meters of phantom climb to a flat run. 5 m sits above that jitter, and since
+    /// a confirmed climb is counted to its true peak, the band costs nothing on a
+    /// real hill: it only decides which wiggles are hills.
+    static let hysteresisM: Double = 5
+
+    /// Fewer usable readings than this is not a profile: nil, so nothing renders. A
+    /// watch records a route point about once a second, so even a five-minute
+    /// workout has hundreds; ten is a floor against a route that is mostly invalid.
+    static let minimumUsableSamples = 10
+
+    /// The reduced profile, or nil when too few usable readings remain.
+    static func reduce(_ samples: [AltitudeSample]) -> RouteElevation? {
+        let usable = samples.filter {
+            $0.altitude.isFinite && $0.verticalAccuracy.isFinite
+                && $0.verticalAccuracy >= 0 && $0.verticalAccuracy <= maxVerticalAccuracyM
+        }.map(\.altitude)
+        guard usable.count >= minimumUsableSamples, let first = usable.first else { return nil }
+
+        // `anchor` is the last confirmed turning point; `extreme` is the running
+        // peak (climbing) or trough (descending) since then. A leg is counted from
+        // anchor to extreme once the profile turns back by `hysteresisM`, and the
+        // open leg is counted at the end.
+        enum Direction { case unknown, up, down }
+        var direction = Direction.unknown
+        var ascent = 0.0, descent = 0.0
+        var anchor = first, extreme = first
+        var low = first, high = first
+        for a in usable {
+            low = min(low, a)
+            high = max(high, a)
+            switch direction {
+            case .unknown:
+                if a - anchor >= hysteresisM {
+                    direction = .up; extreme = a
+                } else if anchor - a >= hysteresisM {
+                    direction = .down; extreme = a
+                }
+            case .up:
+                if a > extreme {
+                    extreme = a
+                } else if extreme - a >= hysteresisM {
+                    ascent += extreme - anchor
+                    anchor = extreme; extreme = a; direction = .down
+                }
+            case .down:
+                if a < extreme {
+                    extreme = a
+                } else if a - extreme >= hysteresisM {
+                    descent += anchor - extreme
+                    anchor = extreme; extreme = a; direction = .up
+                }
+            }
+        }
+        switch direction {
+        case .up: ascent += extreme - anchor
+        case .down: descent += anchor - extreme
+        case .unknown: break
+        }
+        return RouteElevation(ascentM: ascent, descentM: descent,
+                              minAltitudeM: low, maxAltitudeM: high)
+    }
+}
+
 // MARK: - Value type
 
 /// One device-reported workout, reduced to just the fields the block renders.
@@ -196,8 +304,11 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
     var activityName: String
     /// When the workout started (absolute instant).
     var start: Date
-    /// Elapsed duration in seconds.
+    /// Workout time in seconds: `HKWorkout.duration`, which EXCLUDES pauses.
     var duration: TimeInterval
+    /// Elapsed wall-clock time in seconds (end minus start, pauses included), or
+    /// nil when unknown. Rendered only when it exceeds `duration` by a real pause.
+    var elapsed: TimeInterval?
     /// Total distance in METERS, or nil if the activity records none.
     var distanceMeters: Double?
     /// Total active energy in kcal, or nil if unavailable.
@@ -208,6 +319,10 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
     var maxHeartRateBPM: Double?
     /// Recording source, e.g. "Apple Watch", or nil if unknown.
     var source: String?
+    /// `HKMetadataKeyWorkoutBrandName`, the brand the recorder names for the
+    /// workout, or nil. Rendered in the attribution only when it differs from
+    /// `source`.
+    var brandName: String?
 
     // Running dynamics — average over the workout window, runs only, each nil when
     // the sample stream is absent. Rendered as a droppable suffix by the formatter.
@@ -244,6 +359,14 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
     var weatherTemperatureC: Double?
     /// Weather humidity during the workout, as a PERCENT (0…100).
     var weatherHumidityPercent: Double?
+    /// `HKMetadataKeyWeatherCondition` as its `HKWeatherCondition` raw value; the
+    /// word is chosen by `WorkoutContextFormatter.weatherConditionName`.
+    var weatherConditionRawValue: Int?
+    /// Lap events on a run, walk or hike (swims keep theirs in `swim`).
+    var lapCount: Int?
+    /// The route's reduced altitude profile, read only when the workout carries no
+    /// ascent metadata. Rendered with a `(route)` basis marker.
+    var routeElevation: RouteElevation?
     /// Seconds for each completed kilometer, in order. Rendered as its own
     /// droppable suffix, the first thing the byte cap sheds.
     var splitSecondsPerKm: [Double]?
@@ -251,25 +374,30 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
     var swim: SwimDetail?
 
     init(activityName: String, start: Date, duration: TimeInterval,
+         elapsed: TimeInterval? = nil,
          distanceMeters: Double? = nil, activeEnergyKcal: Double? = nil,
          averageHeartRateBPM: Double? = nil, maxHeartRateBPM: Double? = nil,
-         source: String? = nil,
+         source: String? = nil, brandName: String? = nil,
          averageRunningPowerW: Double? = nil, groundContactTimeMs: Double? = nil,
          verticalOscillationCm: Double? = nil, strideLengthM: Double? = nil,
          productType: String? = nil, isIndoor: Bool? = nil, averageMETs: Double? = nil,
          effortScore: Double? = nil, effortScoreIsUserRated: Bool? = nil,
          elevationAscendedM: Double? = nil, elevationDescendedM: Double? = nil,
          stepCount: Double? = nil, weatherTemperatureC: Double? = nil,
-         weatherHumidityPercent: Double? = nil, splitSecondsPerKm: [Double]? = nil,
+         weatherHumidityPercent: Double? = nil, weatherConditionRawValue: Int? = nil,
+         lapCount: Int? = nil, routeElevation: RouteElevation? = nil,
+         splitSecondsPerKm: [Double]? = nil,
          swim: SwimDetail? = nil) {
         self.activityName = activityName
         self.start = start
         self.duration = duration
+        self.elapsed = elapsed
         self.distanceMeters = distanceMeters
         self.activeEnergyKcal = activeEnergyKcal
         self.averageHeartRateBPM = averageHeartRateBPM
         self.maxHeartRateBPM = maxHeartRateBPM
         self.source = source
+        self.brandName = brandName
         self.averageRunningPowerW = averageRunningPowerW
         self.groundContactTimeMs = groundContactTimeMs
         self.verticalOscillationCm = verticalOscillationCm
@@ -284,12 +412,16 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
         self.stepCount = stepCount
         self.weatherTemperatureC = weatherTemperatureC
         self.weatherHumidityPercent = weatherHumidityPercent
+        self.weatherConditionRawValue = weatherConditionRawValue
+        self.lapCount = lapCount
+        self.routeElevation = routeElevation
         self.splitSecondsPerKm = splitSecondsPerKm
         self.swim = swim
     }
 
-    /// When the workout ended (start + duration).
-    var end: Date { start.addingTimeInterval(duration) }
+    /// When the workout ended: start plus the elapsed time when known, else plus
+    /// the workout time (which undershoots by any pause).
+    var end: Date { start.addingTimeInterval(elapsed ?? duration) }
 
     /// True when any running-dynamics field is present (populated only for runs).
     var hasRunningDynamics: Bool {
@@ -321,13 +453,18 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
 /// byte cap sheds them from the right: `base + dynamics + detail + splits`.
 ///
 /// Anything this type DERIVES rather than reads — pace, cadence — carries a literal
-/// `(computed)` marker, so an agent reading the block can always tell a device
-/// reading from arithmetic done here.
+/// `(computed)` marker, and elevation reduced from the route rather than read from
+/// the workout's metadata carries `(route)`, so an agent reading the block can
+/// always tell a device reading from arithmetic done here.
 nonisolated enum WorkoutContextFormatter {
     static let maxWorkouts = 5
     static let windowHours: Double = 48
     /// Hard cap on rendered splits, so a long run cannot dominate the block.
     static let maxSplits = 30
+    /// Elapsed time renders only when it exceeds workout time by at least this many
+    /// whole seconds. Below it the gap is the recorder's start/stop bookkeeping, not
+    /// a pause, and repeating the duration would cost bytes for nothing.
+    static let minPauseSeconds = 5
 
     /// The subsection header for `count` workout lines (singular/plural).
     static func header(count: Int) -> String {
@@ -344,19 +481,23 @@ nonisolated enum WorkoutContextFormatter {
     }
 
     /// The workout line WITHOUT any suffix. Fields that are nil are omitted; the
-    /// source, when present, is parenthesized at the end, with the recording
-    /// device's product type after it.
+    /// source, when present, is parenthesized at the end, then the workout's brand
+    /// when the recorder named one other than itself, then the recording device's
+    /// product type. The duration is workout time to the second.
     static func baseLine(for s: WorkoutSummary, timeZone: TimeZone = .current) -> String {
         var parts = ["\(s.activityName) — \(dateString(s.start, timeZone: timeZone))"]
-        parts.append(durationString(s.duration))
+        parts.append(clockString(s.duration))
         if let d = s.distanceMeters { parts.append(distanceString(d, isSwim: s.isSwim)) }
         if let k = s.activeEnergyKcal { parts.append(energyString(k)) }
         if let avg = s.averageHeartRateBPM { parts.append("avg HR \(bpmString(avg))") }
         if let mx = s.maxHeartRateBPM { parts.append("max HR \(bpmString(mx))") }
         var out = parts.joined(separator: ", ")
         var attribution: [String] = []
-        if let src = s.source, !src.trimmingCharacters(in: .whitespaces).isEmpty {
-            attribution.append(src)
+        let src = s.source?.trimmingCharacters(in: .whitespaces) ?? ""
+        if !src.isEmpty { attribution.append(src) }
+        if let brand = s.brandName?.trimmingCharacters(in: .whitespaces), !brand.isEmpty,
+           brand.caseInsensitiveCompare(src) != .orderedSame {
+            attribution.append(brand)
         }
         if let pt = s.productType, !pt.trimmingCharacters(in: .whitespaces).isEmpty {
             attribution.append(pt)
@@ -385,12 +526,19 @@ nonisolated enum WorkoutContextFormatter {
         var d: [String] = []
 
         if let indoor = s.isIndoor { d.append(indoor ? "indoor" : "outdoor") }
+        if let elapsed = s.elapsed,
+           Int(elapsed.rounded()) - Int(s.duration.rounded()) >= minPauseSeconds {
+            d.append("elapsed \(clockString(elapsed))")
+        }
         if let e = s.effortScore {
             d.append(String(format: "effort %.0f/10 (%@)", e,
                             s.effortScoreIsUserRated == true ? "rated" : "est"))
         }
         if let m = s.averageMETs { d.append(String(format: "avg METs %.1f", m)) }
         if let t = s.weatherTemperatureC { d.append(String(format: "temp %.0f C", t)) }
+        if let raw = s.weatherConditionRawValue, let word = weatherConditionName(raw) {
+            d.append(word)
+        }
         if let h = s.weatherHumidityPercent { d.append(String(format: "humidity %.0f%%", h)) }
 
         if let sw = s.swim { d.append(contentsOf: swimSegments(sw, workout: s)) }
@@ -455,9 +603,43 @@ nonisolated enum WorkoutContextFormatter {
         if let steps = s.stepCount, s.duration > 0 {
             d.append(String(format: "cadence %.0f spm (computed)", steps / (s.duration / 60)))
         }
-        if let up = s.elevationAscendedM { d.append(String(format: "ascent %.0f m", up)) }
-        if let down = s.elevationDescendedM { d.append(String(format: "descent %.0f m", down)) }
+        if let laps = s.lapCount, laps > 0 { d.append("\(laps) lap\(laps == 1 ? "" : "s")") }
+        // Metadata wins, per value, and is a device reading: unmarked. The route's
+        // reduction fills a gap and says so.
+        let route = s.routeElevation
+        if let up = s.elevationAscendedM {
+            d.append(String(format: "ascent %.0f m", up))
+        } else if let up = route?.ascentM {
+            d.append(String(format: "ascent %.0f m (route)", up))
+        }
+        if let down = s.elevationDescendedM {
+            d.append(String(format: "descent %.0f m", down))
+        } else if let down = route?.descentM {
+            d.append(String(format: "descent %.0f m (route)", down))
+        }
+        if let r = route {
+            d.append(String(format: "elevation %.0f to %.0f m", r.minAltitudeM, r.maxAltitudeM))
+        }
         return d
+    }
+
+    // MARK: Weather condition
+
+    /// `HKWeatherCondition` raw values 0…27, in the SDK's order. `none` (0) has no
+    /// word: the segment is simply omitted.
+    static let weatherConditionNames: [String?] = [
+        nil, "clear", "fair", "partly cloudy", "mostly cloudy", "cloudy", "foggy", "haze",
+        "windy", "blustery", "smoky", "dust", "snow", "hail", "sleet", "freezing drizzle",
+        "freezing rain", "rain and hail", "rain and snow", "rain and sleet",
+        "snow and sleet", "drizzle", "scattered showers", "showers", "thunderstorms",
+        "tropical storm", "hurricane", "tornado",
+    ]
+
+    /// The word for a weather condition raw value, or nil for `none` and for a value
+    /// this SDK does not define (a newer recorder's condition is simply omitted).
+    static func weatherConditionName(_ raw: Int) -> String? {
+        guard raw >= 0, raw < weatherConditionNames.count else { return nil }
+        return weatherConditionNames[raw]
     }
 
     // MARK: Unit normalization
@@ -495,15 +677,9 @@ nonisolated enum WorkoutContextFormatter {
         return f.string(from: date)
     }
 
-    /// Compact duration: `45m` under an hour, else `1h05m`. Rounded to the minute.
-    private static func durationString(_ seconds: TimeInterval) -> String {
-        let totalMin = max(0, Int((seconds / 60).rounded()))
-        if totalMin < 60 { return "\(totalMin)m" }
-        return "\(totalMin / 60)h\(String(format: "%02d", totalMin % 60))m"
-    }
-
-    /// A duration to the second: `48m10s`, or `1h05m10s` past the hour. Used where
-    /// the seconds matter (swim time feeds a per-100m pace).
+    /// A duration to the second: `48m10s`, or `1h05m10s` past the hour. Workout
+    /// time, elapsed time and swim time all render this way; rounding the workout
+    /// time to the minute threw away up to 30 s that pace arithmetic needs.
     private static func clockString(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60

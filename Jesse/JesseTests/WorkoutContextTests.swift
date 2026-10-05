@@ -1,4 +1,5 @@
 import XCTest
+import HealthKit
 @testable import Jesse
 
 /// Pure-logic tests for the recent-workouts subsection renderer: the per-workout
@@ -30,7 +31,7 @@ final class WorkoutContextTests: XCTestCase {
         let line = WorkoutContextFormatter.baseLine(for: swim(start: date(2026, 7, 4, 6, 30)),
                                                     timeZone: utc)
         XCTAssertEqual(line,
-            "Swim — 2026-07-04 06:30, 30m, 1500 m, 420 kcal, avg HR 132, max HR 158 (Apple Watch)")
+            "Swim — 2026-07-04 06:30, 30m00s, 1500 m, 420 kcal, avg HR 132, max HR 158 (Apple Watch)")
     }
 
     func testBaseLineOmitsNilFieldsAndSource() {
@@ -38,7 +39,7 @@ final class WorkoutContextTests: XCTestCase {
                                   duration: 3660, distanceMeters: nil, activeEnergyKcal: nil,
                                   averageHeartRateBPM: nil, maxHeartRateBPM: nil, source: nil)
         let line = WorkoutContextFormatter.baseLine(for: bare, timeZone: utc)
-        XCTAssertEqual(line, "Walk — 2026-07-04 08:00, 1h01m")
+        XCTAssertEqual(line, "Walk — 2026-07-04 08:00, 1h01m00s")
         XCTAssertFalse(line.contains("("), "no source paren when source is nil")
     }
 
@@ -85,7 +86,7 @@ final class WorkoutContextTests: XCTestCase {
     /// it can produce is the pace its distance and duration imply.
     func testFullLineAppendsDynamicsThenDetailAfterBase() {
         XCTAssertEqual(WorkoutContextFormatter.line(for: run(dynamics: true), timeZone: utc),
-            "Run — 2026-07-04 07:00, 45m, 8.00 km, 500 kcal, avg HR 150, max HR 172 (Apple Watch)"
+            "Run — 2026-07-04 07:00, 45m00s, 8.00 km, 500 kcal, avg HR 150, max HR 172 (Apple Watch)"
             + ", power 245 W, GCT 240 ms, vert osc 8.1 cm, stride 1.15 m"
             + ", pace 5:38/km (computed)")
     }
@@ -245,7 +246,7 @@ final class WorkoutContextTests: XCTestCase {
         XCTAssertEqual(WorkoutContextFormatter.splitsSuffix(for: bare), "")
         XCTAssertEqual(WorkoutContextFormatter.dynamicsSuffix(for: bare), "")
         XCTAssertEqual(WorkoutContextFormatter.line(for: bare, timeZone: utc), base)
-        XCTAssertEqual(base, "Workout — 2026-07-04 09:00, 20m, 130 kcal (iPhone)")
+        XCTAssertEqual(base, "Workout — 2026-07-04 09:00, 20m00s, 130 kcal (iPhone)")
     }
 
     func testDetailSuffixCommonFields() {
@@ -283,7 +284,7 @@ final class WorkoutContextTests: XCTestCase {
 
     func testFullSwimLineRendersExactly() {
         XCTAssertEqual(WorkoutContextFormatter.line(for: fullSwim(), timeZone: utc),
-            "Swim — 2026-07-04 06:30, 55m, 1650 m, 430 kcal, avg HR 132, max HR 158"
+            "Swim — 2026-07-04 06:30, 55m00s, 1650 m, 430 kcal, avg HR 132, max HR 158"
             + " (Apple Watch, Watch7,5)"
             + ", indoor, effort 6/10 (rated), avg METs 7.2, temp 18 C, humidity 60%"
             + ", pool 25 m, 66 laps, 1840 strokes, swim time 48m10s"
@@ -330,7 +331,7 @@ final class WorkoutContextTests: XCTestCase {
 
     func testFullRunLineRendersExactly() {
         XCTAssertEqual(WorkoutContextFormatter.line(for: fullRun(), timeZone: utc),
-            "Run — 2026-07-04 07:00, 48m, 8.00 km, 500 kcal, avg HR 150, max HR 172"
+            "Run — 2026-07-04 07:00, 48m14s, 8.00 km, 500 kcal, avg HR 150, max HR 172"
             + " (Apple Watch, Watch7,5)"
             + ", power 245 W, GCT 240 ms, vert osc 8.1 cm, stride 1.15 m"
             + ", outdoor, effort 8/10 (est), avg METs 9.4, temp 14 C, humidity 72%"
@@ -420,6 +421,249 @@ final class WorkoutContextTests: XCTestCase {
                                duration: 3600, distanceMeters: 30000, source: "Apple Watch")
         c.stepCount = 500
         c.elevationAscendedM = 320
+        c.isIndoor = false
+        XCTAssertEqual(WorkoutContextFormatter.detailSuffix(for: c), ", outdoor")
+    }
+
+    // MARK: - Route elevation reducer
+
+    /// Deterministic jitter in [-amplitude, +amplitude]: a fixed linear congruential
+    /// sequence, so the profile, and the asserted band, never move between runs.
+    private func jitter(count: Int, amplitude: Double, seed: UInt64 = 42) -> [Double] {
+        var state = seed
+        return (0..<count).map { _ in
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let unit = Double(state >> 11) / Double(1 << 53)  // [0, 1)
+            return (unit * 2 - 1) * amplitude
+        }
+    }
+
+    private func samples(_ altitudes: [Double], accuracy: Double = 3) -> [AltitudeSample] {
+        altitudes.map { AltitudeSample(altitude: $0, verticalAccuracy: accuracy) }
+    }
+
+    /// The 2026-10-05 shape: out from 284 m to 354 m and back, about one reading a
+    /// second, with up to 1.5 m of noise, clamped so the true extremes are the
+    /// recorded ones. The climb is 70 m each way. A confirmed leg is counted to its
+    /// true peak, so the hysteresis costs nothing here; only the noise at the two
+    /// ends can move the total, and by no more than its amplitude at each end.
+    func testOutAndBackProfileYieldsTheClimbAndTheRange() throws {
+        let up = stride(from: 284.0, through: 354.0, by: 0.1).map { $0 }
+        let profile = up + up.reversed()
+        let noise = jitter(count: profile.count, amplitude: 1.5)
+        let noisy = zip(profile, noise).map { min(354, max(284, $0 + $1)) }
+        let r = try XCTUnwrap(RouteElevationReducer.reduce(samples(noisy)))
+        XCTAssertEqual(r.minAltitudeM, 284)
+        XCTAssertEqual(r.maxAltitudeM, 354)
+        XCTAssertEqual(r.ascentM, 70, accuracy: 3)
+        XCTAssertEqual(r.descentM, 70, accuracy: 3)
+    }
+
+    /// Rolling ground climbs more than its range, as the real run did (100 m of
+    /// climb inside a 70 m range): 284 up to 320, down to 300, up to 354, back to
+    /// 284 is 36 + 54 = 90 m of climb and 20 + 70 = 90 m of drop.
+    func testRollingProfileCountsEveryConfirmedClimb() throws {
+        func leg(_ from: Double, _ to: Double) -> [Double] {
+            let step = from < to ? 0.2 : -0.2
+            return stride(from: from, to: to, by: step).map { $0 }
+        }
+        let profile = leg(284, 320) + leg(320, 300) + leg(300, 354) + leg(354, 284) + [284]
+        let r = try XCTUnwrap(RouteElevationReducer.reduce(samples(profile)))
+        XCTAssertEqual(r.ascentM, 90, accuracy: 0.5)
+        XCTAssertEqual(r.descentM, 90, accuracy: 0.5)
+        XCTAssertEqual(r.minAltitudeM, 284)
+        XCTAssertEqual(r.maxAltitudeM, 354, accuracy: 0.2)
+    }
+
+    /// Flat ground with plus or minus 2 m of jitter: summed sample to sample this is
+    /// hundreds of meters of phantom climb; through the dead band it is nothing.
+    func testFlatGroundJitterYieldsNoClimb() throws {
+        let flat = jitter(count: 1800, amplitude: 2).map { 300 + $0 }
+        let r = try XCTUnwrap(RouteElevationReducer.reduce(samples(flat)))
+        XCTAssertLessThan(r.ascentM, 1)
+        XCTAssertLessThan(r.descentM, 1)
+        var naive = 0.0
+        for (a, b) in zip(flat, flat.dropFirst()) where b > a { naive += b - a }
+        XCTAssertGreaterThan(naive, 100, "the jitter is real; the band is what removes it")
+    }
+
+    /// An invalid reading (negative accuracy) and one worse than the threshold are
+    /// dropped before they can touch the range or the climb.
+    func testInvalidAndInaccurateReadingsAreIgnored() throws {
+        var s = samples(Array(repeating: 300, count: 20))
+        s.insert(AltitudeSample(altitude: 900, verticalAccuracy: -1), at: 5)
+        s.insert(AltitudeSample(altitude: 10, verticalAccuracy:
+            RouteElevationReducer.maxVerticalAccuracyM + 0.5), at: 10)
+        s.insert(AltitudeSample(altitude: .nan, verticalAccuracy: 3), at: 15)
+        let r = try XCTUnwrap(RouteElevationReducer.reduce(s))
+        XCTAssertEqual(r, RouteElevation(ascentM: 0, descentM: 0,
+                                         minAltitudeM: 300, maxAltitudeM: 300))
+    }
+
+    /// Too few usable readings is not a profile, whatever the raw count.
+    func testTooFewUsableReadingsYieldsNil() {
+        let n = RouteElevationReducer.minimumUsableSamples
+        XCTAssertNil(RouteElevationReducer.reduce([]))
+        XCTAssertNil(RouteElevationReducer.reduce(samples(Array(repeating: 300, count: n - 1))))
+        XCTAssertNil(RouteElevationReducer.reduce(samples(Array(repeating: 300, count: 50),
+                                                          accuracy: -1)))
+        XCTAssertNotNil(RouteElevationReducer.reduce(samples(Array(repeating: 300, count: n))))
+    }
+
+    // MARK: - Route elevation, time, laps, brand and weather on the line
+
+    private let routeProfile = RouteElevation(ascentM: 100, descentM: 98,
+                                              minAltitudeM: 284, maxAltitudeM: 354)
+
+    /// The 2026-10-05 Runna run, as HealthKit holds it: no elevation metadata, a
+    /// route, five lap events, workout time 29:26 and elapsed 29:31.
+    private func runnaRun() -> WorkoutSummary {
+        WorkoutSummary(activityName: "Run", start: date(2026, 10, 5, 9, 43), duration: 1766,
+                       elapsed: 1771, distanceMeters: 5020, activeEnergyKcal: 380,
+                       averageHeartRateBPM: 151, maxHeartRateBPM: 170, source: "Runna",
+                       productType: "Watch8,1", isIndoor: false, stepCount: 4592,
+                       lapCount: 5, routeElevation: routeProfile)
+    }
+
+    /// Metadata is a device reading and wins: unmarked, and the route's own climb is
+    /// not printed. The range still comes from the route.
+    func testMetadataAscentWinsUnmarkedOverTheRoute() {
+        var w = runnaRun()
+        w.elevationAscendedM = 84
+        w.elevationDescendedM = 80
+        let detail = WorkoutContextFormatter.detailSuffix(for: w)
+        XCTAssertTrue(detail.contains(", ascent 84 m, descent 80 m, "))
+        XCTAssertFalse(detail.contains("(route)"))
+        XCTAssertFalse(detail.contains("ascent 100"))
+        XCTAssertTrue(detail.hasSuffix(", elevation 284 to 354 m"))
+    }
+
+    /// With only the route, the climb renders with its basis marker, and the range
+    /// follows it.
+    func testRouteOnlyElevationRendersMarkedWithTheRange() {
+        let detail = WorkoutContextFormatter.detailSuffix(for: runnaRun())
+        XCTAssertTrue(detail.hasSuffix(
+            ", ascent 100 m (route), descent 98 m (route), elevation 284 to 354 m"))
+    }
+
+    /// Workout time renders to the second, past the hour too.
+    func testWorkoutTimeRendersToTheSecond() {
+        XCTAssertTrue(WorkoutContextFormatter.baseLine(for: runnaRun(), timeZone: utc)
+            .hasPrefix("Run — 2026-10-05 09:43, 29m26s, "))
+        var long = runnaRun()
+        long.duration = 3910
+        long.elapsed = nil
+        XCTAssertTrue(WorkoutContextFormatter.baseLine(for: long, timeZone: utc)
+            .hasPrefix("Run — 2026-10-05 09:43, 1h05m10s, "))
+    }
+
+    /// Elapsed renders only for a real pause: five seconds or more over workout time.
+    func testElapsedRendersOnlyPastTheFiveSecondThreshold() {
+        XCTAssertTrue(WorkoutContextFormatter.detailSuffix(for: runnaRun())
+            .hasPrefix(", outdoor, elapsed 29m31s, "))
+        var w = runnaRun()
+        w.elapsed = 1768
+        XCTAssertFalse(WorkoutContextFormatter.detailSuffix(for: w).contains("elapsed"))
+        w.elapsed = nil
+        XCTAssertFalse(WorkoutContextFormatter.detailSuffix(for: w).contains("elapsed"))
+    }
+
+    /// A run's lap events render as a count; one lap is singular, none is nothing.
+    func testRunLapEventsRenderAsACount() {
+        XCTAssertTrue(WorkoutContextFormatter.detailSuffix(for: runnaRun()).contains(", 5 laps, "))
+        var w = runnaRun()
+        w.lapCount = 1
+        XCTAssertTrue(WorkoutContextFormatter.detailSuffix(for: w).contains(", 1 lap, "))
+        w.lapCount = nil
+        XCTAssertFalse(WorkoutContextFormatter.detailSuffix(for: w).contains(" lap"))
+    }
+
+    /// The whole 2026-10-05 line, pinned.
+    func testRunnaRunLineRendersExactly() {
+        XCTAssertEqual(WorkoutContextFormatter.line(for: runnaRun(), timeZone: utc),
+            "Run — 2026-10-05 09:43, 29m26s, 5.02 km, 380 kcal, avg HR 151, max HR 170"
+            + " (Runna, Watch8,1)"
+            + ", outdoor, elapsed 29m31s"
+            + ", pace 5:52/km (computed), cadence 156 spm (computed), 5 laps"
+            + ", ascent 100 m (route), descent 98 m (route), elevation 284 to 354 m")
+    }
+
+    /// The brand joins the attribution only when it says something the source name
+    /// does not.
+    func testBrandRendersOnlyWhenItDiffersFromTheSource() {
+        var w = runnaRun()
+        w.brandName = "runna"
+        XCTAssertTrue(WorkoutContextFormatter.baseLine(for: w, timeZone: utc)
+            .hasSuffix(" (Runna, Watch8,1)"))
+        w.brandName = "Nike Run Club"
+        XCTAssertTrue(WorkoutContextFormatter.baseLine(for: w, timeZone: utc)
+            .hasSuffix(" (Runna, Nike Run Club, Watch8,1)"))
+    }
+
+    /// The weather condition renders as a word right after the temperature.
+    func testWeatherConditionRendersAsAWordNextToTheTemperature() {
+        var w = runnaRun()
+        w.weatherTemperatureC = 14
+        w.weatherHumidityPercent = 72
+        w.weatherConditionRawValue = HKWeatherCondition.partlyCloudy.rawValue
+        XCTAssertTrue(WorkoutContextFormatter.detailSuffix(for: w)
+            .contains(", temp 14 C, partly cloudy, humidity 72%, "))
+        w.weatherConditionRawValue = HKWeatherCondition.none.rawValue
+        XCTAssertFalse(WorkoutContextFormatter.detailSuffix(for: w).contains("cloudy"))
+        var unknown = w
+        unknown.weatherConditionRawValue = 999
+        w.weatherConditionRawValue = nil
+        XCTAssertEqual(WorkoutContextFormatter.detailSuffix(for: unknown),
+                       WorkoutContextFormatter.detailSuffix(for: w),
+                       "a condition this SDK does not define renders nothing")
+    }
+
+    /// The pure table is pinned to the SDK's enum, so a reordering there fails here
+    /// rather than mislabeling the weather.
+    func testWeatherConditionTableMatchesTheSDK() {
+        let sdk: [(HKWeatherCondition, String)] = [
+            (.clear, "clear"), (.fair, "fair"), (.partlyCloudy, "partly cloudy"),
+            (.mostlyCloudy, "mostly cloudy"), (.cloudy, "cloudy"), (.foggy, "foggy"),
+            (.haze, "haze"), (.windy, "windy"), (.blustery, "blustery"), (.smoky, "smoky"),
+            (.dust, "dust"), (.snow, "snow"), (.hail, "hail"), (.sleet, "sleet"),
+            (.freezingDrizzle, "freezing drizzle"), (.freezingRain, "freezing rain"),
+            (.mixedRainAndHail, "rain and hail"), (.mixedRainAndSnow, "rain and snow"),
+            (.mixedRainAndSleet, "rain and sleet"), (.mixedSnowAndSleet, "snow and sleet"),
+            (.drizzle, "drizzle"), (.scatteredShowers, "scattered showers"),
+            (.showers, "showers"), (.thunderstorms, "thunderstorms"),
+            (.tropicalStorm, "tropical storm"), (.hurricane, "hurricane"),
+            (.tornado, "tornado"),
+        ]
+        for (condition, word) in sdk {
+            XCTAssertEqual(WorkoutContextFormatter.weatherConditionName(condition.rawValue), word)
+        }
+        XCTAssertNil(WorkoutContextFormatter.weatherConditionName(HKWeatherCondition.none.rawValue))
+        XCTAssertEqual(WorkoutContextFormatter.weatherConditionNames.count, sdk.count + 1)
+    }
+
+    /// A swim's segments are untouched by the run fields: the dynamics, detail and
+    /// splits are byte for byte what `main` rendered (only the base line's duration
+    /// gained its seconds), and lap events stay in the swim roll-up.
+    func testSwimSegmentsAreByteIdenticalToMain() {
+        let w = fullSwim()
+        XCTAssertEqual(WorkoutContextFormatter.dynamicsSuffix(for: w)
+                       + WorkoutContextFormatter.detailSuffix(for: w)
+                       + WorkoutContextFormatter.splitsSuffix(for: w),
+            ", indoor, effort 6/10 (rated), avg METs 7.2, temp 18 C, humidity 60%"
+            + ", pool 25 m, 66 laps, 1840 strokes, swim time 48m10s"
+            + ", pace 2:55/100m (computed, swim time), SWOLF 52, water 27.5 C"
+            + ", strokes: freestyle 60, breaststroke 6")
+        XCTAssertNil(w.lapCount)
+    }
+
+    /// A cycle keeps no elevation even with a route profile in hand: the rendering
+    /// scope for elevation is runs, walks and hikes.
+    func testCycleStillShowsNoElevationEvenWithARoute() {
+        var c = WorkoutSummary(activityName: "Cycle", start: date(2026, 7, 4, 7, 0),
+                               duration: 3600, distanceMeters: 30000, source: "Apple Watch")
+        c.elevationAscendedM = 320
+        c.routeElevation = routeProfile
+        c.lapCount = 4
         c.isIndoor = false
         XCTAssertEqual(WorkoutContextFormatter.detailSuffix(for: c), ", outdoor")
     }

@@ -1,3 +1,4 @@
+import CoreLocation
 import Foundation
 import HealthKit
 import UIKit
@@ -36,6 +37,9 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
             HKQuantityType(.distanceSwimming),
             HKQuantityType(.distanceWalkingRunning),
             HKQuantityType(.distanceCycling),
+            // The GPS route, read only to reduce its altitudes to ascent, descent and
+            // range for a recorder that writes no elevation metadata.
+            HKSeriesType.workoutRoute(),
         ]
         for id in quantityReadIdentifiers { types.insert(HKQuantityType(id)) }
         for id in categoryReadIdentifiers { types.insert(HKCategoryType(id)) }
@@ -321,6 +325,11 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         let onFoot = base.isFootDistance
         let isRun = w.workoutActivityType == .running
 
+        // The route is read only when the recorder wrote no ascent metadata (Apple's
+        // Workout app does; Runna and other third parties do not), and under its own
+        // hard bound, so a slow route costs its four numbers and never the line.
+        let needsRoute = onFoot && base.elevationAscendedM == nil
+
         // Each of these makes its own HKHealthStore inside the query: the store is
         // not Sendable and must never be captured across a task boundary.
         async let effort = effortScore(for: w)
@@ -337,6 +346,11 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
             try await sumOverWorkout(.stepCount, unit: .count(), workout: w)
         }
         async let splits: [Double]? = when(onFoot) { try await perKmSplits(for: w) }
+        async let route: RouteElevation? = needsRoute
+            ? await BoundedRead.orNil(within: routeReadBound) {
+                await bestEffort { try await routeElevation(for: w) }
+            }
+            : nil
 
         var s = await dynamics ?? base
         if let e = await effort {
@@ -347,7 +361,40 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         if let water = await water { s.swim?.waterTemperatureC = water }
         s.stepCount = await steps
         if let splits = await splits, !splits.isEmpty { s.splitSecondsPerKm = splits }
+        s.routeElevation = await route
         return s
+    }
+
+    /// The hard bound on one workout's route read. The whole gather shares a 1.5 s
+    /// bound and an overrun empties the ENTIRE block, so the route, the only read
+    /// here that walks a long series, gets well under half of it. A watch route of
+    /// a half-hour run is ~1800 points and reads in a fraction of this on device.
+    static let routeReadBound: Duration = .milliseconds(600)
+
+    /// The workout's route reduced to ascent, descent and altitude range, or nil.
+    /// Each `CLLocation` is mapped to its altitude and vertical accuracy at once and
+    /// dropped: no coordinate is kept, logged or returned. A workout may own several
+    /// route series (one per segment); their readings are joined in start order.
+    private static func routeElevation(for w: HKWorkout) async throws -> RouteElevation? {
+        guard HKHealthStore.isHealthDataAvailable() else { return nil }
+        let store = HKHealthStore()
+        let routesQuery = HKAnchoredObjectQueryDescriptor(
+            predicates: [.sample(type: HKSeriesType.workoutRoute(),
+                                 predicate: HKQuery.predicateForObjects(from: w))],
+            anchor: nil)
+        let routes = try await routesQuery.result(for: store).addedSamples
+            .compactMap { $0 as? HKWorkoutRoute }
+            .sorted { $0.startDate < $1.startDate }
+        guard !routes.isEmpty else { return nil }
+
+        var samples: [AltitudeSample] = []
+        for route in routes {
+            for try await location in HKWorkoutRouteQueryDescriptor(route).results(for: store) {
+                samples.append(AltitudeSample(altitude: location.altitude,
+                                              verticalAccuracy: location.verticalAccuracy))
+            }
+        }
+        return RouteElevationReducer.reduce(samples)
     }
 
     /// Run one read and flatten every failure to nil, so a thrown, denied or empty
@@ -433,15 +480,18 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         let hrStats = w.statistics(for: HKQuantityType(.heartRate))
         let avgHR = hrStats?.averageQuantity()?.doubleValue(for: bpm)
         let maxHR = hrStats?.maximumQuantity()?.doubleValue(for: bpm)
+        let onFoot = [.running, .walking, .hiking].contains(w.workoutActivityType)
         return WorkoutSummary(
             activityName: activityName(w.workoutActivityType),
             start: w.startDate,
             duration: w.duration,
+            elapsed: w.endDate.timeIntervalSince(w.startDate),
             distanceMeters: distanceMeters(for: w),
             activeEnergyKcal: kcal,
             averageHeartRateBPM: avgHR,
             maxHeartRateBPM: maxHR,
             source: w.sourceRevision.source.name,
+            brandName: w.metadata?[HKMetadataKeyWorkoutBrandName] as? String,
             productType: w.sourceRevision.productType,
             isIndoor: metaBool(w.metadata, HKMetadataKeyIndoorWorkout),
             averageMETs: metaQuantity(w.metadata, HKMetadataKeyAverageMETs,
@@ -459,6 +509,11 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
             weatherHumidityPercent: metaQuantity(w.metadata, HKMetadataKeyWeatherHumidity,
                                                  .percent())
                 .flatMap { WorkoutContextFormatter.humidityPercent(fromRaw: $0) },
+            weatherConditionRawValue: metaNumber(w.metadata, HKMetadataKeyWeatherCondition)
+                .map { Int($0) },
+            // A run's laps (manual, or a coach app's intervals) are the same `.lap`
+            // events a swim carries; swims keep their own roll-up in `swimDetail`.
+            lapCount: onFoot ? lapEventCount(w) : nil,
             swim: swimDetail(for: w))
     }
 
@@ -499,6 +554,12 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
             d.lapsByStroke = r.lapsByStroke
         }
         return d.isEmpty ? nil : d
+    }
+
+    /// The number of `.lap` events on a workout, or nil when it has none.
+    private static func lapEventCount(_ w: HKWorkout) -> Int? {
+        let n = (w.workoutEvents ?? []).filter { $0.type == .lap }.count
+        return n > 0 ? n : nil
     }
 
     // MARK: Metadata accessors

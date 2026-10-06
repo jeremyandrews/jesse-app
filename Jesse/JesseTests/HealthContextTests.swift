@@ -420,7 +420,7 @@ final class HealthContextTests: XCTestCase {
         Weight: 78.4 kg (2026-07-03)
 
         1 recent workout from Apple Health (last 48h, newest first):
-        Swim — 2026-07-04 06:30, 30m, 1500 m, 420 kcal, avg HR 132, max HR 158 (Apple Watch)
+        Swim — 2026-07-04 06:30, 30m00s, 1500 m, 420 kcal, avg HR 132, max HR 158 (Apple Watch)
         """
         XCTAssertEqual(block, expected)
     }
@@ -435,7 +435,7 @@ final class HealthContextTests: XCTestCase {
             now: now, timeZone: utc)
         XCTAssertEqual(block, """
         1 recent workout from Apple Health (last 48h, newest first):
-        Swim — 2026-07-04 06:30, 30m, 1500 m, 420 kcal, avg HR 132, max HR 158 (Apple Watch)
+        Swim — 2026-07-04 06:30, 30m00s, 1500 m, 420 kcal, avg HR 132, max HR 158 (Apple Watch)
         """)
     }
 
@@ -605,7 +605,9 @@ final class HealthContextTests: XCTestCase {
                            averageRunningPowerW: 245, groundContactTimeMs: 240,
                            verticalOscillationCm: 8.1, strideLengthM: 1.15,
                            isIndoor: false, averageMETs: 9.4,
-                           elevationAscendedM: 84, stepCount: 4400,
+                           stepCount: 4400, lapCount: 5,
+                           routeElevation: RouteElevation(ascentM: 100, descentM: 98,
+                                                          minAltitudeM: 284, maxAltitudeM: 354),
                            splitSecondsPerKm: [358, 361, 364, 359, 360, 362, 357, 363])
         }
         let w = probe(sourceLength: 1)
@@ -632,6 +634,8 @@ final class HealthContextTests: XCTestCase {
                            "rung \(rung) is the widest tier that fits")
             XCTAssertEqual(rung >= 1, !line.contains("splits/km"), "rung \(rung): splits")
             XCTAssertEqual(rung >= 2, !line.contains("avg METs"), "rung \(rung): detail")
+            XCTAssertEqual(rung >= 2, !line.contains("(route)"), "rung \(rung): route elevation")
+            XCTAssertEqual(rung >= 2, !line.contains("5 laps"), "rung \(rung): laps")
             XCTAssertEqual(rung >= 3, !line.contains("power 245 W"), "rung \(rung): dynamics")
         }
     }
@@ -657,6 +661,50 @@ final class HealthContextTests: XCTestCase {
         XCTAssertLessThanOrEqual(block.utf8.count, HealthContextFormatter.maxBytes)
         XCTAssertTrue(block.contains("5 recent workouts"), "all five workouts retained")
         XCTAssertTrue(block.contains("splits/km"), "with their splits")
+    }
+
+    /// Five newest workouts carrying EVERY segment, the new ones included (elapsed,
+    /// laps, route elevation and range, weather condition, brand), under a full daily
+    /// summary: the block stays inside the cap, keeps all five lines, and each line
+    /// is exactly one of its own tiers, shed from the right in the existing order.
+    func testFiveFullWorkoutsWithEveryNewSegmentStayUnderTheCap() {
+        let runs = (0..<5).map { i in
+            WorkoutSummary(activityName: "Run", start: date(2026, 7, 4, 5 + i, 0), duration: 3000,
+                           elapsed: 3125, distanceMeters: 9000, activeEnergyKcal: 560,
+                           averageHeartRateBPM: 152, maxHeartRateBPM: 176,
+                           source: "Apple Watch Ultra 2", brandName: "Runna",
+                           averageRunningPowerW: 248, groundContactTimeMs: 238,
+                           verticalOscillationCm: 8.3, strideLengthM: 1.18,
+                           productType: "Watch7,5", isIndoor: false, averageMETs: 9.4,
+                           effortScore: 7, effortScoreIsUserRated: true,
+                           stepCount: 4900, weatherTemperatureC: 18, weatherHumidityPercent: 60,
+                           weatherConditionRawValue: 3, lapCount: 9,
+                           routeElevation: RouteElevation(ascentM: 100, descentM: 98,
+                                                          minAltitudeM: 284, maxAltitudeM: 354),
+                           splitSecondsPerKm: Array(repeating: 361, count: 9))
+        }
+        let block = HealthContextFormatter.block(daily: fullDaily(), workouts: runs,
+                                                 now: now, timeZone: utc)!
+        XCTAssertLessThanOrEqual(block.utf8.count, HealthContextFormatter.maxBytes)
+        XCTAssertTrue(block.contains("5 recent workouts"), "all five workouts retained")
+
+        let lines = block.split(separator: "\n").map(String.init).filter { $0.hasPrefix("Run — ") }
+        XCTAssertEqual(lines.count, 5)
+        var previousRung = 0
+        for (line, w) in zip(lines, runs.sorted { $0.start > $1.start }) {
+            let base = WorkoutContextFormatter.baseLine(for: w, timeZone: utc)
+            let dyn = WorkoutContextFormatter.dynamicsSuffix(for: w)
+            let detail = WorkoutContextFormatter.detailSuffix(for: w)
+            let splits = WorkoutContextFormatter.splitsSuffix(for: w)
+            let tiers = [base + dyn + detail + splits, base + dyn + detail, base + dyn, base]
+            let rung = tiers.firstIndex(of: line)
+            XCTAssertNotNil(rung, "a line is always one whole tier")
+            XCTAssertGreaterThanOrEqual(rung ?? 0, previousRung, "older lines never keep more")
+            previousRung = rung ?? previousRung
+        }
+        XCTAssertTrue(lines[0].contains("ascent 100 m (route), descent 98 m (route), "
+                                        + "elevation 284 to 354 m"),
+                      "the newest line keeps its detail")
     }
 
     /// The whole point of the two ceilings: a maximum-size health block and a
@@ -774,6 +822,30 @@ final class HealthContextTests: XCTestCase {
     }
 
     // MARK: - Gather: per-metric failure isolation
+
+    // MARK: - Bounded single read
+
+    func testBoundedReadReturnsAFastValue() async {
+        let v = await BoundedRead.orNil(within: .seconds(2)) { 42 }
+        XCTAssertEqual(v, 42)
+    }
+
+    /// The route read's bound must hold even when the read ignores cancellation, as
+    /// a HealthKit query behind a checked continuation does: the caller resumes at
+    /// the bound with nil, and the workout line keeps everything else.
+    func testBoundedReadGivesUpOnAReadThatIgnoresCancellation() async {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let v: Int? = await BoundedRead.orNil(within: .milliseconds(100)) {
+            await withCheckedContinuation { cont in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    cont.resume(returning: 7)
+                }
+            }
+        }
+        XCTAssertNil(v)
+        XCTAssertLessThan(clock.now - started, .seconds(1))
+    }
 
     func testGatherIsolatesAFailingMetric() async {
         struct Boom: Error {}

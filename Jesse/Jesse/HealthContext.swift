@@ -809,6 +809,46 @@ nonisolated enum HealthContextTimeout {
     }
 }
 
+/// Bounds ONE best-effort read inside the gather: the read's value if it lands
+/// within `timeout`, else nil. Unlike `HealthContextTimeout`, this does not wait for
+/// the losing side to notice cancellation: a HealthKit query wrapped in a checked
+/// continuation never does, and a task group would sit on it until it finished.
+/// The read runs in its own task, is cancelled on timeout, and its late result is
+/// discarded, so the caller resumes at the bound whatever the read is doing.
+nonisolated enum BoundedRead {
+    static func orNil<T: Sendable>(within timeout: Duration,
+                                   _ read: @escaping @Sendable () async -> T?) async -> T? {
+        let gate = ResumeOnce<T?>()
+        return await withCheckedContinuation { cont in
+            gate.arm(cont)
+            let work = Task { gate.resume(await read()) }
+            Task {
+                try? await Task.sleep(for: timeout)
+                work.cancel()
+                gate.resume(nil)
+            }
+        }
+    }
+
+    /// Resumes a continuation exactly once, from whichever side gets there first.
+    nonisolated private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Value, Never>?
+
+        func arm(_ c: CheckedContinuation<Value, Never>) {
+            lock.withLock { continuation = c }
+        }
+
+        func resume(_ value: Value) {
+            let c: CheckedContinuation<Value, Never>? = lock.withLock {
+                defer { continuation = nil }
+                return continuation
+            }
+            c?.resume(returning: value)
+        }
+    }
+}
+
 // MARK: - Settings
 
 /// The persisted "attach health context" toggle. Backed by `UserDefaults` (a

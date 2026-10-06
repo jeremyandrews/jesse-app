@@ -128,6 +128,8 @@ final class HealthKitAuthorizationTypesTests: XCTestCase {
              .distanceWalkingRunning].map(\.rawValue)
         ).union([HKCategoryTypeIdentifier.sleepApneaEvent,
                  .hypertensionEvent].map(\.rawValue))
+        // The route is the only elevation a third-party recorder leaves.
+        .union([HKSeriesType.workoutRoute().identifier])
         let actual = Set(HealthContextProvider.readTypes.map(\.identifier))
         XCTAssertTrue(required.isSubset(of: actual),
                       "read set is missing \(required.subtracting(actual)) — the block would "

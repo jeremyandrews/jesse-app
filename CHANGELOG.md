@@ -14,6 +14,54 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (189)] - 2026-10-05
+
+**A run recorded by a third party app reaches the agent with its elevation, its time to
+the second and its laps.** An outdoor Runna run on Apple Watch on 2026-10-05 showed in
+Apple Fitness an elevation profile from 284 to 354 m, workout time 0:29:26, elapsed
+0:29:31 and 5 laps; the workout line sent `29m` and none of the rest. Three root causes:
+
+1. **Elevation was read only from workout metadata a third party recorder never writes.**
+   `HKMetadataKeyElevationAscended` and `HKMetadataKeyElevationDescended` come from Apple's
+   Workout app. Runna saves the GPS route instead, and the app never read routes.
+2. **Duration was rounded to the minute and elapsed time was never sent.** `HKWorkout.duration`
+   is workout time, pauses excluded, and its doc comment wrongly called it elapsed.
+3. **Run lap events were ignored.** `.lap` events were read for swims only.
+
+- **Route elevation.** `HKSeriesType.workoutRoute()` joins the read set (the existing
+  grown-set check prompts for it once). For a run, walk or hike with no ascent metadata the
+  route's locations are read and reduced at once to four numbers by the new pure
+  `RouteElevationReducer`: readings with negative vertical accuracy or worse than 10 m are
+  dropped, a change of direction counts only after 5 m of hysteresis (so flat ground jitter
+  adds nothing, and a confirmed climb is counted to its true peak), and fewer than 10 usable
+  readings yield nothing. No coordinate is kept, logged or sent. Metadata still wins and
+  renders unmarked; the route's values render `ascent 100 m (route)`, and the range
+  `elevation 284 to 354 m` follows whenever the route was read. Elevation stays off cycles.
+- **Bounded, cached route read.** A first cut of this release would never have rendered a
+  long run's climb: the route read's 600 ms bound was an unmeasured guess, a read that missed
+  it was thrown away, and nothing was cached, so a marathon's ~12,600 points were re-read
+  from HealthKit on every turn and missed the bound every time. Now the reduced numbers are
+  cached per workout UUID (`RouteElevationCache`, Application Support
+  `JesseRouteElevation/route-elevation.json`, excluded from backup, the four numbers and
+  two dates per workout, pruned to workouts that ended within the last 72 h). A hit reads
+  nothing. A miss starts one read per workout, never cancelled; the gather waits up to
+  900 ms (`BoundedRead`, which resumes at the bound even though a HealthKit query ignores
+  cancellation) and a later result lands in the cache for the next turn. A workout with no
+  route series, or a failed read, is not cached and is retried; routes with too few usable
+  readings are cached as a negative. Each read logs its series count, point count,
+  milliseconds and whether it beat the bound, never a location.
+- **Time.** The base line renders workout time to the second (`29m26s`, `1h05m10s`), and
+  the detail segment adds `elapsed 29m31s` when elapsed exceeds workout time by 5 s or
+  more. `WorkoutSummary.end` now uses the elapsed time when known.
+- **Laps.** Runs, walks and hikes render their `.lap` event count (`5 laps`); swims are
+  unchanged.
+- **Brand and weather.** `HKMetadataKeyWorkoutBrandName` joins the attribution when it
+  differs from the source name, and `HKMetadataKeyWeatherCondition` renders as a word next
+  to the temperature (`partly cloudy`), mapped in the pure layer and pinned to the SDK enum.
+- **Inventory.** `docs/workout-feed-inventory.md` lists every workout relevant metadata
+  key, quantity type and workout sub object the feed still does not read, with a
+  recommendation for each.
+
 ## [App 1.0 (188)] - 2026-10-05
 
 **Query expansion adds new words instead of rephrasing the query.** On 1.0 (187) `lost

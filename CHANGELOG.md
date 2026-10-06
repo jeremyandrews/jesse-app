@@ -37,9 +37,19 @@ Apple Fitness an elevation profile from 284 to 354 m, workout time 0:29:26, elap
   readings yield nothing. No coordinate is kept, logged or sent. Metadata still wins and
   renders unmarked; the route's values render `ascent 100 m (route)`, and the range
   `elevation 284 to 354 m` follows whenever the route was read. Elevation stays off cycles.
-- **Bounded route read.** The route read has its own 600 ms bound (`BoundedRead`), which
-  resumes the caller at the bound even though a HealthKit query ignores cancellation, so a
-  slow route drops its four numbers and never the workout line or the block.
+- **Bounded, cached route read.** A first cut of this release would never have rendered a
+  long run's climb: the route read's 600 ms bound was an unmeasured guess, a read that missed
+  it was thrown away, and nothing was cached, so a marathon's ~12,600 points were re-read
+  from HealthKit on every turn and missed the bound every time. Now the reduced numbers are
+  cached per workout UUID (`RouteElevationCache`, Application Support
+  `JesseRouteElevation/route-elevation.json`, excluded from backup, the four numbers and
+  two dates per workout, pruned to workouts that ended within the last 72 h). A hit reads
+  nothing. A miss starts one read per workout, never cancelled; the gather waits up to
+  900 ms (`BoundedRead`, which resumes at the bound even though a HealthKit query ignores
+  cancellation) and a later result lands in the cache for the next turn. A workout with no
+  route series, or a failed read, is not cached and is retried; routes with too few usable
+  readings are cached as a negative. Each read logs its series count, point count,
+  milliseconds and whether it beat the bound, never a location.
 - **Time.** The base line renders workout time to the second (`29m26s`, `1h05m10s`), and
   the detail segment adds `elapsed 29m31s` when elapsed exceeds workout time by 5 s or
   more. `WorkoutSummary.end` now uses the elapsed time when known.

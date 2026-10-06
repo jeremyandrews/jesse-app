@@ -475,6 +475,33 @@ final class WorkoutContextTests: XCTestCase {
         XCTAssertEqual(r.maxAltitudeM, 354, accuracy: 0.2)
     }
 
+    /// A marathon's worth of route, 12,600 readings (3.5 h at one a second): six
+    /// 80 m rolls between 260 and 340 m starting from 300, with 1.5 m of noise. The
+    /// noiseless climb is 40 + 5 x 80 + 40 = 480 m and the drop 6 x 80 = 480 m. The reduce time
+    /// is printed as a measurement, not asserted.
+    func testMarathonProfileReducesToItsClimbAndRange() throws {
+        let n = 12_600
+        let noise = jitter(count: n, amplitude: 1.5, seed: 7)
+        let profile = (0..<n).map { i in
+            300 + 40 * sin(2 * Double.pi * Double(i) / 2100) + noise[i]
+        }
+        let input = samples(profile)
+        let clock = ContinuousClock()
+        var result: RouteElevation?
+        let took = clock.measure { result = RouteElevationReducer.reduce(input) }
+        print("RouteElevationReducer.reduce, \(n) readings: \(took)")
+        let r = try XCTUnwrap(result)
+        // Each leg runs between a noisy peak and a noisy trough, so it can measure up
+        // to twice the noise amplitude long: seven climbing and six dropping legs.
+        let perLeg = 2 * 1.5
+        XCTAssertGreaterThanOrEqual(r.ascentM, 480 - perLeg)
+        XCTAssertLessThanOrEqual(r.ascentM, 480 + 7 * perLeg)
+        XCTAssertGreaterThanOrEqual(r.descentM, 480 - perLeg)
+        XCTAssertLessThanOrEqual(r.descentM, 480 + 6 * perLeg)
+        XCTAssertEqual(r.minAltitudeM, 260, accuracy: 1.6)
+        XCTAssertEqual(r.maxAltitudeM, 340, accuracy: 1.6)
+    }
+
     /// Flat ground with plus or minus 2 m of jitter: summed sample to sample this is
     /// hundreds of meters of phantom climb; through the dead band it is nothing.
     func testFlatGroundJitterYieldsNoClimb() throws {

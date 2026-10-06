@@ -199,7 +199,7 @@ nonisolated struct AltitudeSample: Equatable, Sendable {
 
 /// The four numbers a route's altitude profile is reduced to. Nothing else about
 /// the route is kept.
-nonisolated struct RouteElevation: Equatable, Sendable {
+nonisolated struct RouteElevation: Equatable, Codable, Sendable {
     /// Cumulative climb, meters.
     var ascentM: Double
     /// Cumulative drop, meters.

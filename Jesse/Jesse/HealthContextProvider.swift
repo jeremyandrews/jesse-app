@@ -326,8 +326,9 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         let isRun = w.workoutActivityType == .running
 
         // The route is read only when the recorder wrote no ascent metadata (Apple's
-        // Workout app does; Runna and other third parties do not), and under its own
-        // hard bound, so a slow route costs its four numbers and never the line.
+        // Workout app does; Runna and other third parties do not), through the cache,
+        // and under its own hard bound, so a slow route costs its four numbers on this
+        // turn only and never the line.
         let needsRoute = onFoot && base.elevationAscendedM == nil
 
         // Each of these makes its own HKHealthStore inside the query: the store is
@@ -347,9 +348,8 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         }
         async let splits: [Double]? = when(onFoot) { try await perKmSplits(for: w) }
         async let route: RouteElevation? = needsRoute
-            ? await BoundedRead.orNil(within: routeReadBound) {
-                await bestEffort { try await routeElevation(for: w) }
-            }
+            ? await routeCache.elevation(for: w.uuid, workoutEnd: w.endDate,
+                                         within: routeReadBound) { await readRoute(w) }
             : nil
 
         var s = await dynamics ?? base
@@ -365,18 +365,43 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         return s
     }
 
-    /// The hard bound on one workout's route read. The whole gather shares a 1.5 s
-    /// bound and an overrun empties the ENTIRE block, so the route, the only read
-    /// here that walks a long series, gets well under half of it. A watch route of
-    /// a half-hour run is ~1800 points and reads in a fraction of this on device.
-    static let routeReadBound: Duration = .milliseconds(600)
+    /// How long one gather waits for a route that is not cached yet. A read that
+    /// misses it is NOT lost: it runs on and lands in `routeCache`, so the next gather
+    /// renders it.
+    ///
+    /// The ceiling is the gather's own 1.5 s bound, which empties the whole block on
+    /// overrun. Before the route wait starts, the gather has already run the workout
+    /// sample query; the other per-workout reads run alongside the route, not after
+    /// it. 900 ms leaves 600 ms of that 1.5 s for the sample query and for those
+    /// concurrent reads to finish. No device timing went into the number: the
+    /// `route read` log line (series, points, milliseconds, inside or late) is where
+    /// the real figure comes from, and this should be tuned from it.
+    static let routeReadBound: Duration = .milliseconds(900)
 
-    /// The workout's route reduced to ascent, descent and altitude range, or nil.
-    /// Each `CLLocation` is mapped to its altitude and vertical accuracy at once and
+    /// The one route elevation cache, in Application Support, shared by every gather
+    /// for the life of the process and across launches.
+    static let routeCache = RouteElevationCache(
+        fileURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("JesseRouteElevation", isDirectory: true)
+            .appendingPathComponent("route-elevation.json"),
+        report: { r in
+            let timing = r.withinBound ? "inside bound" : "late"
+            let fate = r.cached ? "cached" : "not cached"
+            Log.health.notice("route read: \(r.seriesCount) series, \(r.pointCount) points, \(r.milliseconds) ms, \(timing), \(fate)")
+        })
+
+    /// One read of the workout's route for the cache: the reduction plus its sizes,
+    /// `.noRoutes` when the workout owns no route series, `.failed` on any error.
+    private static func readRoute(_ w: HKWorkout) async -> RouteReadResult {
+        do { return try await routeElevation(for: w) } catch { return .failed }
+    }
+
+    /// The workout's route reduced to ascent, descent and altitude range. Each
+    /// `CLLocation` is mapped to its altitude and vertical accuracy at once and
     /// dropped: no coordinate is kept, logged or returned. A workout may own several
     /// route series (one per segment); their readings are joined in start order.
-    private static func routeElevation(for w: HKWorkout) async throws -> RouteElevation? {
-        guard HKHealthStore.isHealthDataAvailable() else { return nil }
+    private static func routeElevation(for w: HKWorkout) async throws -> RouteReadResult {
+        guard HKHealthStore.isHealthDataAvailable() else { return .failed }
         let store = HKHealthStore()
         let routesQuery = HKAnchoredObjectQueryDescriptor(
             predicates: [.sample(type: HKSeriesType.workoutRoute(),
@@ -385,7 +410,7 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         let routes = try await routesQuery.result(for: store).addedSamples
             .compactMap { $0 as? HKWorkoutRoute }
             .sorted { $0.startDate < $1.startDate }
-        guard !routes.isEmpty else { return nil }
+        guard !routes.isEmpty else { return .noRoutes }
 
         var samples: [AltitudeSample] = []
         for route in routes {
@@ -394,7 +419,8 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
                                               verticalAccuracy: location.verticalAccuracy))
             }
         }
-        return RouteElevationReducer.reduce(samples)
+        return .reduced(RouteElevationReducer.reduce(samples),
+                        seriesCount: routes.count, pointCount: samples.count)
     }
 
     /// Run one read and flatten every failure to nil, so a thrown, denied or empty

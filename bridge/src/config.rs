@@ -880,6 +880,17 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `collection_edit` is granted although it too takes a local `poster_path` and
 // `background_path`; it is the one collection editor the server has, and SECURITY.md records
 // that residual read path.
+//
+// CLOCKIFY: ALL THIRTEEN TOOLS ON CLOCKIFY'S OWN HOSTED SERVER, WRITES INCLUDED.
+//
+// A live, authenticated `tools/list` against `https://api.clockify.me/mcp-server/mcp` on
+// 2026-10-06 returned thirteen tools, none annotated. Every one is granted by name, on the
+// owner's decision that read only is not required: the reads (`get_current_user_profile`,
+// `get_current_time`, `get_current_timer`, `get_summary_report`, `get_detailed_report`,
+// `list_clients`, `list_projects`, `list_tasks`, `list_tags`) and the writes (`start_timer`,
+// `stop_timer`, `log_past_time`, `create_project`). Each acts with the API key owner's
+// Clockify permissions. Never a wildcard: a tool Clockify adds later is ungranted until it is a
+// decision.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1054,7 +1065,12 @@ mcp__plex__collection_list,mcp__plex__collection_create,mcp__plex__collection_ad
 mcp__plex__collection_remove_from,mcp__plex__collection_edit,mcp__plex__collection_delete,\
 mcp__plex__media_search,mcp__plex__media_get_details,mcp__plex__media_edit_metadata,\
 mcp__plex__media_list_available_artwork,\
-mcp__plex__client_list,mcp__plex__client_get_details,mcp__plex__client_get_timelines";
+mcp__plex__client_list,mcp__plex__client_get_details,mcp__plex__client_get_timelines,\
+mcp__clockify__get_current_user_profile,mcp__clockify__get_current_time,\
+mcp__clockify__get_current_timer,mcp__clockify__start_timer,mcp__clockify__log_past_time,\
+mcp__clockify__stop_timer,mcp__clockify__get_summary_report,\
+mcp__clockify__get_detailed_report,mcp__clockify__list_clients,mcp__clockify__list_projects,\
+mcp__clockify__create_project,mcp__clockify__list_tasks,mcp__clockify__list_tags";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5298,6 +5314,56 @@ mod tests {
                 "`{tool}` is withheld by decision and must never be granted"
             );
         }
+    }
+
+    /// THE CLOCKIFY GRANT IS EXACTLY THE THIRTEEN TOOLS THE SERVER ADVERTISED ON 2026-10-06.
+    ///
+    /// Taken from a live, authenticated `tools/list` against Clockify's hosted MCP server,
+    /// which annotates none of them. Every advertised tool is granted, writes included, on the
+    /// owner's decision. Equality, so a missing grant and a grant for a name the server does
+    /// not register both fail, and a failure names the tool.
+    #[test]
+    fn the_clockify_grant_is_every_advertised_tool_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__clockify__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "get_current_user_profile",
+            "get_current_time",
+            "get_current_timer",
+            "start_timer",
+            "log_past_time",
+            "stop_timer",
+            "get_summary_report",
+            "get_detailed_report",
+            "list_clients",
+            "list_projects",
+            "create_project",
+            "list_tasks",
+            "list_tags",
+        ]
+        .iter()
+        .map(|t| format!("mcp__clockify__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the clockify grant moved; re-probe the server's tools/list and record the decision \
+             before changing this list; it moves `toolset_args`, which costs a live battery run"
+        );
+    }
+
+    /// NO WILDCARD ON THE CLOCKIFY SERVER: a wildcard grants whatever Clockify ships next.
+    #[test]
+    fn no_clockify_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__clockify__*" || e == "mcp__clockify"),
+            "a wildcard grant on the clockify server is never acceptable"
+        );
     }
 
     /// THE KUBERNETES GRANT IS EXACTLY THE TWENTY TOOLS THE PINNED SERVER REGISTERS.

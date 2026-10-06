@@ -769,6 +769,26 @@ macro_rules! mcp_plex {
     };
 }
 
+/// **The Clockify server: Tag1's time tracking, through Clockify's OWN hosted MCP server.**
+/// `type: "http"` (Streamable HTTP) at `api.clockify.me`, a public HTTPS host. The API key
+/// arrives by ENV EXPANSION in an `x-api-key` header, `${JESSE_CLOCKIFY_API_KEY}`, which the
+/// CLI substitutes from the child's environment; the literal key is absent from this const,
+/// from the `--mcp-config` argument and from every file, and the variable is set in the
+/// LaunchAgent plist. Clockify does NOT accept the key as `Authorization: Bearer` (measured
+/// 2026-10-06: `tools/list` answers either way, but every call made with a bearer fails), so
+/// Codex reaches the same variable through `env_http_headers`, not `bearer_token_env_var`.
+///
+/// **EVERY ADVERTISED TOOL IS GRANTED, WRITES INCLUDED.** A live, authenticated `tools/list`
+/// on 2026-10-06 returned thirteen tools carrying no annotations, and
+/// [`crate::DEFAULT_ALLOWED_TOOLS`] grants all thirteen by name: the reads, and
+/// `start_timer`, `stop_timer`, `log_past_time` and `create_project`. Each acts with the key
+/// owner's Clockify permissions. Read SECURITY.md before changing this.
+macro_rules! mcp_clockify {
+    () => {
+        r#""clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}}"#
+    };
+}
+
 /// The five house servers, in order.
 macro_rules! house_servers {
     () => {
@@ -1279,7 +1299,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: &str 
 );
 
 /// The twenty-server set PLUS **`plex`**: every main turn on BOTH harnesses from bridge
-/// 0.166.0. Twenty-one servers.
+/// 0.166.0 until `clockify` landed in 0.167.0. Twenty-one servers.
 ///
 /// What it adds is the owner's Plex media server on the LAN: one new credential (a Plex token,
 /// held by the `plex-mcp` launcher and never by the bridge), one new LAN host, read access to
@@ -1290,6 +1310,43 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: &str 
 /// What it also adds is a new source of UNTRUSTED TEXT: titles, summaries, tags and collection
 /// names are whatever the library's metadata agents fetched or anyone with write access to the
 /// server set, at the same trust level as the message bodies this set already carries.
+///
+/// **RETIRED AS THE MAIN SET IN 0.167.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex`]
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.166.0 until 0.167.0.
+pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: &str = concat!(
+    r#"{"mcpServers":{"#,
+    messages_servers!(),
+    ",",
+    mcp_build!(),
+    ",",
+    mcp_places!(),
+    ",",
+    mcp_inbound!(),
+    ",",
+    mcp_kubernetes!(),
+    ",",
+    mcp_rybbit!(),
+    ",",
+    mcp_tag1!(),
+    ",",
+    mcp_plex!(),
+    "}}"
+);
+
+/// The twenty-one-server set PLUS **`clockify`**: every main turn on BOTH harnesses from
+/// bridge 0.167.0. Twenty-two servers.
+///
+/// What it adds is Tag1's Clockify workspace through Clockify's own hosted MCP server: one new
+/// credential (`JESSE_CLOCKIFY_API_KEY`, in the plist, expanded by the CLI into an `x-api-key`
+/// header), one new public host (`api.clockify.me`), read access to time reports, clients,
+/// projects, tasks and tags, and the power to start and stop timers, log time and create
+/// projects, all with the key owner's Clockify permissions. See the `mcp_clockify!`
+/// declaration and SECURITY.md.
+///
+/// What it also adds is a new source of UNTRUSTED TEXT: time entry descriptions and project,
+/// client, task and tag names are whatever anyone in the workspace typed, at the same trust
+/// level as the message bodies this set already carries.
 ///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
@@ -1312,6 +1369,8 @@ pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     mcp_tag1!(),
     ",",
     mcp_plex!(),
+    ",",
+    mcp_clockify!(),
     "}}"
 );
 
@@ -1630,7 +1689,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetes
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex => READ_ALLOWED_TOOLS,
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify => READ_ALLOWED_TOOLS,
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
         // row-keyed argv exists for; see [`REPLIES_ALLOWED_TOOLS`].
         McpSet::Replies => REPLIES_ALLOWED_TOOLS,
@@ -2944,11 +3004,25 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                21,
+                22,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
-                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1 and plex \
-                 and nothing else: {mcp:?}"
+                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex and \
+                 clockify and nothing else: {mcp:?}"
+            );
+            // THE CLOCKIFY KEY IS A PLACEHOLDER, NEVER A VALUE. The `x-api-key` header must
+            // carry the literal `${JESSE_CLOCKIFY_API_KEY}` for the CLI to expand from the
+            // child's environment; anything else is either a key baked into argv or a server
+            // with no credential.
+            assert_eq!(
+                servers["clockify"],
+                serde_json::json!({
+                    "type": "http",
+                    "url": "https://api.clockify.me/mcp-server/mcp",
+                    "headers": {"x-api-key": "${JESSE_CLOCKIFY_API_KEY}"}
+                }),
+                "{label}: the clockify server is declared with an unexpanded key placeholder: \
+                 {mcp:?}"
             );
             // THE PLEX SERVER IS THE BARE LAUNCHER WITH NO ARGUMENTS. Its URL and token live in
             // the host launcher; an argument here would be a value on argv, in `ps` and in the
@@ -3848,7 +3922,7 @@ mod tests {
     const GOLDEN_QMD_MCP: &str = concat!(
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         home_assistant_mcp_url!(),
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]}}}"#
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}}}}"#
     );
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
 
@@ -3889,44 +3963,67 @@ mod tests {
         let main = servers(MAIN_CHILD_MCP_CONFIG);
         for (label, older, added) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
+                vec!["clockify"],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["plex"],
+                vec!["clockify", "plex"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["plex", "tag1"],
+                vec!["clockify", "plex", "tag1"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["plex", "tag1", "rybbit"],
+                vec!["clockify", "plex", "tag1", "rybbit"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["plex", "tag1", "rybbit", "kubernetes"],
+                vec!["clockify", "plex", "tag1", "rybbit", "kubernetes"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["plex", "tag1", "rybbit", "kubernetes", "inbound"],
+                vec![
+                    "clockify",
+                    "plex",
+                    "tag1",
+                    "rybbit",
+                    "kubernetes",
+                    "inbound",
+                ],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 MESSAGES_BUILD_MCP_CONFIG,
-                vec!["plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
+                vec![
+                    "clockify",
+                    "plex",
+                    "tag1",
+                    "rybbit",
+                    "kubernetes",
+                    "inbound",
+                    "places",
+                ],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,
-                vec!["plex", "tag1", "rybbit", "inbound", "places", "build"],
+                vec![
+                    "clockify", "plex", "tag1", "rybbit", "inbound", "places", "build",
+                ],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 MESSAGES_MCP_CONFIG,
                 vec![
+                    "clockify",
                     "plex",
                     "tag1",
                     "rybbit",

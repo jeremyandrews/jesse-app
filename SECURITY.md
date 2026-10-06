@@ -168,9 +168,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **21 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **22 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `clockify` — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -899,6 +899,7 @@ and read-only). Only the servers named in that config load:
 | `rybbit` | tag1.com web analytics, **read only**, added 2026-10-01 — twenty-eight `mcp__rybbit__*` read tools, no write tool. See [Rybbit](#rybbit-web-analytics-read-only-2026-10-01) |
 | `tag1` | Tag1's public website, **read only**, added 2026-10-02 — six `mcp__tag1__*` read tools, no credential, no write or contact tool. See [tag1.com](#tag1com-public-site-read-only-2026-10-02) |
 | `plex` | The owner's LAN Plex server, added 2026-10-04: forty of fifty-five `mcp__plex__*` tools: reads, search, and collection, playlist and metadata edits. Nothing that deletes media, runs maintenance, shares, plays back or touches the host's files. See [Plex](#plex-lan-media-server-reads-and-collection-edits-2026-10-04) |
+| `clockify` | Tag1's Clockify workspace through Clockify's hosted server, added 2026-10-06: all thirteen `mcp__clockify__*` tools, reads plus timer, time entry and project creation writes, acting with the API key owner's permissions. See [Clockify](#clockify-time-tracking-every-advertised-tool-2026-10-06) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1400,6 +1401,55 @@ The Plex server is on the LAN, so on macOS the process tree that reaches it need
 Network grant. A turn that gets `EHOSTUNREACH` to the Plex host is missing that grant, not
 broken.
 
+### Clockify (time tracking, every advertised tool, 2026-10-06)
+
+Bridge 0.167.0 adds Clockify's own hosted MCP server to every main turn on **both harnesses in
+the same change**, as the twenty-second server. It is `clockify`, `type: "http"` (Streamable
+HTTP) at `https://api.clockify.me/mcp-server/mcp`, a public HTTPS host run by Clockify.
+
+#### The credential
+
+The server takes a Clockify API key in an `x-api-key` header, and **the key goes to Clockify**.
+Every tool acts with **the key owner's Clockify permissions**: whatever that user can see and do
+in the workspace, a turn can see and, for the write tools below, do.
+
+The key is `JESSE_CLOCKIFY_API_KEY` in the bridge LaunchAgent plist's `EnvironmentVariables`,
+and nowhere else: not in the repo, an argv, a record, a fixture or a log.
+
+- **Claude Code** gets the header as `"x-api-key": "${JESSE_CLOCKIFY_API_KEY}"`, which the CLI
+  expands from the child's environment. A golden test pins the unexpanded placeholder.
+- **Codex** gets `env_http_headers = {"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}`: Codex reads the
+  variable by name and builds the header itself. The bearer route that `homeassistant` and
+  `rybbit` use does not work here: measured on 2026-10-06, Clockify answers `tools/list` with
+  the key sent as `Authorization: Bearer`, but every tool call made that way fails as
+  unauthenticated. A test asserts the Codex argv carries the variable name, no
+  `bearer_token_env_var`, and no literal `${JESSE_CLOCKIFY_API_KEY}`.
+
+#### Granted: all thirteen tools
+
+A live, authenticated `tools/list` on 2026-10-06 returned thirteen tools, none annotated. On the
+owner's decision every one is granted, by name, never `mcp__clockify__*`, and a test pins the
+thirteen by equality:
+
+- **Reads:** `get_current_user_profile`, `get_current_time`, `get_current_timer`,
+  `get_summary_report`, `get_detailed_report`, `list_clients`, `list_projects`, `list_tasks`,
+  `list_tags`.
+- **Writes:** `start_timer`, `stop_timer`, `log_past_time`, `create_project`.
+
+#### What it adds to the risk
+
+- **One new credential**, the owner's Clockify API key, sent to Clockify on every call.
+- **One new public host**, `api.clockify.me`.
+- **Workspace-wide reads.** The summary and detailed reports cover every user the key owner
+  can report on, so a turn can read the team's hours, projects and clients.
+- **Writes to the time record.** A phone-injected turn can start or stop the owner's timer, log
+  past time entries and create projects. None of that deletes anything, and there is no delete
+  tool on the server, but a wrong entry lands in Tag1's billing data until someone removes it.
+  Accepted, on the owner's decision that read only is not required.
+- **A new source of untrusted text.** Time entry descriptions and project, client, task and tag
+  names are whatever anyone in the workspace typed, and they enter the turn at the same trust
+  level as message bodies.
+
 ### Roon (no auth, 2026-08-07)
 
 `unified-hifi-control` (open-horizon-labs), reached over Streamable HTTP on the
@@ -1728,6 +1778,12 @@ Codex's form is the bare command with its forty-tool `enabled_tools` and the sam
 auto-approve. None of its tools is annotated at all, so the auto-approve changes nothing for
 it today; it is there so a future release that annotates its edit tools as destructive does
 not silently cancel them on Codex alone.
+
+**`clockify` (0.167.0) followed the same rule.** It is an HTTP server whose key travels in an
+`x-api-key` header, which the bearer table cannot express, so Codex gets a second table beside
+`CODEX_MCP_BEARER_ENV`: `CODEX_MCP_HEADER_ENV`, rendered as `env_http_headers`, which names the
+header and the variable and never carries the value. Its thirteen-tool `enabled_tools` and the
+auto-approve match Claude Code's grant exactly.
 
 **What the shared set does not make shared** is the read boundary: a Codex child reads whatever
 the bridge's unix user can read, and a Claude Code child is held to its `Read` allowlist. The

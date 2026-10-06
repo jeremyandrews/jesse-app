@@ -148,6 +148,14 @@
 //! launcher reads its own URL and token. Every non-main row on either harness is byte for byte
 //! unchanged.
 //!
+//! **AND AGAIN, in bridge 0.167.0, for `clockify`, on BOTH harnesses' three main sites.**
+//! Claude Code's three gained or lost no argument: the `--mcp-config` digest moved on all three
+//! and the `--allowedTools` digest on the two write sites only. Codex's three each grew by eight
+//! arguments (197 → 205, 205 → 213, 205 → 213): `url`, `env_http_headers`, `enabled_tools` and
+//! `default_tools_approval_mode` for `clockify`. `env_http_headers` names the header and the
+//! variable, never the key, and there is no `bearer_token_env_var`, because Clockify rejects a
+//! bearer. Every non-main row on either harness is byte for byte unchanged.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

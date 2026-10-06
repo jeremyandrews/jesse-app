@@ -1927,8 +1927,8 @@ mod tests {
         // main turn actually spawns is re-probed on every battery. Pinning a retired label
         // here would quietly stop testing anything the moment the main set moved — which is
         // exactly what 0.146.0 did to `MessagesBuildPlacesInbound`, 0.163.0 to
-        // `MessagesBuildPlacesInboundKubernetes`, 0.164.0 to `…Rybbit` and 0.166.0 to `…Tag1`.
-        let main_turn = McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex.label();
+        // `MessagesBuildPlacesInboundKubernetes`, 0.164.0 to `…Rybbit`, 0.166.0 to `…Tag1` and 0.167.0 to `…Plex`.
+        let main_turn = McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify.label();
         assert!(
             read_row_passes(&record(), &format!("read/{main_turn}")),
             "precondition: the main-turn read row passes, which is why the rule cannot be \

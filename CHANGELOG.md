@@ -14,6 +14,55 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (190)] - 2026-10-06
+
+**The Mac app attaches photos, screenshots and PDFs, through the same pipeline as the phone.**
+Root cause: the attachment pipeline lived in the iOS target folder, partly on UIKit
+(`JesseAttachment`, `AttachmentLimits`, `AttachmentDownscaler`, `AttachmentThumbnail`,
+`ComposerPaste`, `PasteAttachment`), and the `Jesse Mac` target compiles only its own folder plus
+JesseKit, so it never compiled any of it. With nothing to stage, `MacCoordinator.post` hard coded
+`attachments: []` on every turn, and the Mac transcript never drew `turn.attachments`.
+
+- **One pipeline, in JesseNetworking.** The six types moved there (both apps already link it, and
+  it already holds `JesseRequest.Attachment` and `FrugalPolicy`, so no dependency edge was added).
+  The two `UIImage.jpegData` encodes and the paste fallback's `UIImage.pngData` are now ImageIO
+  `CGImageDestination` (`AttachmentImageEncoding`); the PDF thumbnail renders the first page with
+  PDFKit into a CoreGraphics bitmap instead of `PDFPage.thumbnail`, whose return type differs per
+  platform. The iOS copies are deleted; only `PasteAttachment.pngData(from: UIImage)` stays in the
+  iOS target, beside its pasteboard reader.
+- **One staging function.** `AttachmentStaging.stage` (downscale if over the cap, sniff, name, run
+  the caps) is the body of the phone's `addAttachment`, lifted out unchanged. The phone calls it
+  from its `addAttachment`; every Mac source calls the same function. The wire mapping
+  (`JesseAttachment.wire`) and the off main preview step (`AttachmentThumbnail.previews`) are
+  shared the same way.
+- **Mac sources.** A paperclip menu beside the model picker: Photo or Image, PDF Document (both
+  multiple selection), From Photos (`PhotosPicker`), and Audio Recording, the existing transcribe
+  action moved into the menu (audio is still text only, never an attachment). Paste in the
+  composer stages an image or PDF on the clipboard, reading concrete types in the shared order and
+  keeping bytes verbatim (a screenshot stays PNG, a photo stays JPEG or HEIC; a TIFF only image
+  becomes PNG); a Finder copied file is read as the file, not its icon; text paste is untouched.
+  Dropping image or PDF files on the composer stages them, several at once. Continuity Camera's
+  Take Photo and Scan Documents are offered from the text view's context menu
+  (`validRequestor(forSendType:returnType:)` and `readSelection(from:)`) and staged as attachments.
+- **Chips, gate, send, history.** The phone's removable chips and error line; the paperclip is
+  disabled while a turn runs or at the file cap. A staged file makes an empty composer sendable
+  (`MacSendGate` counts it). The send maps staged files onto the request exactly as iOS does, a
+  turn with files never takes the on device vault answer path, previews are made off the main
+  actor after the user turn is saved (the full bytes are never persisted), and the transcript
+  draws them with the phone's preview row.
+- **Drafts.** Staged files ride `ComposerDrafts` in memory on the Mac as on the phone, and are
+  cleared only when a send is durably staged.
+- **iOS is unchanged in behavior.** Same sources, caps, names and verbatim bytes. The bytes of a
+  re encode (an over cap image downscaled to JPEG, a TIFF paste turned into PNG) now come from
+  `CGImageDestination` rather than `UIImage`, at the same quality settings.
+- **Tests.** `AttachmentPipelineTests` (JesseKit, run on macOS): sniffing, verbatim staging, the
+  oversized image downscale and `.jpg` rename, the count, per file and total caps with their
+  messages, the wire mapping, thumbnails, and the paste rules. `MacAttachmentSendTests`: a PNG and
+  a PDF reach the request with sniffed MIMEs and base64 (on `main` the request carried
+  `attachments: []`), previews land on the user turn, empty text plus a file sends.
+  `MacAttachmentReaderTests`: paste, Continuity Camera and drop over synthetic pasteboards and
+  item providers.
+
 ## [Bridge 0.167.0] - 2026-10-06
 
 **Bridge turns can use Clockify through Clockify's own hosted MCP server, on both harnesses.**

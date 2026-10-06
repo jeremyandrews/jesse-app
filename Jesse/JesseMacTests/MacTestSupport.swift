@@ -71,6 +71,7 @@ final class MacFakeBridgeClient: BridgeClientProtocol, @unchecked Sendable {
     private var _sentTexts: [String] = []
     private var _sentModes: [JesseMode] = []
     private var _sentSessionIds: [String?] = []
+    private var _sentAttachments: [[JesseRequest.Attachment]] = []
 
     var hydrateCalls: [(conversationId: String, after: String?)] { lock.withLock { _hydrateCalls } }
     var deletedCalls: [String] { lock.withLock { _deleted } }
@@ -83,6 +84,9 @@ final class MacFakeBridgeClient: BridgeClientProtocol, @unchecked Sendable {
     var sentModes: [JesseMode] { lock.withLock { _sentModes } }
     /// The `session_id` each turn resumed, if any — nil is a conversation that resumes nothing.
     var sentSessionIds: [String?] { lock.withLock { _sentSessionIds } }
+    /// The files each turn carried, exactly as they would reach the bridge (base64 and the
+    /// declared MIME). One entry per `send`; an empty array is a turn with no files.
+    var sentAttachments: [[JesseRequest.Attachment]] { lock.withLock { _sentAttachments } }
     /// Every `result(jobId:)` poll, in order — so a test can assert that an abandoned stream
     /// was actually resolved through the poll path rather than by luck.
     var resultCalls: [String] { lock.withLock { _resultCalls } }
@@ -151,6 +155,7 @@ final class MacFakeBridgeClient: BridgeClientProtocol, @unchecked Sendable {
                 _sentTexts.append(text)
                 _sentModes.append(mode)
                 _sentSessionIds.append(sessionId)
+                _sentAttachments.append(attachments)
             }
             throw sendError
         }
@@ -159,6 +164,7 @@ final class MacFakeBridgeClient: BridgeClientProtocol, @unchecked Sendable {
             _sentTexts.append(text)
             _sentModes.append(mode)
             _sentSessionIds.append(sessionId)
+            _sentAttachments.append(attachments)
             // Echo the id back the way the bridge does, so the Mac's adopt-and-stamp path is
             // exercised rather than bypassed.
             switch sendHandler?(text) ?? sendResult {

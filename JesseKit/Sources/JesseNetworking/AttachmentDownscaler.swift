@@ -1,7 +1,5 @@
 import Foundation
-import UIKit
 import ImageIO
-import JesseNetworking
 
 // Fit an oversized IMAGE under the per-file attachment cap by re-encoding it as a
 // smaller JPEG, so a >10 MB photo can still attach instead of being rejected with
@@ -16,13 +14,15 @@ import JesseNetworking
 // it exactly as before.
 //
 // Pure/stateless and `nonisolated` (ImageIO + CPU only), so it's safe off the
-// main actor and is driven by synthetic images in tests. Mirrors
+// main actor and is driven by synthetic images in tests. The final encode is ImageIO's
+// `CGImageDestination` (see `AttachmentImageEncoding`), which both platforms have; it was
+// `UIImage.jpegData`, which is why this could not compile for the Mac. Mirrors
 // `AttachmentThumbnail`'s ImageIO approach, which decodes a reduced image and
 // honors EXIF orientation via `kCGImageSourceCreateThumbnailWithTransform`.
-nonisolated enum AttachmentDownscaler {
+public nonisolated enum AttachmentDownscaler {
     /// JPEG quality for the re-encode. High enough to stay visually clean, low
     /// enough to make a real dent in byte size.
-    static let jpegQuality: CGFloat = 0.85
+    public static let jpegQuality: CGFloat = 0.85
     /// Aim under the raw cap (not exactly at it) so a boundary result doesn't flap
     /// around the limit.
     static let targetFraction = 0.9
@@ -45,17 +45,16 @@ nonisolated enum AttachmentDownscaler {
     /// The output is always JPEG regardless of input format (an over-cap HEIC/PNG
     /// becomes a JPEG); use `jpegFilename(from:)` to fix up the display name.
     ///
-    /// `cap` is passed in (not defaulted to `AttachmentLimits.maxBytesPerFile`)
-    /// because this unit is `nonisolated` and that constant is MainActor-isolated —
-    /// a default argument would evaluate in a nonisolated context and not compile.
-    /// The production caller (`addAttachment`, on the main actor) supplies the cap.
+    /// `cap` is passed in rather than read from `AttachmentLimits` so a test can drive the
+    /// re-encode loop with a tiny image; the production caller (`AttachmentStaging.stage`)
+    /// supplies the real one.
     ///
     /// `frugal` adds a SECOND, independent reason to re-encode: on a metered link an image
     /// is capped by PIXELS as well as by bytes, so a 3 MB photo that fits the size cap
     /// comfortably is still sent as a 1280px JPEG. The byte-verbatim invariant is
     /// preserved exactly where it was — with the policy inactive, `frugalLongEdge` is nil
     /// and the first line below is the whole behaviour, unchanged.
-    static func fitToCap(_ data: Data, cap: Int, frugal: FrugalPolicy = .off) -> Data? {
+    public static func fitToCap(_ data: Data, cap: Int, frugal: FrugalPolicy = .off) -> Data? {
         let frugalLongEdge = frugal.attachmentMaxLongEdge
         guard data.count > cap || frugalLongEdge != nil else { return nil }            // under cap, not frugal → verbatim, never decoded
         guard let mime = JesseAttachment.sniffMime(data), mime.hasPrefix("image/") else { return nil } // non-image → leave to caps
@@ -77,7 +76,7 @@ nonisolated enum AttachmentDownscaler {
 
     /// The display name for a downscaled attachment: the original base name with a
     /// `.jpg` extension, since the output is always JPEG regardless of input format.
-    static func jpegFilename(from name: String) -> String {
+    public static func jpegFilename(from name: String) -> String {
         let base = (name as NSString).deletingPathExtension
         return base.isEmpty ? "image.jpg" : "\(base).jpg"
     }
@@ -107,6 +106,6 @@ nonisolated enum AttachmentDownscaler {
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }
-        return UIImage(cgImage: cg).jpegData(compressionQuality: quality)
+        return AttachmentImageEncoding.jpeg(cg, quality: quality)
     }
 }

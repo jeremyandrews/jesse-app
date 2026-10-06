@@ -35,6 +35,10 @@ struct ComposerTextView: NSViewRepresentable {
     /// closure is the same `send()` the send button calls, and that function's guard (which the
     /// button's `disabled` state mirrors) stays the single source of truth.
     var onSend: () -> Void
+    /// Invoked when a Paste, a drop onto the text, or Continuity Camera brings an image or a
+    /// PDF: the items read off the pasteboard, for the composer to stage as attachments. When
+    /// nil the text view keeps AppKit's own behaviour for all three. Text is never routed here.
+    var onMedia: (([MacMediaItem]) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
 
@@ -42,6 +46,7 @@ struct ComposerTextView: NSViewRepresentable {
         let textView = ComposerNSTextView()
         textView.delegate = context.coordinator
         textView.onSend = onSend
+        textView.onMedia = onMedia
         textView.placeholder = placeholder
         textView.string = text
 
@@ -70,6 +75,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
 
+        // Accept image and PDF drags as well as the text and file drags a text view already
+        // takes, so a Photos item or a screenshot thumbnail reaches `performDragOperation`.
+        textView.registerForDraggedTypes(
+            Array(Set(textView.registeredDraggedTypes + MacPasteboardMedia.pasteboardTypes + [.fileURL])))
+
         let scrollView = NSScrollView()
         scrollView.documentView = textView
         scrollView.drawsBackground = false
@@ -97,6 +107,7 @@ struct ComposerTextView: NSViewRepresentable {
         // Refreshed every update, not captured once: the closure reads the view's current state,
         // so a stale one would send a stale draft.
         textView.onSend = onSend
+        textView.onMedia = onMedia
         textView.placeholder = placeholder
         context.coordinator.apply(text, to: textView)
     }
@@ -188,10 +199,84 @@ nonisolated enum ComposerHeight {
     }
 }
 
-/// The composer's `NSTextView`. Its whole job is the Return key; everything else is inherited.
+/// The composer's `NSTextView`. Its job is the Return key, and routing media (a pasted, dropped
+/// or Continuity Camera image or PDF) to the composer's attachments instead of into the text.
+/// Everything else is inherited.
 final class ComposerNSTextView: NSTextView {
     /// Invoked when a key press means "send".
     var onSend: (() -> Void)?
+    /// Invoked with the media read off a pasteboard (see `ComposerTextView.onMedia`).
+    var onMedia: (([MacMediaItem]) -> Void)?
+
+    // MARK: Media: Paste, drop, Continuity Camera
+
+    /// Hand `pasteboard`'s media to the composer, if it has any and the composer takes it.
+    /// False means "not media": the caller falls through to AppKit's text behaviour.
+    @discardableResult
+    func routeMedia(from pasteboard: NSPasteboard) -> Bool {
+        guard let onMedia, let items = MacPasteboardMedia.read(pasteboard) else { return false }
+        onMedia(items)
+        return true
+    }
+
+    /// Paste: an image or a PDF on the clipboard is staged, verbatim; text pastes as text.
+    override func paste(_ sender: Any?) {
+        if routeMedia(from: .general) { return }
+        super.paste(sender)
+    }
+
+    /// Paste and Match Style is the same decision; there is no style to match on a photo.
+    override func pasteAsPlainText(_ sender: Any?) {
+        if routeMedia(from: .general) { return }
+        super.pasteAsPlainText(sender)
+    }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        // `isRichText` is false, so AppKit would grey Paste out for a clipboard holding only
+        // an image. With media routing on, an image or a PDF is something to paste.
+        if item.action == #selector(paste(_:)) || item.action == #selector(pasteAsPlainText(_:)),
+           onMedia != nil, MacPasteboardMedia.hasMedia(.general) {
+            return isEditable
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    /// A drag carrying an image or PDF (a Finder file, a Photos item, a screenshot thumbnail,
+    /// a Preview page) is offered as a copy into the attachments, not as a path in the text.
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        if onMedia != nil, MacPasteboardMedia.hasMedia(sender.draggingPasteboard) { return .copy }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        if onMedia != nil, MacPasteboardMedia.hasMedia(sender.draggingPasteboard) { return .copy }
+        return super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        if routeMedia(from: sender.draggingPasteboard) { return true }
+        return super.performDragOperation(sender)
+    }
+
+    /// CONTINUITY CAMERA. AppKit offers "Take Photo" and "Scan Documents" (the iPhone's
+    /// camera, from this text view's context menu) only to a responder that says it can take
+    /// an image back. A plain-text view cannot, so this one says yes for image and PDF return
+    /// types when nothing is being sent, and `readSelection(from:)` then stages what comes
+    /// back as an attachment, never into the text. This is the Mac's Take Photo: no capture
+    /// view of its own and no camera permission, because the camera is the phone's.
+    override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?,
+                                 returnType: NSPasteboard.PasteboardType?) -> Any? {
+        if onMedia != nil, isEditable, (sendType == nil || sendType?.rawValue.isEmpty == true),
+           let returnType, MacPasteboardMedia.isMediaType(returnType.rawValue) {
+            return self
+        }
+        return super.validRequestor(forSendType: sendType, returnType: returnType)
+    }
+
+    override func readSelection(from pboard: NSPasteboard) -> Bool {
+        if routeMedia(from: pboard) { return true }
+        return super.readSelection(from: pboard)
+    }
 
     /// Drawn when the composer is empty. `NSTextView` has no placeholder of its own.
     var placeholder: String = "" {

@@ -6,6 +6,7 @@ import JesseNetworking
 import JesseConversations
 import JesseSpeech
 import JesseVault
+import PhotosUI
 import UniformTypeIdentifiers
 
 // One conversation: the transcript (hydrated from the bridge on open, cache-first) plus
@@ -25,9 +26,9 @@ struct MacThreadDetailView: View {
     @State private var draft: String = ""
     @State private var mode: JesseMode = .ask
 
-    /// Attaching a RECORDING, which on this platform means transcribing it: the Mac has
-    /// no attachment pipeline (it never gained one — the phone's chips and caps are
-    /// iOS-only), and it does not need one here: what lands in the draft is text.
+    /// Attaching a RECORDING, which means transcribing it: audio is never a file attachment
+    /// on either platform (a turn attachment can reach a hosted model, and audio must not),
+    /// so what lands in the draft is text.
     ///
     /// The same model, the same Studio-first transcriber and the same views as the iPhone;
     /// only the way a file is chosen differs. On the Studio itself the bridge is reached over
@@ -40,7 +41,19 @@ struct MacThreadDetailView: View {
             let config = KeychainConfigStore(service: MacConfigStore.keychainService).load()
             return StudioEndpoint(baseURL: config.endpoint("/"), token: config.token)
         })))
-    @State private var showAudioImporter = false
+    /// The one file panel this composer presents, and what it is choosing. One presenter
+    /// rather than three: SwiftUI honours only one `fileImporter` per view chain, and the
+    /// kind is kept after the panel closes so its completion knows what was picked.
+    @State private var showImporter = false
+    @State private var importKind: MacFileImportKind = .images
+
+    // ── Staged FILES: images and PDFs, through the same `AttachmentStaging` as the phone.
+    /// The composer's staged files, shown as chips and sent with the next turn.
+    @State private var attachments: [JesseAttachment] = []
+    /// Why the last file was refused, in the composer's error line. Nil almost always.
+    @State private var attachError: String?
+    @State private var showPhotosPicker = false
+    @State private var photoItems: [PhotosPickerItem] = []
 
     // ── The DURABLE half of the composer ────────────────────────────────────────────
     //
@@ -154,8 +167,8 @@ struct MacThreadDetailView: View {
 
     /// Put the composer back the way the user left it. One call into the shared
     /// `ComposerDrafts.restore` — the already-sent check, the notice and the one-shot
-    /// markers all live there, so this shell cannot grow its own idea of them. This Mac
-    /// has no attachment pipeline, so `restored.files` is nothing to it.
+    /// markers all live there, so this shell cannot grow its own idea of them. Staged files
+    /// come back too, from memory only (see `ComposerDraftStore`'s header), as on the phone.
     private func restoreDraft() {
         guard !didRestoreDraft else {
             // Appearing again on a composer whose text is still live: nothing to restore, but
@@ -168,6 +181,9 @@ struct MacThreadDetailView: View {
             for: thread, newestUserTurn: newestUserTurn,
             contextStillAttached: coordinator.attachedContext(for: thread.id) != nil)
         draft = restored.text
+        attachments = restored.files.map {
+            JesseAttachment(filename: $0.filename, mime: $0.mime, data: $0.data)
+        }
         draftNotice = restored.notice
     }
 
@@ -183,6 +199,9 @@ struct MacThreadDetailView: View {
     private var composerState: ComposerDraftCapture {
         ComposerDraftCapture(
             text: draft,
+            files: attachments.map {
+                ComposerDraftFile(filename: $0.filename, mime: $0.mime, data: $0.data)
+            },
             pendingRecording: recording.isInFlight ? recording.sourceName : nil,
             contextLabel: coordinator.attachment(for: thread.id)?.contextLabel)
     }
@@ -314,7 +333,8 @@ struct MacThreadDetailView: View {
             // This conversation's own error first, then the app-wide one (a failed sync), which
             // is what `error(for:)` resolves: an error belonging to another conversation's turn
             // never appears here.
-            if let error = coordinator.error(for: thread.id) ?? recording.errorMessage {
+            // A refused file first: it answers what the person just did.
+            if let error = attachError ?? coordinator.error(for: thread.id) ?? recording.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -364,6 +384,9 @@ struct MacThreadDetailView: View {
             if captureOffer.isOffered {
                 MacCaptureOfferNotice()
             }
+            if !attachments.isEmpty {
+                MacAttachmentChips(attachments: attachments, onRemove: remove)
+            }
             HStack(alignment: .bottom, spacing: 10) {
                 Picker("", selection: $mode) {
                     ForEach(JesseMode.allCases) { m in Text(m.label).tag(m) }
@@ -382,16 +405,7 @@ struct MacThreadDetailView: View {
                                    config: coordinator.configStore.config)
                     .disabled(running)
 
-                Button {
-                    recording.dismissError()
-                    showAudioImporter = true
-                } label: {
-                    Image(systemName: "waveform")
-                }
-                .buttonStyle(.plain)
-                .help("Transcribe an audio recording into this message")
-                .accessibilityLabel("Transcribe a recording")
-                .disabled(running || recording.isBusy)
+                attachMenu
 
                 // An AppKit-backed text view, not a SwiftUI TextField. A `TextField` reports
                 // Return through `.onSubmit`, which is handed no modifier state, so "Return
@@ -399,7 +413,8 @@ struct MacThreadDetailView: View {
                 // all. `ComposerTextView` decides in `keyDown(with:)`, where the modifiers
                 // still exist. Send remains gated by `send()` below, the same guard the send
                 // button's `disabled` state mirrors.
-                ComposerTextView(text: $draft, placeholder: "Message Jesse…", onSend: send)
+                ComposerTextView(text: $draft, placeholder: "Message Jesse…", onSend: send,
+                                 onMedia: stageMedia)
                     .frame(maxWidth: .infinity)
                     .padding(8)
                     .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
@@ -433,10 +448,29 @@ struct MacThreadDetailView: View {
             }
         }
         .padding(12)
-        .fileImporter(isPresented: $showAudioImporter,
-                      allowedContentTypes: AudioRecordingTypes.contentTypes,
-                      allowsMultipleSelection: false,
-                      onCompletion: handleAudioImport)
+        // A drop anywhere on the composer outside the text view. One onto the text view is
+        // the text view's own (`ComposerNSTextView.performDragOperation`); both stage through
+        // `stageMedia`, so a dropped file never lands as a path in the message.
+        .onDrop(of: MacItemProviderMedia.dropTypes, isTargeted: nil) { providers in
+            guard !running else { return false }
+            Task { stageMedia(await MacItemProviderMedia.read(providers)) }
+            return true
+        }
+        .fileImporter(isPresented: $showImporter,
+                      allowedContentTypes: importKind.contentTypes,
+                      allowsMultipleSelection: importKind.allowsMultipleSelection) { result in
+            switch importKind {
+            case .images, .pdfs: handleFileImport(result)
+            // One recording at a time: the composer holds one transcript.
+            case .audio: handleAudioImport(result)
+            }
+        }
+        .photosPicker(isPresented: $showPhotosPicker, selection: $photoItems,
+                      maxSelectionCount: AttachmentLimits.maxCount, matching: .images)
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            Task { await handlePhotoItems(items) }
+        }
         .sheet(isPresented: Binding(get: { recording.stage == .choosingLanguage },
                                     set: { if !$0 { recording.abandon() } })) {
             RecordingLanguageSheet(model: recording)
@@ -462,6 +496,104 @@ struct MacThreadDetailView: View {
         // state at the next departure.
     }
 
+    // MARK: - Attachments
+
+    /// The paperclip: three ways to attach a file, and the recording, which is not one (it
+    /// becomes TEXT, exactly as before it moved into this menu). Disabled while a turn runs
+    /// and at the file cap, as on the phone.
+    private var attachMenu: some View {
+        Menu {
+            Button("Photo or Image…", systemImage: "photo") {
+                attachError = nil
+                importKind = .images
+                showImporter = true
+            }
+            Button("PDF Document…", systemImage: "doc") {
+                attachError = nil
+                importKind = .pdfs
+                showImporter = true
+            }
+            Button("From Photos…", systemImage: "photo.on.rectangle") {
+                attachError = nil
+                showPhotosPicker = true
+            }
+            Divider()
+            Button("Audio Recording…", systemImage: "waveform") {
+                attachError = nil
+                recording.dismissError()
+                importKind = .audio
+                showImporter = true
+            }
+            .disabled(recording.isBusy)
+        } label: {
+            Image(systemName: "paperclip")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Attach a photo, image or PDF, or transcribe a recording into this message")
+        .accessibilityLabel("Add attachment")
+        .disabled(running || attachments.count >= AttachmentLimits.maxCount)
+    }
+
+    /// The ONE staging call on this Mac, shared with the phone's `addAttachment`: every source
+    /// here (the two importers, Photos, paste, drop, Continuity Camera) ends in it.
+    private func addAttachment(data: Data, fallbackName: String, suggestedName: String? = nil) {
+        // The Mac has no frugal mode: it is never on a metered link it knows about.
+        attachError = AttachmentStaging.add(data: data, fallbackName: fallbackName,
+                                            suggestedName: suggestedName, to: &attachments,
+                                            frugal: .off)
+    }
+
+    /// Media read off a pasteboard or a drop. Each item is staged in order, so the caps
+    /// refuse exactly the ones past the limit; an unreadable one says so.
+    private func stageMedia(_ items: [MacMediaItem]) {
+        attachError = nil
+        for item in items {
+            guard let data = item.data else {
+                attachError = item.suggestedName.map { "Couldn’t attach “\($0)” (images or PDF only)." }
+                    ?? "Couldn’t paste that item (images or PDF only)."
+                continue
+            }
+            addAttachment(data: data, fallbackName: "Pasted", suggestedName: item.suggestedName)
+        }
+    }
+
+    private func remove(_ att: JesseAttachment) {
+        attachments.removeAll { $0.id == att.id }
+        attachError = nil
+    }
+
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                guard let data = try? Data(contentsOf: url) else {
+                    attachError = "Couldn’t read “\(url.lastPathComponent)”."
+                    continue
+                }
+                addAttachment(data: data, fallbackName: "Document",
+                              suggestedName: url.lastPathComponent)
+            }
+        case .failure(let error):
+            attachError = error.localizedDescription
+        }
+    }
+
+    private func handlePhotoItems(_ items: [PhotosPickerItem]) async {
+        for item in items {
+            let loaded = try? await item.loadTransferable(type: Data.self)
+            guard let data = loaded ?? nil else {
+                attachError = "Couldn’t load that image."
+                continue
+            }
+            addAttachment(data: data, fallbackName: "Photo")
+        }
+        photoItems = []
+    }
+
     /// A picked recording. Transcribed on the Studio (on this Mac only when the Studio can't
     /// be reached), sent to the paired bridge and nowhere else, and the working copy is
     /// deleted however the run ends — the model owns all three.
@@ -481,7 +613,8 @@ struct MacThreadDetailView: View {
     /// button is live.
     private var canSend: Bool {
         MacSendGate.refusal(typed: draft,
-                            hasAttachment: coordinator.attachedContext(for: thread.id) != nil,
+                            hasAttachment: coordinator.attachedContext(for: thread.id) != nil
+                                || !attachments.isEmpty,
                             isConfigured: coordinator.configStore.isConfigured,
                             isRunningInThisConversation: running) == nil
     }
@@ -514,7 +647,7 @@ struct MacThreadDetailView: View {
     private func send() {
         guard canSend else { return }
         guard coordinator.stageAndSend(text: draft, mode: mode, thread: thread,
-                                       context: context) else {
+                                       context: context, files: attachments) else {
             // Nothing was released, so the composer is still the truth. A refused send is
             // a departure like any other: capture it.
             captureDraft()
@@ -523,8 +656,26 @@ struct MacThreadDetailView: View {
         // Durably staged: the user turn is on disk. Only now is the draft released.
         ComposerDrafts.release(for: thread)
         draft = ""
+        attachments = []
+        attachError = nil
         draftNotice = nil
     }
+}
+
+/// What the composer's one file panel is choosing.
+enum MacFileImportKind: Equatable {
+    case images, pdfs, audio
+
+    var contentTypes: [UTType] {
+        switch self {
+        case .images: return [.image]
+        case .pdfs: return [.pdf]
+        case .audio: return AudioRecordingTypes.contentTypes
+        }
+    }
+
+    /// Files go several at a time, up to the cap; a recording goes alone.
+    var allowsMultipleSelection: Bool { self != .audio }
 }
 
 /// The PER-CONVERSATION model picker for the Mac composer. The selection is LOCAL — stored on
@@ -716,6 +867,10 @@ struct MacTurnBubble: View {
                         Label(label, systemImage: "paperclip")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    }
+                    // The files sent with this turn, as their stored previews. Mirrors iOS.
+                    if !turn.attachments.isEmpty {
+                        MacTurnAttachmentsView(attachments: turn.orderedAttachments)
                     }
                     // An ask sent on an empty composer has no typed half to draw — the
                     // caption above is the whole turn.

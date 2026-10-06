@@ -14,6 +14,49 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.167.0] - 2026-10-06
+
+**Bridge turns can use Clockify through Clockify's own hosted MCP server, on both harnesses.**
+Root cause of the gap: a bridge child gets MCP servers only from the compiled
+`--strict-mcp-config` set and tools only from the allowlist, and no Clockify server was in
+either, so a turn could not answer a question about Tag1's tracked time. `clockify` is now the
+twenty-second server on every main turn, Claude Code and Codex in the same change.
+
+- **Declared as a hosted HTTP server with its key by variable.** `clockify` is `type: "http"` at
+  `https://api.clockify.me/mcp-server/mcp`. Claude Code sends `x-api-key:
+  ${JESSE_CLOCKIFY_API_KEY}`, expanded by the CLI from the child's environment; a golden test
+  pins the unexpanded placeholder.
+- **Codex route: a header by variable name, not a bearer.** Measured 2026-10-06: Clockify answers
+  `tools/list` with the key as `Authorization: Bearer`, but every tool call made that way fails
+  as unauthenticated. A new `CODEX_MCP_HEADER_ENV` table beside `CODEX_MCP_BEARER_ENV` renders
+  `env_http_headers={"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}`, which Codex reads by name; a unit
+  test pins the rendering and a shipped-config test asserts no bearer and no literal placeholder.
+- **All thirteen tools granted, by name.** From a live, authenticated `tools/list` on 2026-10-06,
+  none annotated: `get_current_user_profile`, `get_current_time`, `get_current_timer`,
+  `get_summary_report`, `get_detailed_report`, `list_clients`, `list_projects`, `list_tasks`,
+  `list_tags`, `start_timer`, `stop_timer`, `log_past_time`, `create_project`. Each acts with the
+  key owner's Clockify permissions. Tests pin the thirteen by equality and refuse a wildcard; the
+  Codex/Claude Code parity test stays green with no exception.
+- **New row label on both harnesses.** `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify`;
+  the twenty-one-server set is kept as a retired label. Both records were re-recorded live from
+  the bridge LaunchAgent's environment: every probe on every row kept its id, class, verdict and
+  status, only the two main row labels moved, and the main roots gained exactly the thirteen
+  `mcp__clockify__*` tools with no other server's count changing. Claude Code: gate pass, 5 rows
+  x 22 probes on claude 2.1.287. Codex: 5 x 22 on codex-cli 0.153.4; the file-level gate stays
+  `fail` for the standing `basic/none` reason (Codex cannot express `basic`), and every hard
+  gate on the main rows passes. Its two main-row `[[accepted]]` blocks are re-pointed to the new
+  labels under the owner's written authorization, conditioned on that identical-probe result;
+  earlier rationale unchanged below the new paragraph. A first Codex `--write` recorded
+  `whatsapp` with zero tools on the `write` row (the server answered `tools/list` normally a
+  minute later); it was discarded and the battery re-run before anything was committed.
+- **The argv fixture** moved on both harnesses' three main sites only; Codex's grew by eight
+  arguments each.
+- **SECURITY.md** records the new credential (sent to Clockify), the new public host, the
+  workspace-wide report reads, the timer, time entry and project writes, and the new untrusted
+  text source (time entry descriptions and workspace names).
+- **Not deployed.** The production key `JESSE_CLOCKIFY_API_KEY` is already in the bridge
+  LaunchAgent plist, but the bridge has not been redeployed with this version.
+
 ## [App 1.0 (189)] - 2026-10-05
 
 **A run recorded by a third party app reaches the agent with its elevation, its time to

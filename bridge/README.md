@@ -106,6 +106,8 @@ change lives in one focused module:
 | `scheduler` | the tick task, the `SchedulerClock` (the one instant + zone every calendar decision reads), chain execution under the one-scheduled-turn-at-a-time lock, single flight, the `expect_output` contract, the pushes, hot reload, and the `/jesse/schedule` routes |
 | `containment` | the containment RECORD: the `(capability, MCP set)` rows, the verdict/scoring rules, and the committed file's TOML shape (`bridge/containment.toml`). Always compiled — the startup gate reads it |
 | `probe` | the LIVE battery behind it: the adversarial probes, their ground-truth checks, the scratch worlds and the runner. Behind the `containment-probe` feature, so none of it is compiled into the serving binary; run by the `containment-probe` bin |
+| `capmap` | the capability map (`bridge/capability-map.toml`): its parse, the one-row-per-grant check, the harness reach derived from the code, and the `capability_args` golden. See "Capability map" below |
+| `toolusage` | the `tool-usage` audit: the timing log joined against the map, and its text and JSON report. Run by the `tool-usage` bin |
 
 Unit tests live in each module's `#[cfg(test)]`; the `app()`-router tests are a
 `tests/` integration target. `scripts/ci-guards.sh` scans **all** `bridge/src`
@@ -290,17 +292,27 @@ retry behavior) is exactly what it was.
 
 #### `timing` — where the turn's time went
 
-Every turn writes one JSON line to `<state_dir>/turn-timings.jsonl` (pruned to 7 days at
-startup) and serves it back here:
+Every turn writes one JSON line to `<state_dir>/turn-timings.jsonl` (pruned to 30 days at
+startup since 0.168.0; it was 7) and serves it back here:
 
 ```json
-{ "v": 1, "job_id": "…", "started_at": "2026-08-12T09:00:00Z",
+{ "v": 2, "job_id": "…", "started_at": "2026-08-12T09:00:00Z",
   "ended_at": "2026-08-12T10:30:00Z", "elapsed_ms": 5400000, "status": "failed",
-  "tool_calls": 37, "tools": [ { "tool": "Read", "ms": 812 }, … ] }
+  "tool_calls": 37, "harness": "claude-code", "model": "opus",
+  "tools": [ { "tool": "Read", "ms": 812, "outcome": "ok" }, … ] }
 ```
 
-Content-free — tool names, counts and durations, never the question or the answer. This is
-what makes the next slow turn diagnosable in one command:
+Content-free: tool names, counts, durations, the harness and model registry ids, and a
+per-call `outcome` of `ok`, `error` or `refused`; never the question, the answer, a tool
+argument, a tool result or a path. A field-walk test fails on any field nobody has
+classified. `harness`, `model` and `outcome` are schema 2 (0.168.0) and are omitted when
+absent, so a version 1 record still parses. `outcome` is filled only where the adapter
+already sees it: Claude Code from each `tool_result`'s `is_error` and the result line's
+`permission_denials` (a refusal wins over the error result it also produces), Codex from a
+completed tool item's `status` (`completed`, `failed`, `declined`), direct from the agent
+loop's own per-call trace. A Codex call its sandbox refuses emits no item, only a stderr
+line with no id, so it has no entry to annotate. This is what makes the next slow turn
+diagnosable in one command:
 
 ```bash
 jq 'select(.elapsed_ms > 600000)' ~/.jesse-bridge/turn-timings.jsonl
@@ -3416,6 +3428,64 @@ line beyond counts.
 
 **Rollback.** `JESSE_CONTEXT_CARRY=off` restores byte-for-byte today's behavior: no
 ledger reads or writes, no `context.json`, no synthetic ids, no injected blocks.
+
+## Capability map (`capability-map.toml`) and the `tool-usage` audit
+
+`bridge/capability-map.toml` has one row per grant in `DEFAULT_ALLOWED_TOOLS`, keyed by the
+exact grant string (365 at 0.168.0: 4 file, 29 `Bash(...)`, 6 `Skill(...)`, 2 web, and 324
+MCP grants across 22 servers). Each row records:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `file`, `bash`, `skill`, `web` or `mcp` |
+| `server` | the MCP server, for `mcp` rows |
+| `harnesses` | the harnesses the grant reaches today, derived from the code: Claude Code takes the whole allowlist; Codex takes only the `mcp__` entries, as each server's `enabled_tools`; direct takes MCP tools only from a deployment's `[[direct.mcp]]`, and the shipped posture grants none |
+| `placement` | where the capability lives after the move: `turn-pod`, `core`, `upstream-pod`, `mac-edge` or `drop` |
+| `dependency` | credential variable names (never values), LAN targets or macOS features, from the three Codex tables and each server's launcher or env file |
+| `workflows` | the skills, scheduled jobs and routines that use it |
+| `reason` | one sentence; `note` is optional |
+
+The map changes nothing at runtime: the allowlist is the boundary and the map describes it.
+`capmap::tests` keep it exact. Every grant has exactly one row and every row names a grant
+(a negative test removes a grant from a copy of the allowlist and watches the check fire);
+`kind` and `server` agree with the grant string; each row's `harnesses` equals what
+`harnesses_reaching` derives from the code under the shipped config; and the seeded
+placements hold. An MCP row that does not list all three harnesses is a parity defect,
+recorded rather than hidden: today every MCP row misses `direct`.
+
+The same tests pin every harness's `capability_args` for every shipped containment row to
+`bridge/golden/capability-args.json`, and that golden to the containment records' own
+`toolset_args`, so a change meant to describe the posture cannot move it by a byte.
+
+### `tool-usage`: which grants real turns used
+
+```bash
+cargo run --release --bin tool-usage -- --since 30            # text
+cargo run --release --bin tool-usage -- --since 30 --json     # the same data as JSON
+cargo run --release --bin tool-usage -- --since 7 --file /path/to/turn-timings.jsonl
+```
+
+A separate read-only binary, like `vaultqa-audit` and `shadow-audit`; the serving binary
+takes no subcommands. It reads `<state_dir>/turn-timings.jsonl` (`$JESSE_STATE_DIR`, else
+`~/.jesse-bridge`), counts calls and distinct turns per tool name over the window, joins
+them against the map compiled into it, and prints:
+
+- **containment findings** first: tool names called that no grant names;
+- **1. grants used**, with calls, turns, placement and any recorded outcomes;
+- **2. grants never used**, by server;
+- **3. trace names that match no grant**, each with its count, its harness when the record
+  names one, and why the call was possible: a Claude Code built-in the allowlist does not
+  gate (`builtin-ungated`, from the write row's observed root in `containment.toml`), a
+  default permission (`Write`, admitted by the `Edit(...)` rule), an MCP tool of a
+  configured server that no grant names (`outside-allowlist`), direct's own tools
+  (`harness-native`), or a name nobody has accounted for (`unknown`).
+
+What it can and cannot match: MCP and web grants match by exact name, and a file grant
+matches its bare tool name (`Read`). `Bash` and `Skill` are bare class names in the trace,
+so the 29 `Bash(...)` and 6 `Skill(...)` grants cannot be told apart; they are two class
+rows with their totals and are never reported as never used. Records from before 0.168.0
+carry no `harness` or `model` and are grouped as `unknown`. A 30-day, per-harness audit
+needs 30 days of records written by 0.168.0 or later.
 
 ## Containment battery (`containment-probe`)
 

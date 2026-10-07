@@ -119,6 +119,10 @@ pub struct Spawned {
     pub pass_env: Vec<String>,
     /// Keep `~/.claude/projects/<cwd key>/` after the run instead of deleting it.
     pub keep_sessions: bool,
+    /// Every vault a bridge was started on, so [`Drop`] can sweep their session directories
+    /// once more: a `claude` child that outlives its bridge by a moment can write its session
+    /// file AFTER the per-run cleanup, and that file would otherwise stay behind.
+    pub started: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 /// The environment a scratch bridge runs with: the caller's, minus the strip list, plus the
@@ -278,6 +282,7 @@ impl BridgeTarget for Spawned {
             .spawn()
             .map_err(|e| format!("could not spawn {}: {e}", self.bin.display()))?;
         let pid = child.id();
+        self.started.borrow_mut().push(vault.to_path_buf());
         Ok(Box::new(SpawnedBridge {
             child,
             pid,
@@ -332,6 +337,22 @@ impl RunningBridge for SpawnedBridge {
             cleanup_sessions(&self.vault);
         }
         Ok(())
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        if self.keep_sessions {
+            return;
+        }
+        if self.started.borrow().is_empty() {
+            return;
+        }
+        // A moment for a straggling child to finish writing before the last sweep.
+        std::thread::sleep(Duration::from_secs(2));
+        for v in self.started.borrow().iter() {
+            cleanup_sessions(v);
+        }
     }
 }
 
@@ -890,6 +911,10 @@ impl Driver for BridgeDriver {
         Some(self.info.harness.clone())
     }
 
+    fn holds_conversation(&self) -> bool {
+        true
+    }
+
     fn run_task<'a>(
         &'a self,
         task: &'a Task,
@@ -947,15 +972,15 @@ mod tests {
     #[test]
     fn the_scratch_env_strips_live_settings_and_redirects_every_owned_path() {
         let inherited = vec![
-            ("HOME".to_string(), "/Users/someone".to_string()),
+            ("HOME".to_string(), "/home/someone".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
             (
                 "JESSE_STATE_DIR".to_string(),
-                "/Users/someone/.jesse-bridge".to_string(),
+                "/home/someone/.jesse-bridge".to_string(),
             ),
             (
                 "JESSE_CONFIG".to_string(),
-                "/Users/someone/.jesse-bridge/jesse.local.toml".to_string(),
+                "/home/someone/.jesse-bridge/jesse.local.toml".to_string(),
             ),
             (
                 "JESSE_MAIN_MCP_CONFIG".to_string(),
@@ -981,7 +1006,7 @@ mod tests {
             "tok",
         );
         // Kept: HOME (the CLI login), PATH, and the one named key.
-        assert_eq!(env_of(&env, "HOME").as_deref(), Some("/Users/someone"));
+        assert_eq!(env_of(&env, "HOME").as_deref(), Some("/home/someone"));
         assert_eq!(env_of(&env, "PATH").as_deref(), Some("/usr/bin"));
         assert_eq!(
             env_of(&env, "JESSE_MODEL_GLM_AUTH_TOKEN").as_deref(),

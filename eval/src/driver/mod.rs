@@ -182,6 +182,13 @@ pub trait Driver {
         None
     }
 
+    /// Whether a task's `followups` can run: true only for a driver that keeps one
+    /// conversation across turns (`bridge`). The runner fails a multi-turn task as a harness
+    /// error on any other driver rather than grading its first turn as if it were the last.
+    fn holds_conversation(&self) -> bool {
+        false
+    }
+
     /// Run one task in an already-prepared workspace.
     ///
     /// Returns a [`TaskRun`] rather than a `Result` for the same reason the agent loop

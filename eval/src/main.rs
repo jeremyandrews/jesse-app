@@ -340,6 +340,7 @@ fn do_run(a: RunArgs) -> Result<(), String> {
                 config,
                 pass_env: a.pass_env.clone(),
                 keep_sessions: a.keep_sessions,
+                started: Default::default(),
             });
             match driver::BridgeDriver::preflight(
                 target,

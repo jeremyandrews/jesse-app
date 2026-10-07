@@ -253,6 +253,18 @@ pub fn run_suite(suite: &Suite, cfg: &RunConfig) -> Result<RunReport, String> {
             } else {
                 format!(".run{}", i + 1)
             };
+            if !task.followups.is_empty() && !cfg.driver.holds_conversation() {
+                attempts.push(harness_failure(
+                    task,
+                    &suffix,
+                    format!(
+                        "task has {} follow-up turn(s) and the {} driver holds no conversation",
+                        task.followups.len(),
+                        cfg.driver.id()
+                    ),
+                ));
+                continue;
+            }
             let record = match prepare_workspace(task, &dir, cfg.fixtures_root.as_deref())
                 .and_then(|(ws, remotes)| Ok((ws, resolve_task(task, &remotes)?)))
             {

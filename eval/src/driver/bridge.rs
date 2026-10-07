@@ -309,7 +309,7 @@ impl RunningBridge for SpawnedBridge {
         let body =
             std::fs::read_to_string(self.scratch.path().join("bridge.log")).unwrap_or_default();
         let lines: Vec<&str> = body.lines().collect();
-        lines[lines.len().saturating_sub(15)..].join("\n")
+        redact_home(&lines[lines.len().saturating_sub(15)..].join("\n"))
     }
     fn stop(mut self: Box<Self>) -> Result<(), String> {
         // By the RECORDED PID: SIGTERM first so the bridge can reap its own children, then
@@ -961,9 +961,31 @@ impl Driver for BridgeDriver {
     }
 }
 
+/// The bridge log tail lands in `results.json`, which is committed under `eval-runs/`. The
+/// bridge logs absolute paths (its hook helper, the scratch vault), so the operator's home
+/// directory would otherwise ride into a tracked file. Rewrite it to `~`.
+fn redact_home(text: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if home.len() > 1 => text.replace(home.trim_end_matches('/'), "~"),
+        _ => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_log_tail_never_carries_the_home_directory() {
+        let home = std::env::var("HOME").expect("HOME is set under cargo test");
+        let line = format!("helper {home}/devel/bridge/target/release/jesse-hook");
+        let out = redact_home(&line);
+        assert!(!out.contains(&home), "{out}");
+        assert!(
+            out.contains("~/devel/bridge/target/release/jesse-hook"),
+            "{out}"
+        );
+    }
 
     fn env_of(v: &[(String, String)], k: &str) -> Option<String> {
         v.iter().find(|(n, _)| n == k).map(|(_, x)| x.clone())

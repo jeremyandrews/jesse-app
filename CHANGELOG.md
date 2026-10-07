@@ -58,7 +58,8 @@ assertion graded the answer text rather than the vault state a workflow is suppo
   and `CLAUDE_CODE_*` variables are stripped unless named with `--pass-env`; HOME is kept for the
   CLI logins. `--bridge-config` declares models the registry lacks (`eval/bridge-overlays/`). A
   preflight records a cell whose model is unconfigured or unhealthy as NOT RUN. The target is a
-  `BridgeTarget` trait with one implementation, `Spawned`.
+  `BridgeTarget` trait with one implementation, `Spawned`. The bridge log tail a failed run records has
+  the home directory rewritten to `~`, so a committed `results.json` never carries it.
 - **Latency.** Every run records submit to first streamed event, first model token, and result;
   the scorecard reports p50 and p95.
 - **State assertions.** `file_exists`, `file_absent`, `csv_last_row` (RFC 4180 reader, optional

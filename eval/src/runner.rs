@@ -165,6 +165,18 @@ fn legacy_driver() -> String {
     "claude-cli".to_string()
 }
 
+/// Where a workspace's bare remotes are built: a sibling named `<workspace name>.remotes`.
+///
+/// The suffix is APPENDED, never swapped in with `with_extension`: a pass^k attempt's
+/// workspace is `<task>.run<N>`, whose "extension" is `run<N>`, so replacing it gave every
+/// attempt the same `<task>.remotes` and the second attempt's clone failed on the first
+/// attempt's leftover bare repository.
+fn remotes_root_for(dir: &Path) -> PathBuf {
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".remotes");
+    dir.with_file_name(name)
+}
+
 /// Populate a fresh workspace for a task; return the dir to run in and the remotes built
 /// for it. For vault tasks, returns the real vault path and writes nothing.
 fn prepare_workspace(
@@ -177,7 +189,7 @@ fn prepare_workspace(
         Workspace::Fixture => {
             // The remotes live BESIDE the workspace, never in it: the turn reaches one only
             // by cloning it, which is the property a checkout task is testing.
-            let remotes_root = dir.with_extension("remotes");
+            let remotes_root = remotes_root_for(dir);
             let remotes = prepare_fixture(task, dir, fixtures_root, &remotes_root)?;
             (dir.to_path_buf(), remotes)
         }
@@ -697,6 +709,38 @@ fn latency_section(report: &RunReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: every pass^k attempt of a task with remotes got the SAME remotes dir
+    /// (`with_extension` replaced `.runN`), so attempts 2 and 3 failed to clone the seed
+    /// remote over attempt 1's. Each attempt's remotes must be its own, and beside it.
+    #[test]
+    fn each_attempt_gets_its_own_remotes_root() {
+        let root = Path::new("/tmp/jesse-eval-x");
+        let a = remotes_root_for(&root.join("code-review-checkout.run1"));
+        let b = remotes_root_for(&root.join("code-review-checkout.run2"));
+        assert_ne!(a, b);
+        assert_eq!(a, root.join("code-review-checkout.run1.remotes"));
+        assert_eq!(
+            remotes_root_for(&root.join("code-review-checkout")),
+            root.join("code-review-checkout.remotes")
+        );
+    }
+
+    /// The same property end to end: three attempts' remotes built under one temp root.
+    #[test]
+    fn three_attempts_build_their_remotes_without_colliding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec: crate::suite::RemoteSpec = serde_json::from_value(serde_json::json!({
+            "name": "github.com/acme/widget",
+            "commits": [{"message": "init", "files": {"a.txt": "a\n"}}]
+        }))
+        .unwrap();
+        for i in 1..=3 {
+            let dir = tmp.path().join(format!("t.run{i}"));
+            crate::workspace::build_remotes(&remotes_root_for(&dir), std::slice::from_ref(&spec))
+                .unwrap_or_else(|e| panic!("attempt {i}: {e}"));
+        }
+    }
 
     fn record(cost: f64) -> TaskResult {
         TaskResult {

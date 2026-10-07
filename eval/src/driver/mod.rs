@@ -29,6 +29,7 @@
 //! than filling the struct in by hand buys a real property: the transcript persisted to
 //! `<out>/transcripts/<id>.ndjson` reparses to exactly the transcript that was scored.
 
+pub mod bridge;
 pub mod claude_cli;
 pub mod direct;
 
@@ -39,6 +40,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
+pub use bridge::{BridgeDriver, NotRun, Spawned};
 pub use claude_cli::ClaudeCliDriver;
 pub use direct::{DirectDriver, EvalIndex};
 

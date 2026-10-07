@@ -354,6 +354,7 @@ mod tests {
             model: None,
             harness: None,
             runs: 1,
+            not_run: None,
             mock: true,
             tasks,
         }

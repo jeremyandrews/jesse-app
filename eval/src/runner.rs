@@ -149,6 +149,10 @@ pub struct RunReport {
     /// Runs per task (k in pass^k). 1 for every results file written before it existed.
     #[serde(default = "one")]
     pub runs: u32,
+    /// Set when the whole cell could not run (a model whose credential or backend is
+    /// absent): the reason, and then `tasks` is empty. Never green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_run: Option<String>,
     pub mock: bool,
     pub tasks: Vec<TaskResult>,
 }
@@ -276,6 +280,7 @@ pub fn run_suite(suite: &Suite, cfg: &RunConfig) -> Result<RunReport, String> {
         model: cfg.driver.model(),
         harness,
         runs,
+        not_run: None,
         mock: cfg.driver.is_mock(),
         tasks: results,
     };
@@ -456,6 +461,38 @@ fn all_latencies(report: &RunReport) -> Vec<Latency> {
         .collect()
 }
 
+/// Record a cell that could not run at all: `results.json` with the reason and no tasks,
+/// and a scorecard that says NOT RUN. Never a column of failures, never green.
+pub fn write_not_run(
+    out_dir: &Path,
+    suite: &Suite,
+    driver: &str,
+    model: &str,
+    why: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("could not create out dir: {e}"))?;
+    let report = RunReport {
+        suite: suite.name.clone(),
+        driver: driver.to_string(),
+        wire: None,
+        index: None,
+        endpoint: None,
+        model: Some(model.to_string()),
+        harness: None,
+        runs: suite.runs.unwrap_or(1),
+        not_run: Some(why.to_string()),
+        mock: false,
+        tasks: Vec::new(),
+    };
+    std::fs::write(
+        out_dir.join("results.json"),
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("could not write results.json: {e}"))?;
+    std::fs::write(out_dir.join("scorecard.md"), scorecard(&report))
+        .map_err(|e| format!("could not write scorecard.md: {e}"))
+}
+
 /// Render the per-class + totals scorecard.
 pub fn scorecard(report: &RunReport) -> String {
     struct Agg {
@@ -507,6 +544,13 @@ pub fn scorecard(report: &RunReport) -> String {
         report.index.as_deref().unwrap_or("n/a"),
     ));
     out.push_str(&format!("Target: {target}\n\n"));
+    if let Some(why) = &report.not_run {
+        out.push_str(&format!(
+            "**NOT RUN.** {}\n\nNo task ran, so nothing here passed or failed.\n",
+            why.lines().next().unwrap_or("")
+        ));
+        return out;
+    }
     if report.harness.is_some() || report.runs > 1 {
         out.push_str(&format!(
             "Harness: {} · runs per task: {} (pass^{})\n\n",
@@ -679,6 +723,7 @@ mod tests {
             model: Some("m".into()),
             harness: None,
             runs: 1,
+            not_run: None,
             mock: false,
             tasks: vec![record(0.0)],
         };
@@ -875,6 +920,31 @@ mod tests {
         assert_eq!(skip_reason(&task, None), None);
         assert_eq!(skip_reason(&task, Some("direct")), None);
         assert!(skip_reason(&task, Some("claude-code")).is_some());
+    }
+
+    #[test]
+    fn a_cell_that_could_not_run_says_so_and_is_never_green() {
+        let (_root, suite) = suite_with_base();
+        let out = tempfile::tempdir().unwrap();
+        write_not_run(
+            out.path(),
+            &suite,
+            "bridge",
+            "glm",
+            "model 'glm' is not configured",
+        )
+        .unwrap();
+        let card = std::fs::read_to_string(out.path().join("scorecard.md")).unwrap();
+        assert!(
+            card.contains("**NOT RUN.** model 'glm' is not configured"),
+            "{card}"
+        );
+        assert!(!card.contains("TOTAL"), "{card}");
+        let r: RunReport = serde_json::from_str(
+            &std::fs::read_to_string(out.path().join("results.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(r.not_run.is_some() && r.tasks.is_empty());
     }
 
     #[test]

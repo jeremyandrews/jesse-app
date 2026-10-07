@@ -1,0 +1,15 @@
+# Arms `qwen-local-direct` for a jesse-eval bridge run: the same local model as
+# `qwen-local`, on the DIRECT harness, speaking the Anthropic Messages wire to the gateway
+# on 127.0.0.1:9100. The deployment has no such entry; it exists so the baseline has a local
+# cell on `direct`. Pass `--pass-env JESSE_MODEL_QWEN_LOCAL_TOKEN`.
+[[models]]
+id = "qwen-local-direct"
+family = "Qwen"
+version = "3.8 Flash-Next (local, direct)"
+kind = "local"
+harness = "direct"
+wire = "messages"
+base_url = "http://127.0.0.1:9100"
+model = "local-qwen"
+auth_token_env = "JESSE_MODEL_QWEN_LOCAL_TOKEN"
+health = { timeout_secs = 15 }

@@ -35,6 +35,11 @@ tokio-util = "0.7"
 csv = "1"
 # A JS object literal (bare keys, trailing commas) is JSON5, for `json_path_equals`.
 json5 = "0.4"
+# The `bridge` driver's HTTP client: loopback only, so no TLS. Same major as the agent crate's,
+# so the workspace builds one copy.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# The scratch bridge's bearer token and the client-minted conversation id.
+getrandom = "0.4"
 
 [dev-dependencies]
 serde_json = "1"

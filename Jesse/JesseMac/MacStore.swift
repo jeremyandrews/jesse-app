@@ -458,16 +458,22 @@ final class MacCoordinator {
     /// its caller, and a composer that cleared its text around an `await` is the shape of
     /// bug this whole change is about. Returns whether the message was DURABLY STAGED, which
     /// is the only condition on which the composer may clear itself.
+    ///
+    /// `files` are the composer's staged attachments, already through `AttachmentStaging`.
+    /// They make an empty composer a real turn, exactly as an attached context does.
     @discardableResult
     func stageAndSend(text: String, mode: JesseMode, thread: JesseThread,
-                      context: ModelContext) -> Bool {
+                      context: ModelContext, files: [JesseAttachment] = []) -> Bool {
         // ── OFFLINE: this Mac may be able to answer the question from the vault folder
         //    it holds. Only from the COMPOSER — `send(text:mode:thread:context:)` above
         //    is what the morning routine and the Today actions fire, and those are turns
         //    the bridge owes an answer to, not questions.
         // ONE route call per send, for the reason the phone's carries: reachable is the
         // common case and must not pay for a bookmark resolution twice.
-        if offlineRoute() == .onDevice {
+        //
+        // Files are excluded for the phone's reason: a photo is not a lookup, and the vault
+        // folder cannot read one. A turn with files always goes to the bridge.
+        if files.isEmpty, offlineRoute() == .onDevice {
             return stageAndAnswerOnDevice(text: text, mode: mode, thread: thread,
                                           context: context)
         }
@@ -475,13 +481,13 @@ final class MacCoordinator {
         //    to ride this message as attached context, in memory, on one conversation, until
         //    something happened to be sent. It is persisted the moment the Mac answers now
         //    (`reviewStore`) and `deliver` sends it ahead of this message.
-        guard let staged = stage(text: text, thread: thread, context: context) else {
+        guard let staged = stage(text: text, thread: thread, context: context, files: files) else {
             return false
         }
         let composed = staged.text
         let sentFor = staged.promptHint
         Task { await deliver(composed, sentFor: sentFor, mode: mode, thread: thread,
-                             context: context) }
+                             context: context, attachments: files) }
         return true
     }
 
@@ -652,7 +658,7 @@ final class MacCoordinator {
     /// this function returns, so no caller can observe a half-staged send and no keystroke
     /// can land inside the handoff.
     private func stage(text: String, thread: JesseThread, context: ModelContext,
-                       sentFor: String? = nil) -> Turn? {
+                       sentFor: String? = nil, files: [JesseAttachment] = []) -> Turn? {
         let attached = attachedContexts[thread.id]
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmed = attached.map { TodayThreadContext.firstMessage(context: $0.body, typed: text) }
@@ -666,7 +672,8 @@ final class MacCoordinator {
         // button, a pressed Return, and a message that stayed in the composer with no
         // explanation anywhere. The one silent refusal left is an empty composer, which is not
         // an error.
-        if let refusal = MacSendGate.refusal(typed: text, hasAttachment: attached != nil,
+        if let refusal = MacSendGate.refusal(typed: text,
+                                             hasAttachment: attached != nil || !files.isEmpty,
                                              isConfigured: configStore.isConfigured,
                                              isRunningInThisConversation: isRunning(thread.id)) {
             if let message = refusal.message { errors[thread.id] = message }
@@ -715,6 +722,10 @@ final class MacCoordinator {
             errors[thread.id] = "Couldn't save your message — try sending it again."
             return nil
         }
+        // The files' previews, for history: small JPEGs made off the main actor and attached
+        // a moment later. Never the full-resolution bytes, which go to the bridge and nowhere
+        // else on this Mac.
+        attachPreviews(to: userTurn, from: files, context: context)
 
         beginRun(thread.id)
         // A staged send is a completed round trip with the local store, which is the one thing
@@ -732,7 +743,7 @@ final class MacCoordinator {
     /// has no outbox to order the two in. Every Mac send path goes through here, so the
     /// morning routine and the Today actions honour it too.
     private func deliver(_ trimmed: String, sentFor: String?, mode: JesseMode, thread: JesseThread,
-                         context: ModelContext) async {
+                         context: ModelContext, attachments: [JesseAttachment] = []) async {
         // THIS conversation's slot, and nothing else's. The defer used to clear the app's one
         // slot, so the turn that finished first opened the gate for every conversation and
         // closed the spinner on turns that were still running.
@@ -742,14 +753,16 @@ final class MacCoordinator {
             await post(review, sentFor: OfflineAnswerCarry.title, mode: mode, thread: thread,
                        context: context)
         }
-        await post(trimmed, sentFor: sentFor, mode: mode, thread: thread, context: context)
+        // The files ride the message they were staged with, never the review ahead of it.
+        await post(trimmed, sentFor: sentFor, mode: mode, thread: thread, context: context,
+                   attachments: attachments)
     }
 
     /// One POST and whatever it turns into. Split out of `deliver` so a conversation's pending
     /// review and the message behind it are two posts inside ONE run, rather than two runs
     /// whose spinners and error lines fight each other.
     private func post(_ trimmed: String, sentFor: String?, mode: JesseMode, thread: JesseThread,
-                      context: ModelContext) async {
+                      context: ModelContext, attachments: [JesseAttachment] = []) async {
         let cli = client
         // The PER-TURN model this conversation sends on: its own stored selection, else this
         // device's default (`LastUsedModelStore`). Local to this Mac and this thread — it never
@@ -768,7 +781,8 @@ final class MacCoordinator {
                 mode: mode, text: trimmed, sessionId: thread.sessionId,
                 conversationId: conversationId,
                 voice: false, instructions: nil, floorOverride: nil,
-                attachments: [], requestId: UUID().uuidString, model: model,
+                // The same mapping the phone sends through: base64, declared MIME = sniffed.
+                attachments: attachments.map(\.wire), requestId: UUID().uuidString, model: model,
                 effort: effort, sentFor: sentFor)
             // Adopt the AUTHORITATIVE id the bridge registered and stamp the first ACK, which
             // is what the detail view's delivery caption reads.
@@ -785,6 +799,28 @@ final class MacCoordinator {
             errors[thread.id] = Self.friendly(error)
         }
     }
+
+    /// Generate downscaled JPEG previews of `files` and attach them to `userTurn`, as the
+    /// phone's `RunCoordinator.attachPreviews` does and through the same shared
+    /// `AttachmentThumbnail.previews`. Best effort: the turn is already saved, so a preview
+    /// that fails to render or save is simply absent.
+    private func attachPreviews(to userTurn: Turn, from files: [JesseAttachment],
+                                context: ModelContext) {
+        guard !files.isEmpty else { return }
+        lastPreviewTask = Task { [weak self] in
+            let previews = await AttachmentThumbnail.previews(for: files)
+            guard let self, !previews.isEmpty else { return }
+            for preview in previews {
+                userTurn.attachments.append(
+                    TurnAttachment(filename: preview.filename, mime: preview.mime,
+                                   thumbnail: preview.thumbnail))
+            }
+            try? self.save(context)
+        }
+    }
+
+    /// The most recent send's preview task, so a test can await it rather than sleep.
+    @ObservationIgnored private(set) var lastPreviewTask: Task<Void, Never>?
 
     /// Stage this conversation's pending offline review as a turn and return its text, or nil
     /// when there is nothing pending or nowhere to send it.

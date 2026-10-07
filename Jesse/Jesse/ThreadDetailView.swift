@@ -1094,34 +1094,16 @@ struct ThreadDetailView: View {
 
     /// Sniff the type, name it, run the client-side caps, and stage it — or set
     /// `attachError`. The bridge re-validates all of this as the authority.
+    ///
+    /// The body is `AttachmentStaging`, shared with the Mac composer: downscale if over the
+    /// cap, sniff, name, caps. This is the ONE spot every source here reaches (paste, photo
+    /// picker, file import, camera), and that function is the one spot both platforms reach,
+    /// so the paste/picker divergence that was PR #51's root cause cannot come back as a
+    /// phone/Mac one.
     private func addAttachment(data: Data, fallbackName: String, suggestedName: String? = nil) {
-        // Oversized IMAGE → downscale to a JPEG that fits the per-file cap, so a
-        // large photo attaches instead of erroring. This is the ONE shared spot, so
-        // paste, photo picker, file import, and camera all behave identically (the
-        // paste/picker divergence was PR #51's root cause — don't reintroduce one).
-        // Under-cap images and every non-image fall through untouched (`fitToCap`
-        // returns nil), preserving the byte-verbatim staging PR #51 restored. The
-        // output is always JPEG, so the display name gets a `.jpg` extension.
-        var data = data
-        var suggestedName = suggestedName
-        if let fitted = AttachmentDownscaler.fitToCap(data, cap: AttachmentLimits.maxBytesPerFile,
-                                                     frugal: FrugalSettings.current()) {
-            data = fitted
-            suggestedName = suggestedName.map(AttachmentDownscaler.jpegFilename(from:))
-        }
-        guard let mime = JesseAttachment.sniffMime(data) else {
-            attachError = "That file type isn’t supported (images or PDF only)."
-            return
-        }
-        let ext = JesseAttachment.fileExtension(forMime: mime)
-        let name = suggestedName ?? "\(fallbackName) \(attachments.count + 1).\(ext)"
-        let candidate = JesseAttachment(filename: name, mime: mime, data: data)
-        if let reason = AttachmentLimits.rejectionReason(adding: candidate, to: attachments) {
-            attachError = reason
-            return
-        }
-        attachError = nil
-        attachments.append(candidate)
+        attachError = AttachmentStaging.add(data: data, fallbackName: fallbackName,
+                                            suggestedName: suggestedName, to: &attachments,
+                                            frugal: FrugalSettings.current())
     }
 
     /// Empty input is normally nothing to send. With a context attached it is the

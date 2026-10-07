@@ -2886,12 +2886,9 @@ final class RunCoordinator {
             guard let self else { return }
             // Off the main actor: the CPU/ImageIO/PDFKit work only, over the
             // Sendable staged bytes. Returns Sendable (filename, mime, thumbnail).
-            let previews: [(String, String, Data)] = await Task.detached(priority: .utility) {
-                attachments.compactMap { att in
-                    AttachmentThumbnail.make(data: att.data, mime: att.mime)
-                        .map { (att.filename, att.mime, $0) }
-                }
-            }.value
+            // The detached task is inside the shared `AttachmentThumbnail.previews`, which
+            // the Mac coordinator calls too.
+            let previews = await AttachmentThumbnail.previews(for: attachments)
             guard !previews.isEmpty else { return }
             for (filename, mime, thumbnail) in previews {
                 userTurn.attachments.append(

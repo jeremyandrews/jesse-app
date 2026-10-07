@@ -1311,7 +1311,13 @@ pub async fn start_turn(
         // [`crate::turntrace`].
         // It also carries the quota store, so a rate-limit report the child writes mid-turn
         // lands in `GET /jesse/usage` at once and can ride this reply's provenance.
-        let trace = Arc::new(TurnTrace::from_cfg(&cfg).with_quota(st.quota.clone()));
+        // `harness` and `model` on the timing record are the ones this turn runs on: the
+        // tool-usage audit groups by them.
+        let trace = Arc::new(
+            TurnTrace::from_cfg(&cfg)
+                .with_quota(st.quota.clone())
+                .with_identity(harness.id(), &active.id),
+        );
         // WRITES THE TIMING RECORD WHEN THE TURN ENDS — however it ends. A Drop guard for
         // the same reason `TurnLockRelease` is one: a CANCEL aborts this task outright, so
         // any code placed after `complete` below would simply never run for a cancelled

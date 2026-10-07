@@ -74,6 +74,7 @@ while IFS= read -r line; do
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"th-paced\",\"turnId\":\"turn-1\",\"itemId\":\"msg-1\",\"delta\":\"FIRST\"}}"
       sleep "$pace"
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"item/started\",\"params\":{\"threadId\":\"th-paced\",\"turnId\":\"turn-1\",\"startedAtMs\":0,\"item\":{\"type\":\"commandExecution\",\"id\":\"e1\",\"command\":\"ls\"}}}"
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"item/completed\",\"params\":{\"threadId\":\"th-paced\",\"turnId\":\"turn-1\",\"completedAtMs\":0,\"item\":{\"type\":\"commandExecution\",\"id\":\"e1\",\"command\":\"ls\",\"status\":\"failed\",\"exitCode\":1}}}"
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"th-paced\",\"turnId\":\"turn-1\",\"itemId\":\"msg-1\",\"delta\":\" SECOND\"}}"
       sleep "$pace"
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"item/completed\",\"params\":{\"threadId\":\"th-paced\",\"turnId\":\"turn-1\",\"completedAtMs\":0,\"item\":{\"type\":\"agentMessage\",\"id\":\"msg-1\",\"text\":\"FIRST SECOND\",\"phase\":\"final_answer\"}}}"
@@ -243,6 +244,7 @@ async fn the_first_delta_reaches_the_client_before_the_turn_completes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_activity_and_text_interleave_in_order() {
     let rig = Rig::new("interleave", "");
+    let trace = TurnTrace::from_cfg(&rig.cfg);
     let (_text, _activity, mut rx) = rig
         .jobs
         .stream_subscribe(&rig.jid)
@@ -276,7 +278,7 @@ async fn tool_activity_and_text_interleave_in_order() {
         None,
         None,
         None,
-        &TurnTrace::from_cfg(&cfg),
+        &trace,
     )
     .await;
     assert!(out.is_ok(), "{out:?}");
@@ -287,6 +289,20 @@ async fn tool_activity_and_text_interleave_in_order() {
         vec!["text:FIRST", "tool:Bash", "text: SECOND"],
         "the client's frames must be in the order the child produced them"
     );
+    // The completed command item's `status` reached the timing record as the call's outcome,
+    // paired by item id, and no id or command did.
+    let rec = trace.timing("job", "done");
+    let tools: Vec<(String, Option<ToolCallOutcome>)> = rec
+        .tools
+        .iter()
+        .map(|t| (t.tool.clone(), t.outcome))
+        .collect();
+    assert_eq!(
+        tools,
+        vec![("Bash".to_string(), Some(ToolCallOutcome::Error))]
+    );
+    let line = serde_json::to_string(&rec).unwrap();
+    assert!(!line.contains("e1") && !line.contains("\"ls\""), "{line}");
 }
 
 /// A CANCELLED TURN KEEPS WHAT IT HAD SAID AND DOES NOT CLAIM TO HAVE FINISHED.

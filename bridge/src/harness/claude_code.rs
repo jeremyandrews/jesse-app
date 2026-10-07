@@ -150,7 +150,7 @@ impl SpawnedHarness for ClaudeCode {
     /// LINES. Claude Code writes its whole turn to stdout as `stream-json` and never reads
     /// stdin, so there is nothing to say to it after the argv.
     fn reader(&self) -> TurnReader {
-        TurnReader::Lines(Box::new(ClaudeCodeParser))
+        TurnReader::Lines(Box::new(ClaudeCodeParser::default()))
     }
 
     /// qmd PLUS the self-hosted read-only Slack server.
@@ -221,12 +221,99 @@ impl SpawnedHarness for ClaudeCode {
 /// — nothing has to be accumulated across lines to emit a complete `Done`. A harness whose
 /// outcome IS assembled across lines keeps that state in its own parser; the driver makes a
 /// fresh one per spawn attempt either way.
-pub struct ClaudeCodeParser;
+///
+/// The one thing it holds is the LAST line's trace signals (a call id, a call's outcome),
+/// read off the same parse and drained by the driver right after, so a line is parsed once.
+#[derive(Default)]
+pub struct ClaudeCodeParser {
+    signals: Vec<ToolTraceSignal>,
+}
 
 impl TurnParser for ClaudeCodeParser {
     fn on_line(&mut self, line: &str) -> StreamEvent {
-        parse_stream_line(line)
+        let line = line.trim();
+        if line.is_empty() {
+            return StreamEvent::Ignore;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return StreamEvent::Ignore;
+        };
+        self.signals = tool_trace_signals(&v);
+        parse_stream_value(&v)
     }
+
+    fn take_trace_signals(&mut self) -> Vec<ToolTraceSignal> {
+        std::mem::take(&mut self.signals)
+    }
+}
+
+/// What one parsed `stream-json` line says about tool calls beyond their names, for the
+/// timing record's per-call `outcome`. Three shapes; the message shapes are the ones the session
+/// transcripts hold (checked against the Studio's transcripts on 2026-10-07, where a call the
+/// permission layer denied carries `is_error: true`):
+///
+///   * a `stream_event` `content_block_start` whose block is a `tool_use` carries the call's
+///     `id` beside the `name` the activity hint already takes;
+///   * a `user` message whose content holds `tool_result` blocks: each names its call by
+///     `tool_use_id` and carries `is_error`;
+///   * the terminal `result` line's `permission_denials` names, by `tool_use_id`, every call
+///     the permission layer refused, which is how a refusal reads as a refusal rather than
+///     as the error result it also produced.
+///
+/// Only ids and the one bit cross this function: a tool result's CONTENT is never read.
+pub fn tool_trace_signals(v: &Value) -> Vec<ToolTraceSignal> {
+    let mut out = Vec::new();
+    match v.get("type").and_then(Value::as_str) {
+        Some("stream_event") => {
+            let event = v.get("event");
+            let is_start = event.and_then(|e| e.get("type")).and_then(Value::as_str)
+                == Some("content_block_start");
+            let block = event.and_then(|e| e.get("content_block"));
+            let is_tool =
+                block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use");
+            if is_start && is_tool {
+                if let Some(id) = block.and_then(|b| b.get("id")).and_then(Value::as_str) {
+                    out.push(ToolTraceSignal::CallId(id.to_string()));
+                }
+            }
+        }
+        Some("user") => {
+            let content = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array);
+            for block in content.into_iter().flatten() {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                out.push(ToolTraceSignal::Outcome {
+                    call_id: id.to_string(),
+                    outcome: if failed {
+                        ToolCallOutcome::Error
+                    } else {
+                        ToolCallOutcome::Ok
+                    },
+                });
+            }
+        }
+        Some("result") => {
+            let denials = v.get("permission_denials").and_then(Value::as_array);
+            for d in denials.into_iter().flatten() {
+                if let Some(id) = d.get("tool_use_id").and_then(Value::as_str) {
+                    out.push(ToolTraceSignal::Outcome {
+                        call_id: id.to_string(),
+                        outcome: ToolCallOutcome::Refused,
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 // ---- The five call sites' requests ------------------------------------------
@@ -338,9 +425,15 @@ pub fn parse_stream_line(line: &str) -> StreamEvent {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return StreamEvent::Ignore;
     };
+    parse_stream_value(&v)
+}
+
+/// [`parse_stream_line`] for a line already parsed, so [`ClaudeCodeParser`] parses each line
+/// once for both the event and its trace signals.
+pub fn parse_stream_value(v: &Value) -> StreamEvent {
     match v.get("type").and_then(|t| t.as_str()) {
         // The one terminal line — feeds the existing Ok/Retryable/Fatal logic.
-        Some("result") => StreamEvent::Done(classify_result_value(&v, None)),
+        Some("result") => StreamEvent::Done(classify_result_value(v, None)),
         // The `init` event, first line of the stream, carrying the session id this turn
         // runs under. It is the authoritative answer to "which session does this turn
         // belong to" and replaces inferring it from a directory diff. Any other `system`
@@ -4967,5 +5060,86 @@ mod tests {
         // nothing probed.
         cfg.vaultqa_mcp_config = Some("/etc/jesse/qmd.json".to_string());
         assert_eq!(vaultqa_mcp_config(&cfg), EMPTY_MCP_CONFIG);
+    }
+}
+
+#[cfg(test)]
+mod trace_signal_tests {
+    use super::*;
+
+    fn signals(line: &str) -> (StreamEvent, Vec<ToolTraceSignal>) {
+        let mut p = ClaudeCodeParser::default();
+        let ev = p.on_line(line);
+        (ev, p.take_trace_signals())
+    }
+
+    /// A tool start yields the SAME activity it always did, plus the call's id for the trace.
+    #[test]
+    fn a_tool_start_carries_its_call_id() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01A","name":"Read","input":{}}}}"#;
+        let (ev, sig) = signals(line);
+        assert!(matches!(ev, StreamEvent::ToolActivity(ref a) if a == &ToolActivity::used("Read")));
+        assert_eq!(sig, vec![ToolTraceSignal::CallId("toolu_01A".into())]);
+        // Drained: a second take is empty, so a signal is never applied twice.
+        let mut p = ClaudeCodeParser::default();
+        p.on_line(line);
+        p.take_trace_signals();
+        assert!(p.take_trace_signals().is_empty());
+    }
+
+    /// Tool results name their call and carry the one bit; the content is never read.
+    #[test]
+    fn tool_results_carry_is_error_and_nothing_else() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"SECRET FILE BODY","is_error":false},{"type":"tool_result","tool_use_id":"toolu_2","content":"Claude requested permissions to use Bash, but you haven't granted it yet.","is_error":true},{"type":"text","text":"ignored"}]}}"#;
+        let (ev, sig) = signals(line);
+        assert!(matches!(ev, StreamEvent::Ignore));
+        assert_eq!(
+            sig,
+            vec![
+                ToolTraceSignal::Outcome {
+                    call_id: "toolu_1".into(),
+                    outcome: ToolCallOutcome::Ok
+                },
+                ToolTraceSignal::Outcome {
+                    call_id: "toolu_2".into(),
+                    outcome: ToolCallOutcome::Error
+                },
+            ]
+        );
+    }
+
+    /// The terminal line's `permission_denials` marks those calls refused, and the line is
+    /// still the `Done` it always was.
+    #[test]
+    fn the_result_lines_permission_denials_are_refusals() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s1","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"rm -rf /"}}]}"#;
+        let (ev, sig) = signals(line);
+        assert!(matches!(ev, StreamEvent::Done(_)));
+        assert_eq!(
+            sig,
+            vec![ToolTraceSignal::Outcome {
+                call_id: "toolu_2".into(),
+                outcome: ToolCallOutcome::Refused
+            }]
+        );
+    }
+
+    /// The parser's events are exactly `parse_stream_line`'s: the trace signals ride beside
+    /// them and change nothing the client sees.
+    #[test]
+    fn the_parser_and_parse_stream_line_agree_on_every_fixture_line() {
+        for fixture in [
+            include_str!("../../tests/fixtures/stream/success.ndjson"),
+            include_str!("../../tests/fixtures/stream/error_max_turns.ndjson"),
+            include_str!("../../tests/fixtures/stream/missing_result.ndjson"),
+        ] {
+            let mut p = ClaudeCodeParser::default();
+            for line in fixture.lines() {
+                assert_eq!(
+                    format!("{:?}", p.on_line(line)),
+                    format!("{:?}", parse_stream_line(line))
+                );
+            }
+        }
     }
 }

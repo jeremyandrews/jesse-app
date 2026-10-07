@@ -939,6 +939,16 @@ pub trait TurnSink: Send + Sync {
     ///
     /// DEFAULTED TO A NO-OP, like the two provenance methods above.
     fn narration(&self, _block: &str) {}
+
+    /// What the harness learned about a tool call beyond its name: the id of the call it just
+    /// reported through [`TurnSink::tool_activity`], or how a call ended. Provenance for the
+    /// timing record's per-call `outcome`; nothing reaches the client, and the id never
+    /// reaches the record. DEFAULTED TO A NO-OP. See [`ToolCallOutcome`].
+    fn tool_signal(&self, _signal: ToolTraceSignal) {}
+
+    /// Per-call outcomes IN CALL ORDER, from a harness that keeps its own per-call trace and
+    /// hands it over whole (direct). DEFAULTED TO A NO-OP.
+    fn tool_outcomes_in_order(&self, _outcomes: &[ToolCallOutcome]) {}
 }
 
 /// What an in-process turn hands back when it succeeds: exactly what the driver needs to
@@ -1146,6 +1156,14 @@ pub trait TurnParser: Send {
     /// Map one line of the child's stdout to what the bridge does about it, accumulating
     /// whatever this harness needs to build its terminal outcome.
     fn on_line(&mut self, line: &str) -> StreamEvent;
+
+    /// What the LAST line said about tool calls beyond their names (a call id, a call's
+    /// outcome), for the timing record's per-call `outcome`. Drained by the driver after
+    /// every [`TurnParser::on_line`]. DEFAULTED TO NOTHING: a harness whose lines carry no
+    /// such thing writes nothing. See [`ToolCallOutcome`] for who fills it.
+    fn take_trace_signals(&mut self) -> Vec<ToolTraceSignal> {
+        Vec::new()
+    }
 }
 
 /// HOW A SPAWNED HARNESS'S CHILD IS TALKED TO — the second thing a runner shape decides,

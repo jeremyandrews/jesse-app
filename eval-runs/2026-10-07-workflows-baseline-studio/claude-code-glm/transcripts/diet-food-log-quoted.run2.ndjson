@@ -1,0 +1,18 @@
+{"pid":29553,"target":"spawned","type":"bridge_spawn"}
+{"deltas":79,"latency":{"first_event_ms":35054,"first_token_ms":131870,"result_ms":133202},"provenance":{"badge":"[glm · write · $0.3549]","cost_usd":0.35489292000000006,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"result_ms":133202,"status":"done","timing":{"elapsed_ms":133193,"ended_at":"2026-10-07T19:37:17Z","harness":"claude-code","job_id":"186f32f9888005a70000000000000000","model":"glm","started_at":"2026-10-07T19:35:03Z","status":"done","tool_calls":12,"tools":[{"ms":5342,"outcome":"ok","tool":"Read"},{"ms":34838,"outcome":"ok","tool":"Grep"},{"ms":6057,"outcome":"ok","tool":"Bash"},{"ms":4526,"outcome":"ok","tool":"Bash"},{"ms":10713,"outcome":"ok","tool":"Read"},{"ms":7353,"outcome":"ok","tool":"Edit"},{"ms":5076,"outcome":"ok","tool":"Bash"},{"ms":4179,"outcome":"error","tool":"Bash"},{"ms":5259,"outcome":"ok","tool":"Bash"},{"ms":4455,"outcome":"refused","tool":"Bash"},{"ms":3667,"outcome":"refused","tool":"Bash"},{"ms":5344,"outcome":"ok","tool":"Bash"}],"v":2},"turn":1,"type":"bridge_turn"}
+{"data":{"text":""},"event":"reset","t_ms":8,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":35054,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":40396,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":75234,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":81292,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":85819,"type":"bridge_sse"}
+{"data":{"name":"Edit"},"event":"activity","t_ms":96532,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":103886,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":108963,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":113142,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":118402,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":122857,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":126525,"type":"bridge_sse"}
+{"data":{"artifacts":null,"directives":null,"last_reply_ms":1791401837121,"narration":null,"provenance":{"badge":"[glm · write · $0.3549]","cost_usd":0.35489292000000006,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"response":"Logged Tuesday's lunch (13:15, Europe/Rome): same pasta with tomato sauce as Sunday, values copied from that weighed row. Validators pass, and the hook committed it.\n\n**2026-10-06: 621 cal of 1700 target, 1079 left** (13g protein at lunch; the day is light so far, dinner not yet logged).\n\n[glm · write · $0.3549]","session_id":"f4d69d4b-c0d6-448a-a2b2-0bf490f7b577"},"event":"done","t_ms":133202,"type":"bridge_sse"}
+{"message":{"content":[{"name":"Read","type":"tool_use"},{"name":"Grep","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Read","type":"tool_use"},{"name":"Edit","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"}]},"type":"assistant"}
+{"is_error":false,"result":"Logged Tuesday's lunch (13:15, Europe/Rome): same pasta with tomato sauce as Sunday, values copied from that weighed row. Validators pass, and the hook committed it.\n\n**2026-10-06: 621 cal of 1700 target, 1079 left** (13g protein at lunch; the day is light so far, dinner not yet logged).\n\n[glm · write · $0.3549]","subtype":"success","type":"result","usage":{}}

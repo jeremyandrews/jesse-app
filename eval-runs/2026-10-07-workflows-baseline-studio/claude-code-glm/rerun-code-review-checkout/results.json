@@ -1,0 +1,127 @@
+{
+  "suite": "workflows-v1 (code-review-checkout rerun)",
+  "driver": "bridge",
+  "wire": null,
+  "index": null,
+  "endpoint": "spawned jesse-bridge 0.168.0",
+  "model": "glm",
+  "harness": "claude-code",
+  "runs": 3,
+  "mock": false,
+  "tasks": [
+    {
+      "id": "code-review-checkout",
+      "class": "code",
+      "workspace": "fixture",
+      "judged": false,
+      "rubric": null,
+      "passed": true,
+      "completed": true,
+      "wall_ms": 73501,
+      "measured_ttft_ms": 70683,
+      "result_ttft_ms": null,
+      "tool_calls": 8,
+      "tool_names": [
+        "Bash",
+        "Bash",
+        "Bash",
+        "Bash",
+        "Grep",
+        "Read",
+        "Glob",
+        "Write"
+      ],
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_creation": 0
+      },
+      "cost_usd": 0.0,
+      "final_answer": "Reviewed **199208282f76bdb52c3b7c9d35026604b131f443** (\"Add average\"), checked out at `Code/github.com/acme/widget`. Yes, it has a real bug:\n\n1. **Panics on empty input.** `average(&[])` divides by `xs.len() as i64`, which is 0, and integer division by zero panics in Rust. The sibling `sum` returns 0 for an empty slice, so the module is inconsistent. Fix: return 0, return `Option<i64>`, or document the panic.\n2. **Truncates, despite the doc.** The comment says \"arithmetic mean\", but `total / len` truncates toward zero (`average(&[1, 2])` is 1). Also, it takes and returns `i64` while `sum` uses `f64`, so results are silently lossy. Either compute in `f64` or document the truncation.\n\nNothing else in the commit; it only adds this one function to `src/stats.rs`.\n\n[glm · write · $0.2885]",
+      "assertions": [
+        {
+          "kind": "file_exists",
+          "passed": true,
+          "detail": "Code/github.com/acme/widget/.git exists"
+        },
+        {
+          "kind": "file_exists",
+          "passed": true,
+          "detail": "Code/github.com/acme/widget/src/stats.rs exists"
+        },
+        {
+          "kind": "git_head_message_matches",
+          "passed": true,
+          "detail": "HEAD message \"Add average\" matches /^Add average/"
+        },
+        {
+          "kind": "answer_matches",
+          "passed": true,
+          "detail": "/1992082/ matched"
+        },
+        {
+          "kind": "answer_matches",
+          "passed": true,
+          "detail": "/(?i)(empty|zero|divi|panic|len\\(\\) == 0|no values)/ matched"
+        },
+        {
+          "kind": "completed",
+          "passed": true,
+          "detail": "terminal result line arrived"
+        }
+      ],
+      "transcript_path": "transcripts/code-review-checkout.run3.ndjson",
+      "error": null,
+      "latency": {
+        "first_event_ms": 38929,
+        "first_token_ms": 70683,
+        "result_ms": 73501
+      },
+      "attempts": [
+        {
+          "passed": true,
+          "completed": true,
+          "wall_ms": 141761,
+          "latency": {
+            "first_event_ms": 75922,
+            "first_token_ms": 139797,
+            "result_ms": 141761
+          },
+          "tool_calls": 9,
+          "transcript_path": "transcripts/code-review-checkout.run1.ndjson",
+          "failed": [],
+          "error": null
+        },
+        {
+          "passed": true,
+          "completed": true,
+          "wall_ms": 78391,
+          "latency": {
+            "first_event_ms": 37614,
+            "first_token_ms": 74726,
+            "result_ms": 78391
+          },
+          "tool_calls": 8,
+          "transcript_path": "transcripts/code-review-checkout.run2.ndjson",
+          "failed": [],
+          "error": null
+        },
+        {
+          "passed": true,
+          "completed": true,
+          "wall_ms": 73501,
+          "latency": {
+            "first_event_ms": 38929,
+            "first_token_ms": 70683,
+            "result_ms": 73501
+          },
+          "tool_calls": 8,
+          "transcript_path": "transcripts/code-review-checkout.run3.ndjson",
+          "failed": [],
+          "error": null
+        }
+      ]
+    }
+  ]
+}

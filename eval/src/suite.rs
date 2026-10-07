@@ -15,8 +15,16 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Suite {
     pub name: String,
+    /// How many times each task runs; a task passes only when EVERY run passes (pass^k).
+    /// Absent means 1, which is every suite written before `workflows-v1`. `--runs`
+    /// overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<u32>,
     pub tasks: Vec<Task>,
 }
+
+/// The harness ids a task may name in `harnesses`, as the bridge's model registry spells them.
+pub const KNOWN_HARNESSES: &[&str] = &["claude-code", "codex", "direct"];
 
 /// Where a task runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -50,7 +58,86 @@ pub enum Assertion {
     /// A file in the task workspace must have exactly this content.
     FileEquals { path: String, content: String },
     /// Regex must match somewhere in a workspace file's content.
-    FileMatches { path: String, pattern: String },
+    ///
+    /// The file is `path`, or (when `path` is empty) every file directly inside `dir` whose
+    /// NAME matches `name_pattern`; the selector form passes when ANY selected file matches,
+    /// and fails when none is selected. It exists for a file whose name the turn chooses (a
+    /// draft named `YYYY-MM-DD-HHMM-…`), which no fixed path can name in advance.
+    FileMatches {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        path: String,
+        pattern: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_pattern: Option<String>,
+    },
+    /// A workspace path must exist (file or directory). Same selector as `file_matches`:
+    /// `path`, or at least one entry of `dir` whose name matches `name_pattern`.
+    FileExists {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_pattern: Option<String>,
+    },
+    /// A workspace path must NOT exist. With the selector form: no entry of `dir` may have a
+    /// name matching `name_pattern` (a missing `dir` passes, since nothing is in it).
+    FileAbsent {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_pattern: Option<String>,
+    },
+    /// The LAST data row of a CSV file, read with a real RFC 4180 reader (quoted commas and
+    /// doubled quotes are one cell, never a column shift). Every `columns` entry names a
+    /// header and a regex the cell must match IN FULL (anchored, so `Banana` is not
+    /// satisfied by `Banana bread`; spell `(?i).*banana.*` for a substring). `row_count`,
+    /// when set, is the exact number of data rows the file must hold, which is how a suite
+    /// says "updated in place, not appended".
+    CsvLastRow {
+        path: String,
+        columns: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row_count: Option<usize>,
+    },
+    /// The subject and body of the workspace repository's HEAD commit must match `pattern`.
+    /// Read through a constant `git` argv, never a shell.
+    GitHeadMessageMatches {
+        pattern: String,
+        /// The repository, relative to the workspace. Defaults to the workspace itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+    },
+    /// `path` must differ between the seed commit the runner recorded (`refs/eval/seed`)
+    /// and HEAD, i.e. the turn COMMITTED a change to it. With `committed: false` the
+    /// working tree is compared instead, which also counts an uncommitted edit.
+    GitPathChangedSince {
+        path: String,
+        #[serde(default = "default_true")]
+        committed: bool,
+    },
+    /// A value inside a generated `.js` data file that starts with an assignment
+    /// (`window.DIET_TODAY = { … };`). Leading comments and everything up to the first `=`
+    /// are stripped, a trailing `;` dropped, and the rest parsed as JSON5 (which is what a JS
+    /// object literal with bare keys and trailing commas is). `pointer` is an RFC 6901 JSON
+    /// pointer (`/date`, `/meals/0/items/1/item`); the value there must EQUAL `value`.
+    JsonPathEquals {
+        path: String,
+        pointer: String,
+        value: serde_json::Value,
+    },
+    /// One of the CLOSED table of diet validators, run with `node` in the workspace, must exit
+    /// zero. Never a free command: `validator` is an enum and `day` is checked to be a date
+    /// before it reaches the argv.
+    ProcessExitZero {
+        validator: Validator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        day: Option<String>,
+    },
     /// Total tool-call count must be <= this ceiling.
     MaxToolCalls { max: u32 },
     /// A numeric value — capture group 1 of `pattern`, parsed as an f64 — must
@@ -97,6 +184,57 @@ pub enum Assertion {
     ToolsInclude { names: Vec<String> },
     /// NONE of these tool names may appear in the transcript's tool calls.
     ToolsExclude { names: Vec<String> },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The closed table `process_exit_zero` may run. Two entries, both the vault's own diet
+/// validators, vendored into the fixture vault at `vault/<script>`; the argv is
+/// `node vault/<script> [--day <YYYY-MM-DD>]`, built in `crate::assertions` and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Validator {
+    /// `vault/validate-diet-today.js`: the derived day file is well formed.
+    ValidateDietToday,
+    /// `vault/verify-diet-consistency.js`: the day file agrees with the three CSVs.
+    VerifyDietConsistency,
+}
+
+impl Validator {
+    /// The script path, relative to the workspace.
+    pub fn script(self) -> &'static str {
+        match self {
+            Validator::ValidateDietToday => "vault/validate-diet-today.js",
+            Validator::VerifyDietConsistency => "vault/verify-diet-consistency.js",
+        }
+    }
+}
+
+/// A bare git repository the runner builds OUTSIDE the workspace before the task runs, so a
+/// task can clone it as if it were a remote. `name` is `<host>/<owner>/<repo>`; the prompt
+/// and the assertions reach it through `{{remote_url:NAME}}`, `{{remote_head:NAME}}` and
+/// `{{remote_head_short:NAME}}`, substituted by the runner. Commits are made with a fixed
+/// author, committer and date, so a head SHA is the same on every machine.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RemoteSpec {
+    pub name: String,
+    /// The branch the commits land on. Defaults to `main`.
+    #[serde(default = "default_branch")]
+    pub branch: String,
+    pub commits: Vec<RemoteCommit>,
+}
+
+/// One commit of a [`RemoteSpec`]: files written (whole) on top of the previous commit.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RemoteCommit {
+    pub message: String,
+    pub files: BTreeMap<String, String>,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
 }
 
 /// A single eval task.
@@ -150,6 +288,35 @@ pub struct Task {
     #[serde(default)]
     pub rubric: Option<String>,
     pub assertions: Vec<Assertion>,
+    /// The harnesses this task applies to (`claude-code`, `codex`, `direct`). Empty means
+    /// every harness. A driver that knows its harness SKIPS a task that does not name it, and
+    /// the scorecard reports it as a skip, never a fail. Drivers with no harness of their own
+    /// (`claude-cli`, `direct`) run every task, as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<String>,
+    /// A directory under the suite's `fixtures/` root (`<suite dir>/../fixtures/<this>`)
+    /// copied into the workspace BEFORE `fixture_files`, which then overlay it. This is how
+    /// twenty tasks share one realistic vault without twenty copies of it in the suite file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_base: Option<String>,
+    /// Make the workspace a git repository with one seed commit of the fixture, recorded at
+    /// `refs/eval/seed`, before the turn. The `git_*` assertions need it.
+    #[serde(default)]
+    pub git_init: bool,
+    /// Bare repositories the task clones from. See [`RemoteSpec`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remotes: Vec<RemoteSpec>,
+    /// Further turns in the SAME conversation, sent in order after `prompt` has finished.
+    /// The final answer graded is the last turn's. Only a driver that holds a conversation
+    /// (the `bridge` driver) can run one; the others fail it as a harness error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followups: Vec<String>,
+    /// `ask` (the default) or `tell`, the phone's two modes, for a driver that has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The device health block the phone attaches, sent verbatim as `health_context`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_context: Option<String>,
 }
 
 /// The only tools a `vault-readonly` task may use. Nothing that can write.
@@ -229,6 +396,73 @@ impl Task {
                 }
             }
         }
+        for h in &self.harnesses {
+            if !KNOWN_HARNESSES.contains(&h.as_str()) {
+                return Err(format!(
+                    "task '{}' names unknown harness '{h}' (known: {})",
+                    self.id,
+                    KNOWN_HARNESSES.join(", ")
+                ));
+            }
+        }
+        if let Some(m) = self.mode.as_deref() {
+            if m != "ask" && m != "tell" {
+                return Err(format!(
+                    "task '{}' has mode '{m}'; the phone has only `ask` and `tell`",
+                    self.id
+                ));
+            }
+        }
+        if let Some(base) = &self.fixture_base {
+            if !is_plain_relative(base) {
+                return Err(format!(
+                    "task '{}' has fixture_base '{base}', which is not a plain relative path",
+                    self.id
+                ));
+            }
+        }
+        for r in &self.remotes {
+            let parts: Vec<&str> = r.name.split('/').collect();
+            let safe = |s: &str| {
+                !s.is_empty()
+                    && s != "."
+                    && s != ".."
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            };
+            if parts.len() != 3 || !parts.iter().all(|p| safe(p)) {
+                return Err(format!(
+                    "task '{}' has remote '{}'; a remote is named <host>/<owner>/<repo>",
+                    self.id, r.name
+                ));
+            }
+            if r.commits.is_empty() {
+                return Err(format!(
+                    "task '{}' has remote '{}' with no commits",
+                    self.id, r.name
+                ));
+            }
+        }
+        for a in &self.assertions {
+            if let Assertion::ProcessExitZero { day: Some(d), .. } = a {
+                if !is_iso_date(d) {
+                    return Err(format!(
+                        "task '{}' passes day '{d}' to a validator; it must be YYYY-MM-DD",
+                        self.id
+                    ));
+                }
+            }
+            let on_git = matches!(
+                a,
+                Assertion::GitHeadMessageMatches { .. } | Assertion::GitPathChangedSince { .. }
+            );
+            if on_git && !self.git_init {
+                return Err(format!(
+                    "task '{}' asserts on git but does not set git_init",
+                    self.id
+                ));
+            }
+        }
         if self.judged && self.rubric.as_deref().unwrap_or("").trim().is_empty() {
             return Err(format!(
                 "task '{}' is judged but has no rubric text",
@@ -248,6 +482,27 @@ impl Task {
         }
         Ok(())
     }
+}
+
+/// `YYYY-MM-DD`, digits in the right places. Not a calendar check: its job is to keep
+/// anything that is not a date out of a validator's argv.
+pub fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// A relative path with no `..`, no root and no empty component.
+pub fn is_plain_relative(p: &str) -> bool {
+    use std::path::Component;
+    let path = std::path::Path::new(p);
+    !p.is_empty()
+        && path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 impl Suite {
@@ -280,7 +535,91 @@ mod tests {
             judged: false,
             rubric: None,
             assertions: vec![],
+            harnesses: vec![],
+            fixture_base: None,
+            git_init: false,
+            remotes: vec![],
+            followups: vec![],
+            mode: None,
+            health_context: None,
         }
+    }
+
+    #[test]
+    fn an_unknown_harness_is_refused_and_the_three_known_ones_load() {
+        let mut t = task_with(Workspace::Fixture, &[]);
+        t.harnesses = vec!["claude-code".into(), "codex".into(), "direct".into()];
+        assert!(t.validate().is_ok());
+        t.harnesses = vec!["claude".into()];
+        assert!(t.validate().unwrap_err().contains("unknown harness"));
+    }
+
+    #[test]
+    fn a_validator_day_that_is_not_a_date_is_refused() {
+        let mut t = task_with(Workspace::Fixture, &[]);
+        t.assertions = vec![Assertion::ProcessExitZero {
+            validator: Validator::ValidateDietToday,
+            day: Some("2026-10-06; rm -rf /".into()),
+        }];
+        assert!(t.validate().unwrap_err().contains("YYYY-MM-DD"));
+        t.assertions = vec![Assertion::ProcessExitZero {
+            validator: Validator::ValidateDietToday,
+            day: Some("2026-10-06".into()),
+        }];
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn the_validator_table_is_closed_and_unknown_names_do_not_parse() {
+        let ok: Result<Assertion, _> = serde_json::from_value(serde_json::json!(
+            {"type": "process_exit_zero", "validator": "verify-diet-consistency"}
+        ));
+        assert!(ok.is_ok());
+        let bad: Result<Assertion, _> = serde_json::from_value(serde_json::json!(
+            {"type": "process_exit_zero", "validator": "bash"}
+        ));
+        assert!(bad.is_err(), "a free command must not deserialize");
+    }
+
+    #[test]
+    fn git_assertions_need_git_init() {
+        let mut t = task_with(Workspace::Fixture, &[]);
+        t.assertions = vec![Assertion::GitHeadMessageMatches {
+            pattern: "x".into(),
+            repo: None,
+        }];
+        assert!(t.validate().unwrap_err().contains("git_init"));
+        t.git_init = true;
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn a_remote_must_be_host_owner_repo_and_a_base_must_stay_relative() {
+        let mut t = task_with(Workspace::Fixture, &[]);
+        t.remotes = vec![RemoteSpec {
+            name: "github.com/acme/../x".into(),
+            branch: "main".into(),
+            commits: vec![RemoteCommit {
+                message: "m".into(),
+                files: BTreeMap::new(),
+            }],
+        }];
+        assert!(t.validate().is_err());
+        t.remotes[0].name = "github.com/acme/widget".into();
+        assert!(t.validate().is_ok());
+        t.fixture_base = Some("../../etc".into());
+        assert!(t.validate().is_err());
+        t.fixture_base = Some("workflows-v1/base".into());
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn a_mode_other_than_ask_or_tell_is_refused() {
+        let mut t = task_with(Workspace::Fixture, &[]);
+        t.mode = Some("tell".into());
+        assert!(t.validate().is_ok());
+        t.mode = Some("shout".into());
+        assert!(t.validate().is_err());
     }
 
     #[test]

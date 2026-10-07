@@ -7,9 +7,10 @@
 //! split is what lets `compare` put two runs side by side and mean it.
 
 use crate::assertions::{eval_all, AssertionResult};
-use crate::driver::{Driver, PreparedWorkspace};
+use crate::driver::{Driver, Latency, PreparedWorkspace, TaskRun};
 use crate::suite::{Suite, Task, Workspace};
 use crate::transcript::{Transcript, Usage};
+use crate::workspace::{prepare_fixture, resolve_task, BuiltRemote};
 use jesse_agent::PriceDeck;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,6 +25,10 @@ pub struct RunConfig {
     /// zero is honest where a plausible made-up rate is not.
     pub prices: PriceDeck,
     pub out_dir: PathBuf,
+    /// Runs per task, k in pass^k. 1 runs every task once, as every run did before it.
+    pub runs: u32,
+    /// Where a task's `fixture_base` is resolved: `<suite dir>/../fixtures`.
+    pub fixtures_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +94,36 @@ pub struct TaskResult {
     pub transcript_path: String,
     /// Harness-level error (spawn failure, timeout, mock miss). Not a model miss.
     pub error: Option<String>,
+    /// Why the task did not run at all, when it did not: today, a `harnesses` list that does
+    /// not name the driver's harness. A skipped task is neither a pass nor a fail and is
+    /// left out of every pass rate and every comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+    /// Submit-relative latencies of the attempt this record describes (see `attempts`).
+    #[serde(default)]
+    pub latency: Latency,
+    /// One entry per run of this task. A task with `runs: k` passes only when all k passed
+    /// (pass^k); the fields above describe the FIRST FAILING attempt when there is one, and
+    /// the last attempt otherwise, so a failure is never hidden behind a later pass. Empty
+    /// in a results file written before pass^k existed, and for a skipped task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<AttemptRecord>,
+}
+
+/// One run of one task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttemptRecord {
+    pub passed: bool,
+    pub completed: bool,
+    pub wall_ms: u64,
+    #[serde(default)]
+    pub latency: Latency,
+    pub tool_calls: u32,
+    pub transcript_path: String,
+    /// The `kind` of every assertion that failed, for a glance at what broke.
+    #[serde(default)]
+    pub failed: Vec<String>,
+    pub error: Option<String>,
 }
 
 /// Top-level `results.json` document.
@@ -108,39 +143,64 @@ pub struct RunReport {
     pub index: Option<String>,
     pub endpoint: Option<String>,
     pub model: Option<String>,
+    /// The harness the driver ran turns on, when it has one (`bridge`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Runs per task (k in pass^k). 1 for every results file written before it existed.
+    #[serde(default = "one")]
+    pub runs: u32,
+    /// Set when the whole cell could not run (a model whose credential or backend is
+    /// absent): the reason, and then `tasks` is empty. Never green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_run: Option<String>,
     pub mock: bool,
     pub tasks: Vec<TaskResult>,
+}
+
+fn one() -> u32 {
+    1
 }
 
 fn legacy_driver() -> String {
     "claude-cli".to_string()
 }
 
-/// Populate a fresh workspace for a fixture task; return the dir to run in.
-/// For vault tasks, returns the real vault path and writes nothing.
-fn prepare_workspace(task: &Task, temp_root: &Path) -> Result<PreparedWorkspace, String> {
-    let dir = match task.workspace {
-        Workspace::VaultReadonly => crate::suite::vault_dir(),
+/// Populate a fresh workspace for a task; return the dir to run in and the remotes built
+/// for it. For vault tasks, returns the real vault path and writes nothing.
+fn prepare_workspace(
+    task: &Task,
+    dir: &Path,
+    fixtures_root: Option<&Path>,
+) -> Result<(PreparedWorkspace, BTreeMap<String, BuiltRemote>), String> {
+    let (dir, remotes) = match task.workspace {
+        Workspace::VaultReadonly => (crate::suite::vault_dir(), BTreeMap::new()),
         Workspace::Fixture => {
-            let dir = temp_root.join(&task.id);
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("could not create fixture dir: {e}"))?;
-            for (rel, content) in &task.fixture_files {
-                let full = dir.join(rel);
-                if let Some(parent) = full.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-                }
-                std::fs::write(&full, content)
-                    .map_err(|e| format!("could not write fixture {rel}: {e}"))?;
-            }
-            dir
+            // The remotes live BESIDE the workspace, never in it: the turn reaches one only
+            // by cloning it, which is the property a checkout task is testing.
+            let remotes_root = dir.with_extension("remotes");
+            let remotes = prepare_fixture(task, dir, fixtures_root, &remotes_root)?;
+            (dir.to_path_buf(), remotes)
         }
     };
-    Ok(PreparedWorkspace {
-        kind: task.workspace,
-        dir,
-    })
+    Ok((
+        PreparedWorkspace {
+            kind: task.workspace,
+            dir,
+        },
+        remotes,
+    ))
+}
+
+/// Why a driver with harness `h` skips `task`, or `None` to run it.
+pub fn skip_reason(task: &Task, harness: Option<&str>) -> Option<String> {
+    let h = harness?;
+    if task.harnesses.is_empty() || task.harnesses.iter().any(|t| t == h) {
+        return None;
+    }
+    Some(format!(
+        "harness {h} is not in this task's harnesses [{}]",
+        task.harnesses.join(", ")
+    ))
 }
 
 /// Run a whole suite. Returns the report (also written to `out_dir`).
@@ -169,59 +229,58 @@ pub fn run_suite(suite: &Suite, cfg: &RunConfig) -> Result<RunReport, String> {
         .build()
         .map_err(|e| format!("could not start the runtime: {e}"))?;
 
+    let runs = cfg.runs.max(1);
+    let harness = cfg.driver.harness();
     let mut results = Vec::new();
     for task in &suite.tasks {
         // Load-bearing: refuse a vault task with a non-read tool before running.
         task.validate()?;
 
-        let workspace = prepare_workspace(task, temp_root.path())?;
-        let run = runtime.block_on(
-            cfg.driver
-                .run_task(task, &workspace, CancellationToken::new()),
-        );
-
-        // Persist the raw transcript.
-        let transcript_rel = format!("transcripts/{}.ndjson", task.id);
-        let _ = std::fs::write(cfg.out_dir.join(&transcript_rel), run.lines.join("\n"));
-
-        let parsed: &Transcript = &run.transcript;
-
-        // Judged tasks: save the final answer as an artifact for `judge`.
-        if task.judged && !run.answer.is_empty() {
-            let _ = std::fs::write(answers_dir.join(format!("{}.txt", task.id)), &run.answer);
+        if let Some(why) = skip_reason(task, harness.as_deref()) {
+            results.push(skipped_result(task, why));
+            continue;
         }
 
-        let (passed, assertion_results) = eval_all(
-            &task.assertions,
-            parsed,
-            &workspace.dir,
-            task.persona.as_ref(),
-        );
-        // A harness error (couldn't even run) is not a legitimate pass.
-        let passed = passed && run.error.is_none();
-        let tokens = TokenRecord::from(&run.usage);
-        let cost_usd = cost_of(&tokens, &cfg.prices);
-
-        results.push(TaskResult {
-            id: task.id.clone(),
-            class: task.class.clone(),
-            workspace: format!("{:?}", task.workspace).to_lowercase(),
-            judged: task.judged,
-            rubric: task.rubric.clone(),
-            passed,
-            completed: run.completed,
-            wall_ms: run.wall_ms,
-            measured_ttft_ms: run.ttft_ms,
-            result_ttft_ms: parsed.result_ttft_ms,
-            tool_calls: run.tool_calls as u32,
-            tool_names: run.tool_names.clone(),
-            tokens: Some(tokens),
-            cost_usd,
-            final_answer: parsed.final_answer.clone(),
-            assertions: assertion_results,
-            transcript_path: transcript_rel,
-            error: run.error.clone(),
-        });
+        let mut attempts: Vec<(AttemptRecord, TaskResult)> = Vec::new();
+        for i in 0..runs {
+            let dir = if runs == 1 {
+                temp_root.path().join(&task.id)
+            } else {
+                temp_root.path().join(format!("{}.run{}", task.id, i + 1))
+            };
+            let suffix = if runs == 1 {
+                String::new()
+            } else {
+                format!(".run{}", i + 1)
+            };
+            if !task.followups.is_empty() && !cfg.driver.holds_conversation() {
+                attempts.push(harness_failure(
+                    task,
+                    &suffix,
+                    format!(
+                        "task has {} follow-up turn(s) and the {} driver holds no conversation",
+                        task.followups.len(),
+                        cfg.driver.id()
+                    ),
+                ));
+                continue;
+            }
+            let record = match prepare_workspace(task, &dir, cfg.fixtures_root.as_deref())
+                .and_then(|(ws, remotes)| Ok((ws, resolve_task(task, &remotes)?)))
+            {
+                Err(e) => harness_failure(task, &suffix, e),
+                Ok((workspace, resolved)) => {
+                    let run = runtime.block_on(cfg.driver.run_task(
+                        &resolved,
+                        &workspace,
+                        CancellationToken::new(),
+                    ));
+                    score_attempt(&resolved, &workspace, run, cfg, &suffix, &answers_dir)
+                }
+            };
+            attempts.push(record);
+        }
+        results.push(fold_attempts(attempts));
     }
 
     let report = RunReport {
@@ -231,6 +290,9 @@ pub fn run_suite(suite: &Suite, cfg: &RunConfig) -> Result<RunReport, String> {
         index: cfg.driver.index(),
         endpoint: cfg.driver.endpoint(),
         model: cfg.driver.model(),
+        harness,
+        runs,
+        not_run: None,
         mock: cfg.driver.is_mock(),
         tasks: results,
     };
@@ -245,6 +307,202 @@ pub fn run_suite(suite: &Suite, cfg: &RunConfig) -> Result<RunReport, String> {
         .map_err(|e| format!("could not write scorecard.md: {e}"))?;
 
     Ok(report)
+}
+
+/// Score one finished run and persist its transcript (and answer, for a judged task).
+fn score_attempt(
+    task: &Task,
+    workspace: &PreparedWorkspace,
+    run: TaskRun,
+    cfg: &RunConfig,
+    suffix: &str,
+    answers_dir: &Path,
+) -> (AttemptRecord, TaskResult) {
+    let transcript_rel = format!("transcripts/{}{suffix}.ndjson", task.id);
+    let _ = std::fs::write(cfg.out_dir.join(&transcript_rel), run.lines.join("\n"));
+    let parsed: &Transcript = &run.transcript;
+    if task.judged && !run.answer.is_empty() {
+        let _ = std::fs::write(
+            answers_dir.join(format!("{}{suffix}.txt", task.id)),
+            &run.answer,
+        );
+    }
+    let (passed, assertion_results) = eval_all(
+        &task.assertions,
+        parsed,
+        &workspace.dir,
+        task.persona.as_ref(),
+    );
+    // A harness error (couldn't even run) is not a legitimate pass.
+    let passed = passed && run.error.is_none();
+    let tokens = TokenRecord::from(&run.usage);
+    let cost_usd = cost_of(&tokens, &cfg.prices);
+    let attempt = AttemptRecord {
+        passed,
+        completed: run.completed,
+        wall_ms: run.wall_ms,
+        latency: run.latency,
+        tool_calls: run.tool_calls as u32,
+        transcript_path: transcript_rel.clone(),
+        failed: assertion_results
+            .iter()
+            .filter(|a| !a.passed)
+            .map(|a| a.kind.clone())
+            .collect(),
+        error: run.error.clone(),
+    };
+    let result = TaskResult {
+        id: task.id.clone(),
+        class: task.class.clone(),
+        workspace: format!("{:?}", task.workspace).to_lowercase(),
+        judged: task.judged,
+        rubric: task.rubric.clone(),
+        passed,
+        completed: run.completed,
+        wall_ms: run.wall_ms,
+        measured_ttft_ms: run.ttft_ms,
+        result_ttft_ms: parsed.result_ttft_ms,
+        tool_calls: run.tool_calls as u32,
+        tool_names: run.tool_names.clone(),
+        tokens: Some(tokens),
+        cost_usd,
+        final_answer: parsed.final_answer.clone(),
+        assertions: assertion_results,
+        transcript_path: transcript_rel,
+        error: run.error.clone(),
+        skipped: None,
+        latency: run.latency,
+        attempts: Vec::new(),
+    };
+    (attempt, result)
+}
+
+/// A workspace that could not be prepared: a harness failure, recorded like one.
+fn harness_failure(task: &Task, suffix: &str, why: String) -> (AttemptRecord, TaskResult) {
+    let mut r = skipped_result(task, String::new());
+    r.skipped = None;
+    r.error = Some(why.clone());
+    r.transcript_path = format!("transcripts/{}{suffix}.ndjson", task.id);
+    (
+        AttemptRecord {
+            passed: false,
+            completed: false,
+            wall_ms: 0,
+            latency: Latency::default(),
+            tool_calls: 0,
+            transcript_path: r.transcript_path.clone(),
+            failed: Vec::new(),
+            error: Some(why),
+        },
+        r,
+    )
+}
+
+/// The record of a task that did not run.
+fn skipped_result(task: &Task, why: String) -> TaskResult {
+    TaskResult {
+        id: task.id.clone(),
+        class: task.class.clone(),
+        workspace: format!("{:?}", task.workspace).to_lowercase(),
+        judged: task.judged,
+        rubric: task.rubric.clone(),
+        passed: false,
+        completed: false,
+        wall_ms: 0,
+        measured_ttft_ms: None,
+        result_ttft_ms: None,
+        tool_calls: 0,
+        tool_names: Vec::new(),
+        tokens: None,
+        cost_usd: 0.0,
+        final_answer: None,
+        assertions: Vec::new(),
+        transcript_path: String::new(),
+        error: None,
+        skipped: Some(why),
+        latency: Latency::default(),
+        attempts: Vec::new(),
+    }
+}
+
+/// pass^k: every attempt must pass. The task's own fields describe the first failing
+/// attempt, or the last one when all passed.
+fn fold_attempts(attempts: Vec<(AttemptRecord, TaskResult)>) -> TaskResult {
+    let all = attempts.iter().all(|(a, _)| a.passed);
+    let pick = attempts
+        .iter()
+        .position(|(a, _)| !a.passed)
+        .unwrap_or(attempts.len().saturating_sub(1));
+    let records: Vec<AttemptRecord> = attempts.iter().map(|(a, _)| a.clone()).collect();
+    let mut r = attempts
+        .into_iter()
+        .nth(pick)
+        .map(|(_, r)| r)
+        .expect("at least one attempt");
+    r.passed = all;
+    if records.len() > 1 {
+        r.attempts = records;
+    }
+    r
+}
+
+/// Nearest-rank percentile of `xs` (`p` in 0..=100). `None` for an empty set.
+pub fn percentile(xs: &[u64], p: u32) -> Option<u64> {
+    if xs.is_empty() {
+        return None;
+    }
+    let mut v = xs.to_vec();
+    v.sort_unstable();
+    let rank = ((p as f64 / 100.0) * v.len() as f64).ceil() as usize;
+    Some(v[rank.clamp(1, v.len()) - 1])
+}
+
+/// Every attempt's latency in a report: the attempts list when present, else the task's own.
+fn all_latencies(report: &RunReport) -> Vec<Latency> {
+    report
+        .tasks
+        .iter()
+        .filter(|t| t.skipped.is_none())
+        .flat_map(|t| {
+            if t.attempts.is_empty() {
+                vec![t.latency]
+            } else {
+                t.attempts.iter().map(|a| a.latency).collect()
+            }
+        })
+        .collect()
+}
+
+/// Record a cell that could not run at all: `results.json` with the reason and no tasks,
+/// and a scorecard that says NOT RUN. Never a column of failures, never green.
+pub fn write_not_run(
+    out_dir: &Path,
+    suite: &Suite,
+    driver: &str,
+    model: &str,
+    why: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("could not create out dir: {e}"))?;
+    let report = RunReport {
+        suite: suite.name.clone(),
+        driver: driver.to_string(),
+        wire: None,
+        index: None,
+        endpoint: None,
+        model: Some(model.to_string()),
+        harness: None,
+        runs: suite.runs.unwrap_or(1),
+        not_run: Some(why.to_string()),
+        mock: false,
+        tasks: Vec::new(),
+    };
+    std::fs::write(
+        out_dir.join("results.json"),
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("could not write results.json: {e}"))?;
+    std::fs::write(out_dir.join("scorecard.md"), scorecard(&report))
+        .map_err(|e| format!("could not write scorecard.md: {e}"))
 }
 
 /// Render the per-class + totals scorecard.
@@ -262,7 +520,7 @@ pub fn scorecard(report: &RunReport) -> String {
         latency_sum: 0,
         tool_sum: 0,
     };
-    for t in &report.tasks {
+    for t in report.tasks.iter().filter(|t| t.skipped.is_none()) {
         let a = by_class.entry(t.class.clone()).or_insert(Agg {
             n: 0,
             passed: 0,
@@ -298,6 +556,21 @@ pub fn scorecard(report: &RunReport) -> String {
         report.index.as_deref().unwrap_or("n/a"),
     ));
     out.push_str(&format!("Target: {target}\n\n"));
+    if let Some(why) = &report.not_run {
+        out.push_str(&format!(
+            "**NOT RUN.** {}\n\nNo task ran, so nothing here passed or failed.\n",
+            why.lines().next().unwrap_or("")
+        ));
+        return out;
+    }
+    if report.harness.is_some() || report.runs > 1 {
+        out.push_str(&format!(
+            "Harness: {} · runs per task: {} (pass^{})\n\n",
+            report.harness.as_deref().unwrap_or("n/a"),
+            report.runs,
+            report.runs
+        ));
+    }
     out.push_str("| Class | Pass rate | Mean latency | Mean tool calls |\n");
     out.push_str("|---|---|---|---|\n");
     for (class, a) in &by_class {
@@ -319,6 +592,103 @@ pub fn scorecard(report: &RunReport) -> String {
             100.0 * total.passed as f64 / total.n as f64,
             total.latency_sum / total.n as u64,
             total.tool_sum as f64 / total.n as f64,
+        ));
+    }
+    out.push_str(&pass_k_section(report));
+    out.push_str(&skips_section(report));
+    out.push_str(&latency_section(report));
+    out
+}
+
+/// pass^k per task: only when a task ran more than once, since with k = 1 it is the table
+/// above.
+fn pass_k_section(report: &RunReport) -> String {
+    if report.runs <= 1 {
+        return String::new();
+    }
+    let k = report.runs;
+    let mut out =
+        format!("\n## pass^{k} per task\n\nA task passes only when all {k} runs passed.\n\n");
+    out.push_str(
+        "| Task | Class | pass^k | Runs passed | Failed assertion kinds |\n|---|---|---|---|---|\n",
+    );
+    for t in report.tasks.iter().filter(|t| t.skipped.is_none()) {
+        let n_pass = t.attempts.iter().filter(|a| a.passed).count();
+        let n = t.attempts.len().max(1);
+        let mut kinds: Vec<String> = t
+            .attempts
+            .iter()
+            .flat_map(|a| {
+                a.failed
+                    .iter()
+                    .cloned()
+                    .chain(a.error.as_ref().map(|_| "harness-error".to_string()))
+            })
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        out.push_str(&format!(
+            "| {} | {} | {} | {}/{} | {} |\n",
+            t.id,
+            t.class,
+            if t.passed { "PASS" } else { "FAIL" },
+            n_pass,
+            n,
+            if kinds.is_empty() {
+                "".to_string()
+            } else {
+                kinds.join(", ")
+            },
+        ));
+    }
+    out
+}
+
+/// The tasks this run skipped, under the harness that skipped them. A skip is never a fail.
+fn skips_section(report: &RunReport) -> String {
+    let skipped: Vec<&TaskResult> = report
+        .tasks
+        .iter()
+        .filter(|t| t.skipped.is_some())
+        .collect();
+    if skipped.is_empty() {
+        return String::new();
+    }
+    let h = report.harness.as_deref().unwrap_or("this driver");
+    let mut out = format!(
+        "\n## Skipped on {h}: {}\n\nNot counted as passes or fails.\n\n",
+        skipped.len()
+    );
+    for t in skipped {
+        out.push_str(&format!(
+            "- `{}`: {}\n",
+            t.id,
+            t.skipped.as_deref().unwrap_or("")
+        ));
+    }
+    out
+}
+
+/// p50 and p95 of the three submit-relative latencies, over every attempt that has them.
+fn latency_section(report: &RunReport) -> String {
+    let all = all_latencies(report);
+    let pick = |f: fn(&Latency) -> Option<u64>| -> Vec<u64> { all.iter().filter_map(f).collect() };
+    let rows = [
+        ("submit to first streamed event", pick(|l| l.first_event_ms)),
+        ("submit to first model token", pick(|l| l.first_token_ms)),
+        ("submit to result", pick(|l| l.result_ms)),
+    ];
+    if rows.iter().all(|(_, v)| v.is_empty()) {
+        return String::new();
+    }
+    let fmt = |x: Option<u64>| x.map(|v| format!("{v} ms")).unwrap_or_else(|| "n/a".into());
+    let mut out = String::from("\n## Latency\n\n| Measure | p50 | p95 | n |\n|---|---|---|---|\n");
+    for (name, v) in rows {
+        out.push_str(&format!(
+            "| {name} | {} | {} | {} |\n",
+            fmt(percentile(&v, 50)),
+            fmt(percentile(&v, 95)),
+            v.len()
         ));
     }
     out
@@ -348,6 +718,9 @@ mod tests {
             assertions: vec![],
             transcript_path: "x".into(),
             error: None,
+            skipped: None,
+            latency: Latency::default(),
+            attempts: vec![],
         }
     }
 
@@ -360,6 +733,9 @@ mod tests {
             index: Some("grep".into()),
             endpoint: Some("http://example".into()),
             model: Some("m".into()),
+            harness: None,
+            runs: 1,
+            not_run: None,
             mock: false,
             tasks: vec![record(0.0)],
         };
@@ -395,5 +771,217 @@ mod tests {
             out_per_m: 15.0,
         };
         assert!((cost_of(&t, &deck) - 18.3).abs() < 1e-9);
+    }
+
+    // ---- pass^k, skips, latency ------------------------------------------------------
+
+    use crate::driver::BoxFuture;
+    use crate::suite::Suite;
+    use std::cell::Cell;
+
+    /// A driver that knows its harness and answers from a script: run n passes when
+    /// `pass_on(n)` says so (by writing the file the task asserts on), with fixed latencies.
+    struct FakeDriver {
+        harness: &'static str,
+        calls: Cell<u32>,
+        pass_on: fn(u32) -> bool,
+    }
+
+    impl Driver for FakeDriver {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn is_mock(&self) -> bool {
+            true
+        }
+        fn harness(&self) -> Option<String> {
+            Some(self.harness.to_string())
+        }
+        fn run_task<'a>(
+            &'a self,
+            task: &'a Task,
+            workspace: &'a PreparedWorkspace,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, TaskRun> {
+            Box::pin(async move {
+                let n = self.calls.get();
+                self.calls.set(n + 1);
+                assert!(
+                    workspace.dir.join("vault/Today.md").is_file(),
+                    "the base was copied before the driver ran"
+                );
+                if (self.pass_on)(n) {
+                    std::fs::write(workspace.dir.join("out.txt"), "done").unwrap();
+                }
+                let mut run = TaskRun::from_lines(
+                    vec![format!(
+                        r#"{{"type":"result","subtype":"success","result":"ok {}"}}"#,
+                        task.id
+                    )],
+                    100 + u64::from(n),
+                    None,
+                );
+                run.latency = Latency {
+                    first_event_ms: Some(10 * u64::from(n + 1)),
+                    first_token_ms: Some(20 * u64::from(n + 1)),
+                    result_ms: Some(100 * u64::from(n + 1)),
+                };
+                run
+            })
+        }
+    }
+
+    fn suite_with_base() -> (tempfile::TempDir, Suite) {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("fixtures/base/vault");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("Today.md"), "- [ ] one\n").unwrap();
+        let suite = Suite::from_json(
+            serde_json::json!({
+                "name": "wf", "runs": 3,
+                "tasks": [
+                    {"id": "a", "class": "c", "prompt": "p", "workspace": "fixture",
+                     "fixture_base": "base", "git_init": true,
+                     "assertions": [{"type": "file_exists", "path": "out.txt"}]},
+                    {"id": "b-direct-only", "class": "c", "prompt": "p", "workspace": "fixture",
+                     "harnesses": ["direct"], "assertions": []}
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        (root, suite)
+    }
+
+    fn cfg(root: &Path, out: &Path, pass_on: fn(u32) -> bool) -> RunConfig {
+        RunConfig {
+            driver: Box::new(FakeDriver {
+                harness: "codex",
+                calls: Cell::new(0),
+                pass_on,
+            }),
+            prices: PriceDeck::ZERO,
+            out_dir: out.to_path_buf(),
+            runs: 3,
+            fixtures_root: Some(root.join("fixtures")),
+        }
+    }
+
+    #[test]
+    fn pass_k_needs_every_run_and_a_skip_is_not_a_fail() {
+        let (root, suite) = suite_with_base();
+        let out = tempfile::tempdir().unwrap();
+        let report = run_suite(&suite, &cfg(root.path(), out.path(), |_| true)).unwrap();
+        let a = &report.tasks[0];
+        assert!(a.passed);
+        assert_eq!(a.attempts.len(), 3);
+        let b = &report.tasks[1];
+        assert!(b.skipped.as_deref().unwrap().contains("codex"));
+        assert!(!b.passed && b.attempts.is_empty());
+        let card = scorecard(&report);
+        assert!(card.contains("| **TOTAL** | **1/1 (100%)**"), "{card}");
+        assert!(card.contains("## pass^3 per task"), "{card}");
+        assert!(card.contains("| a | c | PASS | 3/3 |"), "{card}");
+        assert!(card.contains("## Skipped on codex: 1"), "{card}");
+        assert!(card.contains("`b-direct-only`"), "{card}");
+        // Three attempts with result 100, 200, 300 ms: p50 200, p95 300.
+        assert!(
+            card.contains("| submit to result | 200 ms | 300 ms | 3 |"),
+            "{card}"
+        );
+        assert!(
+            card.contains("| submit to first model token | 40 ms | 60 ms | 3 |"),
+            "{card}"
+        );
+        // Each attempt left its own transcript.
+        assert!(out.path().join("transcripts/a.run3.ndjson").is_file());
+    }
+
+    #[test]
+    fn one_failing_run_fails_the_task_and_the_record_describes_that_run() {
+        let (root, suite) = suite_with_base();
+        let out = tempfile::tempdir().unwrap();
+        // The second of three runs fails.
+        let report = run_suite(&suite, &cfg(root.path(), out.path(), |n| n != 1)).unwrap();
+        let a = &report.tasks[0];
+        assert!(!a.passed);
+        assert_eq!(
+            a.attempts.iter().map(|x| x.passed).collect::<Vec<_>>(),
+            [true, false, true]
+        );
+        assert_eq!(a.transcript_path, "transcripts/a.run2.ndjson");
+        assert_eq!(a.attempts[1].failed, ["file_exists"]);
+        let card = scorecard(&report);
+        assert!(
+            card.contains("| a | c | FAIL | 2/3 | file_exists |"),
+            "{card}"
+        );
+        assert!(card.contains("| **TOTAL** | **0/1 (0%)**"), "{card}");
+    }
+
+    #[test]
+    fn a_harnessless_driver_runs_every_task() {
+        let mut t = record(0.0);
+        t.id = "x".into();
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id": "x", "class": "c", "prompt": "p", "workspace": "fixture",
+            "harnesses": ["direct"], "assertions": []
+        }))
+        .unwrap();
+        assert_eq!(skip_reason(&task, None), None);
+        assert_eq!(skip_reason(&task, Some("direct")), None);
+        assert!(skip_reason(&task, Some("claude-code")).is_some());
+    }
+
+    #[test]
+    fn a_cell_that_could_not_run_says_so_and_is_never_green() {
+        let (_root, suite) = suite_with_base();
+        let out = tempfile::tempdir().unwrap();
+        write_not_run(
+            out.path(),
+            &suite,
+            "bridge",
+            "glm",
+            "model 'glm' is not configured",
+        )
+        .unwrap();
+        let card = std::fs::read_to_string(out.path().join("scorecard.md")).unwrap();
+        assert!(
+            card.contains("**NOT RUN.** model 'glm' is not configured"),
+            "{card}"
+        );
+        assert!(!card.contains("TOTAL"), "{card}");
+        let r: RunReport = serde_json::from_str(
+            &std::fs::read_to_string(out.path().join("results.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(r.not_run.is_some() && r.tasks.is_empty());
+    }
+
+    #[test]
+    fn percentile_is_nearest_rank() {
+        assert_eq!(percentile(&[], 50), None);
+        assert_eq!(percentile(&[7], 95), Some(7));
+        let xs: Vec<u64> = (1..=20).collect();
+        assert_eq!(percentile(&xs, 50), Some(10));
+        assert_eq!(percentile(&xs, 95), Some(19));
+        assert_eq!(percentile(&[300, 100, 200], 50), Some(200));
+    }
+
+    #[test]
+    fn an_old_results_file_loads_with_one_run_and_no_attempts() {
+        let json = serde_json::json!({
+            "suite": "s", "driver": "direct", "endpoint": null, "model": null,
+            "mock": true, "tasks": [serde_json::to_value(record(0.0)).unwrap()]
+        });
+        let mut v = json.clone();
+        // Strip the fields this change added, as a pre-change file would not have them.
+        for k in ["skipped", "latency", "attempts"] {
+            v["tasks"][0].as_object_mut().unwrap().remove(k);
+        }
+        let report: RunReport = serde_json::from_value(v).expect("old results parse");
+        assert_eq!(report.runs, 1);
+        assert!(report.tasks[0].attempts.is_empty());
     }
 }

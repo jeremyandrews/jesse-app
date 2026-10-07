@@ -1,0 +1,65 @@
+# USD/EUR Running Summary
+
+| Date | Rate | Δ Day | Δ Week | Δ Month | Key Driver |
+|------|------|-------|--------|---------|------------|
+| 2026-10-06 | 0.88040 | +0.00% | -0.00% | +1.00% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-06]]. |
+| 2026-10-05 | 0.88080 | +0.37% | -0.41% | +1.61% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-05]]. |
+| 2026-10-04 | 0.88120 | +0.14% | -0.12% | +1.23% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-04]]. |
+| 2026-10-03 | 0.88160 | +0.21% | -0.63% | +1.48% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-03]]. |
+| 2026-10-02 | 0.88650 | +0.58% | -0.34% | +1.10% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-02]]. |
+| 2026-10-01 | 0.88690 | +0.05% | -0.15% | +1.35% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-01]]. |
+| 2026-09-30 | 0.87820 | +0.42% | -0.56% | +1.96% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-30]]. |
+| 2026-09-29 | 0.87860 | +0.19% | -0.27% | +1.58% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-29]]. |
+| 2026-09-28 | 0.87900 | +0.26% | -0.08% | +1.83% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-28]]. |
+| 2026-09-27 | 0.88390 | +0.03% | -0.49% | +1.45% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-27]]. |
+| 2026-09-26 | 0.88430 | +0.10% | -0.30% | +1.70% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-26]]. |
+| 2026-09-25 | 0.88470 | +0.47% | -0.01% | +1.32% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-25]]. |
+| 2026-09-24 | 0.88510 | +0.24% | -0.42% | +1.93% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-24]]. |
+| 2026-09-23 | 0.87640 | +0.31% | -0.23% | +1.19% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-23]]. |
+| 2026-09-22 | 0.88130 | +0.08% | -0.64% | +1.80% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-22]]. |
+| 2026-09-21 | 0.88170 | +0.15% | -0.45% | +1.06% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-21]]. |
+| 2026-09-20 | 0.88210 | +0.52% | -0.16% | +1.67% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-20]]. |
+| 2026-09-19 | 0.88250 | +0.29% | -0.57% | +1.29% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-19]]. |
+| 2026-09-18 | 0.88290 | +0.36% | -0.38% | +1.54% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-18]]. |
+| 2026-09-17 | 0.88780 | +0.13% | -0.09% | +1.16% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-17]]. |
+| 2026-09-16 | 0.87910 | +0.20% | -0.60% | +1.41% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-16]]. |
+| 2026-09-15 | 0.87950 | +0.57% | -0.31% | +1.03% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-15]]. |
+| 2026-09-14 | 0.87990 | +0.04% | -0.12% | +1.28% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-14]]. |
+| 2026-09-13 | 0.88030 | +0.41% | -0.53% | +1.89% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-13]]. |
+| 2026-09-12 | 0.88520 | +0.18% | -0.24% | +1.51% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-12]]. |
+| 2026-09-11 | 0.88560 | +0.25% | -0.05% | +1.76% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-11]]. |
+| 2026-09-10 | 0.88600 | +0.02% | -0.46% | +1.38% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-10]]. |
+| 2026-09-09 | 0.87730 | +0.09% | -0.27% | +1.63% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-09]]. |
+| 2026-09-08 | 0.87770 | +0.46% | -0.68% | +1.25% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-08]]. |
+| 2026-09-07 | 0.88260 | +0.23% | -0.39% | +1.86% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-07]]. |
+| 2026-09-06 | 0.88300 | +0.30% | -0.20% | +1.12% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-06]]. |
+| 2026-09-05 | 0.88340 | +0.07% | -0.61% | +1.73% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-05]]. |
+| 2026-09-04 | 0.88380 | +0.14% | -0.42% | +1.98% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-04]]. |
+| 2026-09-03 | 0.88420 | +0.51% | -0.13% | +1.60% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-03]]. |
+| 2026-09-02 | 0.88000 | +0.28% | -0.54% | +1.22% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-02]]. |
+| 2026-09-01 | 0.88040 | +0.35% | -0.35% | +1.47% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-09-01]]. |
+| 2026-08-31 | 0.88080 | +0.12% | -0.06% | +1.09% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-31]]. |
+| 2026-08-30 | 0.88120 | +0.19% | -0.57% | +1.34% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-30]]. |
+| 2026-08-29 | 0.88160 | +0.56% | -0.28% | +1.95% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-29]]. |
+| 2026-08-28 | 0.88650 | +0.03% | -0.09% | +1.21% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-28]]. |
+| 2026-08-27 | 0.88690 | +0.40% | -0.50% | +1.82% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-27]]. |
+| 2026-08-26 | 0.87820 | +0.17% | -0.21% | +1.44% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-26]]. |
+| 2026-08-25 | 0.87860 | +0.24% | -0.02% | +1.69% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-25]]. |
+| 2026-08-24 | 0.87900 | +0.01% | -0.43% | +1.31% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-24]]. |
+| 2026-08-23 | 0.88390 | +0.08% | -0.24% | +1.56% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-23]]. |
+| 2026-08-22 | 0.88430 | +0.45% | -0.65% | +1.18% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-22]]. |
+| 2026-08-21 | 0.88470 | +0.22% | -0.36% | +1.79% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-21]]. |
+| 2026-08-20 | 0.88510 | +0.29% | -0.17% | +1.05% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-20]]. |
+| 2026-08-19 | 0.87640 | +0.06% | -0.58% | +1.66% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-19]]. |
+| 2026-08-18 | 0.88130 | +0.13% | -0.39% | +1.91% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-18]]. |
+| 2026-08-17 | 0.88170 | +0.50% | -0.10% | +1.53% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-17]]. |
+| 2026-08-16 | 0.88210 | +0.27% | -0.51% | +1.15% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-16]]. |
+| 2026-08-15 | 0.88250 | +0.34% | -0.32% | +1.40% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-15]]. |
+| 2026-08-14 | 0.88290 | +0.11% | -0.03% | +1.02% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-14]]. |
+| 2026-08-13 | 0.88780 | +0.18% | -0.54% | +1.27% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-13]]. |
+| 2026-08-12 | 0.87910 | +0.55% | -0.25% | +1.88% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-12]]. |
+| 2026-08-11 | 0.87950 | +0.02% | -0.06% | +1.14% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-11]]. |
+| 2026-08-10 | 0.87990 | +0.39% | -0.47% | +1.75% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-10]]. |
+| 2026-08-09 | 0.88030 | +0.16% | -0.18% | +1.37% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-09]]. |
+| 2026-08-08 | 0.88520 | +0.23% | -0.69% | +1.62% | A quiet session with no data of note moved the rate a little. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-08-08]]. |
+

@@ -16,8 +16,12 @@ mod judge;
 mod mapping;
 mod mock;
 mod runner;
+mod state;
 mod suite;
+#[cfg(test)]
+mod suite_checks;
 mod transcript;
+mod workspace;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use jesse_agent::{PersonaPack, PriceDeck, Thinking, Wire};
@@ -54,6 +58,8 @@ enum DriverKind {
     ClaudeCli,
     /// Run `jesse_agent::run_turn` in this process, over the vault tool set.
     Direct,
+    /// Submit each task to a scratch `jesse-bridge` through `POST /jesse`, as the phone does.
+    Bridge,
 }
 
 /// Which search index a `direct` run answers `vault_search` with.
@@ -147,6 +153,26 @@ struct RunArgs {
     /// Path to the `qmd` binary. Omit to resolve the bare name on `PATH`.
     #[arg(long)]
     qmd_bin: Option<PathBuf>,
+    /// Runs per task (k in pass^k). Overrides the suite's own `runs`; absent in both is 1.
+    #[arg(long)]
+    runs: Option<u32>,
+    /// `bridge`: the built `jesse-bridge` binary to spawn per task run.
+    #[arg(long, default_value = "bridge/target/release/jesse-bridge")]
+    bridge_bin: PathBuf,
+    /// `bridge`: a TOML file whose text becomes the scratch bridge's config, to declare a
+    /// `[[models]]` entry the built-in registry lacks. See `eval/bridge-overlays/`.
+    #[arg(long)]
+    bridge_config: Option<PathBuf>,
+    /// `bridge`: an inherited environment variable to keep (a model's key, `JESSE_CLAUDE_BIN`).
+    /// Every other `JESSE_*`, `ANTHROPIC_*` and `CLAUDE_CODE_*` variable is removed. Repeatable.
+    #[arg(long)]
+    pass_env: Vec<String>,
+    /// `bridge`: keep the `~/.claude/projects/<key>` session files the runs created.
+    #[arg(long)]
+    keep_sessions: bool,
+    /// `bridge`: how long a model may take to pass its first health probe, seconds.
+    #[arg(long, default_value_t = 120)]
+    model_wait_secs: u64,
     /// Per-task wall-clock timeout, seconds.
     #[arg(long, default_value_t = 600)]
     timeout_secs: u64,
@@ -302,10 +328,51 @@ fn do_run(a: RunArgs) -> Result<(), String> {
                 thinking: Thinking::Off,
             })
         }
+        DriverKind::Bridge => {
+            let model = a.model.clone().ok_or(
+                "--driver bridge needs --model <registry id> (opus, glm, codex-write, ...)",
+            )?;
+            let config = match &a.bridge_config {
+                Some(p) => std::fs::read_to_string(p)
+                    .map_err(|e| format!("could not read {}: {e}", p.display()))?,
+                None => String::new(),
+            };
+            let target = Box::new(driver::Spawned {
+                bin: a.bridge_bin.clone(),
+                config,
+                pass_env: a.pass_env.clone(),
+                keep_sessions: a.keep_sessions,
+                started: Default::default(),
+            });
+            match driver::BridgeDriver::preflight(
+                target,
+                model.clone(),
+                timeout,
+                Duration::from_secs(a.model_wait_secs),
+            ) {
+                Ok(d) => Box::new(d),
+                Err(driver::NotRun(why)) => {
+                    runner::write_not_run(&a.out, &suite, "bridge", &model, &why)?;
+                    return Err(format!(
+                        "cell NOT RUN (recorded in {}): {why}",
+                        a.out.display()
+                    ));
+                }
+            }
+        }
     };
 
+    // `<suite dir>/../fixtures`, where a task's `fixture_base` lives.
+    let fixtures_root = a
+        .suite
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|d| d.join("fixtures"))
+        .filter(|d| d.is_dir());
     let cfg = runner::RunConfig {
         driver,
+        runs: a.runs.or(suite.runs).unwrap_or(1),
+        fixtures_root,
         prices: PriceDeck {
             in_per_m: a.price_in,
             cached_per_m: a.price_cached,

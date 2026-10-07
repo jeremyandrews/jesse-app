@@ -33,6 +33,13 @@ fn kind_of(a: &Assertion) -> &'static str {
         Assertion::StyleClean { .. } => "style_clean",
         Assertion::ToolsInclude { .. } => "tools_include",
         Assertion::ToolsExclude { .. } => "tools_exclude",
+        Assertion::FileExists { .. } => "file_exists",
+        Assertion::FileAbsent { .. } => "file_absent",
+        Assertion::CsvLastRow { .. } => "csv_last_row",
+        Assertion::GitHeadMessageMatches { .. } => "git_head_message_matches",
+        Assertion::GitPathChangedSince { .. } => "git_path_changed_since",
+        Assertion::JsonPathEquals { .. } => "json_path_equals",
+        Assertion::ProcessExitZero { .. } => "process_exit_zero",
     }
 }
 
@@ -216,7 +223,13 @@ pub fn eval_assertion(
                 }
             }
         }
-        Assertion::FileMatches { path, pattern } => {
+        Assertion::FileMatches {
+            path,
+            pattern,
+            dir: Some(dir),
+            name_pattern: Some(np),
+        } if path.is_empty() => crate::state::file_matches_selected(workspace, dir, np, pattern),
+        Assertion::FileMatches { path, pattern, .. } => {
             let full = workspace.join(path);
             match Regex::new(pattern) {
                 Err(e) => (false, format!("invalid regex /{pattern}/: {e}")),
@@ -401,6 +414,35 @@ pub fn eval_assertion(
                     )
                 },
             )
+        }
+        Assertion::FileExists {
+            path,
+            dir,
+            name_pattern,
+        } => crate::state::file_exists(workspace, path, dir.as_deref(), name_pattern.as_deref()),
+        Assertion::FileAbsent {
+            path,
+            dir,
+            name_pattern,
+        } => crate::state::file_absent(workspace, path, dir.as_deref(), name_pattern.as_deref()),
+        Assertion::CsvLastRow {
+            path,
+            columns,
+            row_count,
+        } => crate::state::csv_last_row(workspace, path, columns, *row_count),
+        Assertion::GitHeadMessageMatches { pattern, repo } => {
+            crate::state::git_head_message_matches(workspace, repo.as_deref(), pattern)
+        }
+        Assertion::GitPathChangedSince { path, committed } => {
+            crate::state::git_path_changed_since(workspace, path, *committed)
+        }
+        Assertion::JsonPathEquals {
+            path,
+            pointer,
+            value,
+        } => crate::state::json_path_equals(workspace, path, pointer, value),
+        Assertion::ProcessExitZero { validator, day } => {
+            crate::state::process_exit_zero(workspace, *validator, day.as_deref())
         }
         Assertion::ToolsExclude { names } => {
             let present: Vec<&str> = names
@@ -722,6 +764,8 @@ mod tests {
                 &Assertion::FileMatches {
                     path: "log.csv".into(),
                     pattern: r"2026-07-09,apple".into(),
+                    dir: None,
+                    name_pattern: None,
                 },
                 &t,
                 dir.path()
@@ -738,6 +782,8 @@ mod tests {
             &Assertion::FileMatches {
                 path: "nope.txt".into(),
                 pattern: "x".into(),
+                dir: None,
+                name_pattern: None,
             },
             &t,
             dir.path(),

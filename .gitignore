@@ -14,6 +14,9 @@ target/
 # local agent settings (never commit; may hold machine-local config)
 .claude/
 .codex/
+# ...except a FIXTURE vault's own `.claude/` (its hooks and skills), which jesse-eval copies
+# into a scratch workspace; it is test data, not this checkout's agent settings.
+!eval/fixtures/*/*/.claude/
 # internal worklog — never shipped (R5: no personal infra in tracked files)
 STATUS.md
 

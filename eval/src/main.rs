@@ -18,6 +18,8 @@ mod mock;
 mod runner;
 mod state;
 mod suite;
+#[cfg(test)]
+mod suite_checks;
 mod transcript;
 mod workspace;
 

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Rebuilding every diet day the edit touched",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/diet-regen.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

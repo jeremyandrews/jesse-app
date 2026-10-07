@@ -19,6 +19,7 @@ mod runner;
 mod state;
 mod suite;
 mod transcript;
+mod workspace;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use jesse_agent::{PersonaPack, PriceDeck, Thinking, Wire};
@@ -148,6 +149,9 @@ struct RunArgs {
     /// Path to the `qmd` binary. Omit to resolve the bare name on `PATH`.
     #[arg(long)]
     qmd_bin: Option<PathBuf>,
+    /// Runs per task (k in pass^k). Overrides the suite's own `runs`; absent in both is 1.
+    #[arg(long)]
+    runs: Option<u32>,
     /// Per-task wall-clock timeout, seconds.
     #[arg(long, default_value_t = 600)]
     timeout_secs: u64,
@@ -305,8 +309,17 @@ fn do_run(a: RunArgs) -> Result<(), String> {
         }
     };
 
+    // `<suite dir>/../fixtures`, where a task's `fixture_base` lives.
+    let fixtures_root = a
+        .suite
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|d| d.join("fixtures"))
+        .filter(|d| d.is_dir());
     let cfg = runner::RunConfig {
         driver,
+        runs: a.runs.or(suite.runs).unwrap_or(1),
+        fixtures_root,
         prices: PriceDeck {
             in_per_m: a.price_in,
             cached_per_m: a.price_cached,

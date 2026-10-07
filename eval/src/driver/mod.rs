@@ -84,6 +84,21 @@ pub struct TaskRun {
     pub lines: Vec<String>,
     /// A harness error. `None` on a clean run, whatever the model said.
     pub error: Option<String>,
+    /// The three turn latencies, measured from the moment the prompt was SUBMITTED. Only a
+    /// driver that submits to something with a stream fills them (the `bridge` driver);
+    /// `None` everywhere else, and `None` for one it could not observe. See `eval/README.md`.
+    pub latency: Latency,
+}
+
+/// Submit-relative turn latencies, in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Latency {
+    /// Submit to the first streamed event of any kind (text, narration, tool activity).
+    pub first_event_ms: Option<u64>,
+    /// Submit to the first model TEXT (a streamed text delta or narration).
+    pub first_token_ms: Option<u64>,
+    /// Submit to the terminal result.
+    pub result_ms: Option<u64>,
 }
 
 impl TaskRun {
@@ -100,6 +115,7 @@ impl TaskRun {
             completed: false,
             lines: Vec::new(),
             error: Some(reason.into()),
+            latency: Latency::default(),
         }
     }
 
@@ -117,6 +133,7 @@ impl TaskRun {
             ttft_ms,
             lines,
             error: None,
+            latency: Latency::default(),
         }
     }
 }
@@ -153,6 +170,13 @@ pub trait Driver {
     /// that the eval can now run either index the bridge can — and a run that did not say
     /// which one it used would leave the reader to guess.
     fn index(&self) -> Option<String> {
+        None
+    }
+
+    /// The harness that runs the turns (`claude-code`, `codex`, `direct`), for a driver that
+    /// has one. A task whose `harnesses` list does not name it is SKIPPED. `None` (every
+    /// driver but `bridge`) runs every task.
+    fn harness(&self) -> Option<String> {
         None
     }
 

@@ -31,6 +31,10 @@ jesse-agent = { path = "../agent", features = ["scripted"] }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 # `CancellationToken` — the type `Driver::run_task` takes and the agent loop honours.
 tokio-util = "0.7"
+# RFC 4180 CSV, for `csv_last_row`: a quoted comma is one cell, never a column shift.
+csv = "1"
+# A JS object literal (bare keys, trailing commas) is JSON5, for `json_path_equals`.
+json5 = "0.4"
 
 [dev-dependencies]
 serde_json = "1"

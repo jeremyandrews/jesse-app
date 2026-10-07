@@ -16,6 +16,7 @@ mod judge;
 mod mapping;
 mod mock;
 mod runner;
+mod state;
 mod suite;
 mod transcript;
 

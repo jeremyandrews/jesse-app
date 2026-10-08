@@ -14,6 +14,67 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.168.0] - 2026-10-07
+
+**The baseline before the move off the Mac: every grant mapped, every macOS dependency listed and guarded, and a turn trace that can say which grants real turns used.**
+Root cause of the gap: nothing recorded why each of the 365 grants exists, which harness it
+reaches, or where it can run off macOS; macOS dependencies were scattered with no list; and
+`turn-timings.jsonl` held a week of bare tool names with no harness, model or outcome, and nothing
+aggregated it. Nothing a child may do, and nothing about how it is spawned, changes.
+
+- **`bridge/capability-map.toml`, one row per grant.** Kind, server, the harnesses the code hands
+  it, placement after the move (`turn-pod`, `core`, `upstream-pod`, `mac-edge`, `drop`),
+  credential variable names or macOS features, workflows and a reason. Tests assert one row per
+  grant and no row without a grant (with a negative test on a copy of the allowlist), that each
+  row's harnesses match the code, and that every harness's `capability_args` for every shipped
+  row matches a committed golden and the containment records byte for byte. Parity defect
+  recorded: every MCP grant reaches claude-code and codex but not direct.
+- **`docs/platform-dependencies.md` and `tests/platform_inventory.rs`.** Every macOS dependency,
+  with file, symbol, what breaks on Linux and the replacement. The test scans `bridge/src`,
+  `agent/src` and the Cargo manifests and fails on any match without a row, and on any row that
+  no longer matches. The same doc records where each harness keeps conversation state, how the
+  path is derived, and its size on the Studio.
+- **Timing record schema 2.** Optional `harness` and `model` (registry ids) and a per-tool
+  `outcome` (`ok`, `error`, `refused`) where the adapter already sees one: Claude Code
+  `tool_result.is_error` and `permission_denials`, a Codex tool item's `status`, the direct
+  loop's own trace. Version 1 records still parse. `TIMING_RETENTION_DAYS` rises from 7 to 30. A
+  field-walk test fails on any field nobody has classified as content free.
+- **`tool-usage --since <days> [--json]`.** A read-only audit binary: containment findings first,
+  then grants used, grants never used, and trace names that match no grant with count, harness
+  and the reason the call was possible. Bash and Skill are class rows, never "never used".
+
+## [eval 0.7.0] - 2026-10-07
+
+**A suite that grades what a turn left behind, run through the real bridge.**
+Root cause of the gap: the CLI driver spawned `claude` with an empty strict MCP config, so no
+task exercised the bridge's spawn path, its hooks, skills, shell grants or MCP servers, and every
+assertion graded the answer text rather than the vault state a workflow is supposed to produce.
+
+- **`jesse-eval run --driver bridge --model <registry id>`.** Each task run spawns the built
+  `jesse-bridge` on a free loopback port with a scratch state dir (`JESSE_STATE_DIR`), a generated
+  config (`JESSE_CONFIG`), the task's fixture vault (`JESSE_VAULT`) and a random token, submits
+  through `POST /jesse` as the phone does, reads `/jesse/stream` for latency, waits on
+  `/jesse/result`, and stops the bridge by its recorded PID. Inherited `JESSE_*`, `ANTHROPIC_*`
+  and `CLAUDE_CODE_*` variables are stripped unless named with `--pass-env`; HOME is kept for the
+  CLI logins. `--bridge-config` declares models the registry lacks (`eval/bridge-overlays/`). A
+  preflight records a cell whose model is unconfigured or unhealthy as NOT RUN. The target is a
+  `BridgeTarget` trait with one implementation, `Spawned`. The bridge log tail a failed run records has
+  the home directory rewritten to `~`, so a committed `results.json` never carries it.
+- **Latency.** Every run records submit to first streamed event, first model token, and result;
+  the scorecard reports p50 and p95.
+- **State assertions.** `file_exists`, `file_absent`, `csv_last_row` (RFC 4180 reader, optional
+  exact row count), `git_head_message_matches`, `git_path_changed_since`, `json_path_equals`
+  (generated `.js` data files), `process_exit_zero` (a closed table of the two diet validators);
+  `file_matches` gains a directory selector.
+- **pass^k and harness skips.** A suite's `runs` (or `--runs`) runs each task k times and passes
+  it only when all pass; a task's `harnesses` list skips it elsewhere, reported as a skip. New task
+  fields: `fixture_base`, `git_init`, `remotes`, `followups`, `mode`, `health_context`.
+- **The `workflows-v1` suite.** 22 tasks over a self-contained fixture vault under
+  `eval/fixtures/workflows-v1/`, graded on vault state: diet logs, a same-day re-weigh, drafts,
+  archive boxes, research, search, Today, a two-turn conversation, a code-review checkout from a
+  seeded remote, the currency rotation, the nightly lint, and product-v1's three injection tasks
+  unchanged.
+
 ## [App 1.0 (190)] - 2026-10-06
 
 **The Mac app attaches photos, screenshots and PDFs, through the same pipeline as the phone.**

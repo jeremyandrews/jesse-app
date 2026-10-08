@@ -29,6 +29,7 @@
 //! than filling the struct in by hand buys a real property: the transcript persisted to
 //! `<out>/transcripts/<id>.ndjson` reparses to exactly the transcript that was scored.
 
+pub mod bridge;
 pub mod claude_cli;
 pub mod direct;
 
@@ -39,6 +40,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
+pub use bridge::{BridgeDriver, NotRun, Spawned};
 pub use claude_cli::ClaudeCliDriver;
 pub use direct::{DirectDriver, EvalIndex};
 
@@ -84,6 +86,21 @@ pub struct TaskRun {
     pub lines: Vec<String>,
     /// A harness error. `None` on a clean run, whatever the model said.
     pub error: Option<String>,
+    /// The three turn latencies, measured from the moment the prompt was SUBMITTED. Only a
+    /// driver that submits to something with a stream fills them (the `bridge` driver);
+    /// `None` everywhere else, and `None` for one it could not observe. See `eval/README.md`.
+    pub latency: Latency,
+}
+
+/// Submit-relative turn latencies, in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Latency {
+    /// Submit to the first streamed event of any kind (text, narration, tool activity).
+    pub first_event_ms: Option<u64>,
+    /// Submit to the first model TEXT (a streamed text delta or narration).
+    pub first_token_ms: Option<u64>,
+    /// Submit to the terminal result.
+    pub result_ms: Option<u64>,
 }
 
 impl TaskRun {
@@ -100,6 +117,7 @@ impl TaskRun {
             completed: false,
             lines: Vec::new(),
             error: Some(reason.into()),
+            latency: Latency::default(),
         }
     }
 
@@ -117,6 +135,7 @@ impl TaskRun {
             ttft_ms,
             lines,
             error: None,
+            latency: Latency::default(),
         }
     }
 }
@@ -154,6 +173,20 @@ pub trait Driver {
     /// which one it used would leave the reader to guess.
     fn index(&self) -> Option<String> {
         None
+    }
+
+    /// The harness that runs the turns (`claude-code`, `codex`, `direct`), for a driver that
+    /// has one. A task whose `harnesses` list does not name it is SKIPPED. `None` (every
+    /// driver but `bridge`) runs every task.
+    fn harness(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether a task's `followups` can run: true only for a driver that keeps one
+    /// conversation across turns (`bridge`). The runner fails a multi-turn task as a harness
+    /// error on any other driver rather than grading its first turn as if it were the last.
+    fn holds_conversation(&self) -> bool {
+        false
     }
 
     /// Run one task in an already-prepared workspace.

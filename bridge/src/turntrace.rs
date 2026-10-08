@@ -17,8 +17,10 @@
 //!   * **A tool-call timeline** — one entry per call, with the name and how long it held
 //!     the turn, written out as a [`TurnTiming`] line per turn ([`TurnTimingLog`]).
 //!
-//! **The timing record is content-free.** Tool names, counts and durations only — never
-//! the question, the answer, or the retained partial text. The partial text is content and
+//! **The timing record is content-free.** Tool names, counts, durations, a three-word
+//! per-call outcome, and the harness and model registry ids only; never the question, the
+//! answer, the retained partial text, a tool argument, a tool result or a path. A field-walk
+//! test fails on any field nobody has classified. The partial text is content and
 //! lives ONLY on the job (in memory + the job's own result file, both of which already
 //! hold the reply), never in the timing log. A test asserts this.
 //!
@@ -41,9 +43,17 @@ pub const DEFAULT_PARTIAL_BYTES: usize = 16 * 1024;
 /// The append-only per-turn timing log under the bridge state dir, one JSON line per turn.
 pub const TURN_TIMING_FILE: &str = "turn-timings.jsonl";
 
-/// Records older than this are pruned from the log at startup. A week covers "what
-/// happened to that turn on Friday" and keeps the file small enough to load whole.
-pub const TIMING_RETENTION_DAYS: u64 = 7;
+/// Records older than this are pruned from the log at startup.
+///
+/// THIRTY DAYS, raised from seven in bridge 0.168.0, because the `tool-usage` audit answers
+/// "which grants did real turns use", and a week is too short a window for a grant used by a
+/// monthly or weekly routine to show up at all. A record is a few hundred bytes of names and
+/// numbers, so a month of turns still loads whole.
+pub const TIMING_RETENTION_DAYS: u64 = 30;
+
+/// The timing record's schema version. 2 added `harness`, `model` and the per-tool `outcome`
+/// (bridge 0.168.0); a version 1 record lacks all three and still parses.
+pub const TURN_TIMING_SCHEMA: u8 = 2;
 
 /// Cap on the timing records held in memory for [`TurnTimingLog::get`]. The startup prune
 /// bounds the FILE; this bounds a long-lived process that never restarts. The newest
@@ -86,6 +96,79 @@ pub struct PartialTurn {
 pub struct ToolCallTiming {
     pub tool: String,
     pub ms: u64,
+    /// How the call ended, where the harness adapter already sees it, and OMITTED where it
+    /// does not: a version 1 record has no `outcome` anywhere, and a harness that reports
+    /// none leaves it out rather than guessing. Which adapters fill it, and why the rest do
+    /// not, is in [`ToolCallOutcome`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ToolCallOutcome>,
+}
+
+/// How one tool call ended: a closed vocabulary of three words, so the field cannot carry a
+/// result, an argument or an error message.
+///
+/// **WHO FILLS IT (bridge 0.168.0), AND WHO CANNOT.**
+///   * claude-code: a `tool_result` block carries `is_error` (`error`, else `ok`), and the
+///     terminal `result` line's `permission_denials` names every call the permission layer
+///     refused (`refused`, which wins over `error`). Matched to the call by `tool_use_id`.
+///   * codex (app server): `item/completed` for a `commandExecution`, `fileChange` or
+///     `mcpToolCall` item carries `status`: `completed` is `ok`, `failed` is `error`,
+///     `declined` is `refused`. Matched by item id. A call the SANDBOX refuses emits no item
+///     at all (only a stderr line with no id), so it is not in the timeline to annotate.
+///   * direct: the agent loop's own trace records `ok`, `refused` or `failed` per call, in
+///     dispatch order, which is the order the calls were narrated; `failed` is `error`.
+///
+/// A call with no outcome (a harness that reports none, a call cut off by the run limit, a
+/// subagent's call) simply has no `outcome` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCallOutcome {
+    Ok,
+    Error,
+    Refused,
+}
+
+impl ToolCallOutcome {
+    fn rank(self) -> u8 {
+        match self {
+            ToolCallOutcome::Ok => 0,
+            ToolCallOutcome::Error => 1,
+            ToolCallOutcome::Refused => 2,
+        }
+    }
+
+    /// Two reports for one call merge to the more severe. A refusal is also an error result
+    /// on Claude Code (the denied call gets an `is_error` tool result), and it must read as
+    /// the refusal it was whichever report arrives first.
+    pub fn merge(self, other: ToolCallOutcome) -> ToolCallOutcome {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolCallOutcome::Ok => "ok",
+            ToolCallOutcome::Error => "error",
+            ToolCallOutcome::Refused => "refused",
+        }
+    }
+}
+
+/// What a harness adapter tells the trace about a tool call beyond its name, so the record
+/// can carry the call's `outcome`. Ids are held IN MEMORY ONLY, to pair a result with its
+/// call; no id ever reaches the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolTraceSignal {
+    /// The call most recently noted carries this id.
+    CallId(String),
+    /// The call with this id ended this way.
+    Outcome {
+        call_id: String,
+        outcome: ToolCallOutcome,
+    },
 }
 
 /// The per-turn timing record: one line of `turn-timings.jsonl`, keyed by job id.
@@ -102,7 +185,7 @@ pub struct TurnTiming {
     pub v: u8,
     pub job_id: String,
     /// RFC3339 UTC, fixed width — which makes the retention prune a STRING comparison
-    /// against `rfc3339_utc(now - 7d)` rather than a date parse.
+    /// against `rfc3339_utc(now - retention)` rather than a date parse.
     pub started_at: String,
     pub ended_at: String,
     pub elapsed_ms: u64,
@@ -131,6 +214,15 @@ pub struct TurnTiming {
     /// The turn's dollar cost on its model's deck. Present exactly when `usage` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// The harness that served the turn, by registry id (`claude-code`, `codex`, `direct`).
+    /// Version 2. Absent on a version 1 record, which the `tool-usage` audit groups as
+    /// `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// The active model's registry id (`opus`, `codex-write`, …), whose harness ran the tool
+    /// timeline. Version 2; absent on a version 1 record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 // ---- The trace ------------------------------------------------------------
@@ -160,8 +252,16 @@ struct TraceInner {
     open: bool,
     /// Completed tool calls, in order.
     tools: Vec<ToolCallTiming>,
-    /// The call in flight: its name and when it started. Closed by the next event.
-    pending: Option<(String, Instant)>,
+    /// The call in flight: its name, when it started, and the harness's id for it once
+    /// known. Closed by the next event.
+    pending: Option<(String, Instant, Option<String>)>,
+    /// Each completed call's harness id, parallel to `tools`. IN MEMORY ONLY: it pairs a
+    /// reported outcome with its call and never reaches the record.
+    tool_ids: Vec<Option<String>>,
+    /// Outcomes reported by call id (claude-code, codex), merged to the most severe.
+    outcomes: HashMap<String, ToolCallOutcome>,
+    /// Outcomes reported in call order (direct), applied to the calls in order.
+    ordered_outcomes: Vec<ToolCallOutcome>,
     /// The turn's aggregate token usage and dollar cost, once the driver knows them.
     usage: Option<(ShadowUsage, f64)>,
     /// Every tool call seen, including any beyond what `tools` retains.
@@ -189,6 +289,9 @@ pub struct TurnTrace {
     /// turn handler did not build (tests, the containment battery), which makes
     /// [`TurnTrace::note_quota`] a record-only no-op there.
     quota: Option<Arc<QuotaStore>>,
+    /// The harness and model this turn runs on, by registry id. Set once, when the turn is
+    /// built, and kept across a retry's [`TurnTrace::reset`]: a retry re-runs the same model.
+    identity: Option<(String, String)>,
 }
 
 impl TurnTrace {
@@ -199,7 +302,15 @@ impl TurnTrace {
             limits,
             inner: Mutex::new(TraceInner::default()),
             quota: None,
+            identity: None,
         }
+    }
+
+    /// Name the harness and model (both registry ids) this turn runs on, for the record's
+    /// `harness` and `model` fields.
+    pub fn with_identity(mut self, harness: &str, model: &str) -> Self {
+        self.identity = Some((harness.to_string(), model.to_string()));
+        self
     }
 
     pub fn from_cfg(cfg: &Config) -> Self {
@@ -253,11 +364,56 @@ impl TurnTrace {
     /// A tool call started. Closes the open text block (so the next delta starts a fresh
     /// one) and starts this call's clock.
     pub fn note_tool(&self, name: &str) {
+        self.note_tool_call(name, None);
+    }
+
+    /// A tool call started, with the harness's own id for it when the adapter has one. The
+    /// id pairs a later [`ToolTraceSignal::Outcome`] with this call and is never recorded.
+    pub fn note_tool_call(&self, name: &str, call_id: Option<&str>) {
         let mut g = self.inner.lock_ok();
         self.close_pending_tool(&mut g);
         g.open = false;
         g.tool_calls += 1;
-        g.pending = Some((name.to_string(), Instant::now()));
+        g.pending = Some((
+            name.to_string(),
+            Instant::now(),
+            call_id.map(str::to_string),
+        ));
+    }
+
+    /// What an adapter learned about a call beyond its name. A [`ToolTraceSignal::CallId`]
+    /// names the call in flight (it arrives on the same line as the start, after the name);
+    /// an outcome is held by id until the record is built, because on every harness the
+    /// result arrives after the next event has already closed the call's clock.
+    pub fn note_signal(&self, signal: ToolTraceSignal) {
+        let mut g = self.inner.lock_ok();
+        match signal {
+            ToolTraceSignal::CallId(id) => {
+                if let Some((_, _, slot)) = g.pending.as_mut() {
+                    if slot.is_none() {
+                        *slot = Some(id);
+                    }
+                }
+            }
+            ToolTraceSignal::Outcome { call_id, outcome } => {
+                let merged = match g.outcomes.get(&call_id) {
+                    Some(prev) => prev.merge(outcome),
+                    None => outcome,
+                };
+                g.outcomes.insert(call_id, merged);
+            }
+        }
+    }
+
+    /// Outcomes reported IN CALL ORDER by a harness that keeps its own per-call trace and
+    /// hands it over whole (direct). Applied to the timeline's calls in order when the record
+    /// is built; appended, so a turn that runs the loop twice (a style regeneration) reports
+    /// each run's calls after the last.
+    pub fn note_ordered_outcomes(&self, outcomes: &[ToolCallOutcome]) {
+        self.inner
+            .lock_ok()
+            .ordered_outcomes
+            .extend_from_slice(outcomes);
     }
 
     /// Record the style checker's verdict for this turn (D6). Two integers; see
@@ -354,28 +510,55 @@ impl TurnTrace {
         let mut g = self.inner.lock_ok();
         self.close_pending_tool(&mut g);
         let elapsed = self.started.elapsed();
+        // Outcomes by id first (claude-code, codex), then in call order (direct). A harness
+        // uses one mechanism or the other, never both, so the order between them is moot.
+        let mut ordered = g.ordered_outcomes.iter().copied();
+        let tools: Vec<ToolCallTiming> = g
+            .tools
+            .iter()
+            .zip(g.tool_ids.iter())
+            .map(|(t, id)| {
+                let by_id = id.as_ref().and_then(|id| g.outcomes.get(id).copied());
+                let outcome = match id {
+                    Some(_) => by_id,
+                    None => ordered.next(),
+                };
+                ToolCallTiming {
+                    outcome: t.outcome.or(outcome),
+                    ..t.clone()
+                }
+            })
+            .collect();
+        let (harness, model) = match &self.identity {
+            Some((h, m)) => (Some(h.clone()), Some(m.clone())),
+            None => (None, None),
+        };
         TurnTiming {
-            v: 1,
+            v: TURN_TIMING_SCHEMA,
             job_id: job_id.to_string(),
             started_at: rfc3339_utc(self.started_at),
             ended_at: rfc3339_utc(self.started_at + elapsed),
             elapsed_ms: elapsed.as_millis() as u64,
             status: status.to_string(),
             tool_calls: g.tool_calls,
-            tools: g.tools.clone(),
+            tools,
             usage: g.usage.as_ref().map(|(u, _)| u.clone()),
             cost_usd: g.usage.as_ref().map(|(_, c)| *c),
+            harness,
+            model,
         }
     }
 
     /// Close the tool call in flight, recording how long it held the turn. Idempotent —
     /// every event calls it, and only the first after a `note_tool` does anything.
     fn close_pending_tool(&self, g: &mut TraceInner) {
-        if let Some((name, at)) = g.pending.take() {
+        if let Some((name, at, id)) = g.pending.take() {
             g.tools.push(ToolCallTiming {
                 tool: name,
                 ms: at.elapsed().as_millis() as u64,
+                outcome: None,
             });
+            g.tool_ids.push(id);
         }
     }
 }
@@ -808,18 +991,25 @@ mod tests {
             tools: vec![],
             usage: None,
             cost_usd: None,
+            harness: None,
+            model: None,
         };
         rewrite_timing_lines(
             &path,
             &[
-                rec("old", Duration::from_secs(8 * 86_400)),
+                rec("old", Duration::from_secs(31 * 86_400)),
+                rec("last-month", Duration::from_secs(20 * 86_400)),
                 rec("fresh", Duration::from_secs(3_600)),
             ],
         )
         .unwrap();
 
         let log = TurnTimingLog::load(&path, now);
-        assert!(log.get("old").is_none(), "8 days old → pruned");
+        assert!(log.get("old").is_none(), "31 days old → pruned");
+        assert!(
+            log.get("last-month").is_some(),
+            "20 days old → kept: the audit window is thirty days, not seven"
+        );
         assert!(log.get("fresh").is_some(), "an hour old → kept");
         // The FILE was rewritten, not just the index.
         let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -864,5 +1054,240 @@ mod tests {
         assert_eq!(tail_bytes_on_char_boundary("abc", 10), "abc");
         assert_eq!(tail_bytes_on_char_boundary("abcdef", 3), "def");
         assert_eq!(tail_bytes_on_char_boundary("", 3), "");
+    }
+
+    #[test]
+    fn the_retention_window_is_thirty_days() {
+        assert_eq!(TIMING_RETENTION_DAYS, 30);
+    }
+
+    /// AN OLD-FORMAT RECORD STILL PARSES. A version 1 line, exactly as the Studio's log holds
+    /// them today, has no `harness`, `model` or per-tool `outcome`, and reads back with all
+    /// three absent rather than failing (which would make the prune drop a whole week).
+    #[test]
+    fn a_version_1_record_still_parses() {
+        let line = r#"{"v":1,"job_id":"eb236451afc4f1ba0000000000000044","started_at":"2026-09-29T20:00:11Z","ended_at":"2026-09-29T20:00:25Z","elapsed_ms":13914,"status":"done","tool_calls":3,"tools":[{"tool":"Skill","ms":1807},{"tool":"Bash","ms":2626},{"tool":"Read","ms":1679}]}"#;
+        let r: TurnTiming = serde_json::from_str(line).expect("a v1 record parses");
+        assert_eq!(r.v, 1);
+        assert_eq!(r.harness, None);
+        assert_eq!(r.model, None);
+        assert!(r.tools.iter().all(|t| t.outcome.is_none()));
+        // And it writes back without growing keys it never had.
+        let back = serde_json::to_string(&r).unwrap();
+        assert!(!back.contains("harness") && !back.contains("model") && !back.contains("outcome"));
+    }
+
+    #[test]
+    fn the_record_names_its_harness_and_model_and_a_retry_keeps_them() {
+        let t = TurnTrace::new(limits(8, 1024)).with_identity("codex", "codex-write");
+        t.note_tool("Bash");
+        t.reset();
+        let r = t.timing("job-1", "done");
+        assert_eq!(r.v, TURN_TIMING_SCHEMA);
+        assert_eq!(r.harness.as_deref(), Some("codex"));
+        assert_eq!(r.model.as_deref(), Some("codex-write"));
+        // A trace built without an identity (tests, the battery) writes neither key.
+        let bare =
+            serde_json::to_string(&TurnTrace::new(limits(8, 1024)).timing("j", "done")).unwrap();
+        assert!(!bare.contains("harness") && !bare.contains("model"));
+    }
+
+    #[test]
+    fn outcomes_pair_with_their_call_by_id_and_a_refusal_wins() {
+        let t = TurnTrace::new(limits(8, 1024));
+        t.note_tool("Read");
+        t.note_signal(ToolTraceSignal::CallId("toolu_1".into()));
+        t.note_tool_call("Bash", Some("toolu_2"));
+        t.note_tool("WebFetch");
+        t.note_signal(ToolTraceSignal::CallId("toolu_3".into()));
+        t.note_signal(ToolTraceSignal::Outcome {
+            call_id: "toolu_1".into(),
+            outcome: ToolCallOutcome::Ok,
+        });
+        // The denied call: an error result first, then the result line's denial list.
+        t.note_signal(ToolTraceSignal::Outcome {
+            call_id: "toolu_2".into(),
+            outcome: ToolCallOutcome::Error,
+        });
+        t.note_signal(ToolTraceSignal::Outcome {
+            call_id: "toolu_2".into(),
+            outcome: ToolCallOutcome::Refused,
+        });
+        // A result for a call this trace never saw (a subagent's) is dropped.
+        t.note_signal(ToolTraceSignal::Outcome {
+            call_id: "toolu_sub".into(),
+            outcome: ToolCallOutcome::Error,
+        });
+        let r = t.timing("job-1", "done");
+        let outcomes: Vec<Option<ToolCallOutcome>> = r.tools.iter().map(|t| t.outcome).collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                Some(ToolCallOutcome::Ok),
+                Some(ToolCallOutcome::Refused),
+                None
+            ]
+        );
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(
+            !line.contains("toolu_"),
+            "a call id never reaches the record: {line}"
+        );
+    }
+
+    #[test]
+    fn ordered_outcomes_apply_to_the_calls_in_order() {
+        let t = TurnTrace::new(limits(8, 1024));
+        t.note_tool("vault_read");
+        t.note_tool("vault_write");
+        t.note_tool("not_granted");
+        t.note_ordered_outcomes(&[ToolCallOutcome::Ok, ToolCallOutcome::Error]);
+        t.note_ordered_outcomes(&[ToolCallOutcome::Refused]);
+        let r = t.timing("job-1", "done");
+        let outcomes: Vec<Option<ToolCallOutcome>> = r.tools.iter().map(|t| t.outcome).collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                Some(ToolCallOutcome::Ok),
+                Some(ToolCallOutcome::Error),
+                Some(ToolCallOutcome::Refused)
+            ]
+        );
+    }
+
+    /// **THE FIELD WALK: NO FIELD CAN CARRY A PROMPT, A RESULT, AN ARGUMENT OR A PATH.**
+    ///
+    /// A record with every optional field present is serialized and walked key by key. Every
+    /// key path must be in `CLASSIFIED`, which says what the value is allowed to be; a field
+    /// added later is unclassified and FAILS this test, so it cannot reach the log without
+    /// somebody deciding, here, that it is content free. Every string leaf is then checked
+    /// against its class, which is what stops a classified name field from quietly carrying
+    /// free text: a tool name is an identifier, an outcome is one of three words, a harness
+    /// is a registry id, never a sentence or a `/`-bearing path.
+    ///
+    /// The trace is also fed content on every input it has (answer text, a path in a tool
+    /// name's place is impossible by construction, a call id) and none of it may appear.
+    #[test]
+    fn the_record_is_content_free_field_by_field() {
+        const CLASSIFIED: &[(&str, &str)] = &[
+            ("v", "number"),
+            ("job_id", "id"),
+            ("started_at", "timestamp"),
+            ("ended_at", "timestamp"),
+            ("elapsed_ms", "number"),
+            ("status", "status"),
+            ("tool_calls", "number"),
+            ("tools", "array"),
+            ("tools[].tool", "tool-name"),
+            ("tools[].ms", "number"),
+            ("tools[].outcome", "outcome"),
+            ("usage", "object"),
+            ("usage.input_tokens", "number"),
+            ("usage.output_tokens", "number"),
+            ("usage.cache_read_input_tokens", "number"),
+            ("usage.cache_creation_input_tokens", "number"),
+            ("cost_usd", "number"),
+            ("harness", "harness"),
+            ("model", "registry-id"),
+        ];
+        let t = TurnTrace::new(limits(8, 1024)).with_identity("claude-code", "opus");
+        t.note_delta("the secret answer about /Users/someuser/private.md");
+        t.note_tool_call("mcp__qmd__query", Some("toolu_SECRETID"));
+        t.note_signal(ToolTraceSignal::Outcome {
+            call_id: "toolu_SECRETID".into(),
+            outcome: ToolCallOutcome::Error,
+        });
+        t.note_usage(
+            ShadowUsage {
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                cache_read_input_tokens: Some(3),
+                cache_creation_input_tokens: Some(4),
+            },
+            0.5,
+        );
+        let rec = t.timing("0123456789abcdef0000000000000001", "done");
+        let v = serde_json::to_value(&rec).unwrap();
+
+        fn walk(v: &Value, path: &str, out: &mut Vec<(String, Value)>) {
+            match v {
+                Value::Object(m) => {
+                    for (k, x) in m {
+                        let p = if path.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        };
+                        out.push((p.clone(), x.clone()));
+                        walk(x, &p, out);
+                    }
+                }
+                Value::Array(a) => {
+                    for x in a {
+                        walk(x, &format!("{path}[]"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        walk(&v, "", &mut leaves);
+        let mut seen = std::collections::BTreeSet::new();
+        for (path, value) in &leaves {
+            let class = CLASSIFIED
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, c)| *c)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{path}` is a field nobody has classified as content free; classify it \
+                         in this test (and make sure it cannot hold a prompt, a result, an \
+                         argument or a path) before it reaches turn-timings.jsonl"
+                    )
+                });
+            seen.insert(path.clone());
+            let s = value.as_str();
+            let ident = |s: &str, extra: &str| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c) || extra.contains(c))
+            };
+            match class {
+                "number" => assert!(value.is_number(), "{path}: {value}"),
+                "array" => assert!(value.is_array(), "{path}"),
+                "object" => assert!(value.is_object(), "{path}"),
+                "id" => assert!(s.is_some_and(|s| ident(s, "")), "{path}: {value}"),
+                "timestamp" => assert!(s.is_some_and(|s| ident(s, ":")), "{path}: {value}"),
+                "status" => assert!(
+                    s.is_some_and(
+                        |s| ["done", "failed", "cancelled", "aborted", "unknown"].contains(&s)
+                    ),
+                    "{path}: {value}"
+                ),
+                "tool-name" => assert!(s.is_some_and(|s| ident(s, "")), "{path}: {value}"),
+                "outcome" => assert!(
+                    s.is_some_and(|s| ["ok", "error", "refused"].contains(&s)),
+                    "{path}: {value}"
+                ),
+                "harness" => assert!(
+                    s.is_some_and(|s| crate::MAP_HARNESSES.contains(&s)),
+                    "{path}: {value}"
+                ),
+                "registry-id" => assert!(s.is_some_and(|s| ident(s, ".:")), "{path}: {value}"),
+                other => panic!("unknown class {other}"),
+            }
+        }
+        // Every classified field was actually exercised, so the walk is not vacuous.
+        for (p, _) in CLASSIFIED {
+            assert!(seen.contains(*p), "the walk never reached `{p}`");
+        }
+        let line = serde_json::to_string(&rec).unwrap();
+        for forbidden in ["secret", "/Users/", "private.md", "SECRETID", "toolu_"] {
+            assert!(
+                !line.contains(forbidden),
+                "must not carry {forbidden}: {line}"
+            );
+        }
     }
 }

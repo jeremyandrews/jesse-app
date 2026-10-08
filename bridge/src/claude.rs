@@ -961,11 +961,21 @@ async fn run_spawned_turn(
                                     );
                                 }
                             }
-                            StreamEvent::Done(outcome) => {
-                                terminal = Some(outcome);
-                                break;
-                            }
+                            // The loop ends below, AFTER the line's trace signals are taken:
+                            // the terminal line is where Claude Code lists the calls its
+                            // permission layer refused.
+                            StreamEvent::Done(outcome) => terminal = Some(outcome),
                             StreamEvent::Ignore => {}
+                        }
+                        // What this line said about tool calls beyond their names (a call's
+                        // id, how a call ended), for the timing record's per-call `outcome`.
+                        // Taken after the match so a call's id lands on the call this same
+                        // line just started.
+                        for signal in parser.take_trace_signals() {
+                            trace.note_signal(signal);
+                        }
+                        if terminal.is_some() {
+                            break;
                         }
                     }
                     Ok::<Option<ClaudeOutcome>, ApiError>(terminal)
@@ -1212,6 +1222,15 @@ impl TurnSink for JobStoreSink<'_> {
     /// scope for the reply's provenance. Like the verdict, nothing is pushed onto the stream.
     fn quota(&self, scope: QuotaScopeId, patch: QuotaPatch) {
         self.trace.note_quota(scope, patch);
+    }
+
+    /// Onto the trace only, for the timing record's per-call `outcome`.
+    fn tool_signal(&self, signal: ToolTraceSignal) {
+        self.trace.note_signal(signal);
+    }
+
+    fn tool_outcomes_in_order(&self, outcomes: &[ToolCallOutcome]) {
+        self.trace.note_ordered_outcomes(outcomes);
     }
 }
 

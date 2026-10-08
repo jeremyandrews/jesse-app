@@ -865,6 +865,20 @@ impl WriteGuard for BrokerGuard {
 
 // ---- The sink ---------------------------------------------------------------
 
+/// The agent loop's per-call outcomes, in dispatch order, in the timing record's words. The
+/// loop's `failed` is the record's `error`; nothing else per call is taken.
+pub fn direct_tool_outcomes(trace: &jesse_agent::TurnTrace) -> Vec<ToolCallOutcome> {
+    trace
+        .tools
+        .iter()
+        .map(|t| match t.outcome {
+            jesse_agent::ToolOutcome::Ok => ToolCallOutcome::Ok,
+            jesse_agent::ToolOutcome::Refused => ToolCallOutcome::Refused,
+            jesse_agent::ToolOutcome::Failed => ToolCallOutcome::Error,
+        })
+        .collect()
+}
+
 /// The agent loop's [`EventSink`], forwarding into the bridge's [`TurnSink`].
 ///
 /// Two events in, the same two events out, and nothing translated: the agent crate's
@@ -1228,6 +1242,9 @@ impl Direct {
             clock: Arc::new(jesse_agent::tools::SystemClock::new()) as Arc<dyn Clock>,
         };
         let mut out = agent_run_turn(input, &deps, &agent_sink, cancel.clone()).await;
+        // The loop's own per-call outcomes, in dispatch order, which is the order the sink was
+        // told about each call: onto the trace for the timing record's per-call `outcome`.
+        sink.tool_outcomes_in_order(&direct_tool_outcomes(&out.trace));
 
         // ---- The style check -------------------------------------------------
         //
@@ -1290,6 +1307,7 @@ impl Direct {
             // The rewrites' bills, folded into this turn's, so the badge's cost figure is
             // what the turn actually cost rather than what its first attempt cost.
             for again in extra.lock_ok().drain(..) {
+                sink.tool_outcomes_in_order(&direct_tool_outcomes(&again.trace));
                 out.usage = add_usage(out.usage, again.usage);
                 out.cost_usd += again.cost_usd;
                 out.tool_calls += again.tool_calls;
@@ -2065,5 +2083,36 @@ mod tests {
             "the size comes from the filesystem"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod tool_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn the_loops_outcomes_map_in_order_and_failed_is_error() {
+        let call = |name: &str, outcome| jesse_agent::turn::ToolTrace {
+            name: name.to_string(),
+            class: ActionClass::Read,
+            ms: 1,
+            outcome,
+        };
+        let trace = jesse_agent::TurnTrace {
+            iterations: 1,
+            tools: vec![
+                call("vault_read", jesse_agent::ToolOutcome::Ok),
+                call("vault_write", jesse_agent::ToolOutcome::Failed),
+                call("shell", jesse_agent::ToolOutcome::Refused),
+            ],
+        };
+        assert_eq!(
+            direct_tool_outcomes(&trace),
+            vec![
+                ToolCallOutcome::Ok,
+                ToolCallOutcome::Error,
+                ToolCallOutcome::Refused
+            ]
+        );
     }
 }

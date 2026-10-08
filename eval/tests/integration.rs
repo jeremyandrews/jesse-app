@@ -1112,3 +1112,87 @@ fn cache_write_price_cli_reaches_report_without_changing_legacy_default() {
         assert!((actual - expected).abs() < 1e-12, "{label}: {actual}");
     }
 }
+
+// ---- workflows-v1 -------------------------------------------------------------------
+
+/// Run the SHIPPED `workflows-v1` suite (in place, so its `fixtures/` root resolves) through
+/// the CLI driver's mock, once per task.
+fn run_workflows_v1(mock_json: &str) -> serde_json::Value {
+    let tmp = tempfile::tempdir().unwrap();
+    let mock_path = tmp.path().join("mock.json");
+    let out = tmp.path().join("out");
+    fs::write(&mock_path, mock_json).unwrap();
+    let suite = concat!(env!("CARGO_MANIFEST_DIR"), "/suites/workflows-v1.json");
+    let status = Command::new(bin())
+        .args([
+            "run",
+            "--driver",
+            "claude-cli",
+            "--runs",
+            "1",
+            "--suite",
+            suite,
+            "--out",
+            out.to_str().unwrap(),
+            "--mock",
+            mock_path.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    serde_json::from_slice(&fs::read(out.join("results.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn workflows_v1_good_mock_passes_every_task_a_files_map_can_express() {
+    let good = include_str!("../suites/validation/workflows-v1-cli-good.json");
+    let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(good).unwrap()["responses"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let results = run_workflows_v1(good);
+    for t in results["tasks"].as_array().unwrap() {
+        let id = t["id"].as_str().unwrap();
+        if ids.iter().any(|i| i == id) {
+            assert_eq!(
+                t["passed"], true,
+                "good mock: {id} should pass; {}",
+                t["assertions"]
+            );
+        }
+    }
+}
+
+#[test]
+fn workflows_v1_a_turn_that_does_nothing_fails_every_task() {
+    // Every task answers "OK." and touches nothing.
+    let suite: serde_json::Value =
+        serde_json::from_str(include_str!("../suites/workflows-v1.json")).unwrap();
+    let mut responses = serde_json::Map::new();
+    for t in suite["tasks"].as_array().unwrap() {
+        responses.insert(
+            t["id"].as_str().unwrap().to_string(),
+            serde_json::json!({"ndjson": [{"type": "result", "subtype": "success",
+                "is_error": false, "result": "OK.", "usage": {}}]}),
+        );
+    }
+    let results = run_workflows_v1(&serde_json::json!({ "responses": responses }).to_string());
+    let tasks = results["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), suite["tasks"].as_array().unwrap().len());
+    for t in tasks {
+        assert_eq!(t["passed"], false, "no-op: {} must fail", t["id"]);
+        let multi_turn = suite["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == t["id"] && s.get("followups").is_some());
+        if multi_turn {
+            // A single-turn driver cannot run a follow-up and says so.
+            assert!(t["error"].as_str().unwrap().contains("follow-up"));
+        } else {
+            assert_eq!(t["error"], serde_json::Value::Null, "{}", t["id"]);
+        }
+    }
+}

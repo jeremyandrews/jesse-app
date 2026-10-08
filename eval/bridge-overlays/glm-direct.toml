@@ -1,0 +1,18 @@
+# Arms `glm-direct` for a jesse-eval bridge run: GLM on Fireworks, on the DIRECT harness (the
+# bridge's in-process agent loop) over the OpenAI chat wire. The deployment has no such
+# entry, because its `glm` runs on claude-code; this one exists so the baseline has a
+# Fireworks cell on `direct`. Same key as `glm`: pass `--pass-env JESSE_MODEL_GLM_AUTH_TOKEN`.
+#
+# `base_url` is the API ROOT the chat wire appends `/chat/completions` to.
+[[models]]
+id = "glm-direct"
+family = "GLM"
+version = "5.3 (direct)"
+kind = "hosted"
+harness = "direct"
+wire = "chat"
+base_url = "https://api.fireworks.ai/inference/v1"
+model = "accounts/fireworks/models/glm-5p3"
+auth_token_env = "JESSE_MODEL_GLM_AUTH_TOKEN"
+price = { in_per_m = 1.40, cached_per_m = 0.26, out_per_m = 4.40 }
+health = { timeout_secs = 15 }

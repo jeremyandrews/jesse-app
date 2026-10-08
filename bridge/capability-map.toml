@@ -1,0 +1,3285 @@
+# THE CAPABILITY MAP: one row per grant in `DEFAULT_ALLOWED_TOOLS` (bridge/src/config.rs),
+# keyed by the exact grant string. It records what each grant is, which harnesses it reaches
+# today, and where the capability lives once the bridge leaves the Mac. Nothing here changes
+# what a turn may do: the allowlist is the boundary and this file only describes it.
+#
+# `capmap::tests` fails the build when a grant has no row, a row names no grant, a row's
+# `kind` or `server` disagrees with its grant string, or a row's `harnesses` disagrees with
+# what the code actually hands each harness. Adding or removing a grant therefore means
+# adding or removing its row here in the same change.
+#
+# FIELDS
+#   kind        file | bash | skill | web | mcp
+#   server      the MCP server, for mcp grants only
+#   harnesses   the harnesses the grant string reaches today, derived from the code:
+#                 * claude-code takes the whole allowlist as `--allowedTools`;
+#                 * codex takes only the `mcp__<server>__<tool>` entries, as each server's
+#                   `enabled_tools` (its shell and file edits are an OS sandbox, not grants);
+#                 * direct takes MCP tools only from a deployment's `[[direct.mcp]]` table
+#                   (stdio servers only), and the shipped posture and the Studio grant none.
+#               The full set reaches a main turn at the write level only: a read-level turn
+#               gets `READ_ALLOWED_TOOLS` (or `REPLIES_ALLOWED_TOOLS` for the brief child).
+#               An mcp row that does not list all three is a PARITY DEFECT, recorded as it
+#               is today rather than hidden; it is not a placement.
+#   placement   where the capability lives after the move:
+#                 turn-pod      inside the agent's own pod, no credential
+#                 core          the bridge does it with its own credentials
+#                 upstream-pod  an MCP server in its own pod with only its own secret
+#                 mac-edge      needs macOS, served by the Mac service
+#                 drop          remove
+#   dependency  credential variable NAMES (never values), LAN targets or macOS features,
+#               taken from the three Codex tables in harness/codex.rs and from each server's
+#               launcher or env file
+#   workflows   the skills, scheduled jobs and routines that use it (free text)
+#   reason      one sentence
+#   note        optional
+#
+# Bash and Skill grants appear in the turn trace only as the bare class names `Bash` and
+# `Skill`, so the usage audit reports them as two class rows and never as "never used".
+# See `tool-usage` in bridge/README.md.
+
+[grant."Read(//${WORKSPACE}/**)"]
+kind = "file"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (the vault checkout the pod is given)"
+workflows = "every main turn; diet-logging, archive-processing, strand-update, drafts and research writes"
+reason = "Reads vault files, scoped to the turn's own working directory."
+
+[grant."Edit(//${WORKSPACE}/**)"]
+kind = "file"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (the vault checkout the pod is given)"
+workflows = "every main turn; diet-logging, archive-processing, strand-update, drafts and research writes"
+reason = "Edits and creates vault files, scoped to the turn's own working directory; Claude Code matches Write and NotebookEdit against this rule too."
+
+[grant."Grep(//${WORKSPACE}/**)"]
+kind = "file"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (the vault checkout the pod is given)"
+workflows = "every main turn; diet-logging, archive-processing, strand-update, drafts and research writes"
+reason = "Searches vault file contents, scoped to the turn's own working directory."
+
+[grant."Glob(//${WORKSPACE}/**)"]
+kind = "file"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (the vault checkout the pod is given)"
+workflows = "every main turn; diet-logging, archive-processing, strand-update, drafts and research writes"
+reason = "Lists vault paths by pattern, scoped to the turn's own working directory."
+
+[grant."mcp__qmd__query"]
+kind = "mcp"
+server = "qmd"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; the qmd binary and its SQLite index under ~/.cache/qmd built over the canonical vault (collection config ~/.config/qmd/index.yml)"
+workflows = "every vault lookup (rule zero), the Vault State scanner, meeting-processing per-person QMD loop"
+reason = "Searches and reads the canonical vault index, which lives beside the canonical vault the core owns."
+
+[grant."mcp__qmd__get"]
+kind = "mcp"
+server = "qmd"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; the qmd binary and its SQLite index under ~/.cache/qmd built over the canonical vault (collection config ~/.config/qmd/index.yml)"
+workflows = "every vault lookup (rule zero), the Vault State scanner, meeting-processing per-person QMD loop"
+reason = "Searches and reads the canonical vault index, which lives beside the canonical vault the core owns."
+
+[grant."mcp__qmd__multi_get"]
+kind = "mcp"
+server = "qmd"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; the qmd binary and its SQLite index under ~/.cache/qmd built over the canonical vault (collection config ~/.config/qmd/index.yml)"
+workflows = "every vault lookup (rule zero), the Vault State scanner, meeting-processing per-person QMD loop"
+reason = "Searches and reads the canonical vault index, which lives beside the canonical vault the core owns."
+
+[grant."mcp__qmd__status"]
+kind = "mcp"
+server = "qmd"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; the qmd binary and its SQLite index under ~/.cache/qmd built over the canonical vault (collection config ~/.config/qmd/index.yml)"
+workflows = "every vault lookup (rule zero), the Vault State scanner, meeting-processing per-person QMD loop"
+reason = "Searches and reads the canonical vault index, which lives beside the canonical vault the core owns."
+
+[grant."Skill(diet-logging)"]
+kind = "skill"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (vault skill under .claude/skills)"
+workflows = "every meal, exercise and weigh-in log from the phone"
+reason = "Loads the diet-logging procedure: CSV append, diet-today.js regeneration and the confirmation step."
+
+[grant."Bash(git:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the vault and checkout remotes' credentials (GitHub token, the LAN vault remote) for fetch, clone and push"
+workflows = "vault commits after every write skill, code review checkouts, health-new-day git log, strand-update"
+reason = "Runs git; the credential-free half (status, log, diff, local commit) could run in a turn pod as a changeset, but the grant also covers fetch, clone and push, which need the core's credentials."
+
+[grant."Bash(mv:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none"
+workflows = "archive-processing skill, archive-box job, strand-update, strands-sweep"
+reason = "Moves vault files to archive folders; the vault rule is a single mv, never copy then delete."
+
+[grant."Bash(date:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none"
+workflows = "the clock header, diet-logging, overnight-currency, every dated draft name"
+reason = "Reads the wall clock and calendar layout; no credential and no write."
+
+[grant."Bash(cal:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none"
+workflows = "the clock header, diet-logging, overnight-currency, every dated draft name"
+reason = "Reads the wall clock and calendar layout; no credential and no write."
+
+[grant."Bash(node vault/generate-diet-today.js:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "node on the turn pod's PATH"
+workflows = "diet-logging, dashboard-regen, health-new-day"
+reason = "Runs a fixed vault diet script that regenerates or validates diet-today.js."
+
+[grant."Bash(node vault/validate-diet-today.js:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "node on the turn pod's PATH"
+workflows = "diet-logging, dashboard-regen, health-new-day"
+reason = "Runs a fixed vault diet script that regenerates or validates diet-today.js."
+
+[grant."Bash(node vault/verify-diet-consistency.js:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "node on the turn pod's PATH"
+workflows = "diet-logging, dashboard-regen, health-new-day"
+reason = "Runs a fixed vault diet script that regenerates or validates diet-today.js."
+
+[grant."Bash(node vault/rotate-currency-summary.js:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "node on the turn pod's PATH"
+workflows = "overnight-currency scheduled job"
+reason = "Runs the fixed vault script that rotates the currency summary."
+
+[grant."Bash(./.claude/skills/archive-processing/find-checked-archive-boxes.sh:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "a POSIX shell and grep"
+workflows = "archive-processing skill, archive-box job"
+reason = "Runs the pinned finder for checked archive boxes."
+
+[grant."Bash(bin/vault-links:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "the vault's bin/vault-links tool"
+workflows = "link-graph expansion after every QMD lookup; meeting-processing"
+reason = "Runs the vault's link-graph neighbour ranking; both spellings are granted because the model uses both."
+
+[grant."Bash(./bin/vault-links:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "the vault's bin/vault-links tool"
+workflows = "link-graph expansion after every QMD lookup; meeting-processing"
+reason = "Runs the vault's link-graph neighbour ranking; both spellings are granted because the model uses both."
+
+[grant."Bash(./.claude/skills/draft-lint/lint-draft.sh:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "a POSIX shell and grep"
+workflows = "draft-lint skill"
+reason = "Runs the pinned banned-pattern check against a draft."
+
+[grant."Bash(./.claude/skills/diet-query/run-week-query.sh:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "duckdb on the turn pod's PATH"
+workflows = "diet-query skill, Sunday weekly diet analysis"
+reason = "Runs the pinned DuckDB query over the diet CSVs."
+
+[grant."Bash(./.claude/skills/currency-stats/currency-stats.py:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "python3 on the turn pod's PATH (the vault script is Python)"
+workflows = "currency-stats skill, overnight-currency scheduled job"
+reason = "Runs the pinned percentile and moving-average script for the currency reports."
+
+[grant."Bash(./.claude/skills/gh-review/create-pending-review.sh:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (the script calls gh api)"
+workflows = "gh-review skill"
+reason = "Vault script that leaves an unpublished PR review through gh, so it needs the GitHub credential."
+
+[grant."Bash(shasum:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none"
+workflows = "team report pull dedup, file fingerprint checks"
+reason = "Fingerprints files; it reads and prints and has no destination."
+
+[grant."Bash(gh pr list:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh pr view:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh pr checks:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh issue list:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh issue view:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh run list:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh run view:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh release list:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh release view:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh repo view:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill, strand-update PR checks, CI status questions, Friday tag1.com status"
+reason = "Read-only GitHub CLI verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh issue create:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "the GitHub authoring carve-outs in the vault's outbound rule (issue and PR creation)"
+reason = "GitHub authoring verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh pr create:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "the GitHub authoring carve-outs in the vault's outbound rule (issue and PR creation)"
+reason = "GitHub authoring verb that needs the owner's GitHub credential."
+
+[grant."Bash(gh api repos/tag1consulting/jesse-app/pulls:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "the gh CLI login (GitHub token in ~/.config/gh)"
+workflows = "gh-review skill (pending review creation on this repository)"
+reason = "One scoped GitHub API path, which needs the owner's GitHub credential."
+
+[grant."Skill(health-new-day)"]
+kind = "skill"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (vault skill under .claude/skills)"
+workflows = "the Jesse app Health tab Start new day button; morning-health-audit and morning-weigh-in jobs"
+reason = "Loads the scope-locked morning health refresh."
+
+[grant."Skill(dashboard-regen)"]
+kind = "skill"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (vault skill under .claude/skills)"
+workflows = "weigh-ins and the morning chain, which regenerate the app's diet data files"
+reason = "Loads the diet data file pipeline the app reads through the bridge."
+
+[grant."Skill(archive-processing)"]
+kind = "skill"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (vault skill under .claude/skills)"
+workflows = "the archive-box scheduled job; any checked archive box"
+reason = "Loads the find, process, verify and move procedure for checked archive boxes."
+
+[grant."Skill(draft-lint)"]
+kind = "skill"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none (vault skill under .claude/skills)"
+workflows = "every draft delivered to Projects/drafts"
+reason = "Loads the pre-delivery banned-pattern check for drafts."
+
+[grant."Skill(health-export-import)"]
+kind = "skill"
+harnesses = ["claude-code"]
+placement = "drop"
+dependency = "none"
+workflows = "none (the skill no longer exists in the vault)"
+reason = "skill deleted 2026-08-15"
+
+[grant."WebSearch"]
+kind = "web"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "none in the pod (the search runs on the model provider's side)"
+workflows = "research reports, the daily philosophy study, any substantive question"
+reason = "Model-side web search; Codex has it switched off (tools.web_search=false) and direct has no search tool."
+
+[grant."WebFetch"]
+kind = "web"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "outbound HTTPS egress from the turn pod"
+workflows = "research reports, Friday tag1.com status, link reading"
+reason = "Fetches a public URL into the turn; direct's fetch_url is its counterpart and ships with an empty allowlist."
+
+[grant."mcp__slack__conversations_history"]
+kind = "mcp"
+server = "slack"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "SLACK_MCP_XOXP_TOKEN (Slack user token, set in the LaunchAgent plist)"
+workflows = "start-of-day Slack scanner and stand-up channels check, people lookups"
+reason = "Read-only Slack search and history on the Tag1 workspace."
+
+[grant."mcp__slack__conversations_replies"]
+kind = "mcp"
+server = "slack"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "SLACK_MCP_XOXP_TOKEN (Slack user token, set in the LaunchAgent plist)"
+workflows = "start-of-day Slack scanner and stand-up channels check, people lookups"
+reason = "Read-only Slack search and history on the Tag1 workspace."
+
+[grant."mcp__slack__conversations_search_messages"]
+kind = "mcp"
+server = "slack"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "SLACK_MCP_XOXP_TOKEN (Slack user token, set in the LaunchAgent plist)"
+workflows = "start-of-day Slack scanner and stand-up channels check, people lookups"
+reason = "Read-only Slack search and history on the Tag1 workspace."
+
+[grant."mcp__slack__channels_list"]
+kind = "mcp"
+server = "slack"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "SLACK_MCP_XOXP_TOKEN (Slack user token, set in the LaunchAgent plist)"
+workflows = "start-of-day Slack scanner and stand-up channels check, people lookups"
+reason = "Read-only Slack search and history on the Tag1 workspace."
+
+[grant."mcp__slack__channels_me"]
+kind = "mcp"
+server = "slack"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "SLACK_MCP_XOXP_TOKEN (Slack user token, set in the LaunchAgent plist)"
+workflows = "start-of-day Slack scanner and stand-up channels check, people lookups"
+reason = "Read-only Slack search and history on the Tag1 workspace."
+
+[grant."mcp__slack__users_search"]
+kind = "mcp"
+server = "slack"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "SLACK_MCP_XOXP_TOKEN (Slack user token, set in the LaunchAgent plist)"
+workflows = "start-of-day Slack scanner and stand-up channels check, people lookups"
+reason = "Read-only Slack search and history on the Tag1 workspace."
+
+[grant."mcp__browser__browser_navigate"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_navigate_back"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_snapshot"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_find"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_wait_for"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_console_messages"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_network_requests"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_network_request"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_click"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_type"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_fill_form"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_press_key"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_hover"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_select_option"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_drag"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_handle_dialog"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser and can act on a page (click, type, submit)."
+
+[grant."mcp__browser__browser_tabs"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_resize"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_close"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__browser__browser_take_screenshot"]
+kind = "mcp"
+server = "browser"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; headless Playwright Chromium fetched by npx, output under /tmp/jesse-browser"
+workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
+reason = "Drives a headless isolated browser against public pages."
+
+[grant."mcp__homeassistant__GetLiveContext"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Reads Home Assistant state, time or to-do items."
+
+[grant."mcp__homeassistant__GetDateTime"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Reads Home Assistant state, time or to-do items."
+
+[grant."mcp__homeassistant__todo_get_items"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Reads Home Assistant state, time or to-do items."
+
+[grant."mcp__homeassistant__HassTurnOn"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassTurnOff"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassSetPosition"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassStopMoving"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassCancelAllTimers"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassLightSet"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassClimateSetTemperature"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaUnpause"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaPause"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaNext"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaPrevious"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassSetVolume"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassSetVolumeRelative"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaPlayerMute"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaPlayerUnmute"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassMediaSearchAndPlay"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassListAddItem"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassListCompleteItem"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassListRemoveItem"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Actuates the house through a Home Assistant intent."
+
+[grant."mcp__homeassistant__HassBroadcast"]
+kind = "mcp"
+server = "homeassistant"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
+workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
+reason = "Speaks a broadcast through the house speakers via Home Assistant."
+
+[grant."mcp__roon__hifi_zones"]
+kind = "mcp"
+server = "roon"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; the Roon MCP bridge on the LAN (plain HTTP)"
+workflows = "music playback requests"
+reason = "Reads Roon zones, status or search results."
+
+[grant."mcp__roon__hifi_now_playing"]
+kind = "mcp"
+server = "roon"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; the Roon MCP bridge on the LAN (plain HTTP)"
+workflows = "music playback requests"
+reason = "Reads Roon zones, status or search results."
+
+[grant."mcp__roon__hifi_control"]
+kind = "mcp"
+server = "roon"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; the Roon MCP bridge on the LAN (plain HTTP)"
+workflows = "music playback requests"
+reason = "Controls Roon playback."
+
+[grant."mcp__roon__hifi_search"]
+kind = "mcp"
+server = "roon"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; the Roon MCP bridge on the LAN (plain HTTP)"
+workflows = "music playback requests"
+reason = "Reads Roon zones, status or search results."
+
+[grant."mcp__roon__hifi_play"]
+kind = "mcp"
+server = "roon"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; the Roon MCP bridge on the LAN (plain HTTP)"
+workflows = "music playback requests"
+reason = "Controls Roon playback."
+
+[grant."mcp__roon__hifi_status"]
+kind = "mcp"
+server = "roon"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no credential; the Roon MCP bridge on the LAN (plain HTTP)"
+workflows = "music playback requests"
+reason = "Reads Roon zones, status or search results."
+
+[grant."mcp__google__list_calendars"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_events"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__query_freebusy"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__search_gmail_messages"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_gmail_message_content"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_gmail_messages_content_batch"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_gmail_thread_content"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_gmail_threads_content_batch"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__list_gmail_labels"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__search_drive_files"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_drive_file_content"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_drive_file_download_url"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__list_drive_items"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_drive_file_permissions"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__check_drive_file_public_access"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__google__get_drive_shareable_link"]
+kind = "mcp"
+server = "google"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET (republished from JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET), WORKSPACE_MCP_CREDENTIALS_DIR (token cache ~/.config/jesse-google/creds), WORKSPACE_ATTACHMENT_DIR, USER_GOOGLE_EMAIL"
+workflows = "start-of-day Gmail and Calendar scanners, meeting agendas, Drive lookups, the today-brief replies child"
+reason = "Read-only Tag1 Google Workspace access (Calendar, Gmail, Drive), started with --read-only."
+
+[grant."mcp__github__actions_get"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__actions_list"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_commit"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_file_contents"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_job_logs"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_latest_release"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_release_by_tag"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_tag"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_branches"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_commits"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_releases"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_repository_collaborators"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_tags"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__search_code"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__search_commits"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__search_repositories"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__issue_read"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_issues"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__search_issues"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_issue_fields"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_issue_types"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__get_label"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__pull_request_read"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__list_pull_requests"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__github__search_pull_requests"]
+kind = "mcp"
+server = "github"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "GITHUB_PERSONAL_ACCESS_TOKEN (republished from JESSE_GITHUB_PAT)"
+workflows = "code review context, gh-review, CI and release status, Friday tag1.com status"
+reason = "Read-only GitHub access (repos, actions, issues, pull requests), started with --read-only."
+
+[grant."mcp__fastmail__get_mailboxes"]
+kind = "mcp"
+server = "fastmail"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JMAP_TOKEN (republished from JESSE_JMAP_TOKEN), JMAP_SESSION_URL"
+workflows = "start-of-day Fastmail scanner, the today-brief replies child"
+reason = "Read-only Fastmail mailbox search and reading over JMAP."
+
+[grant."mcp__fastmail__search_emails"]
+kind = "mcp"
+server = "fastmail"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JMAP_TOKEN (republished from JESSE_JMAP_TOKEN), JMAP_SESSION_URL"
+workflows = "start-of-day Fastmail scanner, the today-brief replies child"
+reason = "Read-only Fastmail mailbox search and reading over JMAP."
+
+[grant."mcp__fastmail__get_email_content"]
+kind = "mcp"
+server = "fastmail"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JMAP_TOKEN (republished from JESSE_JMAP_TOKEN), JMAP_SESSION_URL"
+workflows = "start-of-day Fastmail scanner, the today-brief replies child"
+reason = "Read-only Fastmail mailbox search and reading over JMAP."
+
+[grant."mcp__unifi__unifi_tool_index"]
+kind = "mcp"
+server = "unifi"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "UNIFI_USERNAME, UNIFI_PASSWORD (republished from the JESSE_UNIFI_* plist names), UNIFI_HOST, UNIFI_PORT, UNIFI_CONTROLLER_TYPE, UNIFI_VERIFY_SSL, UNIFI_SITE; the UniFi controller on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads the UniFi controller through its tool index."
+
+[grant."mcp__unifi__unifi_execute"]
+kind = "mcp"
+server = "unifi"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "UNIFI_USERNAME, UNIFI_PASSWORD (republished from the JESSE_UNIFI_* plist names), UNIFI_HOST, UNIFI_PORT, UNIFI_CONTROLLER_TYPE, UNIFI_VERIFY_SSL, UNIFI_SITE; the UniFi controller on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Runs UniFi controller operations, which can change network configuration."
+
+[grant."mcp__unifi__unifi_batch"]
+kind = "mcp"
+server = "unifi"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "UNIFI_USERNAME, UNIFI_PASSWORD (republished from the JESSE_UNIFI_* plist names), UNIFI_HOST, UNIFI_PORT, UNIFI_CONTROLLER_TYPE, UNIFI_VERIFY_SSL, UNIFI_SITE; the UniFi controller on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Runs UniFi controller operations, which can change network configuration."
+
+[grant."mcp__unifi__unifi_batch_status"]
+kind = "mcp"
+server = "unifi"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "UNIFI_USERNAME, UNIFI_PASSWORD (republished from the JESSE_UNIFI_* plist names), UNIFI_HOST, UNIFI_PORT, UNIFI_CONTROLLER_TYPE, UNIFI_VERIFY_SSL, UNIFI_SITE; the UniFi controller on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads the UniFi controller through its tool index."
+
+[grant."mcp__unifi__unifi_load_tools"]
+kind = "mcp"
+server = "unifi"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "UNIFI_USERNAME, UNIFI_PASSWORD (republished from the JESSE_UNIFI_* plist names), UNIFI_HOST, UNIFI_PORT, UNIFI_CONTROLLER_TYPE, UNIFI_VERIFY_SSL, UNIFI_SITE; the UniFi controller on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads the UniFi controller through its tool index."
+
+[grant."mcp__routeros__list_devices"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__system_info"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__interfaces"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__ip_addresses"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__ip_routes"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__bridges"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__neighbors"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__logs"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__config"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__routeros__ping"]
+kind = "mcp"
+server = "routeros"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "ROUTEROS_DEVICES_CONFIG (path to ~/.config/routeros-mcp/devices.yaml, which holds the device credentials), ROUTEROS_SSH_PORT; the MikroTik routers on the LAN"
+workflows = "Thursday network health check, network questions"
+reason = "Reads RouterOS device state, logs and configuration, or pings from a router."
+
+[grant."mcp__proxmox__proxmox_get_nodes"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_node_status"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_vms"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_vm_status"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_execute_vm_command"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_get_storage"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_cluster_status"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_list_templates"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_create_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_create_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_get_next_vmid"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_start_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_start_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_stop_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_stop_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_delete_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_delete_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_reboot_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_reboot_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_shutdown_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_shutdown_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_pause_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_resume_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_clone_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_clone_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_resize_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_resize_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_create_snapshot_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_create_snapshot_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_list_snapshots_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_list_snapshots_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_rollback_snapshot_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_rollback_snapshot_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_delete_snapshot_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_delete_snapshot_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_create_backup_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_create_backup_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_list_backups"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_restore_backup_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_restore_backup_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_delete_backup"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_add_disk_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_add_mountpoint_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_resize_disk_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_resize_disk_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_remove_disk_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_remove_mountpoint_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_move_disk_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_move_disk_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_add_network_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_add_network_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_update_network_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_update_network_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_remove_network_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_remove_network_lxc"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_generate_terraform"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_task_status"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_vm_config"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_whoami"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_migrate_vm"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_get_guest_ips"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_convert_to_template"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_set_cloudinit"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Changes Proxmox guests, disks, networks, snapshots or backups, or executes a command inside a guest."
+
+[grant."mcp__proxmox__proxmox_get_rrd_data"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_pools"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_ha_resources"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__proxmox__proxmox_get_firewall_rules"]
+kind = "mcp"
+server = "proxmox"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = ".env beside the server checkout (loaded by the server itself, not forwarded): PROXMOX_HOST, PROXMOX_USER, PROXMOX_TOKEN_NAME, PROXMOX_TOKEN_VALUE, PROXMOX_PORT, PROXMOX_ALLOW_ELEVATED; optional PROXMOX_VERIFY_TLS, PROXMOX_NODE_ALLOWLIST, PROXMOX_VMID_ALLOWLIST; the Proxmox API on the LAN"
+workflows = "Thursday network health check, homelab VM and container operations"
+reason = "Reads Proxmox cluster, node, guest, storage or task state."
+
+[grant."mcp__whatsapp__search_contacts"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__list_messages"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__list_chats"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__get_chat"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__get_direct_chat_by_contact"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__get_contact_chats"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__get_last_interaction"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__whatsapp__get_message_context"]
+kind = "mcp"
+server = "whatsapp"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "no environment; the server reads the SQLite message store in its own checkout and the WhatsApp Go bridge at a hard-coded localhost:8080, so the Go bridge and its store must move into the same pod"
+workflows = "start-of-day WhatsApp scanner, the today-brief replies child, people lookups"
+reason = "Reads WhatsApp chats, messages and contacts from the local store."
+
+[grant."mcp__imcp__messages_fetch"]
+kind = "mcp"
+server = "imcp"
+harnesses = ["claude-code", "codex"]
+placement = "mac-edge"
+dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search uses Apple Maps"
+workflows = "start-of-day iMessage scanner, the today-brief replies child (messages_fetch); place and address lookups and Apple Maps links (maps_search)"
+reason = "Reads iMessage history through the iMCP app's grant on ~/Library/Messages, which only exists on macOS."
+
+[grant."mcp__imcp__maps_search"]
+kind = "mcp"
+server = "imcp"
+harnesses = ["claude-code", "codex"]
+placement = "mac-edge"
+dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search uses Apple Maps"
+workflows = "start-of-day iMessage scanner, the today-brief replies child (messages_fetch); place and address lookups and Apple Maps links (maps_search)"
+reason = "Searches Apple Maps through the iMCP app, which only exists on macOS."
+
+[grant."mcp__google-perseido__list_calendars"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_events"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__query_freebusy"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__search_gmail_messages"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_gmail_message_content"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_gmail_messages_content_batch"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_gmail_thread_content"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_gmail_threads_content_batch"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__list_gmail_labels"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__search_drive_files"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_drive_file_content"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_drive_file_download_url"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__list_drive_items"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_drive_file_permissions"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__check_drive_file_public_access"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__google-perseido__get_drive_shareable_link"]
+kind = "mcp"
+server = "google-perseido"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-perseido launcher: GOOGLE_CLIENT_SECRET_PATH (client secret file under ~/.config/jesse-google-perseido), WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR (…/creds), WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_PERSEIDO_PORT; it unsets GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+workflows = "start-of-day Gmail scanner Perseido pass, Perseido calendar, the today-brief replies child"
+reason = "Read-only Perseido Google Workspace access, a second account kept apart from the Tag1 one."
+
+[grant."mcp__build__build_bridge"]
+kind = "mcp"
+server = "build"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_VAULT; the bridge checkout and cargo toolchain; macOS /usr/bin/sandbox-exec around the build"
+workflows = "finishing a bridge code change from the phone (compile, test)"
+reason = "Compiles the bridge checkout with a fixed argv inside the macOS sandbox; write-then-execute by construction."
+note = "Linux path does not exist yet: buildsvc reports NOT RUN off macOS, because its sandbox is /usr/bin/sandbox-exec."
+
+[grant."mcp__build__test_bridge"]
+kind = "mcp"
+server = "build"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_VAULT; the bridge checkout and cargo toolchain; macOS /usr/bin/sandbox-exec around the build"
+workflows = "finishing a bridge code change from the phone (compile, test)"
+reason = "Runs the bridge test suite with a fixed argv inside the macOS sandbox; write-then-execute by construction."
+note = "Linux path does not exist yet: buildsvc reports NOT RUN off macOS, because its sandbox is /usr/bin/sandbox-exec."
+
+[grant."mcp__places__places_search"]
+kind = "mcp"
+server = "places"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_PLACES_GOOGLE_API_KEY and the other JESSE_PLACES_* settings, JESSE_STATE_DIR (the Google spend ledger); public OpenStreetMap and Google Places endpoints"
+workflows = "is it open now, ratings and nearby place questions"
+reason = "Searches places or reads one place's details, including hours, from OSM or Google Places."
+
+[grant."mcp__places__place_details"]
+kind = "mcp"
+server = "places"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_PLACES_GOOGLE_API_KEY and the other JESSE_PLACES_* settings, JESSE_STATE_DIR (the Google spend ledger); public OpenStreetMap and Google Places endpoints"
+workflows = "is it open now, ratings and nearby place questions"
+reason = "Searches places or reads one place's details, including hours, from OSM or Google Places."
+
+[grant."mcp__inbound__list_attachments"]
+kind = "mcp"
+server = "inbound"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_VAULT, JESSE_INBOUND_* settings (WhatsApp API and media root, Perseido Gmail credentials path), WORKSPACE_MCP_CREDENTIALS_DIR, JMAP_SESSION_URL, JMAP_TOKEN, JESSE_VISION_* settings, fixed JESSE_INBOUND_HARNESS; PDF rasterization for Codex uses macOS Core Graphics (cgpdf.rs)"
+workflows = "reading an email or WhatsApp attachment into a turn"
+reason = "Lists or fetches a mail or WhatsApp attachment and stages it under the vault for the turn."
+
+[grant."mcp__inbound__fetch_attachment"]
+kind = "mcp"
+server = "inbound"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_VAULT, JESSE_INBOUND_* settings (WhatsApp API and media root, Perseido Gmail credentials path), WORKSPACE_MCP_CREDENTIALS_DIR, JMAP_SESSION_URL, JMAP_TOKEN, JESSE_VISION_* settings, fixed JESSE_INBOUND_HARNESS; PDF rasterization for Codex uses macOS Core Graphics (cgpdf.rs)"
+workflows = "reading an email or WhatsApp attachment into a turn"
+reason = "Lists or fetches a mail or WhatsApp attachment and stages it under the vault for the turn."
+
+[grant."mcp__kubernetes__configuration_view"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__namespaces_list"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__events_list"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__projects_list"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__nodes_log"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__nodes_top"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__nodes_stats_summary"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__pods_list"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__pods_list_in_namespace"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__pods_get"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__pods_log"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__pods_top"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__pods_run"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes__pods_exec"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes__pods_delete"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes__resources_list"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__resources_get"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes__resources_create_or_update"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes__resources_scale"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes__resources_delete"]
+kind = "mcp"
+server = "kubernetes"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-mcp launcher to ~/.kube/ks-jesse.yaml (a cluster-admin ServiceAccount token); pinned kubernetes-mcp-server 0.0.67"
+workflows = "Jesse Sandbox cluster work, cluster debugging"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__rybbit__list_sites"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_site"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_overview"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_overview_timeseries"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_breakdown"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_live_stats"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_event_names"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_errors"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_web_vitals"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_retention"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_journeys"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_goals"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_funnels"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__analyze_funnel"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__list_segments"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__apply_segment"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_users"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_user"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__list_members"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__list_teams"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_sessions"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_session"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_events"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_query_schema"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__run_query"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_annotations"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_search_console_status"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__rybbit__get_search_console_data"]
+kind = "mcp"
+server = "rybbit"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "RYBBIT_API_KEY (personal API key sent as a bearer by the client); public HTTPS https://app.rybbit.io/api/mcp"
+workflows = "Friday tag1.com site status, analytics questions"
+reason = "Reads tag1.com web analytics from Rybbit's hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__tag1__search_tag1"]
+kind = "mcp"
+server = "tag1"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; public HTTPS https://www.tag1.com/mcp"
+workflows = "tag1.com content and expert lookups, Friday tag1.com status"
+reason = "Reads Tag1's public website through its hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__tag1__get_page"]
+kind = "mcp"
+server = "tag1"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; public HTTPS https://www.tag1.com/mcp"
+workflows = "tag1.com content and expert lookups, Friday tag1.com status"
+reason = "Reads Tag1's public website through its hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__tag1__list_case_studies"]
+kind = "mcp"
+server = "tag1"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; public HTTPS https://www.tag1.com/mcp"
+workflows = "tag1.com content and expert lookups, Friday tag1.com status"
+reason = "Reads Tag1's public website through its hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__tag1__list_services"]
+kind = "mcp"
+server = "tag1"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; public HTTPS https://www.tag1.com/mcp"
+workflows = "tag1.com content and expert lookups, Friday tag1.com status"
+reason = "Reads Tag1's public website through its hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__tag1__list_products"]
+kind = "mcp"
+server = "tag1"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; public HTTPS https://www.tag1.com/mcp"
+workflows = "tag1.com content and expert lookups, Friday tag1.com status"
+reason = "Reads Tag1's public website through its hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__tag1__find_expert"]
+kind = "mcp"
+server = "tag1"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "no credential; public HTTPS https://www.tag1.com/mcp"
+workflows = "tag1.com content and expert lookups, Friday tag1.com status"
+reason = "Reads Tag1's public website through its hosted server, which the core can call directly over HTTPS."
+
+[grant."mcp__plex__library_list"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__library_get_stats"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__library_get_details"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__library_get_recently_added"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__library_get_contents"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_search_users"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_list_all_users"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_get_info"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_get_on_deck"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_get_continue_watching"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_get_watch_history"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__user_get_statistics"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__sessions_get_active"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__sessions_get_media_playback_history"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__server_get_plex_logs"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__server_get_info"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__server_get_bandwidth"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__server_get_current_resources"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__server_get_butler_tasks"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__server_get_alerts"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__playlist_list"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__playlist_get_contents"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__playlist_create"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__playlist_edit"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__playlist_add_to"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__playlist_remove_from"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__playlist_delete"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__collection_list"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__collection_create"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__collection_add_to"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__collection_remove_from"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__collection_edit"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__collection_delete"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__media_search"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__media_get_details"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__media_edit_metadata"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Edits Plex playlists, collections or item metadata (never media files)."
+
+[grant."mcp__plex__media_list_available_artwork"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__client_list"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__client_get_details"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__plex__client_get_timelines"]
+kind = "mcp"
+server = "plex"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "PLEX_URL, PLEX_TOKEN from ~/.config/jesse-plex/plex.env, exported by the plex-mcp launcher; the Plex server on the LAN"
+workflows = "media library questions, playlist and collection edits"
+reason = "Reads the Plex library, users, sessions, server or clients."
+
+[grant."mcp__clockify__get_current_user_profile"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__get_current_time"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__get_current_timer"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__start_timer"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Writes to Clockify (timers, logged time, projects) with the key owner's permissions."
+
+[grant."mcp__clockify__log_past_time"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Writes to Clockify (timers, logged time, projects) with the key owner's permissions."
+
+[grant."mcp__clockify__stop_timer"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Writes to Clockify (timers, logged time, projects) with the key owner's permissions."
+
+[grant."mcp__clockify__get_summary_report"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__get_detailed_report"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__list_clients"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__list_projects"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__create_project"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Writes to Clockify (timers, logged time, projects) with the key owner's permissions."
+
+[grant."mcp__clockify__list_tasks"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__clockify__list_tags"]
+kind = "mcp"
+server = "clockify"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
+workflows = "Tag1 time tracking: timers, logged time, reports"
+reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."

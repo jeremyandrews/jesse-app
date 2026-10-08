@@ -1,0 +1,3 @@
+Date,Type,Description,Distance_km,Duration,Pace_min_per_km,Elevation_m,Avg_HR,Cadence,Calories,Plan_Source,Notes,Start_Time,TZ,Treadmill,Source
+2026-10-04,Run,"Easy run, outdoor",8.02,0:46:10,5:45,42,141,168,560,,"Easy aerobic run from the watch.",07:00,Europe/Rome,false,watch
+2026-10-05,Walk,"Evening walk",4.1,0:48:00,11:42,15,98,,190,,"Walk around the neighbourhood, self reported.",18:30,Europe/Rome,false,self_reported

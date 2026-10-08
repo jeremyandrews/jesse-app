@@ -556,6 +556,29 @@ fn answer_server_request(method: &str, _params: &Value) -> Value {
     }
 }
 
+/// The id of a TOOL item (`commandExecution`, `fileChange`, `mcpToolCall`), the three item
+/// types the activity feed narrates; `None` for any other item.
+fn tool_item_id(item: &Value) -> Option<&str> {
+    match item.get("type").and_then(Value::as_str)? {
+        "commandExecution" | "fileChange" | "mcpToolCall" => item.get("id")?.as_str(),
+        _ => None,
+    }
+}
+
+/// How a completed tool item ended, from its `status`, the protocol's own closed set
+/// (`CommandExecutionStatus`, `PatchApplyStatus`, `McpToolCallStatus` in the app server's
+/// generated schema, codex-cli 0.153.4): `completed` is `ok`, `failed` is `error`, and
+/// `declined` (an approval this headless bridge always answers no) is `refused`. Anything
+/// else, `inProgress` included, says nothing about how the call ended.
+fn tool_item_outcome(item: &Value) -> Option<ToolCallOutcome> {
+    match item.get("status").and_then(Value::as_str)? {
+        "completed" => Some(ToolCallOutcome::Ok),
+        "failed" => Some(ToolCallOutcome::Error),
+        "declined" => Some(ToolCallOutcome::Refused),
+        _ => None,
+    }
+}
+
 /// One notification. `Some(outcome)` is terminal.
 fn notification(
     ctx: &TurnDriveCtx<'_>,
@@ -608,7 +631,13 @@ fn notification(
                     ctx.sink
                         .tool_activity(ToolActivity::used(format!("mcp__{server}__{tool}")));
                 }
-                _ => {}
+                _ => return None,
+            }
+            // The tool item's id, so its `item/completed` status can be paired with this call
+            // on the timing record. Trace only; the id is never recorded.
+            if let Some(id) = tool_item_id(item) {
+                ctx.sink
+                    .tool_signal(ToolTraceSignal::CallId(id.to_string()));
             }
             None
         }
@@ -622,6 +651,15 @@ fn notification(
         // with two answer items delivers the last, exactly as before.
         "item/completed" => {
             let item = params.get("item")?;
+            // A completed TOOL item says how the call ended, as a status word. Onto the trace
+            // for the timing record's per-call `outcome`, and nowhere else.
+            if let (Some(id), Some(outcome)) = (tool_item_id(item), tool_item_outcome(item)) {
+                ctx.sink.tool_signal(ToolTraceSignal::Outcome {
+                    call_id: id.to_string(),
+                    outcome,
+                });
+                return None;
+            }
             if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
                 return None;
             }
@@ -1577,5 +1615,33 @@ mod tests {
         provider.model.kind = ModelKind::OpenAi;
         provider.on("account/rateLimits/updated", params);
         assert!(provider.sink.quota.lock_ok().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tool_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn a_completed_tool_items_status_maps_to_an_outcome() {
+        let item = |ty: &str, status: &str| json!({"type": ty, "id": "i1", "status": status});
+        for ty in ["commandExecution", "fileChange", "mcpToolCall"] {
+            assert_eq!(tool_item_id(&item(ty, "completed")), Some("i1"));
+            assert_eq!(
+                tool_item_outcome(&item(ty, "completed")),
+                Some(ToolCallOutcome::Ok)
+            );
+            assert_eq!(
+                tool_item_outcome(&item(ty, "failed")),
+                Some(ToolCallOutcome::Error)
+            );
+            assert_eq!(tool_item_outcome(&item(ty, "inProgress")), None);
+        }
+        assert_eq!(
+            tool_item_outcome(&item("commandExecution", "declined")),
+            Some(ToolCallOutcome::Refused)
+        );
+        // An answer item is not a tool item, whatever its status.
+        assert_eq!(tool_item_id(&item("agentMessage", "completed")), None);
     }
 }

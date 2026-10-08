@@ -632,7 +632,7 @@ async fn a_turn_killed_at_the_run_limit_returns_how_far_it_got() {
     let _ = std::fs::remove_file(&fake);
 }
 #[tokio::test]
-async fn every_turn_appends_a_timing_record_that_is_pruned_at_seven_days() {
+async fn every_turn_appends_a_timing_record_that_is_pruned_after_the_retention_window() {
     // The other half of "no record anywhere of where the hour went": one JSONL line per
     // turn under the state dir, keyed by job id, with the tool calls and their durations —
     // and a startup prune so the file can't grow without bound.
@@ -641,7 +641,8 @@ async fn every_turn_appends_a_timing_record_that_is_pruned_at_seven_days() {
     let state_parent = std::env::temp_dir().join(format!("jesse-timing-state-{}", random_hex()));
     let script = "#!/bin/sh\n\
              printf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Grep\",\"input\":{}}}}'\n\
-             printf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"found it\",\"session_id\":\"sess-t\"}'\n";
+             printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"denied\",\"is_error\":true}]}}'\n\
+             printf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"found it\",\"session_id\":\"sess-t\",\"permission_denials\":[{\"tool_name\":\"Grep\",\"tool_use_id\":\"toolu_1\",\"tool_input\":{}}]}'\n";
     let fake = write_fake_claude(script);
     let cfg = Config {
         claude_bin: fake.to_string_lossy().into_owned(),
@@ -666,6 +667,12 @@ async fn every_turn_appends_a_timing_record_that_is_pruned_at_seven_days() {
     // The record reaches the client on the existing result endpoint.
     assert_eq!(done["timing"]["status"], "done");
     assert_eq!(done["timing"]["tools"][0]["tool"], "Grep");
+    // Version 2: the harness and model the turn ran on, and the call's outcome, paired by
+    // its id: an error result first, then the result line's denial, which wins.
+    assert_eq!(done["timing"]["v"], 2);
+    assert_eq!(done["timing"]["harness"], "claude-code");
+    assert!(done["timing"]["model"].is_string(), "{}", done["timing"]);
+    assert_eq!(done["timing"]["tools"][0]["outcome"], "refused");
 
     // …and the same record is on disk, one line, content-free.
     let path = state_parent.join("turn-timings.jsonl");
@@ -705,7 +712,7 @@ async fn every_turn_appends_a_timing_record_that_is_pruned_at_seven_days() {
     let after = std::fs::read_to_string(&path).unwrap();
     assert!(
         !after.contains("job-from-last-week"),
-        "older than 7 days → pruned at startup: {after}"
+        "older than the retention window → pruned at startup: {after}"
     );
     assert!(
         after.contains(&job_id),

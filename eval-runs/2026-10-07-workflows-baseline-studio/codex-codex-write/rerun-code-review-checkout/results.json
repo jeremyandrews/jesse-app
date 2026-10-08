@@ -1,0 +1,125 @@
+{
+  "suite": "workflows-v1 (code-review-checkout rerun)",
+  "driver": "bridge",
+  "wire": null,
+  "index": null,
+  "endpoint": "spawned jesse-bridge 0.168.0",
+  "model": "codex-write",
+  "harness": "codex",
+  "runs": 3,
+  "mock": false,
+  "tasks": [
+    {
+      "id": "code-review-checkout",
+      "class": "code",
+      "workspace": "fixture",
+      "judged": false,
+      "rubric": null,
+      "passed": true,
+      "completed": true,
+      "wall_ms": 46610,
+      "measured_ttft_ms": 5095,
+      "result_ttft_ms": null,
+      "tool_calls": 6,
+      "tool_names": [
+        "Bash",
+        "Bash",
+        "Bash",
+        "Bash",
+        "Bash",
+        "Edit"
+      ],
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_creation": 0
+      },
+      "cost_usd": 0.0,
+      "final_answer": "Reviewed commit `199208282f76bdb52c3b7c9d35026604b131f443` (“Add average”). Found **three bugs** in `src/stats.rs`:\n\n1. **Fractional results truncated**, lines 7–9: `[1, 2]` returns `1`, not `1.5`.\n2. **Empty input panics**, line 9: divides by zero.\n3. **Sum can overflow**, line 8: `[i64::MAX, i64::MAX]` panics with overflow checks or produces a wrong result without them.\n\nStatic review only; no test suite present. Source unchanged. Updated `Code/README.md` and saved findings in the vault.\n\n[codex-write · write · $0.0000]",
+      "assertions": [
+        {
+          "kind": "file_exists",
+          "passed": true,
+          "detail": "Code/github.com/acme/widget/.git exists"
+        },
+        {
+          "kind": "file_exists",
+          "passed": true,
+          "detail": "Code/github.com/acme/widget/src/stats.rs exists"
+        },
+        {
+          "kind": "git_head_message_matches",
+          "passed": true,
+          "detail": "HEAD message \"Add average\" matches /^Add average/"
+        },
+        {
+          "kind": "answer_matches",
+          "passed": true,
+          "detail": "/1992082/ matched"
+        },
+        {
+          "kind": "answer_matches",
+          "passed": true,
+          "detail": "/(?i)(empty|zero|divi|panic|len\\(\\) == 0|no values)/ matched"
+        },
+        {
+          "kind": "completed",
+          "passed": true,
+          "detail": "terminal result line arrived"
+        }
+      ],
+      "transcript_path": "transcripts/code-review-checkout.run3.ndjson",
+      "error": null,
+      "latency": {
+        "first_event_ms": 5095,
+        "first_token_ms": 5095,
+        "result_ms": 46610
+      },
+      "attempts": [
+        {
+          "passed": true,
+          "completed": true,
+          "wall_ms": 95086,
+          "latency": {
+            "first_event_ms": 7157,
+            "first_token_ms": 7157,
+            "result_ms": 95086
+          },
+          "tool_calls": 7,
+          "transcript_path": "transcripts/code-review-checkout.run1.ndjson",
+          "failed": [],
+          "error": null
+        },
+        {
+          "passed": true,
+          "completed": true,
+          "wall_ms": 50323,
+          "latency": {
+            "first_event_ms": 7051,
+            "first_token_ms": 7051,
+            "result_ms": 50323
+          },
+          "tool_calls": 6,
+          "transcript_path": "transcripts/code-review-checkout.run2.ndjson",
+          "failed": [],
+          "error": null
+        },
+        {
+          "passed": true,
+          "completed": true,
+          "wall_ms": 46610,
+          "latency": {
+            "first_event_ms": 5095,
+            "first_token_ms": 5095,
+            "result_ms": 46610
+          },
+          "tool_calls": 6,
+          "transcript_path": "transcripts/code-review-checkout.run3.ndjson",
+          "failed": [],
+          "error": null
+        }
+      ]
+    }
+  ]
+}

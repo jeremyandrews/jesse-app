@@ -122,8 +122,18 @@ pub fn compare(a_dir: &Path, b_dir: &Path, out: &Path) -> Result<CompareReport, 
 
 /// Pair two reports by task id and aggregate per class.
 pub fn build(a: &RunReport, b: &RunReport) -> CompareReport {
-    let a_by_id: BTreeMap<&str, &TaskResult> = a.tasks.iter().map(|t| (t.id.as_str(), t)).collect();
-    let b_by_id: BTreeMap<&str, &TaskResult> = b.tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+    let a_by_id: BTreeMap<&str, &TaskResult> = a
+        .tasks
+        .iter()
+        .filter(|t| t.skipped.is_none())
+        .map(|t| (t.id.as_str(), t))
+        .collect();
+    let b_by_id: BTreeMap<&str, &TaskResult> = b
+        .tasks
+        .iter()
+        .filter(|t| t.skipped.is_none())
+        .map(|t| (t.id.as_str(), t))
+        .collect();
 
     let mut unpaired: Vec<String> = Vec::new();
     for id in a_by_id.keys() {
@@ -328,6 +338,9 @@ mod tests {
             assertions: vec![],
             transcript_path: String::new(),
             error: None,
+            skipped: None,
+            latency: Default::default(),
+            attempts: vec![],
         }
     }
 
@@ -339,6 +352,9 @@ mod tests {
             index: None,
             endpoint: None,
             model: None,
+            harness: None,
+            runs: 1,
+            not_run: None,
             mock: true,
             tasks,
         }

@@ -156,6 +156,13 @@
 //! variable, never the key, and there is no `bearer_token_env_var`, because Clockify rejects a
 //! bearer. Every non-main row on either harness is byte for byte unchanged.
 //!
+//! **AND AGAIN, in bridge 0.169.0, for `house`, on Claude Code's two write sites only.** Their
+//! `--allowedTools` digest moved because the grant gained the twenty-four `mcp__house__*`
+//! tools. Nothing else moved: the fixture's config has no `[house]` table, so the rendered
+//! `--mcp-config` drops the `house` entry and is byte for byte the twenty-two-server set on
+//! every site, Codex's argv gains nothing, and no child gains `JESSE_HOUSE_TOKEN`. The house
+//! rendering itself is pinned by the unit tests in `src/house.rs`.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

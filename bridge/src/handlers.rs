@@ -899,6 +899,8 @@ pub async fn start_turn(
             voice: req.voice,
             instructions: req.instructions.as_deref(),
             floor_override: req.floor_override.as_deref(),
+            // Told about the house model only when the harness serving this turn registers it.
+            house: main_turn_loads_house(&st.cfg, st.cfg.harnesses.serving(&active)),
         },
         &device_contexts,
         &st.cfg.persona,

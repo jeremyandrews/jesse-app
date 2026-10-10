@@ -660,6 +660,38 @@ against `$CODEX_HOME` or `~/.codex`. Fireworks has no balance API, so that scope
 never remaining credit; a billing bucket reported with no cost is estimated from its tokens and
 the model's price deck, and the spend is marked `estimated`.
 
+### The house model (`[house]`, 0.169.0)
+
+`house-mcp`, on the home k3s cluster, holds a spatial model of the house and grounds and answers
+spatial questions (`what_is_at`, `nearest`, `in_space`, `measure`, `render_plan`, and more). With
+an optional `[house]` table in `jesse.local.toml` the bridge registers it as the `house` server
+on every Claude Code and Codex main turn, all twenty-four tools granted, writes included:
+
+```toml
+[house]
+url = "https://house.pozza/mcp"
+token_file = "/path/to/house-token"   # 0600, owned by the bridge user
+ca_file = "/path/to/pozza-ca.crt"     # optional, the bridge's own client
+```
+
+- **Absent table:** the server is not registered, and every main turn's `--mcp-config` is byte
+  for byte the twenty-two-server set. The containment row is still the twenty-three-server one;
+  a deployment without the table runs it minus one server.
+- **Present and wrong** (no `url`, not `https://`, a token file that is not `0600` or not owned
+  by the bridge user, an unreadable `ca_file`): the bridge refuses to start and names it.
+- **The token** is read once at start and reaches a child only as `JESSE_HOUSE_TOKEN`, on a
+  child whose set loads `house`. It is never in the plist, an argv or a log.
+- **Certificates:** `claude` and `codex` verify the internal CA through the macOS keychain. The
+  bridge's own client cannot see the keychain and uses `ca_file` for one advisory
+  `initialize` at startup (`house model reachable at …`, or a WARNING).
+- **`direct`** gets nothing: its MCP client is stdio only, and `house` is HTTP only.
+- **The prompt:** a turn whose harness registers the server gets one appended line telling it to
+  ask `house` where things are and to record what the conversation teaches about the house.
+
+To run a battery with the server registered, point `JESSE_CONFIG` at a config with the table:
+the battery renders each child exactly as the bridge does, so without it the battery records
+the row minus `house`. See [SECURITY.md](../SECURITY.md#house-model-spatial-reads-and-writes-2026-10-10).
+
 ### How `claude` is run
 
 The bridge runs the turn as:

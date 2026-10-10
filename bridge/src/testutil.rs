@@ -115,6 +115,9 @@ pub(crate) fn test_config() -> Config {
         // No Fireworks account and the per-scope TTLs: the quota store is only ever read by
         // tests that install their own fetcher.
         quota: QuotaSettings::default(),
+        // No `[house]` table in the fixture: the shipped default, and the server is not
+        // registered. The house tests set it explicitly.
+        house: HouseConfig::Absent,
         // Speech transcription OFF in the fixture: no intake or models directory is ever
         // touched. The speech tests build their own service over a scratch root and fakes.
         speech: crate::speech::SpeechConfig::disabled(),

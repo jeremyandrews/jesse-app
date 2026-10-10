@@ -3283,3 +3283,219 @@ placement = "core"
 dependency = "JESSE_CLOCKIFY_API_KEY (sent as the x-api-key header by the client); public HTTPS https://api.clockify.me/mcp-server/mcp"
 workflows = "Tag1 time tracking: timers, logged time, reports"
 reason = "Reads Clockify time, reports, clients, projects, tasks or tags from Clockify's hosted server, which the core can call directly."
+
+[grant."mcp__house__add_note"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__create_site"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__delete"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__find"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__get_file"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__get_floor"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__history"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__import_dxf"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__import_geojson"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__in_space"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__link_ref"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__list_files"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__list_sites"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__measure"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__nearest"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__render_plan"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__restore"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__search_notes"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__house__set_attributes"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__upload_file"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__upsert_floor"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__upsert_object"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__upsert_space"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Writes to the owner's house model (sites, floors, spaces, objects, files, notes), with a recorded reason; delete is a soft delete that restore undoes."
+
+[grant."mcp__house__what_is_at"]
+kind = "mcp"
+server = "house"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
+workflows = "where things are in and around the house; recording the house layout and contents from conversation"
+reason = "Reads the owner's house model and answers spatial questions about the house and grounds."

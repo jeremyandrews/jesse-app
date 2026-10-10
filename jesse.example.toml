@@ -182,6 +182,37 @@ Answer the question I asked, not the one you wish I had asked.
 # fireworks_account_id = "my-account"
 
 # =============================================================================
+# [house]: the house model's MCP server (optional)
+# =============================================================================
+#
+# `house-mcp` holds a spatial model of the house and grounds (sites, floors, rooms, objects,
+# files, notes) and answers spatial questions: what_is_at, nearest, in_space, measure,
+# render_plan and more. With this table present, every Claude Code and Codex main turn
+# registers it as the `house` server, with all of its tools granted, writes included (each
+# write takes a `reason` the server records). Without the table the server is not registered
+# on any turn. The `direct` harness never gets it: its MCP client speaks stdio only.
+#
+# url: the server's Streamable HTTP endpoint. https:// only.
+#
+# token_file: a file holding the read and write bearer token, ONE line. It must be a regular
+# file owned by the user the bridge runs as, with mode 0600 exactly; anything else refuses to
+# start, naming the problem. The bridge reads it once at start and hands it to a child only as
+# the JESSE_HOUSE_TOKEN environment variable, never on a command line or in a file it writes.
+#
+# ca_file (optional): the PEM certificate of the CA that signed the server's certificate, when
+# it is a private one. The harness children (claude, codex) verify the server through the
+# macOS keychain, so trust the CA there too. This file is for the bridge's OWN HTTP client,
+# which cannot see the keychain and uses it for a startup reachability check (advisory: a
+# failure is a warning, never a refusal to start). Verification is never switched off.
+#
+# Changing this table needs a restart; the token file is read only at start.
+#
+# [house]
+# url = "https://house.example/mcp"
+# token_file = "/path/to/house-token"
+# ca_file = "/path/to/house-ca.crt"
+
+# =============================================================================
 # [[models]] — the global model switch's registry (declarative, operator-configurable)
 # =============================================================================
 #

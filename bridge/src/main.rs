@@ -8,13 +8,13 @@ use jesse_bridge::{
     app, binary_exists, bind_broker, build_apns, detect_binary_drift,
     detect_unresolved_mcp_servers, env_string, env_truthy, export_mcp_server_env, harness_bin_env,
     harness_default_bin, harnesses_in_use, is_bind_allowed, load_local_models,
-    manual_pairing_lines, open_inbound_staging, pairing_payload, prune_direct_state,
+    manual_pairing_lines, open_inbound_staging, pairing_payload, probe_house, prune_direct_state,
     qr_env_tristate, search_scale, sentinel_advert, serve_broker, settings_permission_drift,
     shadowing_direct_mcp_grants, show_qr_opt_in, show_token_opt_in, spawn_eviction_task,
-    spawn_scheduler, spawn_session_gc_task, start_health_prober, validate_model_config,
-    validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config, ConfigError, QrArt, Runner,
-    TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS, DIRECT_ID, INBOUND_DIR_NAME, SEARCH_SCALE,
-    SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
+    spawn_scheduler, spawn_session_gc_task, start_health_prober, validate_house,
+    validate_model_config, validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config,
+    ConfigError, QrArt, Runner, TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS, DIRECT_ID,
+    INBOUND_DIR_NAME, SEARCH_SCALE, SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
 };
 
 #[tokio::main]
@@ -60,6 +60,9 @@ async fn main() {
     // the child can. It is NOT held to a passing row — see `validate_vaultqa_mcp` for why the
     // two children are treated differently on purpose.
     errors.extend(validate_vaultqa_mcp(&cfg));
+    // …and the `[house]` table: present means it must be usable. A token file with the wrong
+    // mode or owner is refused here rather than read anyway. Absent is the default and fine.
+    errors.extend(validate_house(&cfg));
     // The `[concurrency]` table joins the SAME gate. A misspelled model id there is refused by
     // name rather than silently ignored — a config surface that quietly does nothing is the
     // failure mode this project keeps designing against.
@@ -126,6 +129,28 @@ async fn main() {
         }
     }
     let _ = SETTINGS_DRIFT.set(settings_grants);
+
+    // ADVISORY, never fatal: the house model, from the bridge's OWN HTTP client, in the
+    // background. A server that is down, or a CA or token that is wrong, is said once here
+    // rather than discovered by the first turn that needs it. See `probe_house`.
+    if let Some(house) = cfg.house.ready().cloned() {
+        tokio::spawn(async move {
+            match probe_house(&house).await {
+                Ok(server) => eprintln!(
+                    "jesse-bridge: house model reachable at {} ({server})",
+                    house.url
+                ),
+                Err(e) => eprintln!(
+                    "jesse-bridge: WARNING — the house model at {} did not answer an MCP \
+                     initialize from the bridge: {e}. Turns still register the server; check \
+                     the server, the token in {}, and `ca_file` (the bridge's own client \
+                     verifies the internal CA only through it).",
+                    house.url,
+                    house.token_file.display()
+                ),
+            }
+        });
+    }
 
     // ADVISORY, never fatal: does every stdio server in the config a child is actually
     // spawned with have a binary the child can execute?

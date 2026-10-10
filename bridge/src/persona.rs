@@ -524,6 +524,10 @@ struct LocalConfig {
     /// operator's own Fireworks account slug for month to date spend. See [`crate::quota`].
     #[serde(default)]
     quota: Option<QuotaToml>,
+    /// The optional top-level `[house]` table: where the house model's MCP server is and
+    /// which file holds its token. See [`crate::HouseConfig`].
+    #[serde(default)]
+    house: Option<HouseToml>,
 }
 
 /// Resolve the local overlay file, first existing wins:
@@ -764,6 +768,12 @@ pub fn load_profile_table(home: &str) -> Option<ProfileToml> {
 /// that spend is not configured without calling anything.
 pub fn load_quota_table(home: &str) -> Option<QuotaToml> {
     load_local_config(home).and_then(|c| c.quota)
+}
+
+/// Read the `[house]` table from the same overlay file. Absent or malformed file, or no table,
+/// is `None`: the house model is simply not registered.
+pub fn load_house_table(home: &str) -> Option<HouseToml> {
+    load_local_config(home).and_then(|c| c.house)
 }
 
 /// The overlay file the bridge actually loaded, or `None` when there is none.

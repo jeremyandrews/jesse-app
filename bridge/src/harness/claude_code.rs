@@ -54,6 +54,9 @@ impl ClaudeCode {
         .stderr(Stdio::piped())
         .kill_on_drop(true); // killed if the timeout fires or the task is dropped
         apply_main_env(&mut cmd, req.active);
+        // The house token, as `JESSE_HOUSE_TOKEN`, on a child whose rendered set loads
+        // `house` and on no other. The CLI expands it into the server's header.
+        apply_house_env(&mut cmd, cfg, req.mcp_config);
         // THE TURN'S EFFORT, when it asked for one. Appended AFTER the containment argv and
         // never part of `capability_args`, so it moves no recorded posture, and absent on a
         // turn that named none — whose argv is then byte-identical to one from before effort
@@ -882,6 +885,34 @@ macro_rules! mcp_clockify {
     };
 }
 
+/// **The house model: `house-mcp` on the home k3s cluster**, a spatial model of the owner's
+/// house and grounds in PostGIS. `type: "http"` (Streamable HTTP) on the LAN, behind a
+/// certificate from the internal CA `pozza-ca`, which both harnesses' TLS clients take from the
+/// macOS keychain.
+///
+/// **THE ONE DECLARATION WITH NO FIXED URL, AND THE ONE SERVER A DEPLOYMENT CAN SWITCH OFF.**
+/// The URL comes from the bridge config's `[house]` table, so this fragment carries the
+/// placeholder [`crate::HOUSE_URL_PLACEHOLDER`] and [`crate::render_house_mcp`] replaces it with
+/// the configured URL when it renders a child's `--mcp-config`, or removes the whole entry when
+/// the deployment has no ready `[house]` table. The placeholder never reaches a child: a test
+/// renders every harness's main turn and asserts it is gone.
+///
+/// The token arrives by ENV EXPANSION, `${JESSE_HOUSE_TOKEN}`, which the CLI substitutes from
+/// the child's environment. The bridge reads it from the `[house]` table's `token_file` at
+/// start and sets the variable on each child that loads this server; it is never in this
+/// const, on an argv or in a file the bridge writes. Codex reaches the same variable through
+/// `bearer_token_env_var`.
+///
+/// **EVERY ADVERTISED TOOL IS GRANTED, WRITES INCLUDED.** A live, authenticated `tools/list`
+/// on 2026-10-10 returned twenty-four tools, none annotated, and
+/// [`crate::DEFAULT_ALLOWED_TOOLS`] grants all of them by name. Every write takes a required
+/// `reason` the server records. Read SECURITY.md before changing this.
+macro_rules! mcp_house {
+    () => {
+        r#""house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}}"#
+    };
+}
+
 /// The five house servers, in order.
 macro_rules! house_servers {
     () => {
@@ -1428,7 +1459,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: 
 );
 
 /// The twenty-one-server set PLUS **`clockify`**: every main turn on BOTH harnesses from
-/// bridge 0.167.0. Twenty-two servers.
+/// bridge 0.167.0 until `house` landed in 0.169.0. Twenty-two servers.
 ///
 /// What it adds is Tag1's Clockify workspace through Clockify's own hosted MCP server: one new
 /// credential (`JESSE_CLOCKIFY_API_KEY`, in the plist, expanded by the CLI into an `x-api-key`
@@ -1440,6 +1471,50 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: 
 /// What it also adds is a new source of UNTRUSTED TEXT: time entry descriptions and project,
 /// client, task and tag names are whatever anyone in the workspace typed, at the same trust
 /// level as the message bodies this set already carries.
+///
+/// **RETIRED AS THE MAIN SET IN 0.169.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify`]
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.167.0 until 0.169.0.
+pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG: &str = concat!(
+    r#"{"mcpServers":{"#,
+    messages_servers!(),
+    ",",
+    mcp_build!(),
+    ",",
+    mcp_places!(),
+    ",",
+    mcp_inbound!(),
+    ",",
+    mcp_kubernetes!(),
+    ",",
+    mcp_rybbit!(),
+    ",",
+    mcp_tag1!(),
+    ",",
+    mcp_plex!(),
+    ",",
+    mcp_clockify!(),
+    "}}"
+);
+
+/// The twenty-two-server set PLUS **`house`**: every main turn on BOTH harnesses from bridge
+/// 0.169.0. Twenty-three servers.
+///
+/// What it adds is the owner's house model, `house-mcp` on the home k3s cluster: one new
+/// credential (a read and write bearer token, read by the bridge from the `[house]` table's
+/// `token_file` and handed to the child as `JESSE_HOUSE_TOKEN`), one new LAN host behind the
+/// internal CA, read access to the spatial model of the house and grounds, and the power to
+/// create, edit, soft delete and restore sites, floors, spaces, objects, files and notes, every
+/// write with a recorded `reason`. See the `mcp_house!` declaration and SECURITY.md.
+///
+/// What it also adds is a new source of UNTRUSTED TEXT: names, notes, attributes and stored
+/// files are whatever anyone holding the write token put there, at the same trust level as the
+/// message bodies this set already carries.
+///
+/// **THE SERVER IS CONDITIONAL; THE SET IS NOT.** This const always declares `house`, so the
+/// row label, the grant and the record are one fixed posture. [`crate::render_house_mcp`] fills
+/// in the URL when the deployment has a ready `[house]` table and drops the entry when it does
+/// not, so a deployment without the table runs this posture minus one server.
 ///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
@@ -1464,8 +1539,16 @@ pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     mcp_plex!(),
     ",",
     mcp_clockify!(),
+    ",",
+    mcp_house!(),
     "}}"
 );
+
+/// The `house` entry exactly as [`MAIN_CHILD_MCP_CONFIG`] declares it, WITH its leading
+/// separator, so [`crate::render_house_mcp`] can remove it from a rendered config without
+/// parsing and re-serializing the JSON (which would reorder every other server's keys and move
+/// every argv fixture for nothing).
+pub const HOUSE_MCP_ENTRY: &str = concat!(",", mcp_house!());
 
 /// **The six servers the owner's own replies arrive on** — `google`, `google-perseido`,
 /// `fastmail`, `slack`, `whatsapp`, `imcp` — and nothing else. The TODAY-BRIEF child's set when
@@ -1783,7 +1866,10 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify => READ_ALLOWED_TOOLS,
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => {
+            READ_ALLOWED_TOOLS
+        }
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
         // row-keyed argv exists for; see [`REPLIES_ALLOWED_TOOLS`].
         McpSet::Replies => REPLIES_ALLOWED_TOOLS,
@@ -2104,7 +2190,11 @@ pub fn build_claude_args(
     }
     // ROOT MCP boundary, then the capability's toolset. Every spawn site assembles in
     // this order, which is what lets one builder serve all of them.
-    args.extend(mcp_args(mcp_config));
+    //
+    // RENDERED, not passed through: the `house` entry's URL is the deployment's, and a
+    // deployment with no ready `[house]` table gets no `house` entry at all. The SET below is
+    // still resolved from the shipped string, so the grant is the row's either way.
+    args.extend(mcp_args(&render_house_mcp(cfg, mcp_config)));
     // THE SET IS RESOLVED FROM THE CONFIG STRING, because that is what a spawn site carries.
     // A set the project does not ship (an operator's `JESSE_VAULTQA_MCP_CONFIG` file, say)
     // resolves to `None` and therefore to the standard Read grant — byte-for-byte the
@@ -4015,7 +4105,7 @@ mod tests {
     const GOLDEN_QMD_MCP: &str = concat!(
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         home_assistant_mcp_url!(),
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}}}}"#
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}}}}"#
     );
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
 
@@ -4056,34 +4146,40 @@ mod tests {
         let main = servers(MAIN_CHILD_MCP_CONFIG);
         for (label, older, added) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
+                vec!["house"],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
-                vec!["clockify"],
+                vec!["house", "clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["clockify", "plex"],
+                vec!["house", "clockify", "plex"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["clockify", "plex", "tag1"],
+                vec!["house", "clockify", "plex", "tag1"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["clockify", "plex", "tag1", "rybbit"],
+                vec!["house", "clockify", "plex", "tag1", "rybbit"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["clockify", "plex", "tag1", "rybbit", "kubernetes"],
+                vec!["house", "clockify", "plex", "tag1", "rybbit", "kubernetes"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_MCP_CONFIG,
                 vec![
+                    "house",
                     "clockify",
                     "plex",
                     "tag1",
@@ -4096,6 +4192,7 @@ mod tests {
                 "MESSAGES_BUILD_MCP_CONFIG",
                 MESSAGES_BUILD_MCP_CONFIG,
                 vec![
+                    "house",
                     "clockify",
                     "plex",
                     "tag1",
@@ -4109,13 +4206,14 @@ mod tests {
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,
                 vec![
-                    "clockify", "plex", "tag1", "rybbit", "inbound", "places", "build",
+                    "house", "clockify", "plex", "tag1", "rybbit", "inbound", "places", "build",
                 ],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 MESSAGES_MCP_CONFIG,
                 vec![
+                    "house",
                     "clockify",
                     "plex",
                     "tag1",
@@ -4656,7 +4754,9 @@ mod tests {
                 &[
                     "--strict-mcp-config",
                     "--mcp-config",
-                    GOLDEN_QMD_MCP,
+                    // The fixture has no `[house]` table, so the rendered set is the
+                    // twenty-two-server one: `house` declared in the const, dropped here.
+                    MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
                     "--allowedTools",
                     &allow,
                     "--disallowedTools",
@@ -4682,7 +4782,9 @@ mod tests {
                 &[
                     "--strict-mcp-config",
                     "--mcp-config",
-                    GOLDEN_QMD_MCP,
+                    // The fixture has no `[house]` table, so the rendered set is the
+                    // twenty-two-server one: `house` declared in the const, dropped here.
+                    MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
                     "--tools",
                     "Read,Grep,Glob",
                     "--allowedTools",

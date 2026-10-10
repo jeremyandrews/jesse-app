@@ -891,6 +891,18 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `stop_timer`, `log_past_time`, `create_project`). Each acts with the API key owner's
 // Clockify permissions. Never a wildcard: a tool Clockify adds later is ungranted until it is a
 // decision.
+//
+// HOUSE: ALL TWENTY-FOUR TOOLS ON THE OWNER'S HOUSE MODEL, WRITES INCLUDED.
+//
+// A live, authenticated `tools/list` against `house-mcp` 0.1.0 on 2026-10-10 returned
+// twenty-four tools, none annotated, so none is `destructive` and none needs Codex's approve
+// mode. Every one is granted by name, because recording what the owner says about the house is
+// the point of the server: the twelve reads (`find`, `get_file`, `get_floor`, `history`,
+// `in_space`, `list_files`, `list_sites`, `measure`, `nearest`, `render_plan`, `search_notes`,
+// `what_is_at`) and the twelve writes (`add_note`, `create_site`, `delete`, `import_dxf`,
+// `import_geojson`, `link_ref`, `restore`, `set_attributes`, `upload_file`, `upsert_floor`,
+// `upsert_object`, `upsert_space`). Every write takes a required `reason` the server records,
+// and `delete` is a soft delete that `restore` undoes. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1070,7 +1082,14 @@ mcp__clockify__get_current_user_profile,mcp__clockify__get_current_time,\
 mcp__clockify__get_current_timer,mcp__clockify__start_timer,mcp__clockify__log_past_time,\
 mcp__clockify__stop_timer,mcp__clockify__get_summary_report,\
 mcp__clockify__get_detailed_report,mcp__clockify__list_clients,mcp__clockify__list_projects,\
-mcp__clockify__create_project,mcp__clockify__list_tasks,mcp__clockify__list_tags";
+mcp__clockify__create_project,mcp__clockify__list_tasks,mcp__clockify__list_tags,\
+mcp__house__add_note,mcp__house__create_site,mcp__house__delete,mcp__house__find,\
+mcp__house__get_file,mcp__house__get_floor,mcp__house__history,mcp__house__import_dxf,\
+mcp__house__import_geojson,mcp__house__in_space,mcp__house__link_ref,mcp__house__list_files,\
+mcp__house__list_sites,mcp__house__measure,mcp__house__nearest,mcp__house__render_plan,\
+mcp__house__restore,mcp__house__search_notes,mcp__house__set_attributes,\
+mcp__house__upload_file,mcp__house__upsert_floor,mcp__house__upsert_object,\
+mcp__house__upsert_space,mcp__house__what_is_at";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -1132,6 +1151,9 @@ pub struct Config {
     /// `JESSE_FIREWORKS_ACCOUNT_ID`) and the snapshot TTL override (`JESSE_QUOTA_TTL_SECS`).
     /// See [`crate::quota`].
     pub quota: QuotaSettings,
+    /// The house model (`[house]`): absent, ready, or refused at startup. See
+    /// [`crate::HouseConfig`]. Holds the token, which is why `Config` has no `Debug`.
+    pub house: HouseConfig,
     /// The per-turn run limit in seconds (`JESSE_TIMEOUT`, default
     /// [`DEFAULT_TIMEOUT_SECS`], clamped to `[1, HARD_TIMEOUT_CEILING]`).
     pub timeout_secs: u64,
@@ -4696,6 +4718,9 @@ impl Config {
             offload_order: load_offload_order(&home),
             // Env over the `[quota]` table; the TTL override warns once on a bad value.
             quota: QuotaSettings::from_env(load_quota_table(&home)),
+            // The `[house]` table, its token read and checked here, once. A refused table is
+            // carried as `Refused` and stops the bridge at the startup gate.
+            house: HouseConfig::from_toml(load_house_table(&home)),
             // 90m default; clamped to [1, HARD_TIMEOUT_CEILING].
             timeout_secs: clamp_timeout_secs(env_parse("JESSE_TIMEOUT", DEFAULT_TIMEOUT_SECS)),
             // The cut-off turn's partial-answer ring. Blocks are floored at 1 (a
@@ -5363,6 +5388,66 @@ mod tests {
                 .split(',')
                 .any(|e| e == "mcp__clockify__*" || e == "mcp__clockify"),
             "a wildcard grant on the clockify server is never acceptable"
+        );
+    }
+
+    /// THE HOUSE GRANT IS EXACTLY THE TWENTY-FOUR TOOLS THE SERVER ADVERTISED ON 2026-10-10.
+    ///
+    /// Taken from a live, authenticated `tools/list` against `house-mcp` 0.1.0, which annotates
+    /// none of them. Every advertised tool is granted, the twelve writes included. Equality, so
+    /// a missing grant and a grant for a name the server does not register both fail.
+    #[test]
+    fn the_house_grant_is_every_advertised_tool_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__house__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "add_note",
+            "create_site",
+            "delete",
+            "find",
+            "get_file",
+            "get_floor",
+            "history",
+            "import_dxf",
+            "import_geojson",
+            "in_space",
+            "link_ref",
+            "list_files",
+            "list_sites",
+            "measure",
+            "nearest",
+            "render_plan",
+            "restore",
+            "search_notes",
+            "set_attributes",
+            "upload_file",
+            "upsert_floor",
+            "upsert_object",
+            "upsert_space",
+            "what_is_at",
+        ]
+        .iter()
+        .map(|t| format!("mcp__house__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the house grant moved; re-probe the server's tools/list and record the decision \
+             before changing this list; it moves `toolset_args`, which costs a live battery run"
+        );
+    }
+
+    /// NO WILDCARD ON THE HOUSE SERVER: a wildcard grants whatever the server ships next.
+    #[test]
+    fn no_house_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__house__*" || e == "mcp__house"),
+            "a wildcard grant on the house server is never acceptable"
         );
     }
 

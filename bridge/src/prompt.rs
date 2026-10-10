@@ -204,6 +204,16 @@ have. A repo under `Repos/` that is not on \
 the registered list is review-only like `Code/`. `Code/` itself is unchanged and stays \
 REVIEW-ONLY: clone and read, never push, never edit.)";
 
+/// Appended after [`MANAGED_REPO_CAPABILITY`] on a turn whose harness registers the `house`
+/// server ([`crate::main_turn_loads_house`]), and on no other: a turn that cannot reach the
+/// server must not be told to ask it. Two things, both in the owner's words for the job: ask
+/// the server where something physically is, and write down what the conversation teaches
+/// about the house, with the `reason` every write takes.
+pub const HOUSE_CAPABILITY: &str = "\n\n(House model: for where something physically is in \
+or around the house, ask the `house` server (`what_is_at`, `in_space`, `nearest`, `measure`, \
+`render_plan`) rather than guessing. When a fact about the house's layout or contents arrives \
+in conversation, record it with a `house` write tool and a `reason`.)";
+
 // ---- Optional recent-workouts context (health_context) --------------------
 //
 // The phone may attach a compact "recent workouts" block from Apple Health so
@@ -1056,6 +1066,9 @@ pub struct TurnPrompt<'a> {
     /// Non-empty rewords the always-prepended safety FLOOR. Blank/absent uses the
     /// const — this never removes the floor.
     pub floor_override: Option<&'a str>,
+    /// This turn's harness registers the `house` server on this deployment, so the turn is
+    /// told when to use it ([`HOUSE_CAPABILITY`]). `false` for every turn that cannot reach it.
+    pub house: bool,
 }
 
 impl<'a> TurnPrompt<'a> {
@@ -1068,6 +1081,7 @@ impl<'a> TurnPrompt<'a> {
             voice: false,
             instructions: None,
             floor_override: None,
+            house: false,
         }
     }
 }
@@ -1164,6 +1178,7 @@ pub fn build_prompt_at(
         voice,
         instructions,
         floor_override,
+        house,
     } = turn;
     // Validate the mode and pick both the built-in wrapper and the default floor —
     // an unknown mode is still a 400, override or not.
@@ -1243,6 +1258,10 @@ pub fn build_prompt_at(
     // review note it names, and so the review-only posture stays byte-for-byte pinned by
     // its own test while a write path is added beside it.
     p.push_str(MANAGED_REPO_CAPABILITY);
+    // …and the house model note, only when this turn can reach the server.
+    if house {
+        p.push_str(HOUSE_CAPABILITY);
+    }
     // Device-channel notes, ONE per channel. Within a channel exactly one of three
     // states applies, checked in priority order so the agent is never told two
     // contradictory things about it:
@@ -1313,6 +1332,7 @@ mod tests {
                 voice,
                 instructions,
                 floor_override: floor,
+                house: false,
             },
             &DeviceContexts::default(),
             &Persona::default(),
@@ -1580,6 +1600,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                 voice: false,
                 instructions: Some("{Owner} asks from {owner_pronoun} phone. Question: "),
                 floor_override: Some("Do nothing {owner} did not ask for."),
+                house: false,
             },
             &DeviceContexts::default(),
             &persona,
@@ -1600,6 +1621,40 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
         )
         .unwrap();
         assert!(plain.contains(literal));
+    }
+
+    /// THE HOUSE NOTE RIDES ONLY A TURN THAT CAN REACH THE SERVER, after the managed-repos
+    /// note, and says both halves of the job: ask it, and record what the conversation teaches.
+    #[test]
+    fn the_house_note_is_present_exactly_when_the_turn_loads_the_server() {
+        let persona = named("Alex Example", "her");
+        let without = build_prompt_at(
+            TEST_CLOCK,
+            &TurnPrompt::new("ask", "where is the boiler"),
+            &DeviceContexts::default(),
+            &persona,
+        )
+        .unwrap();
+        assert!(!without.contains(HOUSE_CAPABILITY));
+        let with = build_prompt_at(
+            TEST_CLOCK,
+            &TurnPrompt {
+                house: true,
+                ..TurnPrompt::new("ask", "where is the boiler")
+            },
+            &DeviceContexts::default(),
+            &persona,
+        )
+        .unwrap();
+        let at = with.find(HOUSE_CAPABILITY).expect("the note is there");
+        assert!(at > with.find(MANAGED_REPO_CAPABILITY).unwrap());
+        assert!(HOUSE_CAPABILITY.contains("`house` server"));
+        assert!(HOUSE_CAPABILITY.contains("`reason`"));
+        // House style for prompt text: no dash punctuation.
+        for dash in ['\u{2014}', '\u{2013}'] {
+            assert!(!HOUSE_CAPABILITY.contains(dash));
+        }
+        assert!(!HOUSE_CAPABILITY.contains("--"));
     }
 
     /// The DATA blocks are not prompt text and are never substituted into. A phone
@@ -1783,6 +1838,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
             TEST_CLOCK,
             &TurnPrompt {
                 floor_override: Some("x"),
+                house: false,
                 ..TurnPrompt::new("shout", "hey")
             },
             &DeviceContexts::default(),
@@ -1873,6 +1929,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                     voice,
                     instructions: None,
                     floor_override: None,
+                    house: false,
                 },
                 &DeviceContexts::default(),
                 &Persona::default(),

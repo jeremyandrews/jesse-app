@@ -168,9 +168,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **22 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **23 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `clockify` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `clockify`, `house` (when the deployment configures it) — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -900,6 +900,7 @@ and read-only). Only the servers named in that config load:
 | `tag1` | Tag1's public website, **read only**, added 2026-10-02 — six `mcp__tag1__*` read tools, no credential, no write or contact tool. See [tag1.com](#tag1com-public-site-read-only-2026-10-02) |
 | `plex` | The owner's LAN Plex server, added 2026-10-04: forty of fifty-five `mcp__plex__*` tools: reads, search, and collection, playlist and metadata edits. Nothing that deletes media, runs maintenance, shares, plays back or touches the host's files. See [Plex](#plex-lan-media-server-reads-and-collection-edits-2026-10-04) |
 | `clockify` | Tag1's Clockify workspace through Clockify's hosted server, added 2026-10-06: all thirteen `mcp__clockify__*` tools, reads plus timer, time entry and project creation writes, acting with the API key owner's permissions. See [Clockify](#clockify-time-tracking-every-advertised-tool-2026-10-06) |
+| `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1450,6 +1451,87 @@ thirteen by equality:
   names are whatever anyone in the workspace typed, and they enter the turn at the same trust
   level as message bodies.
 
+### House model (spatial reads and writes, 2026-10-10)
+
+Bridge 0.169.0 adds `house-mcp`, the owner's house model on the home k3s cluster, to every main
+turn on **both harnesses in the same change**, as the twenty-third server. It is `house`,
+`type: "http"` (Streamable HTTP) on the LAN, with a certificate from the internal CA
+`pozza-ca`. It holds a spatial model of the house and grounds in PostGIS (sites, floors, rooms,
+objects, files, notes) and answers spatial questions: `what_is_at`, `nearest`, `in_space`,
+`measure`, `render_plan` (which returns a PNG), and more.
+
+#### A server the deployment switches on
+
+This is the one server whose URL and credential come from the bridge config rather than from
+the compiled const and the plist. The optional `[house]` table names `url`, `token_file` and,
+optionally, `ca_file`. The compiled `MAIN_CHILD_MCP_CONFIG` always DECLARES `house`, with the
+URL as the placeholder ``, so the row label, the grant and both containment
+records describe one fixed posture. What a child is handed is rendered per deployment by
+`render_house_mcp`: with a ready table the placeholder becomes the configured URL; without one
+the entry is removed, and the child runs the recorded posture minus one server, which is
+narrower and never wider. A test renders every harness's main turn and asserts the placeholder
+never reaches a child.
+
+#### The credential
+
+The token reads and writes. It lives in `token_file`, which the bridge refuses at startup
+unless it is a regular file owned by the bridge's own user with mode `0600` exactly; a
+refused table stops the bridge and names the problem rather than reading the file anyway. The
+bridge reads it once, holds it in a type whose `Debug` prints nothing, and hands it to a child
+only as the environment variable `JESSE_HOUSE_TOKEN`, and only to a child whose rendered set
+loads `house`. It is not in the plist, the repo, an argv, a record, a fixture or a log.
+
+- **Claude Code** gets `"Authorization": "Bearer "`, which the CLI
+  expands from the child's environment.
+- **Codex** gets `bearer_token_env_var = "JESSE_HOUSE_TOKEN"` from `CODEX_MCP_BEARER_ENV`, and
+  reads the variable itself.
+
+#### Certificate trust
+
+Verification is never switched off. Both harness children verify `house.pozza` through the
+macOS keychain, where the owner installed the CA (measured 2026-10-10: claude 2.1.296 connected
+with no `NODE_EXTRA_CA_CERTS`, and codex-cli 0.153.4 completed a `list_sites` call). The
+bridge's own HTTP client is rustls with bundled roots and cannot see the keychain, so it trusts
+the CA only through `ca_file`; it uses it for an advisory reachability check at startup and for
+nothing on a turn's path.
+
+#### Granted: all twenty-four tools
+
+A live, authenticated `tools/list` on 2026-10-10 returned twenty-four tools, none annotated, so
+none is `destructive` and none needs an approval mode. On the owner's decision every one is
+granted, by name, never `mcp__house__*`, and a test pins the twenty-four by equality:
+
+- **Reads:** `find`, `get_file`, `get_floor`, `history`, `in_space`, `list_files`,
+  `list_sites`, `measure`, `nearest`, `render_plan`, `search_notes`, `what_is_at`.
+- **Writes:** `add_note`, `create_site`, `delete`, `import_dxf`, `import_geojson`, `link_ref`,
+  `restore`, `set_attributes`, `upload_file`, `upsert_floor`, `upsert_object`, `upsert_space`.
+
+Every write takes a required `reason`, which the server records in its change table. `delete`
+is a soft delete that `restore` undoes; nothing on the server removes a row.
+
+#### What it adds to the risk
+
+- **One new credential**, a read and write token for the house model, held by the bridge.
+- **One new LAN host**, behind the internal CA.
+- **Writes to the house model.** A phone-injected turn can create, edit and soft delete sites,
+  floors, spaces, objects, files and notes, and import drawings. The change table records each
+  write and its reason, and every delete can be restored, so the damage is recoverable, but a
+  wrong fact lands in the model until someone corrects it. Accepted, on the owner's decision
+  that recording the house from conversation is the point of the server.
+- **Stored files.** `upload_file` stores up to 25 MiB per file on the server, and `get_file`
+  returns a stored text file's content.
+- **A new source of untrusted text.** Names, notes, attributes and stored files are whatever
+  anyone holding the write token put there, and they enter the turn at the same trust level as
+  message bodies.
+- **The prompt names it.** A turn whose harness registers the server is told, in one appended
+  line, to ask it where things are and to record what the conversation teaches about the house.
+  A turn that cannot reach it, including every `direct` turn, is not told.
+
+#### `direct` does not get it
+
+The `direct` harness's MCP client (`agent/src/mcp`) speaks stdio only, by design, and `house`
+is HTTP only. It is given nothing, and nothing else is widened for it.
+
 ### Roon (no auth, 2026-08-07)
 
 `unified-hifi-control` (open-horizon-labs), reached over Streamable HTTP on the
@@ -1783,6 +1865,12 @@ not silently cancel them on Codex alone.
 `x-api-key` header, which the bearer table cannot express, so Codex gets a second table beside
 `CODEX_MCP_BEARER_ENV`: `CODEX_MCP_HEADER_ENV`, rendered as `env_http_headers`, which names the
 header and the variable and never carries the value. Its thirteen-tool `enabled_tools` and the
+auto-approve match Claude Code's grant exactly.
+
+**`house` (0.169.0) followed the same rule.** It is an HTTP server with a bearer, so it joins
+`CODEX_MCP_BEARER_ENV` as `("house", "JESSE_HOUSE_TOKEN")`. Its URL comes from the deployment's
+`[house]` table and is rendered into the Codex argv by the same function that renders it for
+Claude Code, so the two cannot disagree, and its twenty-four-tool `enabled_tools` and the
 auto-approve match Claude Code's grant exactly.
 
 **What the shared set does not make shared** is the read boundary: a Codex child reads whatever

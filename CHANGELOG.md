@@ -14,6 +14,59 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.169.0] - 2026-10-10
+
+**Bridge turns can read and write the owner's house model, `house-mcp`, on both spawned harnesses.**
+Root cause of the gap: a bridge child gets MCP servers only from the compiled
+`--strict-mcp-config` set and tools only from the allowlist, and no server knew where anything
+physically is, so a turn could answer "turn on the light" but not "where is the boiler".
+`house` is now the twenty-third server on every Claude Code and Codex main turn.
+
+- **A server the deployment switches on, with an optional `[house]` table** (`url`,
+  `token_file`, optional `ca_file`; documented in `jesse.example.toml`). The compiled
+  `MAIN_CHILD_MCP_CONFIG` always declares `house` with the URL as `${JESSE_HOUSE_URL}`, so the row
+  label, the grant and both records describe one posture; `render_house_mcp` puts the configured
+  URL in its place, or removes the entry when there is no ready table, in which case every
+  child's `--mcp-config` is byte for byte the twenty-two-server set.
+- **The token never leaves the bridge except to a child that loads `house`.** `token_file` is
+  refused at startup unless it is a regular file owned by the bridge's user with mode `0600`
+  exactly (there was no such check for a read credential before; this adds one). The token is
+  held in a type whose `Debug` prints nothing and reaches a child only as `JESSE_HOUSE_TOKEN`:
+  Claude Code expands `Bearer ${JESSE_HOUSE_TOKEN}`, Codex reads it through
+  `bearer_token_env_var` in `CODEX_MCP_BEARER_ENV`. Never on an argv, in the plist, a record, a
+  fixture or a log.
+- **CA route per harness, measured 2026-10-10, verification never switched off.** Claude Code
+  (2.1.296): the macOS keychain, no `NODE_EXTRA_CA_CERTS` needed. Codex (0.153.4): the keychain.
+  The bridge's own Rust client (rustls, bundled roots, cannot see the keychain): `ca_file`, used
+  for one advisory `initialize` at startup.
+- **All twenty-four tools granted, by name.** From a live, authenticated `tools/list` against
+  `house-mcp` 0.1.0, none annotated, so none is destructive and none needs an approval mode:
+  `find`, `get_file`, `get_floor`, `history`, `in_space`, `list_files`, `list_sites`, `measure`,
+  `nearest`, `render_plan`, `search_notes`, `what_is_at`, and the writes `add_note`,
+  `create_site`, `delete`, `import_dxf`, `import_geojson`, `link_ref`, `restore`,
+  `set_attributes`, `upload_file`, `upsert_floor`, `upsert_object`, `upsert_space`. Tests pin
+  the twenty-four by equality and refuse a wildcard; the parity test is green with no exception.
+- **The turn is told.** A turn whose harness registers `house` gets one appended line: ask the
+  `house` server where something physically is, and record a fact about the house's layout or
+  contents with a write tool and a `reason`.
+- **`direct` gets nothing.** Its MCP client is stdio only by design and `house` is HTTP only;
+  nothing else is widened for it.
+- **New row label on both harnesses,** `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse`;
+  the twenty-two-server set is kept as a retired label. Both records were re-recorded live from
+  the bridge LaunchAgent's environment with `JESSE_CONFIG` pointing at a config with the table,
+  each with its own target directory, a dry run first and then `--write`. Every probe on every
+  row kept its id, class, verdict and status; the only change in any root is `house` at
+  twenty-four tools, and no other server's count moved. Claude Code: gate pass, 5 x 22 on claude
+  2.1.296 (the record was on 2.1.287). Codex: 5 x 22 on codex-cli 0.153.4, gate `fail` for the
+  standing `basic/none` reason only, every hard gate on the main rows passing. Its two main-row
+  `[[accepted]]` blocks are re-pointed under the owner's written authorization; earlier
+  rationale unchanged below the new paragraph.
+- **The argv fixture** moved on Claude Code's two write sites only (the `--allowedTools`
+  digest); the fixture config has no `[house]` table, so nothing else moved.
+- **`capability-map.toml`** gains a row per new grant, and `golden/capability-args.json` the
+  twenty-four tools.
+- **Not deployed.** The live bridge needs the `[house]` table added to its config.
+
 ## [Bridge 0.168.0] - 2026-10-07
 
 **The baseline before the move off the Mac: every grant mapped, every macOS dependency listed and guarded, and a turn trace that can say which grants real turns used.**

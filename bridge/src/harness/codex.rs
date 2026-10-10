@@ -1003,9 +1003,15 @@ pub const CODEX_MCP_ENV_FIXED: &[(&str, &[(&str, &str)])] =
 ///
 /// `RYBBIT_API_KEY` is a Rybbit personal API key for tag1.com's analytics, scoped to read,
 /// also set in the plist and reached by Claude Code as `${RYBBIT_API_KEY}` in the same way.
+///
+/// `JESSE_HOUSE_TOKEN` (0.169.0) is the house model's read and write token. It is NOT in the
+/// plist: the bridge reads it from the `[house]` table's `token_file` at start and sets it on
+/// each child whose rendered set loads `house` (see [`crate::apply_house_env`]), and Claude
+/// Code reaches it as `${JESSE_HOUSE_TOKEN}` in that server's header.
 pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[
     ("homeassistant", "HA_MCP_TOKEN"),
     ("rybbit", "RYBBIT_API_KEY"),
+    ("house", "JESSE_HOUSE_TOKEN"),
 ];
 
 /// The environment variable behind each NON-BEARER HTTP header a server authenticates with,
@@ -1936,9 +1942,13 @@ impl Codex {
         // The SET is resolved from the config string because that is what a spawn site
         // carries, exactly as `claude_child_args` resolves it; a set this build does not ship
         // resolves to `None` and therefore to the standard `Read` grant.
+        //
+        // The config RENDERED for this deployment: the `house` entry gets its URL from the
+        // `[house]` table, or is removed when there is no ready table. The set, and so the
+        // grant, is still resolved from the shipped string.
         let mcp = codex_mcp_args(
             CODEX_ID,
-            req.mcp_config,
+            &render_house_mcp(cfg, req.mcp_config),
             row_allowed_tools(
                 cfg,
                 req.capability,
@@ -2019,6 +2029,9 @@ impl Codex {
                 cmd.env(CODEX_PROVIDER_KEY_ENV, token);
             }
         }
+        // The house token, BY VALUE ON THIS CHILD ONLY, under the name `bearer_token_env_var`
+        // above tells Codex to read. Absent when this turn's rendered set has no `house`.
+        apply_house_env(&mut cmd, cfg, req.mcp_config);
         Ok(cmd)
     }
 }

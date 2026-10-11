@@ -3,8 +3,8 @@ use crate::*;
 use jesse_agent::budget::Budget;
 use jesse_agent::index::{GrepIndex, QmdIndex, SearchIndex};
 use jesse_agent::mcp::{
-    tool_name as mcp_tool_name, CompositeToolSet, McpToolSet, ServerGrant, DEFAULT_CALL_TIMEOUT,
-    DEFAULT_CONNECT_TIMEOUT,
+    tool_name as mcp_tool_name, CompositeToolSet, McpToolSet, McpTransport, ServerGrant,
+    DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
 };
 use jesse_agent::persona::{
     apply as apply_style_policy, check as check_style, regeneration_request,
@@ -90,9 +90,13 @@ pub static DIRECT_ATTACHMENTS: AttachmentSupport = AttachmentSupport {
 /// What did NOT change is the number of rows. The axis has exactly one value PER DEPLOYMENT —
 /// a deployment grants one set of servers, not a choice of sets, because unlike a claude-code
 /// call site there is no second spawn site here to pick a different one. So the rows are still
-/// one per level, and the label each carries comes from [`direct_mcp_label`]: `none` on a
-/// deployment that grants nothing (the shipped posture, and what the committed record holds),
-/// `qmd` on one that grants qmd, `a+b` on one that grants two.
+/// one per level, and the label each carries comes from [`direct_mcp_label`]: `house` on a
+/// deployment that grants nothing more (the shipped posture since 0.170.0, and what the
+/// committed record holds), `house+qmd` on one that also grants qmd.
+///
+/// The `mcp` field below stays [`McpSet::None`] because an [`McpSet`] names a `--mcp-config`
+/// this repository commits for a CLI child, and none applies here; the label the record keys a
+/// row on is [`Harness::record_mcp_label`], which this harness answers from its grants.
 ///
 /// The gate that makes this real is [`Harness::capability_args`], not the label: it carries
 /// the sorted granted `mcp__…` names and is compared to the record by strict equality.
@@ -229,26 +233,30 @@ impl Harness for Direct {
         // makes an MCP grant cost a record change: this vector is compared to the committed
         // record by STRICT EQUALITY at boot, so adding a server to `[[direct.mcp]]` and
         // restarting refuses to start until the battery has been re-run and the record
-        // re-committed. A deployment with no `[[direct.mcp]]` produces exactly the vector it
-        // produced before D10, which is why the shipped record still matches byte for byte.
+        // re-committed. The shipped `house` grant is always among them (see
+        // [`direct_record_grants`]), so the record names it on every deployment.
         //
         // Appended rather than merged into one sort so the two halves stay legible in a
         // record a person has to read: the tools this project wrote, then the tools it
         // borrowed.
-        let mut mcp: Vec<String> = cfg
-            .direct
-            .mcp
-            .iter()
-            .flat_map(|g| g.granted_names_at(level))
-            .collect();
-        mcp.sort_unstable();
-        mcp.dedup();
-        names.extend(mcp);
+        names.extend(direct_granted_mcp_names(cfg, level));
         vec!["--tools".to_string(), names.join(",")]
     }
 
     fn shipped_rows(&self) -> &'static [ContainmentRow] {
         &DIRECT_SHIPPED_ROWS
+    }
+
+    /// The grants' names, not the row's [`McpSet`]: see [`DIRECT_SHIPPED_ROWS`].
+    fn record_mcp_label(&self, cfg: &Config, _row: ContainmentRow) -> String {
+        direct_mcp_label(cfg)
+    }
+
+    /// A recorded label stands for this deployment's posture only when it names exactly this
+    /// deployment's grants. It resolves to [`McpSet::None`] because [`Direct::capability_args`]
+    /// ignores the set; the comparison that gates is the `--tools` token.
+    fn parse_record_mcp(&self, cfg: &Config, label: &str) -> Option<McpSet> {
+        (label == direct_mcp_label(cfg)).then_some(McpSet::None)
     }
 
     /// `None` — this harness writes no transcript in a directory layout the bridge scans.
@@ -441,9 +449,11 @@ impl DirectMcpGrant {
         }
         ServerGrant {
             name: self.name.clone(),
-            command: self.command.clone(),
-            args: self.args.clone(),
-            env,
+            transport: McpTransport::Stdio {
+                command: self.command.clone(),
+                args: self.args.clone(),
+                env,
+            },
             tools: self.tools.clone(),
             action_class_default: self.class,
             per_tool_class: self
@@ -477,16 +487,40 @@ pub fn direct_mcp_grants(grants: &[DirectMcpGrant]) -> Vec<ServerGrant> {
 /// closed list the project ships: an `McpSet` names a `--mcp-config` JSON this repository
 /// commits, and these servers come from an operator's own file. Inventing a variant per
 /// deployment is not a thing an enum can do.
+///
+/// Since 0.170.0 it always starts with `house`, the one grant this project ships for the
+/// harness, so the shipped label is `house` and a deployment with `[[direct.mcp]]` grants reads
+/// `house+<theirs>`. It never answers `none` any more.
 pub fn direct_mcp_label(cfg: &Config) -> String {
-    if cfg.direct.mcp.is_empty() {
-        return McpSet::None.label().to_string();
-    }
-    cfg.direct
-        .mcp
+    direct_record_grants(cfg)
         .iter()
         .map(|g| g.name.as_str())
         .collect::<Vec<_>>()
         .join("+")
+}
+
+/// Every grant the `direct` record commits on this deployment: the shipped `house` grant, then
+/// the operator's `[[direct.mcp]]` grants in order. CREDENTIAL-FREE: the house entry is
+/// [`house_grant_shape`], which carries names and classes and nothing a turn could connect
+/// with.
+///
+/// `house` is here whether or not the deployment has a `[house]` table, which is what lets one
+/// committed record boot both deployments; see [`house_grant_shape`].
+pub fn direct_record_grants(cfg: &Config) -> Vec<DirectMcpGrant> {
+    std::iter::once(house_grant_shape())
+        .chain(cfg.direct.mcp.iter().cloned())
+        .collect()
+}
+
+/// The `mcp__<server>__<tool>` names the `direct` record commits at `level`, sorted.
+pub fn direct_granted_mcp_names(cfg: &Config, level: Level) -> Vec<String> {
+    let mut names: Vec<String> = direct_record_grants(cfg)
+        .iter()
+        .flat_map(|g| g.granted_names_at(level))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// The broker this process's direct turns take their write locks through.
@@ -1121,11 +1155,16 @@ impl Direct {
         // reports an unreachable server as a warning and exposes the rest; the direction is
         // what makes that safe, because the live set is then a SUBSET of the granted one and
         // the record commits the grant.
-        let mcp = if rt.settings.mcp.is_empty() {
+        //
+        // The configured stdio grants, then `house` when this deployment has a ready `[house]`
+        // table. Without one the turn runs the recorded posture minus that server.
+        let mut grants = direct_mcp_grants(&rt.settings.mcp);
+        grants.extend(direct_house_grant(cfg));
+        let mcp = if grants.is_empty() {
             None
         } else {
             match McpToolSet::connect(
-                &direct_mcp_grants(&rt.settings.mcp),
+                &grants,
                 level,
                 DEFAULT_CALL_TIMEOUT,
                 DEFAULT_CONNECT_TIMEOUT,
@@ -1848,23 +1887,37 @@ mod tests {
     /// before D10 — which is why `bridge/containment-direct.toml` still matches — and with a
     /// grant the granted names are appended, sorted, after the vault set's.
     #[test]
-    fn the_tools_token_is_unchanged_without_a_grant_and_carries_the_granted_names_with_one() {
+    fn the_tools_token_carries_house_always_and_the_granted_names_with_a_grant() {
         let mut cfg = crate::testutil::test_config();
+        let house_reads: Vec<String> = HOUSE_READ_TOOLS
+            .iter()
+            .map(|t| format!("mcp__house__{t}"))
+            .collect();
+        // THE SHIPPED POSTURE NAMES HOUSE, table or no table: the record commits the grant.
+        assert!(cfg.house.ready().is_none());
         assert_eq!(
             Direct.capability_args(&cfg, Capability::Read, McpSet::None),
             vec![
                 "--tools".to_string(),
-                "fetch_url,vault_list,vault_read,vault_search".to_string()
+                format!(
+                    "fetch_url,vault_list,vault_read,vault_search,{}",
+                    house_reads.join(",")
+                )
             ]
         );
 
         cfg.direct.mcp = vec![grant("qmd", &["query", "get"], ActionClass::Read)];
+        let mut mcp = house_reads.clone();
+        mcp.extend(["mcp__qmd__get".to_string(), "mcp__qmd__query".to_string()]);
+        mcp.sort();
         assert_eq!(
             Direct.capability_args(&cfg, Capability::Read, McpSet::None),
             vec![
                 "--tools".to_string(),
-                "fetch_url,vault_list,vault_read,vault_search,mcp__qmd__get,mcp__qmd__query"
-                    .to_string()
+                format!(
+                    "fetch_url,vault_list,vault_read,vault_search,{}",
+                    mcp.join(",")
+                )
             ],
             "the granted names are appended and sorted among themselves"
         );
@@ -1900,16 +1953,26 @@ mod tests {
         assert!(write.contains("mcp__notes__write_note"));
     }
 
-    /// The record's second key follows the grant, and is `none` on the shipped posture.
+    /// The record's second key follows the grant, and is `house` on the shipped posture.
     #[test]
     fn the_records_mcp_label_names_the_granted_servers() {
         let mut cfg = crate::testutil::test_config();
-        assert_eq!(direct_mcp_label(&cfg), "none");
+        assert_eq!(direct_mcp_label(&cfg), "house");
+        assert_eq!(
+            Direct.parse_record_mcp(&cfg, "house"),
+            Some(McpSet::None),
+            "the shipped label resolves on this deployment"
+        );
+        assert_eq!(
+            Direct.parse_record_mcp(&cfg, "none"),
+            None,
+            "the old label does not"
+        );
         cfg.direct.mcp = vec![
             grant("qmd", &["query"], ActionClass::Read),
             grant("notes", &["read_note"], ActionClass::Read),
         ];
-        assert_eq!(direct_mcp_label(&cfg), "qmd+notes");
+        assert_eq!(direct_mcp_label(&cfg), "house+qmd+notes");
     }
 
     /// **NO SECRET IS EVER HELD IN `Config`.** The grant carries the NAME of an environment
@@ -1930,17 +1993,17 @@ mod tests {
         std::env::remove_var("JESSE_TEST_D10_UNSET");
         let resolved = g.resolve();
         std::env::remove_var("JESSE_TEST_D10_TOKEN");
+        let McpTransport::Stdio { env, .. } = resolved.transport else {
+            panic!("a configured grant is stdio");
+        };
 
-        assert_eq!(
-            resolved.env.get("SERVER_TOKEN").map(String::as_str),
-            Some("s3cr3t")
-        );
+        assert_eq!(env.get("SERVER_TOKEN").map(String::as_str), Some("s3cr3t"));
         assert!(
-            !resolved.env.contains_key("SERVER_OTHER"),
+            !env.contains_key("SERVER_OTHER"),
             "an unset variable is absent, never an empty string"
         );
         // The forwarded five, and nothing else this process happens to hold.
-        for k in resolved.env.keys() {
+        for k in env.keys() {
             assert!(
                 DIRECT_MCP_FORWARDED_ENV.contains(&k.as_str()) || k.starts_with("SERVER_"),
                 "{k} is neither forwarded by name nor named by the grant"

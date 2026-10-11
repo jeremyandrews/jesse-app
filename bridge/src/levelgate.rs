@@ -776,8 +776,9 @@ pub fn validate_toolset_argv(
         // The row's SET, resolved the same way its capability is. A label this build does not
         // know is refused rather than compared against a stand-in: the argv is keyed on the
         // row, so comparing one row's grant against another set's posture would report a
-        // mismatch that means nothing — or, worse, agreement that does.
-        let Some(mcp) = McpSet::parse(&row.mcp_set) else {
+        // mismatch that means nothing — or, worse, agreement that does. Resolved through the
+        // harness, because `direct` keys its rows on its grants rather than on a shipped set.
+        let Some(mcp) = harness.parse_record_mcp(cfg, &row.mcp_set) else {
             errors.push(ConfigError::global(format!(
                 "the containment record has a row with an MCP set this build does not know \
                  ('{}'). A set that does not resolve names a posture nothing here can spawn, \
@@ -824,7 +825,9 @@ pub fn validate_toolset_argv(
 /// deployment's `[direct]` table, not to a model — every direct model on this bridge runs
 /// under the same one.
 pub fn validate_direct_mcp(cfg: &Config) -> Vec<ConfigError> {
-    match jesse_agent::mcp::validate_grants(&direct_mcp_grants(&cfg.direct.mcp)) {
+    // The shipped `house` grant is checked WITH the configured ones, so a `[[direct.mcp]]`
+    // entry named `house` is refused as a duplicate server rather than shadowing it.
+    match jesse_agent::mcp::validate_grants(&direct_mcp_grants(&direct_record_grants(cfg))) {
         Ok(()) => Vec::new(),
         Err(e) => vec![ConfigError::global(format!(
             "the [[direct.mcp]] grants are unusable: {e}\n\

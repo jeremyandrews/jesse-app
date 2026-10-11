@@ -1,9 +1,9 @@
 [package]
 name = "jesse-agent"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Provider-neutral agent layer for Jesse: one request/response model, one streaming event vocabulary, per-wire adapters (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses), the tool-calling turn loop that runs on top of them, and a stdio MCP client that supplies a second tool source under the same boundary."
+description = "Provider-neutral agent layer for Jesse: one request/response model, one streaming event vocabulary, per-wire adapters (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses), the tool-calling turn loop that runs on top of them, and an MCP client (stdio and Streamable HTTP) that supplies a second tool source under the same boundary."
 
 # NO DEPENDENCY ON `bridge/` IN EITHER DIRECTION. The bridge is excluded from the root
 # workspace (see the root Cargo.toml) and builds standalone from its own Cargo.lock; a
@@ -36,8 +36,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # `process` and `io-util` are D10's: the MCP client spawns a stdio server per grant and reads
 # newline-delimited JSON-RPC off its stdout. `process` is the only way to own a child's pipes
 # on this runtime, and `io-util` is `BufReader::lines` plus `write_all` — both used
-# exclusively by `src/mcp/client.rs`. NOT `net`: this client speaks stdio only, and an HTTP
-# transport is deliberately out of scope (see `src/mcp/mod.rs`).
+# exclusively by `src/mcp/client.rs`. NOT `net`: the Streamable HTTP transport
+# (`src/mcp/http.rs`) rides on the `reqwest` client above, which brings its own sockets.
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "signal", "process", "io-util"] }
 # `CancellationToken` — the cancellation primitive `Provider::stream` takes. Hand-rolling
 # one over `AtomicBool` + `Notify` was rejected: cancellation has to compose (D2's loop

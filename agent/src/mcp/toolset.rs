@@ -52,6 +52,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::mcp::client::{McpClient, McpError};
+use crate::mcp::http::Bearer;
 use crate::provider::{BoxFuture, ToolSpec};
 use crate::scope::Scope;
 use crate::tools::{
@@ -70,21 +71,54 @@ pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// runtime's boot — `npx` fetching a package, a Python interpreter importing.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// One server, and exactly what it is allowed to expose.
+/// How a grant reaches its server.
 ///
-/// **THE `env` MAP IS THE CHILD'S WHOLE ENVIRONMENT**, values already resolved by the caller.
-/// This crate reads nothing out of its own process environment and nothing off disk, so what
-/// a server can see is one table a reviewer can read. A caller that forwards no `PATH` must
-/// give an absolute `command`.
+/// **THE STDIO `env` MAP IS THE CHILD'S WHOLE ENVIRONMENT**, values already resolved by the
+/// caller. This crate reads nothing out of its own process environment and nothing off disk,
+/// so what a server can see is one table a reviewer can read. A caller that forwards no `PATH`
+/// must give an absolute `command`.
+///
+/// **THE HTTP BEARER IS A VALUE, ALREADY READ BY THE CALLER**, for the same reason, and it is
+/// held in [`Bearer`], whose `Debug` prints a marker: a `{:?}` of a grant cannot leak it. The
+/// CA, when given, is the PEM bytes, again read by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransport {
+    /// A child process speaking newline-delimited JSON-RPC on stdin and stdout.
+    Stdio {
+        /// The program to run. A bare name is resolved against the `PATH` in `env`.
+        command: String,
+        args: Vec<String>,
+        /// The child's environment, complete. Names to VALUES; see the type doc.
+        env: BTreeMap<String, String>,
+    },
+    /// A Streamable HTTP endpoint.
+    Http {
+        /// `https://…`, or `http://` to a loopback host only; see [`validate_grants`].
+        url: String,
+        bearer: Option<Bearer>,
+        /// One extra trust root for this server's client only, as PEM.
+        ca_pem: Option<PemBytes>,
+    },
+}
+
+/// A PEM certificate's bytes. A newtype only so `Debug` prints a length rather than a page of
+/// numbers.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PemBytes(pub Vec<u8>);
+
+impl fmt::Debug for PemBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PemBytes({} bytes)", self.0.len())
+    }
+}
+
+/// One server, and exactly what it is allowed to expose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerGrant {
     /// The server's name in tool names and records (`qmd`). Must be usable in a tool name.
     pub name: String,
-    /// The program to run. A bare name is resolved against the `PATH` in `env`.
-    pub command: String,
-    pub args: Vec<String>,
-    /// The child's environment, complete. Names to VALUES; see the type doc.
-    pub env: BTreeMap<String, String>,
+    /// How to reach it.
+    pub transport: McpTransport,
     /// The tools that may be exposed, BY NAME. No wildcard is expressible.
     pub tools: Vec<String>,
     /// The class every granted tool takes unless `per_tool_class` overrides it.
@@ -94,7 +128,7 @@ pub struct ServerGrant {
 }
 
 impl ServerGrant {
-    /// A grant of `tools` at one class, which is the common shape.
+    /// A stdio grant of `tools` at one class, which is the common shape.
     pub fn new(
         name: impl Into<String>,
         command: impl Into<String>,
@@ -103,22 +137,66 @@ impl ServerGrant {
     ) -> ServerGrant {
         ServerGrant {
             name: name.into(),
-            command: command.into(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
+            transport: McpTransport::Stdio {
+                command: command.into(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
             tools: tools.into_iter().map(Into::into).collect(),
             action_class_default: class,
             per_tool_class: HashMap::new(),
         }
     }
 
-    pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.args = args.into_iter().map(Into::into).collect();
+    /// A Streamable HTTP grant of `tools` at one class, with no bearer and no extra CA.
+    pub fn http(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        tools: impl IntoIterator<Item = impl Into<String>>,
+        class: ActionClass,
+    ) -> ServerGrant {
+        ServerGrant {
+            name: name.into(),
+            transport: McpTransport::Http {
+                url: url.into(),
+                bearer: None,
+                ca_pem: None,
+            },
+            tools: tools.into_iter().map(Into::into).collect(),
+            action_class_default: class,
+            per_tool_class: HashMap::new(),
+        }
+    }
+
+    /// Stdio only: the child's arguments. A no-op on an HTTP grant.
+    pub fn with_args(mut self, new: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        if let McpTransport::Stdio { args, .. } = &mut self.transport {
+            *args = new.into_iter().map(Into::into).collect();
+        }
         self
     }
 
-    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
-        self.env = env;
+    /// Stdio only: the child's whole environment. A no-op on an HTTP grant.
+    pub fn with_env(mut self, new: BTreeMap<String, String>) -> Self {
+        if let McpTransport::Stdio { env, .. } = &mut self.transport {
+            *env = new;
+        }
+        self
+    }
+
+    /// HTTP only: the bearer every message carries. A no-op on a stdio grant.
+    pub fn with_bearer(mut self, token: Bearer) -> Self {
+        if let McpTransport::Http { bearer, .. } = &mut self.transport {
+            *bearer = Some(token);
+        }
+        self
+    }
+
+    /// HTTP only: one extra trust root, as PEM. A no-op on a stdio grant.
+    pub fn with_ca_pem(mut self, pem: Vec<u8>) -> Self {
+        if let McpTransport::Http { ca_pem, .. } = &mut self.transport {
+            *ca_pem = Some(PemBytes(pem));
+        }
         self
     }
 
@@ -167,6 +245,14 @@ pub fn validate_grants(grants: &[ServerGrant]) -> Result<(), McpSetError> {
         if g.tools.is_empty() {
             return Err(McpSetError::EmptyGrant(g.name.clone()));
         }
+        if let McpTransport::Http { url, .. } = &g.transport {
+            if !http_url_is_acceptable(url) {
+                return Err(McpSetError::InsecureUrl {
+                    server: g.name.clone(),
+                    url: url.clone(),
+                });
+            }
+        }
         for t in &g.tools {
             let composed = tool_name(&g.name, t);
             if !usable_tool_name(&composed) {
@@ -185,6 +271,25 @@ pub fn validate_grants(grants: &[ServerGrant]) -> Result<(), McpSetError> {
         }
     }
     Ok(())
+}
+
+/// An HTTP grant's URL is `https://`, or plain `http://` to a loopback host. A bearer sent in
+/// clear over a network is a bearer anyone on the path holds; loopback is admitted because a
+/// server on this machine has no path to snoop and because the crate's own tests need one.
+fn http_url_is_acceptable(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty();
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match host.rsplit_once(':') {
+        // `[::1]:8080` and `127.0.0.1:8080`; a bare `[::1]` has its colons inside brackets.
+        Some((h, port)) if !port.contains(']') => h,
+        _ => host,
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
 /// A tool set could not be built from a set of grants.
@@ -206,6 +311,8 @@ pub enum McpSetError {
     },
     /// A grant asked for [`ActionClass::ExternalWrite`], which is exposed at no level.
     ExternalWrite { server: String, tool: String },
+    /// An HTTP grant whose URL is neither `https://` nor `http://` to a loopback host.
+    InsecureUrl { server: String, url: String },
     /// The server could not be reached at all. NOT fatal to a turn — see
     /// [`McpToolSet::connect`], which turns this into a warning — fatal only to a caller that
     /// asked for a set of exactly these servers.
@@ -237,6 +344,11 @@ impl fmt::Display for McpSetError {
             McpSetError::ExternalWrite { server, tool } => write!(
                 f,
                 "{server}/{tool} is granted as external_write, which is exposed at no level"
+            ),
+            McpSetError::InsecureUrl { server, url } => write!(
+                f,
+                "the MCP grant for {server:?} points at {url:?}; an HTTP server must be \
+                 https://, or http:// to a loopback host"
             ),
             McpSetError::Unreachable { server, error } => {
                 write!(f, "the MCP server {server:?} could not be used: {error}")
@@ -317,16 +429,28 @@ impl McpToolSet {
         let mut builder = ToolSetBuilder::new(level);
         let mut clients = Vec::new();
         for g in grants {
-            let client = match McpClient::connect(
-                &g.name,
-                &g.command,
-                &g.args,
-                &g.env,
-                call_timeout,
-                connect_timeout,
-            )
-            .await
-            {
+            let connected = match &g.transport {
+                McpTransport::Stdio { command, args, env } => {
+                    McpClient::connect(&g.name, command, args, env, call_timeout, connect_timeout)
+                        .await
+                }
+                McpTransport::Http {
+                    url,
+                    bearer,
+                    ca_pem,
+                } => {
+                    McpClient::connect_http(
+                        &g.name,
+                        url,
+                        bearer.as_ref(),
+                        ca_pem.as_ref().map(|p| p.0.as_slice()),
+                        call_timeout,
+                        connect_timeout,
+                    )
+                    .await
+                }
+            };
+            let client = match connected {
                 Ok(c) => Arc::new(c),
                 Err(error) => {
                     report.warnings.push(format!(
@@ -381,11 +505,17 @@ impl McpToolSet {
                         client: client.clone(),
                     }) as Arc<dyn Tool>,
                 );
-                exposed += 1;
+                // Counted only when the LEVEL lets it through: the builder withholds the rest
+                // at `build`, and a line saying they were exposed would be the one place an
+                // operator reads the posture wrong.
+                if level.permits(class) {
+                    exposed += 1;
+                }
             }
 
             report.servers.push(format!(
-                "{} ({}, protocol {}): {exposed} of {} granted tool(s) exposed, {} advertised",
+                "{} ({}, protocol {}): {exposed} of {} granted tool(s) exposed at {level}, {} \
+                 advertised",
                 g.name,
                 client.server_info(),
                 client.server_protocol(),

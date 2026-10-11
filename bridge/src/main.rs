@@ -151,6 +151,26 @@ async fn main() {
             }
         });
     }
+    // Whether `direct` turns get the house grant, said once. A refused table never gets here
+    // (the startup gate stops on it), so the two cases are a ready table and no table.
+    if cfg
+        .model_registry
+        .models
+        .iter()
+        .any(|m| m.harness == DIRECT_ID && m.configured)
+    {
+        match cfg.house.ready() {
+            Some(h) => eprintln!(
+                "jesse-bridge: direct turns connect the house model at {} over HTTP (reads at \
+                 read, writes at write)",
+                h.url
+            ),
+            None => eprintln!(
+                "jesse-bridge: direct turns get no house grant: this deployment has no [house] \
+                 table"
+            ),
+        }
+    }
 
     // ADVISORY, never fatal: does every stdio server in the config a child is actually
     // spawned with have a binary the child can execute?

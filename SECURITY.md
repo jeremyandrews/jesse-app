@@ -23,7 +23,9 @@ and this section states what it is, what proves it, and what it gives up.
 
 Since bridge 0.112.0 it can also be granted **stdio MCP servers** (`[[direct.mcp]]`), which is
 the one place it starts a child process. That is off by default, it is what the committed
-record speaks for, and its posture has its own subsection below.
+record speaks for, and its posture has its own subsection below. Since bridge 0.170.0 it also
+reaches the **house model over Streamable HTTP** when the deployment has a `[house]` table; see
+"`direct` reaches it over HTTP (0.170.0)" under the house model section.
 
 ### The boundary
 
@@ -75,8 +77,9 @@ same way the other two records do.
 
 ### MCP servers on a direct turn (`[[direct.mcp]]`, 0.112.0)
 
-**Off unless configured, and the shipped posture is off.** `bridge/containment-direct.toml` is
-recorded with `mcp_set = "none"`, and a deployment that grants a server records rows naming it.
+**Off unless configured.** `bridge/containment-direct.toml` is recorded with
+`mcp_set = "house"` (the one grant this project ships for the harness, since 0.170.0), and a
+deployment that grants more records rows naming those too (`house+qmd`).
 
 - **The grant is a list of names.** `[[direct.mcp]] tools = [...]` names each tool
   individually. There is no wildcard form, in the config or in the type behind it. This is the
@@ -1525,12 +1528,52 @@ is a soft delete that `restore` undoes; nothing on the server removes a row.
   message bodies.
 - **The prompt names it.** A turn whose harness registers the server is told, in one appended
   line, to ask it where things are and to record what the conversation teaches about the house.
-  A turn that cannot reach it, including every `direct` turn, is not told.
+  A turn that cannot reach it is not told. Since 0.170.0 that no longer excludes `direct` turns
+  on a deployment with a ready table.
 
-#### `direct` does not get it
+#### `direct` reaches it over HTTP (0.170.0)
 
-The `direct` harness's MCP client (`agent/src/mcp`) speaks stdio only, by design, and `house`
-is HTTP only. It is given nothing, and nothing else is widened for it.
+Until 0.170.0 the `direct` harness got nothing here: its MCP client (`agent/src/mcp`) spoke
+stdio only, deliberately, until there was a credential story for HTTP. The `[house]` table is
+that story, and 0.170.0 gives the client a Streamable HTTP transport and the harness a `house`
+grant built from the same table: the same URL, the same token, the same `ca_file`.
+
+- **The same four messages and no capabilities**, POSTed with `Accept: application/json,
+  text/event-stream`; a reply arrives as one JSON body or inside an SSE stream, and the
+  stream is read only until the reply. The session id the server assigns is carried, and the
+  session is ended with a `DELETE` at turn end. No standing `GET` stream is ever opened: a
+  server-initiated message is a request towards a client that declared no capability to answer
+  it. A non 2xx, a malformed body, a reply with the wrong id and a timeout each drop the server
+  for the rest of the turn, as on stdio.
+- **The credential.** The token the bridge read from the `0600` file reaches the agent crate as
+  a `Bearer` value whose `Debug` prints a marker and which has no `Display`; it goes on the wire
+  as one header marked sensitive, and nowhere else. An error names the server and the HTTP
+  status and never the header or the response body (a broken server could echo the header back
+  in a body). A test formats the grant and asserts the token is absent. An HTTP grant must be
+  `https://`, or `http://` to a loopback host; anything else is refused at boot.
+- **Trust.** The bundled webpki roots plus the `ca_file` PEM, added to that server's client
+  only. Verification is never off, and redirects are not followed, because a redirect is a
+  request to send the credential somewhere else.
+- **Classes: the twelve reads are `egress`, the twelve writes are `vault_write`.** A read sends
+  arguments the model wrote to a server off this host, which is what `egress` means; `read` is
+  kept for what stays inside the vault boundary. A write changes the owner's own records on the
+  owner's own server, carries a `reason` the server records, and is recoverable through
+  `restore` and the change table: the profile of a vault write (owner data, recorded,
+  reversible) rather than a write to a third party's state. `external_write` is exposed at no
+  level, so it would grant nothing. A `read` turn gets the twelve reads; a `write` turn gets
+  all twenty four; `basic` gets none and connects nothing.
+- **One list for all three harnesses.** The twenty four names live in `HOUSE_READ_TOOLS` and
+  `HOUSE_WRITE_TOOLS` in `bridge/src/house.rs`; the direct grant is built from them, and the
+  CLI allowlist is pinned to them by equality in a test.
+- **One record for both deployments.** The direct record commits the `house` grant whether or
+  not the table is present, the precedent the CLI harnesses set in 0.169.0. Without a ready
+  table the turn connects no `house` client, so the live set is the recorded one minus those
+  tools, never more. A `[[direct.mcp]]` entry named `house` is refused at boot as a duplicate
+  server.
+- **Connected per turn and closed with it**, like every other direct server.
+
+Nothing else is widened for `direct`: no other server is granted, and no stdio behaviour
+changed.
 
 ### Roon (no auth, 2026-08-07)
 

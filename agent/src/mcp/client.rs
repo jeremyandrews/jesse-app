@@ -1,5 +1,12 @@
-//! **The stdio MCP client** — one child process, one request at a time, newline-delimited
-//! JSON-RPC 2.0, and a hard rule about what a misbehaving server may cost a turn.
+//! **The MCP client** — one server, one request at a time, JSON-RPC 2.0 over either of two
+//! transports, and a hard rule about what a misbehaving server may cost a turn.
+//!
+//! The transports are a child process speaking newline-delimited JSON over stdio
+//! ([`McpClient::connect`]) and Streamable HTTP ([`McpClient::connect_http`], in
+//! [`crate::mcp::http`]). Everything below is the same on both: the messages, the empty
+//! capabilities, the rule that a failure kills the connection, and the one-request lock. Where
+//! the text says "the pipe" or "stdout", the HTTP transport has its own equivalent, named in
+//! its module.
 //!
 //! ---- THE SUBSET THIS SPEAKS, AND WHAT IT DELIBERATELY DOES NOT --------------
 //!
@@ -59,6 +66,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{timeout_at, Instant};
 
+use crate::mcp::http::{Bearer, HttpConnection};
+
 /// The protocol version this client asks for.
 ///
 /// A DATED STRING, not a semver triple, because that is what the protocol uses. The server
@@ -104,6 +113,13 @@ pub enum McpError {
     /// A well-formed JSON-RPC error response. **This is the server WORKING**: it framed a
     /// reply, gave it the right id, and said no. It does not kill the connection.
     Rpc { code: i64, message: String },
+    /// HTTP only: the server could not be reached at all (refused, unresolvable, a TLS
+    /// failure). The message names the server; it never carries a header.
+    Unreachable(String),
+    /// HTTP only: the server answered a status outside 2xx. **The connection is dead
+    /// afterwards.** The server and the status, and nothing from the response body, which a
+    /// broken server could use to echo the request's `Authorization` header back.
+    Http { server: String, status: u16 },
 }
 
 impl std::fmt::Display for McpError {
@@ -118,6 +134,16 @@ impl std::fmt::Display for McpError {
             ),
             McpError::Dead(why) => write!(f, "the server was dropped earlier this turn ({why})"),
             McpError::Rpc { code, message } => write!(f, "server error {code}: {message}"),
+            McpError::Unreachable(m) => write!(f, "{m}"),
+            McpError::Http { server, status } => {
+                let why = match status {
+                    401 => " (the credential was refused)",
+                    403 => " (the credential is not allowed this)",
+                    404 => " (no such endpoint, or the session expired)",
+                    _ => "",
+                };
+                write!(f, "the server '{server}' answered HTTP {status}{why}")
+            }
         }
     }
 }
@@ -164,17 +190,25 @@ struct StderrSink {
     ring: Mutex<std::collections::VecDeque<String>>,
 }
 
-/// The live half of a connection. `None` in [`McpClient`] once the server is dead.
+/// The live half of a stdio connection.
 struct Connection {
     child: Child,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
 }
 
-/// A connected MCP server, over stdio.
+/// The live half of a connection, on whichever transport. `None` in [`McpClient`] once the
+/// server is dead.
+enum Wire {
+    Stdio(Connection),
+    Http(HttpConnection),
+}
+
+/// A connected MCP server, over stdio or Streamable HTTP.
 ///
-/// Construct with [`McpClient::connect`]. Dropping it closes the child's stdin and kills the
-/// child — a server that ignores the closed pipe must not outlive the turn that started it.
+/// Construct with [`McpClient::connect`] or [`McpClient::connect_http`]. Dropping a stdio
+/// client closes the child's stdin and kills the child — a server that ignores the closed pipe
+/// must not outlive the turn that started it. Dropping an HTTP client ends its session.
 pub struct McpClient {
     /// The server's configured name (`qmd`), used in errors and in tool names.
     name: String,
@@ -185,7 +219,7 @@ pub struct McpClient {
     per_call: Duration,
     next_id: AtomicU64,
     stderr: Arc<StderrSink>,
-    conn: tokio::sync::Mutex<Option<Connection>>,
+    conn: tokio::sync::Mutex<Option<Wire>>,
     /// Why the connection died, once it has. Set exactly once.
     death: Mutex<Option<String>>,
 }
@@ -276,21 +310,58 @@ impl McpClient {
             }
         });
 
-        let mut client = McpClient {
+        let client = McpClient {
             name: name.to_string(),
             server_protocol: String::new(),
             server_info: String::new(),
             per_call,
             next_id: AtomicU64::new(1),
             stderr: sink,
-            conn: tokio::sync::Mutex::new(Some(Connection {
+            conn: tokio::sync::Mutex::new(Some(Wire::Stdio(Connection {
                 child,
                 stdin,
                 stdout: BufReader::new(stdout).lines(),
-            })),
+            }))),
             death: Mutex::new(None),
         };
+        client.handshake(connect_timeout).await
+    }
 
+    /// Open a session with a Streamable HTTP server, negotiate, and return a client ready for
+    /// [`McpClient::list_tools`].
+    ///
+    /// The same handshake as [`McpClient::connect`], the same empty capabilities, the same
+    /// acceptance of whatever protocol version the server answers. `bearer`, when given, goes
+    /// on every message as `Authorization: Bearer …`. `ca_pem`, when given, is one extra trust
+    /// root for THIS client only, beside the bundled webpki roots. There is no stderr here,
+    /// so [`McpClient::stderr_lines`] stays at zero.
+    ///
+    /// `connect_timeout` bounds both the TCP and TLS connect and the `initialize` exchange.
+    pub async fn connect_http(
+        name: &str,
+        url: &str,
+        bearer: Option<&Bearer>,
+        ca_pem: Option<&[u8]>,
+        per_call: Duration,
+        connect_timeout: Duration,
+    ) -> Result<McpClient, McpError> {
+        let conn = HttpConnection::new(name, url, bearer, ca_pem, connect_timeout)?;
+        let client = McpClient {
+            name: name.to_string(),
+            server_protocol: String::new(),
+            server_info: String::new(),
+            per_call,
+            next_id: AtomicU64::new(1),
+            stderr: Arc::new(StderrSink::default()),
+            conn: tokio::sync::Mutex::new(Some(Wire::Http(conn))),
+            death: Mutex::new(None),
+        };
+        client.handshake(connect_timeout).await
+    }
+
+    /// `initialize`, the capability check, and `notifications/initialized`, on either wire.
+    async fn handshake(mut self, connect_timeout: Duration) -> Result<McpClient, McpError> {
+        let client = &mut self;
         let result = client
             .request_with_timeout(
                 "initialize",
@@ -341,6 +412,12 @@ impl McpClient {
             ));
         }
 
+        // Over HTTP every message after `initialize` names the negotiated version in a header,
+        // so it is recorded on the wire before the notification goes out.
+        if let Some(Wire::Http(h)) = client.conn.lock().await.as_mut() {
+            h.set_protocol(&protocol);
+        }
+
         client
             .notify("notifications/initialized", json!({}))
             .await?;
@@ -349,7 +426,7 @@ impl McpClient {
         // so `..client` would be a partial move the compiler refuses.
         client.server_protocol = protocol;
         client.server_info = info;
-        Ok(client)
+        Ok(self)
     }
 
     /// The configured server name.
@@ -508,9 +585,9 @@ impl McpClient {
         // in. Doing both inside one scope is a borrow conflict, so the exchange runs first,
         // returns, and only then is the slot emptied — which also makes "every fatal error
         // kills the connection" one rule in one place rather than six call sites.
-        let outcome = {
-            let conn = guard.as_mut().expect("checked just above");
-            exchange(conn, id, &line, budget, method).await
+        let outcome = match guard.as_mut().expect("checked just above") {
+            Wire::Stdio(conn) => exchange(conn, id, &line, budget, method).await,
+            Wire::Http(conn) => conn.exchange(id, &line, budget, method).await,
         };
         match outcome {
             Ok(v) => Ok(v),
@@ -538,9 +615,9 @@ impl McpClient {
                 self.death_reason().unwrap_or_else(|| "unknown".into()),
             ));
         }
-        let written = {
-            let conn = guard.as_mut().expect("checked just above");
-            write_line(&mut conn.stdin, &line, deadline).await
+        let written = match guard.as_mut().expect("checked just above") {
+            Wire::Stdio(conn) => write_line(&mut conn.stdin, &line, deadline).await,
+            Wire::Http(conn) => conn.notify(&line, deadline).await,
         };
         if let Err(e) = written {
             self.kill_locked(&mut guard, &e.to_string()).await;
@@ -556,23 +633,27 @@ impl McpClient {
 
     /// Drop the connection and record why. The FIRST reason wins, because the first one is
     /// the cause and everything after it is a consequence.
-    async fn kill_locked(&self, guard: &mut Option<Connection>, why: &str) {
+    async fn kill_locked(&self, guard: &mut Option<Wire>, why: &str) {
         if let Ok(mut d) = self.death.lock() {
             if d.is_none() {
                 *d = Some(why.to_string());
             }
         }
-        if let Some(mut conn) = guard.take() {
-            // The spec's stdio shutdown, then the kill. Closing stdin is what lets a
-            // well-behaved server exit on its own; the kill is what stops one that does not.
-            drop(conn.stdin);
-            let _ = conn.child.start_kill();
+        match guard.take() {
+            None => {}
+            Some(Wire::Stdio(mut conn)) => {
+                // The spec's stdio shutdown, then the kill. Closing stdin is what lets a
+                // well-behaved server exit on its own; the kill is what stops one that does
+                // not.
+                drop(conn.stdin);
+                let _ = conn.child.start_kill();
+            }
+            // The transport's shutdown: `DELETE` the session, bounded, outcome ignored.
+            Some(Wire::Http(mut conn)) => conn.close().await,
         }
     }
 }
 
-/// One request written, and lines read until the matching reply. Every error it returns
-/// except [`McpError::Rpc`] is fatal to the connection; the caller is what acts on that.
 /// One request written, then lines read until the matching reply.
 ///
 /// A free function taking the [`Connection`] rather than a method on [`McpClient`], and that
@@ -611,54 +692,67 @@ async fn exchange(
         }
         let msg: Value = serde_json::from_str(&next)
             .map_err(|e| McpError::Protocol(format!("a line on stdout is not JSON: {e}")))?;
-        if msg.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
-            return Err(McpError::Protocol(
-                "a message on stdout is not JSON-RPC 2.0".into(),
-            ));
+        // A notification does NOT reset the deadline, which is the point of the
+        // whole-exchange budget above.
+        if let Some(outcome) = interpret(&msg, id, method) {
+            return outcome;
         }
-        // A REQUEST FROM THE SERVER. This client advertised no capability that permits one,
-        // so it is a violation rather than something to answer — answering would be
-        // implementing sampling or elicitation by accident.
-        if msg.get("method").is_some() && msg.get("id").is_some() {
-            return Err(McpError::Protocol(format!(
-                "the server sent a request ({}) to a client that advertised no capabilities",
-                msg.get("method").and_then(|v| v.as_str()).unwrap_or("?")
-            )));
-        }
-        // A notification. Ignored — this client subscribes to nothing — and it does NOT
-        // reset the deadline, which is the point of the whole-exchange budget above.
-        if msg.get("method").is_some() {
-            continue;
-        }
-        match msg.get("id").and_then(|v| v.as_u64()) {
-            Some(got) if got == id => {}
-            // A reply to a request nobody is waiting for means this client's view of the
-            // stream is wrong. There is no id left to trust, so the connection goes.
-            other => {
-                return Err(McpError::Protocol(format!(
-                    "a reply carried id {other:?}, not the {id} that was sent"
-                )))
-            }
-        }
-        if let Some(err) = msg.get("error") {
-            // A WELL-FORMED REFUSAL — the server framed a reply, gave it the right id, and
-            // said no. The connection stays up.
-            return Err(McpError::Rpc {
-                code: err.get("code").and_then(|v| v.as_i64()).unwrap_or(0),
-                message: err
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(no message)")
-                    .to_string(),
-            });
-        }
-        return match msg.get("result") {
-            Some(r) => Ok(r.clone()),
-            None => Err(McpError::Protocol(format!(
-                "the reply to {method} has neither result nor error"
-            ))),
-        };
     }
+}
+
+/// What one incoming JSON-RPC message means to a client waiting on request `id`: `None` for a
+/// notification (skipped; this client subscribes to nothing), or the outcome of the exchange.
+///
+/// ONE FUNCTION FOR BOTH TRANSPORTS, so a line on stdout and an event in an HTTP reply's
+/// stream are judged by the same rules. Every `Err` it returns except [`McpError::Rpc`] is
+/// fatal to the connection.
+pub(crate) fn interpret(msg: &Value, id: u64, method: &str) -> Option<Result<Value, McpError>> {
+    if msg.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Some(Err(McpError::Protocol(
+            "a message from the server is not JSON-RPC 2.0".into(),
+        )));
+    }
+    // A REQUEST FROM THE SERVER. This client advertised no capability that permits one,
+    // so it is a violation rather than something to answer — answering would be
+    // implementing sampling or elicitation by accident.
+    if msg.get("method").is_some() && msg.get("id").is_some() {
+        return Some(Err(McpError::Protocol(format!(
+            "the server sent a request ({}) to a client that advertised no capabilities",
+            msg.get("method").and_then(|v| v.as_str()).unwrap_or("?")
+        ))));
+    }
+    // A notification. Ignored — this client subscribes to nothing.
+    if msg.get("method").is_some() {
+        return None;
+    }
+    match msg.get("id").and_then(|v| v.as_u64()) {
+        Some(got) if got == id => {}
+        // A reply to a request nobody is waiting for means this client's view of the
+        // stream is wrong. There is no id left to trust, so the connection goes.
+        other => {
+            return Some(Err(McpError::Protocol(format!(
+                "a reply carried id {other:?}, not the {id} that was sent"
+            ))))
+        }
+    }
+    if let Some(err) = msg.get("error") {
+        // A WELL-FORMED REFUSAL — the server framed a reply, gave it the right id, and
+        // said no. The connection stays up.
+        return Some(Err(McpError::Rpc {
+            code: err.get("code").and_then(|v| v.as_i64()).unwrap_or(0),
+            message: err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no message)")
+                .to_string(),
+        }));
+    }
+    Some(match msg.get("result") {
+        Some(r) => Ok(r.clone()),
+        None => Err(McpError::Protocol(format!(
+            "the reply to {method} has neither result nor error"
+        ))),
+    })
 }
 
 impl Drop for McpClient {
@@ -668,10 +762,24 @@ impl Drop for McpClient {
     /// `kill_on_drop(true)` set at spawn: dropping the [`Child`] inside the mutex sends the
     /// kill. The explicit [`McpClient::shutdown`] is the graceful path (stdin closed first);
     /// this is the one that holds when a turn is cancelled and futures are dropped mid-call.
+    ///
+    /// An HTTP session that was never shut down gets its `DELETE` on a spawned task when a
+    /// runtime is there to run it, best effort; the server's own session expiry is the
+    /// backstop when one is not.
     fn drop(&mut self) {
         if let Ok(mut guard) = self.conn.try_lock() {
-            if let Some(conn) = guard.take() {
-                drop(conn);
+            match guard.take() {
+                Some(Wire::Http(conn)) => {
+                    if let (Some(req), Ok(rt)) =
+                        (conn.close_request(), tokio::runtime::Handle::try_current())
+                    {
+                        rt.spawn(async move {
+                            let _ = tokio::time::timeout(Duration::from_secs(5), req.send()).await;
+                        });
+                    }
+                }
+                Some(conn) => drop(conn),
+                None => {}
             }
         }
     }

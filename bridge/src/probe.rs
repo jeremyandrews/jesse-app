@@ -3120,19 +3120,14 @@ pub fn direct_results_from_battery(
             .into_iter()
             .map(str::to_string)
             .collect();
-        let mut mcp_tools: Vec<String> = cfg
-            .direct
-            .mcp
-            .iter()
-            .flat_map(|g| g.granted_names_at(agent_level))
-            .collect();
-        mcp_tools.sort();
-        mcp_tools.dedup();
-        root_tools.extend(mcp_tools);
+        root_tools.extend(direct_granted_mcp_names(cfg, agent_level));
         rows.push(RowResult {
             capability: level.to_string(),
             mcp_set: direct_mcp_label(cfg),
-            mcp_servers: cfg.direct.mcp.iter().map(|g| g.name.clone()).collect(),
+            mcp_servers: direct_record_grants(cfg)
+                .into_iter()
+                .map(|g| g.name)
+                .collect(),
             toolset_args: Direct.capability_args(cfg, row.capability, row.mcp),
             // The tools actually at the root: the manifest, which is what `toolset_args`
             // already names. Recorded in both places because the other harnesses record a

@@ -654,6 +654,21 @@ pub trait Harness: Send + Sync {
     /// any one of them gained a server.
     fn shipped_rows(&self) -> &'static [ContainmentRow];
 
+    /// The MCP-set label this harness's record keys `row` under on this deployment.
+    ///
+    /// The row's own [`McpSet`] label for a spawned harness, whose sets are `--mcp-config`
+    /// values this repository commits. `direct` answers from its grants instead, because its
+    /// servers are not one of those sets; see `DIRECT_SHIPPED_ROWS`.
+    fn record_mcp_label(&self, _cfg: &Config, row: ContainmentRow) -> String {
+        row.mcp.label().to_string()
+    }
+
+    /// The set a recorded row's MCP label stands for on this deployment, or `None` when it
+    /// names a posture nothing here can run. The inverse of [`Harness::record_mcp_label`].
+    fn parse_record_mcp(&self, _cfg: &Config, label: &str) -> Option<McpSet> {
+        McpSet::parse(label)
+    }
+
     /// Where this harness keeps its transcripts on disk, if it keeps any.
     ///
     /// `None` means it keeps none in a layout the bridge can read — its thread state is its

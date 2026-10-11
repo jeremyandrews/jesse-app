@@ -5402,35 +5402,11 @@ mod tests {
             .split(',')
             .filter(|e| e.starts_with("mcp__house__"))
             .collect();
-        let mut expected: Vec<String> = [
-            "add_note",
-            "create_site",
-            "delete",
-            "find",
-            "get_file",
-            "get_floor",
-            "history",
-            "import_dxf",
-            "import_geojson",
-            "in_space",
-            "link_ref",
-            "list_files",
-            "list_sites",
-            "measure",
-            "nearest",
-            "render_plan",
-            "restore",
-            "search_notes",
-            "set_attributes",
-            "upload_file",
-            "upsert_floor",
-            "upsert_object",
-            "upsert_space",
-            "what_is_at",
-        ]
-        .iter()
-        .map(|t| format!("mcp__house__{t}"))
-        .collect();
+        let mut expected: Vec<String> = HOUSE_READ_TOOLS
+            .iter()
+            .chain(HOUSE_WRITE_TOOLS.iter())
+            .map(|t| format!("mcp__house__{t}"))
+            .collect();
         granted.sort_unstable();
         expected.sort_unstable();
         assert_eq!(

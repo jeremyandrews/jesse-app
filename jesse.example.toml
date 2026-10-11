@@ -190,7 +190,8 @@ Answer the question I asked, not the one you wish I had asked.
 # render_plan and more. With this table present, every Claude Code and Codex main turn
 # registers it as the `house` server, with all of its tools granted, writes included (each
 # write takes a `reason` the server records). Without the table the server is not registered
-# on any turn. The `direct` harness never gets it: its MCP client speaks stdio only.
+# on any turn. A `direct` turn (0.170.0) connects it over HTTP from this same table: the
+# twelve reads at `read`, all twenty four at `write`, nothing at `basic`.
 #
 # url: the server's Streamable HTTP endpoint. https:// only.
 #

@@ -14,6 +14,61 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.170.0, Agent 0.13.0] - 2026-10-11
+
+**A `direct` turn can call the same `house` tools a Claude Code or Codex turn can.**
+Root cause of the gap: the agent crate's MCP client spoke stdio only, deliberately, until there
+was a credential story for HTTP, and `house` is Streamable HTTP only. 0.169.0 gave the two
+spawned harnesses the server and left `direct` with nothing. The `[house]` table is that
+credential story, so the fix is a second transport in the client and a grant built from the
+table.
+
+- **Agent: Streamable HTTP beside stdio** (`agent/src/mcp/http.rs`, `McpClient::connect_http`).
+  The same four messages and the same empty capabilities. POST with `Accept: application/json,
+  text/event-stream`; a reply is taken as one JSON body or from an SSE stream (read only until
+  the reply; comments and notifications skipped, a server request refused as on stdio);
+  `Mcp-Session-Id` carried from `initialize` on, with `MCP-Protocol-Version` after it; the
+  session ended with a `DELETE` whose `405` is ignored. No standing `GET` stream. A non 2xx is
+  `McpError::Http { server, status }`, an unreachable server `McpError::Unreachable` naming it,
+  and neither carries a header or a response body. Every failure but a JSON-RPC error drops the
+  server for the turn, as on stdio. Replies are capped at 32 MB. Reuses
+  `DEFAULT_CONNECT_TIMEOUT` and `DEFAULT_CALL_TIMEOUT`. Reply checking is now one function both
+  transports share, so a line on stdout and an SSE event are judged by the same rules.
+- **Agent: the per-server startup line counts what the level exposes.** It counted every granted
+  tool the server advertised, so a `read` turn logged "24 of 24 exposed" while the builder had
+  correctly withheld the twelve writes. It now counts only what the level lets through and names
+  the level ("12 of 24 granted tool(s) exposed at read"). Log text only; the manifest was right.
+- **Agent: the grant gains a transport.** `ServerGrant.transport` is `McpTransport::Stdio
+  { command, args, env }` (unchanged behaviour) or `McpTransport::Http { url, bearer, ca_pem }`.
+  The bearer is a `Bearer`, whose `Debug` prints a marker and which has no `Display`; a test
+  formats a grant and asserts the token is absent. Trust is webpki roots plus the optional PEM,
+  for that client only; redirects are not followed. `validate_grants` adds one rule: an HTTP
+  URL is `https://`, or `http://` to a loopback host.
+- **Bridge: `house` on direct.** With a ready `[house]` table a direct turn connects `house`
+  from the same URL, token and `ca_file` the CLI harnesses use, naming the same twenty four
+  tools from one shared constant (`HOUSE_READ_TOOLS`, `HOUSE_WRITE_TOOLS` in `house.rs`; the CLI
+  allowlist is now pinned to them by equality). The twelve reads are `egress` (they send
+  model-written arguments off the host) and the twelve writes `vault_write` (the owner's own
+  records on his own server, each with a recorded `reason`, recoverable through `restore` and the
+  change table; `external_write` is exposed at no level). So `read` gets the reads and `write`
+  gets all twenty four. Without a ready table a direct turn connects no `house` client, and the
+  startup log says which of the two this deployment is, once. Direct turns that connect it now
+  receive the house instruction line.
+- **Record.** `containment-direct.toml` re-recorded with the agent crate's battery
+  (`cargo test -p jesse-agent --test containment_direct`, then `containment-probe --harness
+  direct --write`): every probe still passes, the rows are now `basic|read|write + mcp:house`,
+  and `toolset_args` carries the twelve or twenty four house names. Following the 0.169.0
+  precedent, the record commits the grant whether or not the table is present, so one committed
+  record boots both deployments. The direct label is no longer an `McpSet`, so the harness now
+  answers it (`Harness::record_mcp_label`, `Harness::parse_record_mcp`); the spawned harnesses'
+  answers and both of their records are unchanged byte for byte. A `[[direct.mcp]]` entry named
+  `house` is refused at boot as a duplicate server.
+- **Tests.** Against an in-process mock HTTP MCP server: a JSON reply, an SSE reply, the session
+  id carried, a 401 surfaced without the token, a server down at connect, a call timeout, and an
+  image result kept as an image block. In the bridge: the grant present with a ready table and
+  absent without one, the twenty four names by equality, reads at `read` and writes only at
+  `write`.
+
 ## [Bridge 0.169.0] - 2026-10-10
 
 **Bridge turns can read and write the owner's house model, `house-mcp`, on both spawned harnesses.**

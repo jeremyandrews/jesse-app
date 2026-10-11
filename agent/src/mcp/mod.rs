@@ -1,5 +1,5 @@
-//! **MCP over stdio** — a second source of [`crate::tools::Tool`]s, under the same boundary
-//! as the first.
+//! **MCP over stdio and Streamable HTTP** — a second source of [`crate::tools::Tool`]s, under
+//! the same boundary as the first.
 //!
 //! ---- WHY THIS IS IN THE CRATE AT ALL ---------------------------------------
 //!
@@ -36,18 +36,25 @@
 //!
 //! ---- WHAT IS NOT HERE ------------------------------------------------------
 //!
-//! HTTP transport, OAuth, server-initiated anything, tool-list-change notifications, and
-//! resource or prompt support. The set is stdio-only because that is what a server on the
-//! owner's own machine is, and because an HTTP server needs a credential story
-//! (`Authorization` headers, refresh, rotation) that this step deliberately does not open.
+//! OAuth, token refresh and rotation, a standing `GET` stream, server-initiated anything,
+//! tool-list-change notifications, and resource or prompt support.
+//!
+//! HTTP transport was left out until there was a credential story, and the story it got is
+//! deliberately the smallest one: a static bearer VALUE the caller has already read (from a
+//! `0600` file the caller checked, in the bridge's case), held in [`Bearer`] so no `Debug` can
+//! print it, sent as one sensitive header, and one optional extra CA root for that server's
+//! client alone. Nothing here reads a credential, refreshes one or stores one. A server that
+//! needs more than a static bearer is not a server this client can be granted.
 
 pub mod client;
+pub mod http;
 pub mod toolset;
 
 pub use client::{
     AdvertisedTool, CallOutcome, McpClient, McpError, StderrCounts, CLIENT_NAME, PROTOCOL_VERSION,
 };
+pub use http::Bearer;
 pub use toolset::{
     tool_name, validate_grants, CompositeError, CompositeToolSet, McpReport, McpSetError,
-    McpToolSet, ServerGrant, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
+    McpToolSet, McpTransport, PemBytes, ServerGrant, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
 };

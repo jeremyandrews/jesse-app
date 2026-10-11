@@ -100,7 +100,10 @@ fn the_record_covers_every_row_the_bridge_actually_spawns() {
         );
         for row in harness.shipped_rows().iter().copied() {
             let rec = r
-                .row(capability_label(row.capability), row.mcp.label())
+                .row(
+                    capability_label(row.capability),
+                    &harness.record_mcp_label(&probe_config(), row),
+                )
                 .unwrap_or_else(|| panic!("{id}: no recorded row for {}", row.label()));
             assert_eq!(
                 rec.toolset_args,

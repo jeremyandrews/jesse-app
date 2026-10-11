@@ -521,7 +521,7 @@ record, so `Harness::capability_args` records the **manifest** (`["--tools", "a,
 and the startup gate compares that by the same strict equality it uses for the other two.
 
 Since 0.112.0 it can also be granted **stdio MCP servers** (`[[direct.mcp]]`), which is the one
-place it starts a child process. Off by default and off in the shipped record. Each granted
+place it starts a child process. Off by default; the shipped record grants only `house` (0.170.0, Streamable HTTP, below). Each granted
 tool is named individually — there is no wildcard form — and appears as
 `mcp__<server>__<tool>`, so the granted names join the `--tools` token above and **a grant
 change costs a record change**: add a server and the bridge refuses to start until the battery
@@ -684,7 +684,11 @@ ca_file = "/path/to/pozza-ca.crt"     # optional, the bridge's own client
 - **Certificates:** `claude` and `codex` verify the internal CA through the macOS keychain. The
   bridge's own client cannot see the keychain and uses `ca_file` for one advisory
   `initialize` at startup (`house model reachable at …`, or a WARNING).
-- **`direct`** gets nothing: its MCP client is stdio only, and `house` is HTTP only.
+- **`direct`** (0.170.0) connects it over Streamable HTTP from the same table: same URL, same
+  token (as a bearer that never prints), and `ca_file` as one extra trust root for that client
+  only. Reads are `egress` and writes `vault_write`, so a `read` turn gets the twelve reads and a
+  `write` turn all twenty four. The direct record (`containment-direct.toml`, rows
+  `mcp:house`) commits the grant whether or not the table is present, so one record boots both.
 - **The prompt:** a turn whose harness registers the server gets one appended line telling it to
   ask `house` where things are and to record what the conversation teaches about the house.
 

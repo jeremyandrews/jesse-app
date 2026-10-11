@@ -521,7 +521,11 @@ mod tests {
         for (id, h) in &harnesses {
             for row in h.shipped_rows() {
                 running.entry(id.to_string()).or_default().insert(
-                    row.label(),
+                    format!(
+                        "{}/{}",
+                        capability_label(row.capability),
+                        h.record_mcp_label(&cfg, *row)
+                    ),
                     h.capability_args(&cfg, row.capability, row.mcp),
                 );
             }

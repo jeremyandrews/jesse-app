@@ -29,6 +29,10 @@
 //! child whose rendered set loads `house`: never on an argv, never in a file the bridge writes,
 //! never in a log line. Claude Code expands `${JESSE_HOUSE_TOKEN}` in the server's header;
 //! Codex reads the variable by name through `bearer_token_env_var`.
+//!
+//! The `direct` harness (0.170.0) takes the same token by value instead, as a
+//! `jesse_agent::mcp::Bearer` inside its HTTP grant ([`direct_house_grant`]), so for that
+//! harness it never enters any environment; the `Bearer`'s `Debug` prints a marker.
 
 use std::borrow::Cow;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -44,6 +48,115 @@ use crate::*;
 /// the server loudly on an unset variable rather than dial something; a test asserts it never
 /// reaches a rendered config on any harness.
 pub const HOUSE_URL_PLACEHOLDER: &str = "${JESSE_HOUSE_URL}";
+
+/// The twelve house tools that only read, by name as the server advertises them.
+///
+/// **ONE LIST FOR ALL THREE HARNESSES.** The `direct` grant is built from this and
+/// [`HOUSE_WRITE_TOOLS`]; the Claude Code and Codex allowlist (`DEFAULT_ALLOWED_TOOLS`, a
+/// literal string because it is concatenated at compile time) is pinned to the same two lists
+/// by equality in a test, so no harness can be granted a house tool the others are not.
+///
+/// From a live, authenticated `tools/list` against `house-mcp` 0.1.0 on 2026-10-10.
+pub const HOUSE_READ_TOOLS: [&str; 12] = [
+    "find",
+    "get_file",
+    "get_floor",
+    "history",
+    "in_space",
+    "list_files",
+    "list_sites",
+    "measure",
+    "nearest",
+    "render_plan",
+    "search_notes",
+    "what_is_at",
+];
+
+/// The twelve house tools that write. Every one takes a required `reason` the server records,
+/// and `delete` is a soft delete `restore` undoes. See [`HOUSE_READ_TOOLS`] for why this is the
+/// one list.
+pub const HOUSE_WRITE_TOOLS: [&str; 12] = [
+    "add_note",
+    "create_site",
+    "delete",
+    "import_dxf",
+    "import_geojson",
+    "link_ref",
+    "restore",
+    "set_attributes",
+    "upload_file",
+    "upsert_floor",
+    "upsert_object",
+    "upsert_space",
+];
+
+/// The server's name in tool names and records, on every harness.
+pub const HOUSE_SERVER: &str = "house";
+
+/// The `direct` harness's `house` grant as the record sees it, with no credential in it: every
+/// tool named, the reads `egress` and the writes `vault_write`.
+///
+/// **WHY THOSE CLASSES.** A read sends arguments the model wrote (a search string, a point, a
+/// note query) to a server off this host, which is what `egress` means; it is not `read`, which
+/// this project keeps for what stays inside the vault boundary. A write changes the owner's own
+/// records on the owner's own server, carries a `reason` the server logs, and is recoverable
+/// through `restore` and the server's change table: the profile of a vault write (owner data,
+/// recorded, reversible), not of a write to a third party's state. `external_write` is exposed
+/// at no level, so classing the writes that way would grant nothing. A `read` turn therefore
+/// gets the twelve reads and a `write` turn gets all twenty four.
+///
+/// THE RECORD COMMITS THIS GRANT WHETHER OR NOT THE DEPLOYMENT HAS A `[house]` TABLE, the
+/// precedent the CLI harnesses set in 0.169.0: the posture is fixed, and a deployment without a
+/// ready table runs it minus one server ([`direct_house_grant`] answers `None`), which is
+/// narrower and never wider.
+pub fn house_grant_shape() -> DirectMcpGrant {
+    DirectMcpGrant {
+        name: HOUSE_SERVER.to_string(),
+        command: String::new(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        tools: HOUSE_READ_TOOLS
+            .iter()
+            .chain(HOUSE_WRITE_TOOLS.iter())
+            .map(|t| t.to_string())
+            .collect(),
+        class: jesse_agent::tools::ActionClass::Egress,
+        per_tool_class: HOUSE_WRITE_TOOLS
+            .iter()
+            .map(|t| (t.to_string(), jesse_agent::tools::ActionClass::VaultWrite))
+            .collect(),
+    }
+}
+
+/// The `house` grant a direct turn connects with on this deployment, or `None` without a ready
+/// `[house]` table.
+///
+/// Built from the SAME table the CLI harnesses use: the same URL, the same token (read from the
+/// `0600` file at config load and handed over as a [`jesse_agent::mcp::Bearer`], whose `Debug`
+/// prints nothing), and the same `ca_file`, read now. A CA that cannot be read at turn time
+/// costs the grant for that turn and says so, rather than connecting with the wrong trust.
+pub fn direct_house_grant(cfg: &Config) -> Option<jesse_agent::mcp::ServerGrant> {
+    let h = cfg.house.ready()?;
+    let shape = house_grant_shape();
+    let mut grant =
+        jesse_agent::mcp::ServerGrant::http(HOUSE_SERVER, &h.url, shape.tools, shape.class)
+            .with_bearer(jesse_agent::mcp::Bearer::new(h.token.expose()));
+    grant.per_tool_class = shape.per_tool_class.into_iter().collect();
+    if let Some(ca) = &h.ca_file {
+        match std::fs::read(ca) {
+            Ok(pem) => grant = grant.with_ca_pem(pem),
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: the house `ca_file` {} cannot be read ({e}); this direct \
+                     turn runs without the house server.",
+                    ca.display()
+                );
+                return None;
+            }
+        }
+    }
+    Some(grant)
+}
 
 /// The variable a child reads the house token from. Named in the shipped declaration
 /// (`Bearer ${JESSE_HOUSE_TOKEN}`) and in Codex's bearer table, and set by
@@ -308,16 +421,16 @@ pub fn apply_house_env(cmd: &mut Command, cfg: &Config, config: &str) {
 }
 
 /// Whether a main turn on `harness` registers the `house` server on this deployment: a ready
-/// table, a spawned harness, and a main set that declares it. The `direct` harness never does
-/// (its MCP client is stdio only), and an operator's `JESSE_MAIN_MCP_CONFIG` decides for
-/// itself.
+/// table, and then either a spawned harness whose main set declares it (an operator's
+/// `JESSE_MAIN_MCP_CONFIG` decides for itself) or the `direct` harness, which connects it
+/// through [`direct_house_grant`] on every turn above `basic`.
 pub fn main_turn_loads_house(cfg: &Config, harness: &dyn Harness) -> bool {
     if cfg.house.ready().is_none() {
         return false;
     }
     match harness.runner() {
         Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HOUSE_MCP_ENTRY),
-        _ => false,
+        Runner::InProcess(_) => harness.id() == DIRECT_ID,
     }
 }
 
@@ -648,7 +761,106 @@ mod tests {
         cfg.house = ready();
         assert!(main_turn_loads_house(&cfg, &ClaudeCode));
         assert!(main_turn_loads_house(&cfg, &Codex));
+        assert!(
+            main_turn_loads_house(&cfg, &Direct),
+            "direct connects house over HTTP since 0.170.0"
+        );
+        cfg.house = HouseConfig::Absent;
         assert!(!main_turn_loads_house(&cfg, &Direct));
+    }
+
+    /// THE DIRECT GRANT EXISTS EXACTLY WHEN THE TABLE IS READY, and it is built from that
+    /// table: the same URL, the token as a bearer that never prints.
+    #[test]
+    fn a_direct_turn_gets_the_house_grant_exactly_when_the_table_is_ready() {
+        let mut cfg = test_config();
+        assert!(direct_house_grant(&cfg).is_none(), "no table, no grant");
+        cfg.house = HouseConfig::Refused("bad mode".into());
+        assert!(
+            direct_house_grant(&cfg).is_none(),
+            "a refused table, no grant"
+        );
+        cfg.house = ready();
+        let g = direct_house_grant(&cfg).expect("a ready table grants house");
+        assert_eq!(g.name, "house");
+        match &g.transport {
+            jesse_agent::mcp::McpTransport::Http {
+                url,
+                bearer,
+                ca_pem,
+            } => {
+                assert_eq!(url, "https://house.example/mcp");
+                assert_eq!(bearer, &Some(jesse_agent::mcp::Bearer::new("t0ken")));
+                assert!(ca_pem.is_none());
+            }
+            other => panic!("house is HTTP, got {other:?}"),
+        }
+        assert!(!format!("{g:?}").contains("t0ken"), "{g:?}");
+        assert!(jesse_agent::mcp::validate_grants(&[g]).is_ok());
+    }
+
+    /// THE TWENTY FOUR NAMES, BY EQUALITY, so a dropped tool and an invented one both fail
+    /// and the failure names it. The CLI allowlist is pinned to the same constants in
+    /// `config.rs`, which is what keeps the three harnesses in step.
+    #[test]
+    fn the_direct_house_grant_names_the_twenty_four_tools() {
+        let mut names = house_grant_shape().tools;
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "add_note",
+                "create_site",
+                "delete",
+                "find",
+                "get_file",
+                "get_floor",
+                "history",
+                "import_dxf",
+                "import_geojson",
+                "in_space",
+                "link_ref",
+                "list_files",
+                "list_sites",
+                "measure",
+                "nearest",
+                "render_plan",
+                "restore",
+                "search_notes",
+                "set_attributes",
+                "upload_file",
+                "upsert_floor",
+                "upsert_object",
+                "upsert_space",
+                "what_is_at",
+            ]
+        );
+    }
+
+    /// Reads at `read`, writes only at `write`, nothing at `basic`, and no tool is
+    /// `external_write`.
+    #[test]
+    fn the_house_reads_are_egress_and_the_writes_are_vault_writes() {
+        use jesse_agent::tools::{ActionClass, Level};
+        let g = house_grant_shape();
+        for t in HOUSE_READ_TOOLS {
+            assert_eq!(g.class_for(t), ActionClass::Egress, "{t}");
+        }
+        for t in HOUSE_WRITE_TOOLS {
+            assert_eq!(g.class_for(t), ActionClass::VaultWrite, "{t}");
+        }
+        let at = |l: Level| g.granted_names_at(l);
+        assert!(at(Level::Basic).is_empty());
+        let mut reads: Vec<String> = HOUSE_READ_TOOLS
+            .iter()
+            .map(|t| format!("mcp__house__{t}"))
+            .collect();
+        reads.sort();
+        assert_eq!(at(Level::Read), reads);
+        assert_eq!(at(Level::Write).len(), 24);
+        for t in HOUSE_WRITE_TOOLS {
+            assert!(at(Level::Write).contains(&format!("mcp__house__{t}")));
+        }
     }
 
     #[test]

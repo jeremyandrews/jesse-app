@@ -1360,13 +1360,16 @@ async fn a_grant_that_matches_nothing_is_a_named_warning() {
 /// for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_that_will_not_start_is_a_warning_not_a_failure() {
-    let mut grant = ServerGrant::new(
+    let grant = ServerGrant::new(
         "absent",
         "/nonexistent/jesse-mcp-server-that-does-not-exist",
         ["probe_echo"],
         ActionClass::Read,
-    );
-    grant.env.insert("PATH".into(), String::new());
+    )
+    .with_env(std::collections::BTreeMap::from([(
+        "PATH".to_string(),
+        String::new(),
+    )]));
     let set = McpToolSet::connect(
         &[grant],
         Level::Read,

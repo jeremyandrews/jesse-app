@@ -204,17 +204,17 @@
     ]
   },
   "direct": {
-    "basic/none": [
+    "basic/house": [
       "--tools",
       ""
     ],
-    "read/none": [
+    "read/house": [
       "--tools",
-      "fetch_url,vault_list,vault_read,vault_search"
+      "fetch_url,vault_list,vault_read,vault_search,mcp__house__find,mcp__house__get_file,mcp__house__get_floor,mcp__house__history,mcp__house__in_space,mcp__house__list_files,mcp__house__list_sites,mcp__house__measure,mcp__house__nearest,mcp__house__render_plan,mcp__house__search_notes,mcp__house__what_is_at"
     ],
-    "write/none": [
+    "write/house": [
       "--tools",
-      "deliver_artifact,fetch_url,vault_edit,vault_list,vault_move,vault_read,vault_search,vault_write"
+      "deliver_artifact,fetch_url,vault_edit,vault_list,vault_move,vault_read,vault_search,vault_write,mcp__house__add_note,mcp__house__create_site,mcp__house__delete,mcp__house__find,mcp__house__get_file,mcp__house__get_floor,mcp__house__history,mcp__house__import_dxf,mcp__house__import_geojson,mcp__house__in_space,mcp__house__link_ref,mcp__house__list_files,mcp__house__list_sites,mcp__house__measure,mcp__house__nearest,mcp__house__render_plan,mcp__house__restore,mcp__house__search_notes,mcp__house__set_attributes,mcp__house__upload_file,mcp__house__upsert_floor,mcp__house__upsert_object,mcp__house__upsert_space,mcp__house__what_is_at"
     ]
   }
 }

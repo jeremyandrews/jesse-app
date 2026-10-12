@@ -1575,6 +1575,77 @@ grant built from the same table: the same URL, the same token, the same `ca_file
 Nothing else is widened for `direct`: no other server is granted, and no stdio behaviour
 changed.
 
+### Health archive (read-only SQL, 2026-10-12)
+
+Bridge 0.173.0 adds `healthdb`, this repository's own `jesse-healthdb-mcp`, to every main turn
+on **all three harnesses in the same change**, as the twenty-fourth server on Claude Code and
+Codex and a stdio grant on `direct`. It reads the owner's health archive in Postgres
+(`healthdb.pozza:5432`, database `health`): every Apple Health sample, workout, GPS route and
+diet row the bridge archives. Two tools, `healthdb_schema` and `healthdb_query`; the second
+takes caller-written SQL.
+
+#### A server the deployment switches on
+
+Declared in the compiled `MAIN_CHILD_MCP_CONFIG` as a bare `jesse-healthdb-mcp` (in
+`deploy-bins.toml`), so the row label, the grant and every record describe one posture.
+`render_healthdb_mcp` keeps the entry only when the `[healthdb]` table has an `ro_url_file`;
+without one the child runs the recorded posture minus this server, never wider. `direct`
+commits the grant in its record whether or not it is configured, and connects it only when it
+is.
+
+#### The credential
+
+The `health_ro` role, which may `SELECT` from `raw` and `analytics` and nothing else. Its URL is
+in `ro_url_file`, refused at startup unless a regular file owned by the bridge's user with no
+group or other permission, holding a `postgres://` URL, and refused when it names the same role
+as `url_file` (the owner). **The bridge never passes the URL on.** A child gets two PATHS,
+`JESSE_HEALTHDB_RO_URL_FILE` and `JESSE_HEALTHDB_CA_FILE`, plus the ledger path; the server
+reads the file itself, re-runs the same mode and owner checks as its own uid, and forces
+`verify-full` TLS against `ca_file` whatever the URL's `sslmode` says. Codex forwards the three
+names through `CODEX_MCP_ENV_PASSTHROUGH`; `direct` builds the stdio grant's environment from
+its five forwarded variables plus these three, and nothing else. The owner credential is never
+offered to the server.
+
+#### Every guard is in the server
+
+The role is one layer. These hold whatever the role turns out to be allowed:
+
+- **One read statement.** A lexer (quotes, quoted identifiers, dollar quotes, nested comments)
+  refuses a second statement, an unterminated quote or comment, and anything not beginning
+  `SELECT`, `WITH`, `TABLE` or `VALUES`. The statement then goes through the extended protocol,
+  which refuses a second statement again, as a subquery, which refuses a data-modifying `WITH`.
+- **Read only.** Each call is a fresh connection, `BEGIN READ ONLY`, the statement, `ROLLBACK`.
+  A rollback also reverts any `set_config` the statement made. Tested as the OWNER role, which
+  can write: `lo_create` and `FOR UPDATE` are refused by the transaction (25006).
+- **Time, memory, size.** `statement_timeout` 15 s, `work_mem` 16 MB, a 25 s client ceiling, at
+  most 500 rows, every string cut at 500 characters, with flags for either cut.
+- **Logs carry no content.** One line per call (tool, outcome, ms, rows) to stderr and to
+  `<state_dir>/healthdb-mcp-calls.log`; never the SQL, a value, an error message or the URL.
+  Postgres's own error message goes back to the turn that asked, and nowhere else.
+
+#### Classes on `direct`: both tools are `egress`
+
+The query sends SQL the model wrote to a server off this host. That the server is the owner's
+does not change the shape of the channel, so it is `egress`, not `read`; `egress` is exposed at
+`read` and `write` alike. On Claude Code and Codex the grant sits in `DEFAULT_ALLOWED_TOOLS`,
+the main (write) turn's list; a `Read` CLI child keeps its qmd-only list, as for `house`.
+
+#### What it adds to the risk
+
+- **One new credential**, read only, and one new LAN host behind the internal CA.
+- **The owner's whole health history is readable by a turn**: heart rate, sleep, weight, diet,
+  and GPS routes, which reveal where he lives, runs and travels. A turn steered by injected text
+  can read any of it and put it in a reply. This is the point of the server and is accepted on
+  the owner's decision; it adds no new egress on Claude Code and Codex beyond what a main turn
+  already holds, and on `direct` it is subject to the same `egress` class as every network read.
+- **No write path.** No tool writes, and the role, the transaction and the statement filter
+  each refuse a write independently.
+- **Untrusted text.** Sample metadata and diet notes are whatever reached Apple Health or the
+  CSVs, and enter the turn at the same trust level as message bodies.
+- **The prompt names it.** A turn whose harness registers the server is told, in one appended
+  line, to query the archive for health questions past the attached block and to quote the
+  numbers from the result. A turn that cannot reach it is not told.
+
 ### Roon (no auth, 2026-08-07)
 
 `unified-hifi-control` (open-horizon-labs), reached over Streamable HTTP on the

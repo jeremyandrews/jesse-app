@@ -966,6 +966,17 @@ pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
             "JESSE_VISION_TIMEOUT_SECS",
         ],
     ),
+    // `healthdb` (0.173.0) reads two PATHS and a ledger path, never a credential: the bridge
+    // sets them on the Codex child that loads the server ([`crate::apply_healthdb_env`]) and
+    // they are not in the plist. Without the first two it exits at once and registers nothing.
+    (
+        "healthdb",
+        &[
+            "JESSE_HEALTHDB_RO_URL_FILE",
+            "JESSE_HEALTHDB_CA_FILE",
+            "JESSE_HEALTHDB_MCP_LEDGER",
+        ],
+    ),
 ];
 
 /// Fixed, NON-SECRET environment values a stdio server is started with on Codex, set with
@@ -1944,11 +1955,12 @@ impl Codex {
         // resolves to `None` and therefore to the standard `Read` grant.
         //
         // The config RENDERED for this deployment: the `house` entry gets its URL from the
-        // `[house]` table, or is removed when there is no ready table. The set, and so the
+        // `[house]` table, or is removed when there is no ready table; `healthdb` is removed
+        // when `[healthdb]` has no `ro_url_file`. The set, and so the
         // grant, is still resolved from the shipped string.
         let mcp = codex_mcp_args(
             CODEX_ID,
-            &render_house_mcp(cfg, req.mcp_config),
+            &render_child_mcp(cfg, req.mcp_config),
             row_allowed_tools(
                 cfg,
                 req.capability,
@@ -2030,8 +2042,9 @@ impl Codex {
             }
         }
         // The house token, BY VALUE ON THIS CHILD ONLY, under the name `bearer_token_env_var`
-        // above tells Codex to read. Absent when this turn's rendered set has no `house`.
-        apply_house_env(&mut cmd, cfg, req.mcp_config);
+        // above tells Codex to read; absent when this turn's rendered set has no `house`. And
+        // the health archive server's paths, which `CODEX_MCP_ENV_PASSTHROUGH` publishes to it.
+        apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
         Ok(cmd)
     }
 }

@@ -908,6 +908,8 @@ pub async fn start_turn(
             floor_override: req.floor_override.as_deref(),
             // Told about the house model only when the harness serving this turn registers it.
             house: main_turn_loads_house(&st.cfg, st.cfg.harnesses.serving(&active)),
+            // …and about the health archive only when it registers that server.
+            healthdb: main_turn_loads_healthdb(&st.cfg, st.cfg.harnesses.serving(&active)),
         },
         &device_contexts,
         &st.cfg.persona,

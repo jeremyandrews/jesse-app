@@ -1265,10 +1265,14 @@ One content-free line per call (tool, outcome, ms, rows) goes to stderr and to
 `healthdb_mcp_query_total` and `healthdb_mcp_schema_total` by outcome (`ok`, `rejected`,
 `timeout`, `error`, `unavailable`).
 
-**Not yet registered on any harness.** Adding a server to a child MCP set moves the main row
-labels on every harness, which needs a live containment battery per harness and the owner
-re-signing Codex's `[[accepted]]` blocks. The tests are in `src/healthquery.rs` and
-`tests/healthdb_mcp_pg.rs`.
+**Registered on all three harnesses since 0.173.0**, when `[healthdb]` has an `ro_url_file`:
+Claude Code and Codex main turns carry it as the twenty-fourth server (`healthdb` in
+`MAIN_CHILD_MCP_CONFIG`, kept or dropped by `render_child_mcp`), with both tools in
+`DEFAULT_ALLOWED_TOOLS`; Codex forwards the three path variables through
+`CODEX_MCP_ENV_PASSTHROUGH`; `direct` connects it as a stdio grant whose tools are `egress`.
+A turn that registers it is told, in one line, to query the archive for health questions past
+the attached block and to quote the numbers. The binary is in `deploy-bins.toml`. The tests
+are in `src/healthquery.rs` and `tests/healthdb_mcp_pg.rs`.
 
 ## Recent-workouts context (`health_context`)
 

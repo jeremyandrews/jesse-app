@@ -337,6 +337,23 @@ pub enum McpSet {
     /// [`crate::render_house_mcp`]). So a deployment without the table runs this row's posture
     /// MINUS one server, which is narrower than what the record vouches for, never wider.
     MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
+    /// The twenty-three-server set PLUS **`healthdb`** ([`MAIN_CHILD_MCP_CONFIG`]): every main
+    /// turn on BOTH harnesses from bridge 0.173.0. Twenty-four servers.
+    ///
+    /// **WHAT IS NEW IS THE OWNER'S HEALTH ARCHIVE, READ ONLY**: this repository's own
+    /// `jesse-healthdb-mcp`, connecting as `health_ro` with verify-full TLS to the Postgres that
+    /// holds every Apple Health sample, workout, GPS route and diet row. One new credential (the
+    /// read-only role's URL, read by the server from a `0600` file the bridge names by path) and
+    /// one new LAN host. Its query tool takes caller-written SQL, so the guards (one read
+    /// statement, a read-only transaction, a timeout, a row cap) live in the server as well as
+    /// in the role. A distinct row for the standing reason: the record must be able to say which
+    /// rows held which credential.
+    ///
+    /// **THE SECOND SERVER A DEPLOYMENT CAN SWITCH OFF.** `healthdb` is declared in the shipped
+    /// const and kept on a child only when `[healthdb]` has an `ro_url_file`
+    /// ([`crate::render_healthdb_mcp`]); `house` stays conditional as before. A deployment
+    /// without either runs this row's posture minus that server, never wider.
+    MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb,
     /// **The six servers the owner's own replies arrive on, and NOTHING else**
     /// ([`REPLIES_MCP_CONFIG`]): `google`, `google-perseido`, `fastmail`, `slack`, `whatsapp`
     /// and `imcp`. The TODAY-BRIEF child, when sent-message search is switched on.
@@ -462,6 +479,12 @@ const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_L
 slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+\
 google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+clockify+house";
 
+/// The label for [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb`], written ONCE for the reason every label above it is.
+const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL:
+    &str = "qmd+\
+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+\
+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+clockify+house+healthdb";
+
 /// The label for [`McpSet::Replies`], written ONCE for the reason every label above it is: a
 /// typo in the `parse` arm would fail the round trip for exactly the row a startup gate needs
 /// to resolve, and it would fail it by returning `None` rather than by failing to compile.
@@ -506,6 +529,9 @@ impl McpSet {
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => {
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL
             }
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL
+            }
             McpSet::Replies => REPLIES_LABEL,
         }
     }
@@ -543,6 +569,9 @@ impl McpSet {
             }
             MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL => {
                 Some(McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse)
+            }
+            MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL => {
+                Some(McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb)
             }
             REPLIES_LABEL => Some(McpSet::Replies),
             _ => None,
@@ -582,6 +611,9 @@ impl McpSet {
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => {
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG
+            }
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
                 MAIN_CHILD_MCP_CONFIG
             }
             McpSet::Replies => REPLIES_MCP_CONFIG,
@@ -595,7 +627,7 @@ impl McpSet {
     /// It is a literal array rather than something derived, so adding a variant without adding
     /// it here is caught by [`every_set_round_trips_through_its_config`] rather than silently
     /// making that set unresolvable from a spawn site's config string.
-    pub const ALL: [McpSet; 18] = [
+    pub const ALL: [McpSet; 19] = [
         McpSet::None,
         McpSet::Qmd,
         McpSet::QmdSlack,
@@ -613,6 +645,7 @@ impl McpSet {
         McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex,
         McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify,
         McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
+        McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb,
         McpSet::Replies,
     ];
 
@@ -663,7 +696,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -694,6 +730,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             // `Replies` loads Slack for the owner's own sent messages. Its SEND tools are
             // registered by the server and withheld by the allowlist ALONE — see the variant.
             | McpSet::Replies => true,
@@ -718,7 +755,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -748,7 +788,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -773,7 +816,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -796,6 +842,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             // `Replies` loads it for the work mailbox. Read-only at three layers: the
             // `--read-only` server flag, `*.readonly` OAuth scopes, and the allowlist —
             // which grants the GMAIL READ TOOLS ONLY, not Drive and not Calendar.
@@ -823,7 +870,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -845,6 +895,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             // `Replies` loads it for the personal mailbox. The server registers three tools
             // and all three read: there is no write tool to withhold here.
             | McpSet::Replies => true,
@@ -873,7 +924,8 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => true,
         }
     }
 
@@ -898,7 +950,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -924,7 +979,8 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetes | McpSet::MessagesBuildPlacesInboundKubernetesRybbit | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => true,
         }
     }
 
@@ -951,6 +1007,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             | McpSet::Replies => true,
         }
     }
@@ -990,6 +1047,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             | McpSet::Replies => true,
         }
     }
@@ -1020,6 +1078,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             | McpSet::Replies => true,
         }
     }
@@ -1051,7 +1110,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1083,7 +1145,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1114,7 +1179,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1151,7 +1219,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1182,7 +1253,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1213,7 +1287,10 @@ impl McpSet {
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1245,7 +1322,10 @@ impl McpSet {
             | McpSet::Replies => false,
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1276,7 +1356,10 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::Replies => false,
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
         }
     }
 
@@ -1309,7 +1392,43 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => true,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+                true
+            }
+        }
+    }
+
+    /// Whether this set DECLARES the **healthdb** server, same exhaustiveness rule as every
+    /// sibling above, and never a `_` arm.
+    ///
+    /// A `true` means the row may start `jesse-healthdb-mcp`, which reads the `health_ro`
+    /// role's URL from a `0600` file and runs one read-only statement at a time against the
+    /// owner's health archive on the LAN: every Apple Health sample, workout, GPS route and diet
+    /// row. It writes nothing. Free text in the archive (sample metadata, diet notes) is
+    /// untrusted text that reaches the turn. A deployment with no `[healthdb] ro_url_file`
+    /// renders the set WITHOUT the server; this predicate describes the most a row can hold.
+    pub fn contains_healthdb(&self) -> bool {
+        match self {
+            McpSet::None
+            | McpSet::Qmd
+            | McpSet::QmdSlack
+            | McpSet::QmdSlackBrowser
+            | McpSet::House
+            | McpSet::Morning
+            | McpSet::Messages
+            | McpSet::MessagesBuild
+            | McpSet::MessagesBuildPlaces
+            | McpSet::MessagesBuildPlacesInbound
+            | McpSet::MessagesKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::Replies => false,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => true,
         }
     }
 
@@ -1387,6 +1506,9 @@ impl McpSet {
         if self.contains_house() {
             out.push("house");
         }
+        if self.contains_healthdb() {
+            out.push("healthdb");
+        }
         out
     }
 }
@@ -1457,11 +1579,11 @@ pub const CLAUDE_CODE_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb,
     },
     // The TODAY-BRIEF child with sent-message search on. A THIRD `Read` containment, which is
     // the whole reason a row is keyed on (capability, MCP set): this one reads the owner's own
@@ -1473,18 +1595,19 @@ pub const CLAUDE_CODE_SHIPPED_ROWS: [ContainmentRow; 5] = [
 ];
 
 /// Codex's rows. From 0.165.0 its main turn loads the SAME set Claude Code's does, from
-/// 0.169.0 the twenty-three-server [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse`], so its main rows carry the same
+/// 0.173.0 the twenty-four-server [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb`], so its main rows carry the same
 /// labels as Claude Code's (in a different record).
 ///
-/// THE ROW LABELS HAVE NOW MOVED NINE TIMES, AND EACH TIME IT COST THE SAME TWO SIGNATURES.
+/// THE ROW LABELS HAVE NOW MOVED TEN TIMES, AND EACH TIME IT COST THE SAME TWO SIGNATURES.
 /// Until 0.66.0 Codex's main turn was `qmd` alone (`read/qmd`, `write/qmd`); 0.66.0 made it
 /// `qmd+slack+browser`; 0.67.0 made it [`McpSet::House`]; 0.69.0 made it
 /// [`McpSet::Morning`]; 0.73.0 made it [`McpSet::Messages`]; 0.76.0 moved `+imessage+` to
 /// `+imcp+`; 0.146.0 made it [`McpSet::MessagesKubernetes`]; 0.165.0 made it
 /// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1`]; 0.166.0 made it
 /// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex`]; 0.167.0 made it
-/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify`]; 0.169.0 makes it
-/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse`]. Each rename orphans the two
+/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify`]; 0.169.0 made it
+/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse`]; 0.173.0 makes it
+/// [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb`]. Each rename orphans the two
 /// operator `[[accepted]]` blocks in `containment-codex.toml`, because acceptances match by
 /// `ContainmentRow::label` — so no such change can be made unilaterally. Every time, the
 /// six `read_*` known-opens were re-signed under the new labels by the owner, on the same
@@ -1514,11 +1637,11 @@ pub const CODEX_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb,
     },
     // The brief child on Codex, for the standing reason a capability lands on every harness in
     // the same change. Its LABEL is the same as Claude Code's — the set is one set — so unlike
@@ -2230,7 +2353,7 @@ mod tests {
         // The corrected row key: `Read` names TWO containments (the main read-only turn with
         // qmd, the vault-QA child with no servers), so one `Read` row would describe a
         // posture that was never probed.
-        // Claude Code's main rows carry the TWENTY-THREE-server set, and so do Codex's from
+        // Claude Code's main rows carry the TWENTY-FOUR-server set, and so do Codex's from
         // 0.165.0 on. The old asymmetry is still why this asserts each harness: one harness
         // gaining a server — a code-execution one in 0.86.0, a network one in 0.100.0, a
         // document-fetching one in 0.115.0 — must not silently re-key the other harness's
@@ -2241,8 +2364,8 @@ mod tests {
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL}"),
-                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL}"),
+                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL}"),
+                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );
@@ -2272,6 +2395,9 @@ mod tests {
             // Retired in 0.169.0 when `house` landed on both harnesses: the twenty-two-server
             // set.
             MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_LABEL,
+            // Retired in 0.173.0 when `healthdb` landed on both harnesses: the
+            // twenty-three-server set.
+            MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL,
         ] {
             let set = McpSet::parse(label).unwrap_or_else(|| panic!("{label} must parse"));
             assert_eq!(set.label(), label, "the label must round-trip exactly");
@@ -2426,8 +2552,8 @@ mod tests {
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL}"),
-                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_LABEL}"),
+                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL}"),
+                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );

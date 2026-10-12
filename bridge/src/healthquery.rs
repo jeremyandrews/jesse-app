@@ -31,6 +31,7 @@
 //! URL. A Postgres error message goes back to the turn that asked, because the turn needs it to
 //! fix its query, and nowhere else.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -792,6 +793,140 @@ pub async fn run_health_tool(
     }
 }
 
+// ---- Registration -------------------------------------------------------------------------
+
+/// The server's name in every MCP set and grant: tools are `mcp__healthdb__<tool>`.
+pub const HEALTHDB_SERVER: &str = "healthdb";
+/// The bare command every harness starts, resolved from the child's `PATH`.
+pub const HEALTHDB_COMMAND: &str = "jesse-healthdb-mcp";
+
+/// The two tool names, from the closed set, in sorted order.
+pub fn healthdb_tool_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = HealthDbTool::ALL.iter().map(|t| t.tool_name()).collect();
+    names.sort_unstable();
+    names
+}
+
+/// Whether this deployment starts the server at all: a ready `[healthdb]` table WITH an
+/// `ro_url_file`. Without one, no harness registers it and no process is started.
+pub fn healthdb_mcp_ready(cfg: &Config) -> Option<&HealthDbSettings> {
+    cfg.healthdb
+        .ready()
+        .filter(|s| s.healthdb_mcp_env().is_some())
+}
+
+/// The `--mcp-config` a child is given, as far as `healthdb` goes: a config that does not carry
+/// the shipped entry ([`HEALTHDB_MCP_ENTRY`]) is returned unchanged, byte for byte; one that
+/// does keeps it on a deployment that starts the server and loses it on any other.
+pub fn render_healthdb_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
+    if !config.contains(HEALTHDB_MCP_ENTRY) || healthdb_mcp_ready(cfg).is_some() {
+        return Cow::Borrowed(config);
+    }
+    Cow::Owned(config.replacen(HEALTHDB_MCP_ENTRY, "", 1))
+}
+
+/// Every conditional server, rendered: `house` ([`render_house_mcp`]) then `healthdb`. The one
+/// function a spawn site calls, so a third conditional server is a change here and not at each
+/// site.
+pub fn render_child_mcp(cfg: &Config, config: &str) -> String {
+    render_healthdb_mcp(cfg, &render_house_mcp(cfg, config)).into_owned()
+}
+
+/// The variables a `jesse-healthdb-mcp` child reads, as `(name, value)`: the two paths, and the
+/// ledger's path when the bridge has a state directory, so the server's calls land where
+/// `GET /health` tallies them. `None` when the deployment does not start the server.
+pub fn healthdb_child_env(cfg: &Config) -> Option<Vec<(&'static str, String)>> {
+    let s = healthdb_mcp_ready(cfg)?;
+    let mut env: Vec<(&'static str, String)> = s.healthdb_mcp_env()?.into_iter().collect();
+    if let Some(dir) = cfg.state_dir.as_deref() {
+        env.push((
+            HEALTHQ_ENV_LEDGER,
+            PathBuf::from(dir)
+                .join(HEALTHQ_LEDGER_FILE)
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
+    Some(env)
+}
+
+/// Put the server's variables on a child whose rendered set loads it, and on no other. Paths
+/// only: nothing here is a credential.
+pub fn apply_healthdb_env(cmd: &mut Command, cfg: &Config, config: &str) {
+    if !config.contains(HEALTHDB_MCP_ENTRY) {
+        return;
+    }
+    if let Some(env) = healthdb_child_env(cfg) {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+    }
+}
+
+/// Every conditional server's environment ([`apply_house_env`], [`apply_healthdb_env`]).
+pub fn apply_child_mcp_env(cmd: &mut Command, cfg: &Config, config: &str) {
+    apply_house_env(cmd, cfg, config);
+    apply_healthdb_env(cmd, cfg, config);
+}
+
+/// Whether a main turn on `harness` registers `healthdb` on this deployment: the server is
+/// started here, and the harness's main set declares it, or it is `direct`, which connects it
+/// through [`direct_healthdb_grant`] on every turn above `basic`.
+pub fn main_turn_loads_healthdb(cfg: &Config, harness: &dyn Harness) -> bool {
+    if healthdb_mcp_ready(cfg).is_none() {
+        return false;
+    }
+    match harness.runner() {
+        Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HEALTHDB_MCP_ENTRY),
+        Runner::InProcess(_) => harness.id() == DIRECT_ID,
+    }
+}
+
+/// The `healthdb` grant as the `direct` record commits it, with or without the table, as
+/// [`house_grant_shape`] is: names and classes, nothing a turn could connect with.
+///
+/// Both tools are `egress`, not `read`: the query tool sends caller-authored SQL to a server off
+/// this host, which is the channel the class exists to name, even though that server is the
+/// owner's. `egress` is exposed at `read` and `write` alike.
+pub fn healthdb_grant_shape() -> DirectMcpGrant {
+    DirectMcpGrant {
+        name: HEALTHDB_SERVER.to_string(),
+        command: String::new(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        tools: healthdb_tool_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        class: jesse_agent::tools::ActionClass::Egress,
+        per_tool_class: BTreeMap::new(),
+    }
+}
+
+/// The `healthdb` grant a direct turn connects with on this deployment, or `None` when the
+/// server is not started here. A stdio grant whose environment is the direct harness's five
+/// forwarded variables plus the server's own paths, and nothing else.
+pub fn direct_healthdb_grant(cfg: &Config) -> Option<jesse_agent::mcp::ServerGrant> {
+    let env = healthdb_child_env(cfg)?;
+    let shape = healthdb_grant_shape();
+    let mut vars: BTreeMap<String, String> = DIRECT_MCP_FORWARDED_ENV
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect();
+    vars.extend(env.into_iter().map(|(k, v)| (k.to_string(), v)));
+    Some(jesse_agent::mcp::ServerGrant {
+        name: HEALTHDB_SERVER.to_string(),
+        transport: jesse_agent::mcp::McpTransport::Stdio {
+            command: HEALTHDB_COMMAND.to_string(),
+            args: Vec::new(),
+            env: vars,
+        },
+        tools: shape.tools,
+        action_class_default: shape.class,
+        per_tool_class: Default::default(),
+    })
+}
+
 // ---- The ledger and the counters ----------------------------------------------------------
 
 /// One line per call, appended by the server and tallied by the bridge for `GET /health`.
@@ -1149,5 +1284,236 @@ mod tests {
         assert_eq!(c[METRIC_MCP_SCHEMA]["ok"], 1);
         assert!(healthdb_mcp_counters(&dir.join("absent")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Registration: which harness carries the server, and with what, configured and not.
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::testutil::*;
+
+    const RO_FILE: &str = "/srv/jesse/healthdb-ro-url";
+    const CA_FILE: &str = "/srv/jesse/healthdb-ca.crt";
+
+    /// A ready `[healthdb]` table, with or without `ro_url_file`. The URL is the OWNER's and
+    /// must never reach anything this module builds.
+    fn table(ro: bool) -> HealthDbConfig {
+        HealthDbConfig::Ready(HealthDbSettings {
+            url: HealthDbUrl::for_test("postgres://health:OWNERSECRET@healthdb.example/health"),
+            url_file: PathBuf::from("/srv/jesse/healthdb-url"),
+            ca_file: PathBuf::from(CA_FILE),
+            mirror_diet: true,
+            ro_url_file: ro.then(|| PathBuf::from(RO_FILE)),
+        })
+    }
+
+    fn configured() -> Config {
+        let mut cfg = test_config();
+        cfg.healthdb = table(true);
+        cfg.state_dir = Some("/srv/jesse/state".to_string());
+        cfg
+    }
+
+    /// Every way a deployment can lack the server: no table, a refused one, a ready one with
+    /// no `ro_url_file`.
+    fn unconfigured() -> Vec<Config> {
+        [
+            HealthDbConfig::Absent,
+            HealthDbConfig::Refused("x".into()),
+            table(false),
+        ]
+        .into_iter()
+        .map(|h| {
+            let mut cfg = test_config();
+            cfg.healthdb = h;
+            cfg
+        })
+        .collect()
+    }
+
+    fn servers_on_argv(args: &[String]) -> serde_json::Map<String, Value> {
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let v: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        v["mcpServers"].as_object().unwrap().clone()
+    }
+
+    fn claude_main_args(cfg: &Config) -> Vec<String> {
+        build_claude_args(
+            cfg,
+            "hi",
+            None,
+            Capability::Write,
+            main_mcp_config(cfg, &ClaudeCode),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn the_rendered_set_keeps_healthdb_exactly_when_ro_url_file_is_set() {
+        let with = render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG);
+        assert!(with.contains(HEALTHDB_MCP_ENTRY));
+        for cfg in unconfigured() {
+            let without = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG);
+            assert!(!without.contains("healthdb"), "{without}");
+            // No house table in the fixture either, so both conditional servers are gone and
+            // nothing else moved: the twenty-two-server set, byte for byte.
+            assert_eq!(
+                without,
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG
+            );
+        }
+        // Every other set is untouched either way.
+        for set in McpSet::ALL.into_iter().filter(|s| !s.contains_healthdb()) {
+            for cfg in [configured(), test_config()] {
+                if set.contains_house() {
+                    continue;
+                }
+                assert_eq!(render_child_mcp(&cfg, set.config()), set.config());
+            }
+        }
+    }
+
+    #[test]
+    fn claude_code_registers_healthdb_when_configured_and_not_otherwise() {
+        let args = claude_main_args(&configured());
+        let servers = servers_on_argv(&args);
+        assert_eq!(
+            servers["healthdb"],
+            json!({"type": "stdio", "command": HEALTHDB_COMMAND, "args": []})
+        );
+        assert!(args.join("\n").contains("mcp__healthdb__healthdb_query"));
+        for cfg in unconfigured() {
+            let args = claude_main_args(&cfg);
+            assert!(!servers_on_argv(&args).contains_key("healthdb"));
+            // The GRANT is the row's either way: the set resolves from the shipped string.
+            assert!(args.join("\n").contains("mcp__healthdb__healthdb_query"));
+        }
+        assert!(main_turn_loads_healthdb(&configured(), &ClaudeCode));
+    }
+
+    #[test]
+    fn codex_registers_healthdb_with_its_paths_forwarded_when_configured_and_not_otherwise() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            &render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG),
+            DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("renders");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.healthdb.command="jesse-healthdb-mcp""#),
+            "{flat}"
+        );
+        assert!(
+            flat.contains(
+                r#"mcp_servers.healthdb.enabled_tools=["healthdb_query", "healthdb_schema"]"#
+            ),
+            "{flat}"
+        );
+        let env_vars = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.healthdb.env_vars="))
+            .expect("Codex forwards the server's variables by name");
+        for name in [
+            HEALTHQ_ENV_RO_URL_FILE,
+            HEALTHQ_ENV_CA_FILE,
+            HEALTHQ_ENV_LEDGER,
+        ] {
+            assert!(env_vars.contains(name), "{env_vars}");
+        }
+        assert!(main_turn_loads_healthdb(&configured(), &Codex));
+        for cfg in unconfigured() {
+            let args = codex_mcp_args(
+                CODEX_ID,
+                &render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG),
+                DEFAULT_ALLOWED_TOOLS,
+            )
+            .expect("renders");
+            assert!(
+                !args.iter().any(|a| a.starts_with("mcp_servers.healthdb.")),
+                "{args:?}"
+            );
+            assert!(!main_turn_loads_healthdb(&cfg, &Codex));
+            assert!(!main_turn_loads_healthdb(&cfg, &ClaudeCode));
+        }
+    }
+
+    #[test]
+    fn direct_gets_a_stdio_grant_with_paths_only_when_configured() {
+        let g = direct_healthdb_grant(&configured()).expect("configured");
+        assert_eq!(g.name, HEALTHDB_SERVER);
+        assert_eq!(g.tools, ["healthdb_query", "healthdb_schema"]);
+        assert_eq!(
+            g.action_class_default,
+            jesse_agent::tools::ActionClass::Egress
+        );
+        let jesse_agent::mcp::McpTransport::Stdio { command, args, env } = &g.transport else {
+            panic!("healthdb is stdio");
+        };
+        assert_eq!(command, HEALTHDB_COMMAND);
+        assert!(args.is_empty());
+        assert_eq!(env[HEALTHQ_ENV_RO_URL_FILE], RO_FILE);
+        assert_eq!(env[HEALTHQ_ENV_CA_FILE], CA_FILE);
+        assert_eq!(
+            env[HEALTHQ_ENV_LEDGER],
+            "/srv/jesse/state/healthdb-mcp-calls.log"
+        );
+        let extra: Vec<&String> = env
+            .keys()
+            .filter(|k| !DIRECT_MCP_FORWARDED_ENV.contains(&k.as_str()))
+            .collect();
+        assert_eq!(
+            extra.len(),
+            3,
+            "the forwarded five and the three paths: {extra:?}"
+        );
+        assert!(!format!("{g:?}").contains("OWNERSECRET"));
+        assert!(main_turn_loads_healthdb(&configured(), &Direct));
+        for cfg in unconfigured() {
+            assert!(direct_healthdb_grant(&cfg).is_none());
+            assert!(!main_turn_loads_healthdb(&cfg, &Direct));
+        }
+    }
+
+    #[test]
+    fn only_a_child_that_loads_healthdb_gets_its_paths_and_never_a_url() {
+        let names = [
+            HEALTHQ_ENV_RO_URL_FILE,
+            HEALTHQ_ENV_CA_FILE,
+            HEALTHQ_ENV_LEDGER,
+        ];
+        let env_of = |cmd: &Command| -> Vec<(String, String)> {
+            cmd.as_std()
+                .get_envs()
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.to_string_lossy().into_owned(),
+                        v?.to_string_lossy().into_owned(),
+                    ))
+                })
+                .collect()
+        };
+        let mut cmd = Command::new("true");
+        apply_child_mcp_env(&mut cmd, &configured(), MAIN_CHILD_MCP_CONFIG);
+        let env = env_of(&cmd);
+        for n in names {
+            assert!(env.iter().any(|(k, _)| k == n), "{n}: {env:?}");
+        }
+        assert!(!format!("{env:?}").contains("OWNERSECRET"));
+
+        let mut cmd = Command::new("true");
+        apply_child_mcp_env(&mut cmd, &configured(), McpSet::Replies.config());
+        assert!(env_of(&cmd)
+            .iter()
+            .all(|(k, _)| !names.contains(&k.as_str())));
+        for cfg in unconfigured() {
+            let mut cmd = Command::new("true");
+            apply_child_mcp_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG);
+            assert!(env_of(&cmd)
+                .iter()
+                .all(|(k, _)| !names.contains(&k.as_str())));
+        }
     }
 }

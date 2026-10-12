@@ -102,6 +102,12 @@ impl HealthDbUrl {
     pub fn connect_options(&self) -> PgConnectOptions {
         PgConnectOptions::from_str(&self.0).unwrap_or_else(|_| PgConnectOptions::new())
     }
+
+    /// A URL for a test that needs a ready table without files on disk.
+    #[cfg(test)]
+    pub(crate) fn for_test(url: &str) -> HealthDbUrl {
+        HealthDbUrl(url.to_string())
+    }
 }
 
 impl std::fmt::Debug for HealthDbUrl {

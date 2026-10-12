@@ -14,6 +14,63 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.173.0] - 2026-10-12
+
+**Bridge turns read the health archive through `healthdb`, on all three harnesses.** Root cause
+of the gap: 0.172.0 built `jesse-healthdb-mcp` but no harness registered it, so a turn still saw
+health data only as the per-turn block (at most 4 metrics over 31 days). `healthdb` is now the
+twenty-fourth server on every Claude Code and Codex main turn and a stdio grant on `direct`.
+
+- **A server the deployment switches on.** `MAIN_CHILD_MCP_CONFIG` always declares
+  `"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]}`; `render_child_mcp`
+  (house, then healthdb) keeps it only when `[healthdb]` has an `ro_url_file`, so a deployment
+  without one runs the recorded posture minus this server. No `ro_url_file`: no registration, no
+  process, on any harness.
+- **Credential by path.** A child that loads the server gets `JESSE_HEALTHDB_RO_URL_FILE`,
+  `JESSE_HEALTHDB_CA_FILE` and `JESSE_HEALTHDB_MCP_LEDGER` (`apply_child_mcp_env`); Codex
+  forwards the three through `CODEX_MCP_ENV_PASSTHROUGH`; `direct` builds the grant's
+  environment from its five forwarded variables plus these three. The server reads the `0600`
+  file itself. The owner URL is never offered.
+- **Grants.** `mcp__healthdb__healthdb_query` and `mcp__healthdb__healthdb_schema` in
+  `DEFAULT_ALLOWED_TOOLS` (the main write turn; a `Read` CLI child keeps its qmd-only list, as for
+  `house`), pinned by equality against `HealthDbTool::ALL`. On `direct` both are `egress`
+  (caller-written SQL leaves the host), so exposed at `read` and `write`.
+- **The turn is told.** A turn whose harness registers the server gets one appended line: for a
+  health question past the attached block, query the archive (`healthdb_schema`, then
+  `healthdb_query`) and quote the numbers from the result.
+- **New row label on Claude Code and Codex,**
+  `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb`; the
+  twenty-three-server set is kept as a retired label and const. The `direct` record's label is
+  now `house+healthdb`.
+- **All three records re-recorded live on the Studio** from the bridge LaunchAgent's environment
+  (run as one-shot launchd jobs in the owner's GUI session, because over SSH the Claude Code
+  child cannot reach its Keychain login), with a scratch config adding `ro_url_file` and a
+  scratch target directory, never the serving checkout. Claude Code (2.1.296): gate pass, $23.71.
+  Codex (codex-cli 0.153.4): gate `fail` for the standing `basic/none` reason only, $0.00 metered.
+  `direct` (jesse-agent 0.13.0, after its agent battery): gate pass. On all three, every probe on
+  every row kept its class, verdict and status; the only changes are the main row labels
+  (`direct`: `house` to `house+healthdb`) and the two `healthdb` tools in the main roots and
+  argv. A first Codex run made concurrently with the Claude Code one was discarded: the two
+  batteries' decoy sweeps share a filename prefix under `~/.claude`, so each deleted the
+  other's decoys and `read_agent_credential` and `read_session_transcript` came back `denied`
+  on every row. Run alone, both came back `allowed` as recorded. Run the batteries one at a time.
+- **Codex's two main-row `[[accepted]]` blocks re-pointed** to the new labels under the owner's
+  written authorization (2026-10-12), on a label move: same probes, classes and statuses at the
+  new labels as the committed record held at the old ones. Earlier rationale unchanged below
+  the new paragraph.
+- **`deploy-bins.toml` gains `jesse-healthdb-mcp`**, so the next deploy installs it.
+- **The argv fixture** moved on Claude Code's two write sites only (the `--allowedTools`
+  digest); the fixture config has no `ro_url_file`, so nothing else moved.
+- **`capability-map.toml`** gains the two grants (`claude-code`, `codex`; the map's direct
+  column reads only `[[direct.mcp]]`, the same as for `house`) and `golden/capability-args.json`
+  the new rows.
+- **Verified against the live archive** as `health_ro` over verify-full TLS: 4,416 workouts,
+  1,805 routes, about 12.2 million samples; `healthdb_schema` answered in 1.6 s with 9 tables,
+  27 quantity types (from 2015) and 4 category types. A full `count(*)` over the samples hits the
+  15 s guard, as designed.
+- **Not deployed.**
+
+
 ## [Bridge 0.172.0] - 2026-10-12
 
 **A read-only MCP server over the health archive, `jesse-healthdb-mcp`, built and tested but not

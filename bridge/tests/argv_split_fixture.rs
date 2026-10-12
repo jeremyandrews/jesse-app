@@ -163,6 +163,14 @@
 //! every site, Codex's argv gains nothing, and no child gains `JESSE_HOUSE_TOKEN`. The house
 //! rendering itself is pinned by the unit tests in `src/house.rs`.
 //!
+//! **AND AGAIN, in bridge 0.173.0, for `healthdb`, on Claude Code's two write sites only.** Their
+//! `--allowedTools` digest moved because the grant gained `mcp__healthdb__healthdb_query` and
+//! `mcp__healthdb__healthdb_schema`. Nothing else moved: the fixture's config has no `[healthdb]`
+//! `ro_url_file`, so the rendered `--mcp-config` drops the `healthdb` entry (and `house`) and is
+//! still the twenty-two-server set on every site, Codex's argv gains nothing, and no child gains
+//! a `JESSE_HEALTHDB_*` variable. The rendering is pinned by the unit tests in
+//! `src/healthquery.rs`.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

@@ -903,6 +903,14 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `import_geojson`, `link_ref`, `restore`, `set_attributes`, `upload_file`, `upsert_floor`,
 // `upsert_object`, `upsert_space`). Every write takes a required `reason` the server records,
 // and `delete` is a soft delete that `restore` undoes. Never a wildcard.
+//
+// HEALTHDB: BOTH TOOLS ON THE OWNER'S HEALTH ARCHIVE, READ ONLY.
+//
+// `jesse-healthdb-mcp` is this repository's own server and its `tools/list` is the closed set in
+// `HealthDbTool::ALL`: `healthdb_schema` and `healthdb_query`, both annotated `readOnlyHint`.
+// Both are granted by name. The query tool takes caller-written SQL; what keeps it a read is in
+// the server (one SELECT/WITH/TABLE/VALUES statement, `BEGIN READ ONLY`, a 15 s timeout, a 500
+// row cap) and in the `health_ro` role, not in this list. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1089,7 +1097,8 @@ mcp__house__import_geojson,mcp__house__in_space,mcp__house__link_ref,mcp__house_
 mcp__house__list_sites,mcp__house__measure,mcp__house__nearest,mcp__house__render_plan,\
 mcp__house__restore,mcp__house__search_notes,mcp__house__set_attributes,\
 mcp__house__upload_file,mcp__house__upsert_floor,mcp__house__upsert_object,\
-mcp__house__upsert_space,mcp__house__what_is_at";
+mcp__house__upsert_space,mcp__house__what_is_at,\
+mcp__healthdb__healthdb_query,mcp__healthdb__healthdb_schema";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5430,6 +5439,30 @@ mod tests {
                 .split(',')
                 .any(|e| e == "mcp__house__*" || e == "mcp__house"),
             "a wildcard grant on the house server is never acceptable"
+        );
+    }
+
+    /// THE HEALTHDB GRANT IS EXACTLY THE SERVER'S CLOSED TOOL SET, AND NEVER A WILDCARD.
+    /// Equality against `HealthDbTool::ALL`, so a tool added to the server is a compile-visible
+    /// decision here rather than a grant that arrives by itself.
+    #[test]
+    fn the_healthdb_grant_is_both_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__healthdb"))
+            .collect();
+        granted.sort_unstable();
+        let expected: Vec<String> = healthdb_tool_names()
+            .iter()
+            .map(|t| format!("mcp__healthdb__{t}"))
+            .collect();
+        assert_eq!(granted, expected);
+        assert_eq!(
+            expected,
+            [
+                "mcp__healthdb__healthdb_query",
+                "mcp__healthdb__healthdb_schema"
+            ]
         );
     }
 

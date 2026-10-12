@@ -601,11 +601,15 @@ mod tests {
 
         for absent in [HouseConfig::Absent, HouseConfig::Refused("x".to_string())] {
             cfg.house = absent;
-            let without = render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG);
+            let without = render_house_mcp(
+                &cfg,
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
+            );
             let v: serde_json::Value = serde_json::from_str(&without).expect("still JSON");
             assert!(v["mcpServers"].get("house").is_none(), "{without}");
             assert!(!without.contains("JESSE_HOUSE"), "{without}");
-            // Nothing else moved: the rendered config IS the retired twenty-two-server set.
+            // Nothing else moved: the house-era set rendered without it IS the retired
+            // twenty-two-server set.
             assert_eq!(
                 without,
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG
@@ -867,6 +871,8 @@ mod tests {
     fn the_shipped_entry_carries_the_placeholder_and_the_token_by_name() {
         assert!(HOUSE_MCP_ENTRY.contains(HOUSE_URL_PLACEHOLDER));
         assert!(HOUSE_MCP_ENTRY.contains(&format!("${{{HOUSE_TOKEN_ENV}}}")));
-        assert!(MAIN_CHILD_MCP_CONFIG.ends_with(&format!("{HOUSE_MCP_ENTRY}}}}}")));
+        assert!(
+            MAIN_CHILD_MCP_CONFIG.ends_with(&format!("{HOUSE_MCP_ENTRY}{HEALTHDB_MCP_ENTRY}}}}}"))
+        );
     }
 }

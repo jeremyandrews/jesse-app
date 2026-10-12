@@ -3630,11 +3630,12 @@ mod tests {
         let stale: Vec<ContainmentRow> = codex
             .iter()
             .map(|r| {
-                if r.mcp == McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+                if r.mcp
+                    == McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
                 {
                     ContainmentRow {
                         capability: r.capability,
-                        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify,
+                        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse,
                     }
                 } else {
                     *r

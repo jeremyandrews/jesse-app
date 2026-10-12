@@ -3499,3 +3499,21 @@ placement = "core"
 dependency = "JESSE_HOUSE_TOKEN, read by the bridge from the [house] token_file and sent as a bearer by the client; https://house.pozza/mcp on the home k3s cluster, internal CA pozza-ca"
 workflows = "where things are in and around the house; recording the house layout and contents from conversation"
 reason = "Reads the owner's house model and answers spatial questions about the house and grounds."
+
+[grant."mcp__healthdb__healthdb_query"]
+kind = "mcp"
+server = "healthdb"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-healthdb-mcp (this repository, in deploy-bins.toml); the [healthdb] ro_url_file (health_ro role, 0600) and ca_file, handed to the server by path; Postgres healthdb.pozza:5432 database health, verify-full TLS"
+workflows = "health questions past the per-turn health block: long-range trends, workouts, GPS routes and trail planning, diet history"
+reason = "Runs one read-only SQL statement against the owner's health archive (Apple Health samples, workouts, routes, diet rows); 500 row cap, 15 s timeout, read-only transaction."
+
+[grant."mcp__healthdb__healthdb_schema"]
+kind = "mcp"
+server = "healthdb"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-healthdb-mcp (this repository, in deploy-bins.toml); the [healthdb] ro_url_file (health_ro role, 0600) and ca_file, handed to the server by path; Postgres healthdb.pozza:5432 database health, verify-full TLS"
+workflows = "health questions past the per-turn health block: finding which tables, views and sample types exist before querying"
+reason = "Describes the health archive's tables, views, sample types and a fixed guide to reading them; reads only."

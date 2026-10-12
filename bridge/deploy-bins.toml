@@ -36,4 +36,5 @@ bins = [
     "jesse-build-mcp",
     "jesse-places-mcp",
     "jesse-inbound-mcp",
+    "jesse-healthdb-mcp",
 ]

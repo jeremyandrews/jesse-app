@@ -499,15 +499,16 @@ pub fn direct_mcp_label(cfg: &Config) -> String {
         .join("+")
 }
 
-/// Every grant the `direct` record commits on this deployment: the shipped `house` grant, then
-/// the operator's `[[direct.mcp]]` grants in order. CREDENTIAL-FREE: the house entry is
-/// [`house_grant_shape`], which carries names and classes and nothing a turn could connect
-/// with.
+/// Every grant the `direct` record commits on this deployment: the shipped `house` and
+/// `healthdb` grants, then the operator's `[[direct.mcp]]` grants in order. CREDENTIAL-FREE:
+/// the shipped entries are [`house_grant_shape`] and [`healthdb_grant_shape`], which carry names
+/// and classes and nothing a turn could connect with.
 ///
-/// `house` is here whether or not the deployment has a `[house]` table, which is what lets one
-/// committed record boot both deployments; see [`house_grant_shape`].
+/// Both are here whether or not the deployment has a `[house]` table or a `[healthdb]
+/// ro_url_file`, which is what lets one committed record boot every deployment.
 pub fn direct_record_grants(cfg: &Config) -> Vec<DirectMcpGrant> {
-    std::iter::once(house_grant_shape())
+    [house_grant_shape(), healthdb_grant_shape()]
+        .into_iter()
         .chain(cfg.direct.mcp.iter().cloned())
         .collect()
 }
@@ -1157,9 +1158,11 @@ impl Direct {
         // the record commits the grant.
         //
         // The configured stdio grants, then `house` when this deployment has a ready `[house]`
-        // table. Without one the turn runs the recorded posture minus that server.
+        // table, then `healthdb` when `[healthdb]` has an `ro_url_file`. Without one the turn
+        // runs the recorded posture minus that server.
         let mut grants = direct_mcp_grants(&rt.settings.mcp);
         grants.extend(direct_house_grant(cfg));
+        grants.extend(direct_healthdb_grant(cfg));
         let mcp = if grants.is_empty() {
             None
         } else {
@@ -1887,14 +1890,24 @@ mod tests {
     /// before D10 — which is why `bridge/containment-direct.toml` still matches — and with a
     /// grant the granted names are appended, sorted, after the vault set's.
     #[test]
-    fn the_tools_token_carries_house_always_and_the_granted_names_with_a_grant() {
+    fn the_tools_token_carries_house_and_healthdb_always_and_the_granted_names_with_a_grant() {
         let mut cfg = crate::testutil::test_config();
-        let house_reads: Vec<String> = HOUSE_READ_TOOLS
+        // The shipped grants at `read`: the house reads and both healthdb tools (egress),
+        // sorted together.
+        let mut house_reads: Vec<String> = HOUSE_READ_TOOLS
             .iter()
             .map(|t| format!("mcp__house__{t}"))
+            .chain(
+                healthdb_tool_names()
+                    .iter()
+                    .map(|t| format!("mcp__healthdb__{t}")),
+            )
             .collect();
-        // THE SHIPPED POSTURE NAMES HOUSE, table or no table: the record commits the grant.
+        house_reads.sort();
+        // THE SHIPPED POSTURE NAMES HOUSE AND HEALTHDB, table or no table: the record commits
+        // both grants.
         assert!(cfg.house.ready().is_none());
+        assert!(healthdb_mcp_ready(&cfg).is_none());
         assert_eq!(
             Direct.capability_args(&cfg, Capability::Read, McpSet::None),
             vec![
@@ -1953,26 +1966,29 @@ mod tests {
         assert!(write.contains("mcp__notes__write_note"));
     }
 
-    /// The record's second key follows the grant, and is `house` on the shipped posture.
+    /// The record's second key follows the grant, and is `house+healthdb` on the shipped
+    /// posture.
     #[test]
     fn the_records_mcp_label_names_the_granted_servers() {
         let mut cfg = crate::testutil::test_config();
-        assert_eq!(direct_mcp_label(&cfg), "house");
+        assert_eq!(direct_mcp_label(&cfg), "house+healthdb");
         assert_eq!(
-            Direct.parse_record_mcp(&cfg, "house"),
+            Direct.parse_record_mcp(&cfg, "house+healthdb"),
             Some(McpSet::None),
             "the shipped label resolves on this deployment"
         );
-        assert_eq!(
-            Direct.parse_record_mcp(&cfg, "none"),
-            None,
-            "the old label does not"
-        );
+        for old in ["none", "house"] {
+            assert_eq!(
+                Direct.parse_record_mcp(&cfg, old),
+                None,
+                "an old label does not"
+            );
+        }
         cfg.direct.mcp = vec![
             grant("qmd", &["query"], ActionClass::Read),
             grant("notes", &["read_note"], ActionClass::Read),
         ];
-        assert_eq!(direct_mcp_label(&cfg), "house+qmd+notes");
+        assert_eq!(direct_mcp_label(&cfg), "house+healthdb+qmd+notes");
     }
 
     /// **NO SECRET IS EVER HELD IN `Config`.** The grant carries the NAME of an environment

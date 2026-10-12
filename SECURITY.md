@@ -1454,6 +1454,114 @@ thirteen by equality:
   names are whatever anyone in the workspace typed, and they enter the turn at the same trust
   level as message bodies.
 
+### Clockify, Tag1's own server (four way hours, read only, 2026-10-12)
+
+Bridge 0.175.0 adds `clockify-rs`, Tag1's own Clockify server, to every main turn on **both
+harnesses in the same change**, as the twenty-fifth server. It is the private
+`tag1consulting/clockify-rs` repository's `clockify-mcp` crate, version 0.5.0 at commit
+`7255f1d`, stdio transport, declared with the bare command `clockify-rs-mcp` and no arguments,
+resolved off the bridge `PATH` like `plex-mcp`. The hosted `clockify` server above stays
+alongside it, unchanged: same key route, same thirteen grants.
+
+It exists because the hosted server cannot answer "how many client billable and internal hours
+did each person log": its summary report carries no billable field and no user filter, and its
+detailed report carries no user and stops at 50 entries without paging. `clockify-rs` splits each
+person's hours four ways (client or internal, billable or not), pages the detailed report in
+full, and counts its periods in Europe/Rome, the zone Tag1 bills in, unless a call names another.
+
+#### No new credential
+
+The server reads `CLOCKIFY_API_KEY`, and it gets **the same key the hosted server uses**,
+`JESSE_CLOCKIFY_API_KEY` from the bridge LaunchAgent plist. What changes is who holds it: the
+key now also sits in the environment of a local child process, not only in a header sent to
+Clockify. It is not in the repo, an argv, a record, a fixture or a log.
+
+- **Claude Code** children inherit the bridge's environment, so the launcher finds the variable.
+- **Codex** scrubs an MCP child's environment, so `CODEX_MCP_ENV_PASSTHROUGH` forwards
+  `JESSE_CLOCKIFY_API_KEY` to `clockify-rs` **by name**, the same variable the hosted server's
+  `x-api-key` header reads. It is in no bearer or header table: this is a stdio server. A test
+  asserts the name appears on the Codex argv only as a forwarded name (or as the hosted server's
+  header variable), never as a value, a `${…}` placeholder or a `NAME=` assignment.
+
+#### No new host
+
+`api.clockify.me` and `reports.api.clockify.me`, the same Clockify the hosted server already
+reaches. Reads only.
+
+#### Granted: all twelve tools, and every one reads
+
+A bare environment `initialize` and `tools/list` against 0.5.0 on 2026-10-12 returned twelve
+tools, **every one annotated `readOnlyHint: true`**: `list_users`, `list_user_groups`,
+`hours_by_user`, `monthly_hours`, `detailed_entries`, `resolve_user`, `check`, `trend`,
+`audit`, `projects`, `daily` and `team_summary`. All twelve are in `DEFAULT_ALLOWED_TOOLS` by
+name, never `mcp__clockify-rs__*`, and a test pins the twelve by equality. Codex renders the same
+twelve in `enabled_tools` with `default_tools_approval_mode = "approve"`. None writes: the server
+has no timer, time entry, project or delete call at all.
+
+#### What it adds to the risk
+
+- **No new credential and no new host**, as above; one more process holds the key.
+- **Workspace-wide reads, now complete.** The hosted server could already read the team's hours.
+  This one reads every entry in a range, per person, which is the point.
+- **No dollar figure reaches any output.** No tool returns a money field, and the library's
+  `no_money` tests enforce that. The live proof below grepped every output for money fields
+  and found none.
+- **A new source of untrusted text.** `detailed_entries` returns each time entry's
+  `description`, along with project, client and task names, and those are whatever anyone in
+  the workspace typed. They enter the turn at the same trust level as message bodies.
+
+#### Proved against live Clockify before shipping
+
+On 2026-10-12, against the Tag1 Consulting workspace, `hours_by_user` (summary reports grouped
+by user then client) and `monthly_hours` (one detailed sweep reading each entry's client and
+billable flag) were compared per person for September 2026, in Europe/Rome and in UTC, raw and
+rounded. All 62 people agreed on all four columns and the total in all four combinations, every
+`monthly_hours` run reported `outside_range` 0, and no output carried a money field.
+
+#### Deployment
+
+**Host setup, not repo content.** Install the pinned commit:
+
+```sh
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --locked --force \
+  --git ssh://git@github.com/tag1consulting/clockify-rs.git \
+  --rev 7255f1de67acfc2c030261d76400ed8a835fd956 clockify-mcp \
+  --root ~/.local/share/jesse-mcp/clockify-rs
+```
+
+`clockify-rs-mcp` must be on the bridge's `PATH`, in the launchers directory beside `plex-mcp`.
+It must be a mode `0755` `/bin/sh` script that does exactly this and nothing else:
+
+- fail with a message on stderr if `JESSE_CLOCKIFY_API_KEY` is unset or empty;
+- `export CLOCKIFY_API_KEY="$JESSE_CLOCKIFY_API_KEY"`;
+- `exec` the absolute path of the installed binary. **Never** a symlink to it (the Proxmox
+  rule), and never the key on an argument list: an argument is visible in `ps`.
+
+An upgrade is a deliberate edit: a new `--rev`, then a re-probe of `tools/list` against
+`DEFAULT_ALLOWED_TOOLS`. Handshake it from a bare environment before trusting it, because a
+server that starts and registers zero tools looks identical to one that works. The key goes in
+on **stdin**, read by the shell that `exec`s the launcher, so it is never a `NAME=value`
+argument to `env` (which `ps` would show), never echoed and never written to a file:
+
+```sh
+# PLIST is the bridge LaunchAgent plist.
+KEY="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:JESSE_CLOCKIFY_API_KEY' "$PLIST")"
+{ printf '%s\n' "$KEY"
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"handshake","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  sleep 3; } |
+  env -i PATH="$(launchctl getenv PATH)" HOME="$HOME" \
+    sh -c 'IFS= read -r JESSE_CLOCKIFY_API_KEY; export JESSE_CLOCKIFY_API_KEY; exec clockify-rs-mcp' |
+  jq -r 'select(.id==2) | .result.tools[] | "\(.name) \(.annotations.readOnlyHint)"'
+unset KEY
+```
+
+`printf` is a shell builtin, so the key is on no process's argument list. If `launchctl getenv
+PATH` is empty, take `PATH` from the plist's `EnvironmentVariables`. The result must be the
+twelve tools above, each `true`.
+
 ### House model (spatial reads and writes, 2026-10-10)
 
 Bridge 0.169.0 adds `house-mcp`, the owner's house model on the home k3s cluster, to every main

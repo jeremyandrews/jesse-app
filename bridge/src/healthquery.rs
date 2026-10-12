@@ -1360,9 +1360,14 @@ mod registration_tests {
             let without = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG);
             assert!(!without.contains("healthdb"), "{without}");
             // No house table in the fixture either, so both conditional servers are gone and
-            // nothing else moved: the twenty-two-server set, byte for byte.
+            // nothing else moved: the twenty-two-server set plus the unconditional `clockify-rs`,
+            // byte for byte.
             assert_eq!(
-                without,
+                without.replacen(
+                    r#","clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}"#,
+                    "",
+                    1
+                ),
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG
             );
         }

@@ -911,6 +911,14 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // Both are granted by name. The query tool takes caller-written SQL; what keeps it a read is in
 // the server (one SELECT/WITH/TABLE/VALUES statement, `BEGIN READ ONLY`, a 15 s timeout, a 500
 // row cap) and in the `health_ro` role, not in this list. Never a wildcard.
+//
+// CLOCKIFY-RS: ALL TWELVE TOOLS OF TAG1'S OWN CLOCKIFY SERVER, EVERY ONE A READ.
+//
+// A bare environment `tools/list` against `clockify-mcp` 0.5.0 (commit `7255f1d`) on 2026-10-12
+// returned twelve tools, every one annotated `readOnlyHint`: `list_users`, `list_user_groups`,
+// `hours_by_user`, `monthly_hours`, `detailed_entries`, `resolve_user`, `check`, `trend`,
+// `audit`, `projects`, `daily` and `team_summary`. All twelve are granted by name. The hosted
+// `clockify` server's thirteen grants above are unchanged. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1098,7 +1106,12 @@ mcp__house__list_sites,mcp__house__measure,mcp__house__nearest,mcp__house__rende
 mcp__house__restore,mcp__house__search_notes,mcp__house__set_attributes,\
 mcp__house__upload_file,mcp__house__upsert_floor,mcp__house__upsert_object,\
 mcp__house__upsert_space,mcp__house__what_is_at,\
-mcp__healthdb__healthdb_query,mcp__healthdb__healthdb_schema";
+mcp__healthdb__healthdb_query,mcp__healthdb__healthdb_schema,\
+mcp__clockify-rs__list_users,mcp__clockify-rs__list_user_groups,\
+mcp__clockify-rs__hours_by_user,mcp__clockify-rs__monthly_hours,\
+mcp__clockify-rs__detailed_entries,mcp__clockify-rs__resolve_user,mcp__clockify-rs__check,\
+mcp__clockify-rs__trend,mcp__clockify-rs__audit,mcp__clockify-rs__projects,\
+mcp__clockify-rs__daily,mcp__clockify-rs__team_summary";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5403,6 +5416,56 @@ mod tests {
                 .split(',')
                 .any(|e| e == "mcp__clockify__*" || e == "mcp__clockify"),
             "a wildcard grant on the clockify server is never acceptable"
+        );
+    }
+
+    /// THE CLOCKIFY-RS GRANT IS EXACTLY THE TWELVE TOOLS THE PINNED SERVER REGISTERS.
+    ///
+    /// Taken from a bare environment `tools/list` against `clockify-mcp` 0.5.0 (commit
+    /// `7255f1d`) on 2026-10-12, every tool annotated `readOnlyHint`. Equality, so a missing
+    /// grant and a grant for a name the server does not register both fail, and a failure names
+    /// the tool. The hosted server's grant is pinned separately, above, and is not this one.
+    #[test]
+    fn the_clockify_rs_grant_is_every_registered_tool_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__clockify-rs__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "list_users",
+            "list_user_groups",
+            "hours_by_user",
+            "monthly_hours",
+            "detailed_entries",
+            "resolve_user",
+            "check",
+            "trend",
+            "audit",
+            "projects",
+            "daily",
+            "team_summary",
+        ]
+        .iter()
+        .map(|t| format!("mcp__clockify-rs__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the clockify-rs grant moved; re-probe the pinned server's tools/list and record the \
+             decision before changing this list; it moves `toolset_args`, which costs a live \
+             battery run"
+        );
+    }
+
+    /// NO WILDCARD ON THE CLOCKIFY-RS SERVER: a wildcard grants whatever the next release adds.
+    #[test]
+    fn no_clockify_rs_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__clockify-rs__*" || e == "mcp__clockify-rs"),
+            "a wildcard grant on the clockify-rs server is never acceptable"
         );
     }
 

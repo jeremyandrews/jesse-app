@@ -935,6 +935,30 @@ macro_rules! mcp_healthdb {
     };
 }
 
+/// **Tag1's own Clockify server, read only: `clockify-rs`** (`tag1consulting/clockify-rs`,
+/// crate `clockify-mcp` 0.5.0 at pinned commit `7255f1d`), a stdio server that reports each
+/// person's hours split four ways (client or internal, billable or not) with no dollar figure.
+/// Its report periods default to Europe/Rome, the zone Tag1 bills in, and every request it makes
+/// names its zone. It is NOT built here: it is installed on the host with `cargo install` and
+/// started through the `clockify-rs-mcp` launcher on the bridge's `PATH`, like `plex-mcp`.
+///
+/// The key arrives BY ENVIRONMENT: the launcher reads `JESSE_CLOCKIFY_API_KEY` (the same
+/// variable the hosted `clockify` server's `x-api-key` header uses, already in the LaunchAgent
+/// plist), exports it as `CLOCKIFY_API_KEY` and `exec`s the binary. Nothing secret is in this
+/// const or on an argv. Codex forwards the variable by name through `CODEX_MCP_ENV_PASSTHROUGH`.
+///
+/// **ALL TWELVE TOOLS ARE GRANTED, AND ALL TWELVE READ.** A bare environment `tools/list` on
+/// 2026-10-12 returned `list_users`, `list_user_groups`, `hours_by_user`, `monthly_hours`,
+/// `detailed_entries`, `resolve_user`, `check`, `trend`, `audit`, `projects`, `daily` and
+/// `team_summary`, every one annotated `readOnlyHint`, and [`crate::DEFAULT_ALLOWED_TOOLS`]
+/// grants all twelve by name. The hosted `clockify` server stays alongside it, unchanged. Read
+/// SECURITY.md before changing this.
+macro_rules! mcp_clockify_rs {
+    () => {
+        r#""clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}"#
+    };
+}
+
 /// The five house servers, in order.
 macro_rules! house_servers {
     () => {
@@ -1583,6 +1607,50 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// when `[healthdb]` has an `ro_url_file`, so a deployment without either runs this posture
 /// minus that server, which is narrower than the record, never wider.
 ///
+/// **RETIRED AS THE MAIN SET IN 0.175.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb`]
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.173.0 until 0.175.0.
+pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG:
+    &str = concat!(
+    r#"{"mcpServers":{"#,
+    messages_servers!(),
+    ",",
+    mcp_build!(),
+    ",",
+    mcp_places!(),
+    ",",
+    mcp_inbound!(),
+    ",",
+    mcp_kubernetes!(),
+    ",",
+    mcp_rybbit!(),
+    ",",
+    mcp_tag1!(),
+    ",",
+    mcp_plex!(),
+    ",",
+    mcp_clockify!(),
+    ",",
+    mcp_house!(),
+    ",",
+    mcp_healthdb!(),
+    "}}"
+);
+
+/// The twenty-four-server set PLUS **`clockify-rs`**: every main turn on BOTH harnesses from
+/// bridge 0.175.0. Twenty-five servers.
+///
+/// What it adds is Tag1's own read-only Clockify server, which answers what the hosted
+/// `clockify` server cannot: each person's hours over a period split four ways (client or
+/// internal, billable or not), paged in full, with no dollar figure in any output. No new
+/// credential (the same `JESSE_CLOCKIFY_API_KEY`, now also held by a local child process) and no
+/// new host (`api.clockify.me` and `reports.api.clockify.me`, reads only). See the
+/// `mcp_clockify_rs!` declaration and SECURITY.md.
+///
+/// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
+/// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
+/// when `[healthdb]` has an `ro_url_file`. `clockify-rs` is unconditional.
+///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
 /// `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the build if that
@@ -1610,6 +1678,8 @@ pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
     mcp_house!(),
     ",",
     mcp_healthdb!(),
+    ",",
+    mcp_clockify_rs!(),
     "}}"
 );
 
@@ -1942,7 +2012,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs => {
             READ_ALLOWED_TOOLS
         }
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
@@ -3263,11 +3334,11 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                22,
+                23,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
-                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex and \
-                 clockify and nothing else: {mcp:?}"
+                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex, \
+                 clockify and clockify-rs and nothing else: {mcp:?}"
             );
             // THE CLOCKIFY KEY IS A PLACEHOLDER, NEVER A VALUE. The `x-api-key` header must
             // carry the literal `${JESSE_CLOCKIFY_API_KEY}` for the CLI to expand from the
@@ -4181,9 +4252,35 @@ mod tests {
     const GOLDEN_QMD_MCP: &str = concat!(
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         home_assistant_mcp_url!(),
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]}}}"#
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}}}"#
     );
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
+    /// The main set as a child renders it under the test fixture, which has no `[house]` table
+    /// and no `[healthdb] ro_url_file`: the twenty-two-server set plus `clockify-rs`, the one
+    /// server after the two conditional ones that is always kept.
+    const RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS: &str = concat!(
+        r#"{"mcpServers":{"#,
+        messages_servers!(),
+        ",",
+        mcp_build!(),
+        ",",
+        mcp_places!(),
+        ",",
+        mcp_inbound!(),
+        ",",
+        mcp_kubernetes!(),
+        ",",
+        mcp_rybbit!(),
+        ",",
+        mcp_tag1!(),
+        ",",
+        mcp_plex!(),
+        ",",
+        mcp_clockify!(),
+        ",",
+        mcp_clockify_rs!(),
+        "}}"
+    );
 
     /// EVERY COPY OF THE CHILD MCP CONFIG SAYS THE SAME THING.
     ///
@@ -4222,44 +4319,50 @@ mod tests {
         let main = servers(MAIN_CHILD_MCP_CONFIG);
         for (label, older, added) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG",
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
+                vec!["clockify-rs"],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
-                vec!["healthdb"],
+                vec!["clockify-rs", "healthdb"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
-                vec!["healthdb", "house"],
+                vec!["clockify-rs", "healthdb", "house"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
-                vec!["healthdb", "house", "clockify"],
+                vec!["clockify-rs", "healthdb", "house", "clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["healthdb", "house", "clockify", "plex"],
+                vec!["clockify-rs", "healthdb", "house", "clockify", "plex"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["healthdb", "house", "clockify", "plex", "tag1"],
+                vec!["clockify-rs", "healthdb", "house", "clockify", "plex", "tag1"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["healthdb", "house", "clockify", "plex", "tag1", "rybbit"],
+                vec!["clockify-rs", "healthdb", "house", "clockify", "plex", "tag1", "rybbit"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["healthdb", "house", "clockify", "plex", "tag1", "rybbit", "kubernetes"],
+                vec!["clockify-rs", "healthdb", "house", "clockify", "plex", "tag1", "rybbit", "kubernetes"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 MESSAGES_BUILD_PLACES_MCP_CONFIG,
                 vec![
+                    "clockify-rs",
                     "healthdb",
                     "house",
                     "clockify",
@@ -4274,6 +4377,7 @@ mod tests {
                 "MESSAGES_BUILD_MCP_CONFIG",
                 MESSAGES_BUILD_MCP_CONFIG,
                 vec![
+                    "clockify-rs",
                     "healthdb",
                     "house",
                     "clockify",
@@ -4289,14 +4393,15 @@ mod tests {
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 MESSAGES_KUBERNETES_MCP_CONFIG,
                 vec![
-                    "healthdb", "house", "clockify", "plex", "tag1", "rybbit", "inbound", "places",
-                    "build",
+                    "clockify-rs", "healthdb", "house", "clockify", "plex", "tag1", "rybbit", "inbound",
+                    "places", "build",
                 ],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 MESSAGES_MCP_CONFIG,
                 vec![
+                    "clockify-rs",
                     "healthdb",
                     "house",
                     "clockify",
@@ -4840,8 +4945,9 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-two-server one: `house` declared in the const, dropped here.
-                    MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
+                    // twenty-two-server one plus `clockify-rs`: `house` and `healthdb` are
+                    // declared in the const and dropped here.
+                    RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS,
                     "--allowedTools",
                     &allow,
                     "--disallowedTools",
@@ -4868,8 +4974,9 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-two-server one: `house` declared in the const, dropped here.
-                    MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
+                    // twenty-two-server one plus `clockify-rs`: `house` and `healthdb` are
+                    // declared in the const and dropped here.
+                    RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS,
                     "--tools",
                     "Read,Grep,Glob",
                     "--allowedTools",

@@ -168,10 +168,11 @@ final class HealthDataObserver {
 }
 
 /// Carries an observer query's completion handler into the task that finishes the work, and
-/// makes calling it more than once harmless. Unchecked because the guarantee is HealthKit's:
+/// makes calling it more than once harmless. Shared with `HealthArchiveObserver`.
+/// Unchecked because the guarantee is HealthKit's:
 /// the handler is documented to be callable from any thread. `nonisolated` because it is built
 /// and called from HealthKit's own background queue, not the main actor this target defaults to.
-private nonisolated final class ObserverCompletion: @unchecked Sendable {
+nonisolated final class ObserverCompletion: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: (() -> Void)?
 

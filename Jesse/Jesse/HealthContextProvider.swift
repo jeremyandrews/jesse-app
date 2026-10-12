@@ -37,8 +37,9 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
             HKQuantityType(.distanceSwimming),
             HKQuantityType(.distanceWalkingRunning),
             HKQuantityType(.distanceCycling),
-            // The GPS route, read only to reduce its altitudes to ascent, descent and
-            // range for a recorder that writes no elevation metadata.
+            // The GPS route: the per-turn block reduces its altitudes to ascent, descent
+            // and range for a recorder that writes no elevation metadata; the health
+            // archive uploads it whole to the bridge's ingest endpoint, and nowhere else.
             HKSeriesType.workoutRoute(),
         ]
         for id in quantityReadIdentifiers { types.insert(HKQuantityType(id)) }
@@ -398,8 +399,11 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
 
     /// The workout's route reduced to ascent, descent and altitude range. Each
     /// `CLLocation` is mapped to its altitude and vertical accuracy at once and
-    /// dropped: no coordinate is kept, logged or returned. A workout may own several
-    /// route series (one per segment); their readings are joined in start order.
+    /// dropped: no coordinate is kept, logged or returned, because nothing positional
+    /// may enter the per-turn block. (The health archive uploads whole routes to the
+    /// bridge's ingest endpoint; that is the one place a route leaves the phone.) A
+    /// workout may own several route series (one per segment); their readings are
+    /// joined in start order.
     private static func routeElevation(for w: HKWorkout) async throws -> RouteReadResult {
         guard HKHealthStore.isHealthDataAvailable() else { return .failed }
         let store = HKHealthStore()
@@ -414,13 +418,23 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
 
         var samples: [AltitudeSample] = []
         for route in routes {
-            for try await location in HKWorkoutRouteQueryDescriptor(route).results(for: store) {
-                samples.append(AltitudeSample(altitude: location.altitude,
-                                              verticalAccuracy: location.verticalAccuracy))
+            try await readRouteLocations(route, store: store) { location in
+                samples.append(AltitudeSample(location))
             }
         }
         return .reduced(RouteElevationReducer.reduce(samples),
                         seriesCount: routes.count, pointCount: samples.count)
+    }
+
+    /// Walk every location HealthKit saved for one route, in order, every batch until done,
+    /// handing each to `each`. Shared by the elevation reduction above, which keeps two
+    /// numbers of each and drops the rest, and the health archive's route upload, which
+    /// keeps the location for the bridge's ingest endpoint and nowhere else.
+    static func readRouteLocations(_ route: HKWorkoutRoute, store: HKHealthStore,
+                                   _ each: (CLLocation) -> Void) async throws {
+        for try await location in HKWorkoutRouteQueryDescriptor(route).results(for: store) {
+            each(location)
+        }
     }
 
     /// Run one read and flatten every failure to nil, so a thrown, denied or empty
@@ -446,7 +460,7 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
     /// `@Sendable` handler and hand-guarding the continuation against a second
     /// resume. A one-shot sample query has neither hazard and answers the same
     /// question.
-    private static func effortScore(for w: HKWorkout) async -> (score: Double, userRated: Bool)? {
+    static func effortScore(for w: HKWorkout) async -> (score: Double, userRated: Bool)? {
         if let rated = await bestEffort({ try await effortSample(.workoutEffortScore, for: w) }) {
             return (rated, true)
         }
@@ -820,7 +834,7 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
     // MARK: Distance / activity naming
 
     /// First available distance statistic (swim / walk-run / cycle) in meters.
-    private static func distanceMeters(for w: HKWorkout) -> Double? {
+    static func distanceMeters(for w: HKWorkout) -> Double? {
         for id in [HKQuantityTypeIdentifier.distanceSwimming,
                    .distanceWalkingRunning,
                    .distanceCycling] {
@@ -839,7 +853,7 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
     ///
     /// "Swim" is load-bearing beyond display: the pure formatter reads it to decide
     /// the whole-meter distance format and the swim detail segments.
-    private static func activityName(_ t: HKWorkoutActivityType) -> String {
+    static func activityName(_ t: HKWorkoutActivityType) -> String {
         switch t {
         case .swimming: return "Swim"
         case .running: return "Run"
@@ -998,5 +1012,13 @@ nonisolated extension HealthContextProvider {
             store.execute(q)
         }
         return samples.map { (end: $0.endDate, value: $0.quantity.doubleValue(for: unit)) }
+    }
+}
+
+extension AltitudeSample {
+    /// The ONLY lift from a route location into the per-turn health block's path: its altitude
+    /// and vertical accuracy. The coordinate is not read, so nothing downstream can carry it.
+    nonisolated init(_ location: CLLocation) {
+        self.init(altitude: location.altitude, verticalAccuracy: location.verticalAccuracy)
     }
 }

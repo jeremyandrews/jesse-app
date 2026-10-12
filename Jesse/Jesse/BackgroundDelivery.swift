@@ -183,6 +183,9 @@ final class BackgroundDelivery {
         // resting HR and HRV from Health, so the Patterns engine has them by morning even
         // when the app was not opened. Its outcome does not decide this task's.
         async let vitals = VitalsSync.shared.sync()
+        // And the health archive: whatever Health gained since its anchors, to the Studio's
+        // Postgres archive. Its outcome does not decide this task's either.
+        async let archive: Void = HealthArchiveSync.shared.sync()
         async let replies: BackgroundWorkOutcome = {
             var outcome = BackgroundWorkOutcome.noData
             for (_, job) in jobs {
@@ -191,6 +194,7 @@ final class BackgroundDelivery {
             return outcome
         }()
         _ = await vitals
+        await archive
         return Self.combine(await snapshots, await replies)
     }
 

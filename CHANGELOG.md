@@ -14,6 +14,58 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (191)] - 2026-10-12
+
+**The phone copies its whole Apple Health history to the Studio's health archive, then keeps it
+current.** Root cause of the gap: the app read a wide set of HealthKit types but uploaded only a
+ten-number daily vitals summary, so the archive the bridge gained in 0.169.0
+(`POST /jesse/health/ingest`) had nothing feeding it. The bridge does not change.
+
+- **What is sent.** Every quantity and category type in the existing read set, every workout
+  with its statistics and events, and every workout route with all of its locations. No HealthKit
+  read type was added: the archive covers what the app may already read. The list is
+  `HealthArchiveCatalogue` (JesseNetworking), each quantity type with one canonical unit; an app
+  test fails if it and `HealthContextProvider.readTypes` ever differ, or if a unit is not
+  compatible with its type.
+- **The wire shape, in JesseKit** (`HealthArchiveWire.swift`): request types for the four kinds,
+  a batcher (at most 2000 samples and 2000 deletions per request, order kept), quantity series
+  expanded into `seq` 0, 1, 2… points under the series sample's UUID, metadata made JSON-safe
+  (an `HKQuantity` becomes `{"value", "unit"}`, a date an RFC 3339 string, anything else dropped
+  and counted), RFC 3339 timestamps with a numeric offset and milliseconds, and routes thinned
+  evenly to 100000 points with the first and last kept and `downsampled` set. A negative
+  accuracy, speed or course is sent as null, and so is the altitude when its vertical accuracy is
+  invalid; route numbers are rounded (coordinates to 7 decimals) to keep the largest route inside
+  the bridge's 16 MiB body. Uploads use their own session with a 300-second ceiling.
+- **The engine** (`HealthArchiveSync`). Per type, an anchored query from the type's own anchor
+  under `healthArchive.anchor.` (never the chat triggers' `healthAnchor.*`), a page at a time, and
+  the anchor is stored only after every batch of the page answered 200. A 503, a 400, a 401 or a
+  thrown error leaves it; `503 not_configured` and `401` stop the whole run. A locked phone
+  (`errorDatabaseInaccessible`) ends the run quietly with no anchor touched, and an empty answer
+  is never taken as caught up while protected data is unavailable. The first run reads full
+  history and resumes page by page after an interruption. Two triggers never make two runs.
+- **Workouts and routes** (`HealthArchiveReader.swift`). Workouts 100 to a request; events map
+  onto the six wire words with HealthKit's raw event type kept in the event metadata. Routes go
+  one per request and one per page, so a route's anchor moves only after its own 200. A route's
+  workout is found by asking the workouts that overlap it which routes they own, then by largest
+  time overlap; a route no workout claims is counted in the log and passed over. The route read
+  shares `HealthContextProvider.readRouteLocations` with the elevation reduction.
+- **When it runs.** Observer queries with background delivery for every archive type (hourly;
+  body mass and workouts stay immediate, which the weigh-in and workout chat triggers already
+  ask for), the existing background refresh, and each foreground. All gated on Apple Health
+  being connected and a bridge being paired.
+- **Settings › Health archive.** State (off, not configured on the bridge, backfilling with
+  samples sent and types done, up to date), last sync, last error kind, and a "Start backfill"
+  button that runs in the foreground with the idle timer disabled.
+- **The coordinates rule is rewritten** (`docs/workout-feed-inventory.md` and the route
+  comments): no coordinate, place name or route shape ever enters the per-turn health block, a
+  prompt or a log line; the single exception is the health archive's upload of workout routes to
+  the bridge's ingest endpoint, into Jeremy's own database (ruled 2026-10-10). The per-turn block
+  is unchanged and still carries only the route's four elevation numbers; `AltitudeSample(_:)`
+  is now the one lift from a location into that path, and a test walks a fixture route through
+  it to the block and finds no latitude or longitude.
+- Unchanged: `VitalsSync`, the per-turn health block, the workout auto log, the chat triggers
+  and their anchors, the meal writer and the read set.
+
 ## [Bridge 0.171.0] - 2026-10-12
 
 **The bridge archives Apple Health samples and the diet CSVs into Postgres when `[healthdb]` is

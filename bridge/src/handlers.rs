@@ -604,9 +604,11 @@ pub async fn health(State(st): State<AppState>, headers: HeaderMap) -> Json<Valu
             });
         }
         // THE HEALTH ARCHIVE's counters, present only where `[healthdb]` is configured. Labels
-        // are kinds, reasons and diet file names, never a value.
+        // are kinds, reasons, diet file names and the read server's call outcomes, never a value.
         if st.healthdb.is_some() {
-            body["healthdb"] = json!({ "counters": healthdb_counters_json() });
+            body["healthdb"] = json!({
+                "counters": healthdb_all_counters_json(st.cfg.state_dir.as_deref())
+            });
         }
         if let Some(drift) = BINARY_DRIFT.get().filter(|d| !d.is_empty()) {
             body["containment_stale"] = json!(drift

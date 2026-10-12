@@ -238,6 +238,13 @@ Answer the question I asked, not the one you wish I had asked.
 # mirror_diet (optional, default true): false turns the diet CSV mirror off and leaves the
 # ingest route on.
 #
+# ro_url_file (optional): a file holding the connection URL of the READ-ONLY role, for example
+#   postgres://health_ro:PASSWORD@healthdb.pozza:5432/health?sslmode=verify-full
+# for the jesse-healthdb-mcp server turns read the archive through. Same checks as url_file
+# (regular file, owned by the bridge's user, chmod 600) and the same ca_file; a URL naming the
+# same role as url_file is refused. The bridge never connects with it: it hands the server the
+# file's PATH, and the server reads it. Without it no read server is ever started.
+#
 # If Postgres is down at start the bridge still starts; the route answers
 # 503 {"error":"unavailable"} until it can connect. Changing this table needs a restart.
 #
@@ -245,6 +252,7 @@ Answer the question I asked, not the one you wish I had asked.
 # url_file = "/path/to/healthdb-url"
 # ca_file = "/path/to/healthdb-ca.crt"
 # mirror_diet = true
+# ro_url_file = "/path/to/healthdb-ro-url"
 
 # =============================================================================
 # [[models]] — the global model switch's registry (declarative, operator-configurable)

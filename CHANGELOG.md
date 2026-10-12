@@ -14,6 +14,59 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.172.0] - 2026-10-12
+
+**A read-only MCP server over the health archive, `jesse-healthdb-mcp`, built and tested but not
+yet registered on any harness.** Root cause of the gap: a turn sees health data only as the
+per-turn text block (at most 4 metrics over 31 days, full workout detail only inside 48 hours),
+while the archive now holds every sample, route and diet row. Registration is held back: adding a
+server to a child MCP set moves the main containment row labels on every harness, which needs a
+live battery per harness and the owner re-signing Codex's two `[[accepted]]` blocks, and a bridge
+built with the new set and no new record refuses to start.
+
+- **Two tools** (`src/healthquery.rs`, `src/bin/jesse-healthdb-mcp.rs`). `healthdb_schema`: every
+  table and view in `raw` and `analytics` the role can read, with columns and types; row counts
+  exact below 100000 estimated rows and from `pg_class`/`pg_stat` above; the distinct `type`
+  values of `raw.quantity_sample` (with units) and `raw.category_sample` with first and last
+  dates, by a skip scan over the `(type, start_ts)` index; and a fixed guide (sleep stage codes,
+  the 2026-09-21 watch change in VO2 max, the 18 percent swim time undercount, `diet_row.data`
+  values being text, timestamptz in Europe/Rome, routes: analytics views first, never all of a
+  route's points, haversine in metres). `healthdb_query`: one statement, rows as JSON arrays
+  under typed `columns`.
+- **Every guard is in the server, not only in the role.** A lexer (quotes, quoted identifiers,
+  dollar quotes, nested block comments) refuses a second statement, an unterminated quote or
+  comment, and anything not beginning `SELECT`, `WITH`, `TABLE` or `VALUES`. Then a fresh
+  connection, `BEGIN READ ONLY`, `SET LOCAL statement_timeout = '15s'`, `work_mem = '16MB'`,
+  `TimeZone = 'Europe/Rome'`, the statement through the extended protocol as a subquery under
+  `LIMIT 501`, `ROLLBACK`, close; a 25 s client ceiling drops the connection if the server stops
+  answering. At most 500 rows, every string cut at 500 characters, `rows_truncated` and
+  `values_truncated` flags with a note. Postgres's own message, detail and hint go back to the
+  turn as an `isError` result; a timeout says how to narrow the query.
+- **`[healthdb]` gains optional `ro_url_file`** (documented in `jesse.example.toml`): the
+  `health_ro` URL, refused at startup unless a regular `0600` file owned by the bridge's user
+  holding a `postgres://` URL, and refused when it names the same role as `url_file`. The bridge
+  never reads the URL past that check: `HealthDbSettings::healthdb_mcp_env` hands the server the
+  file's PATH and `ca_file`, and the server re-runs the same checks as its own uid and forces
+  verify-full TLS whatever the URL's `sslmode` says. Absent, it returns `None` and nothing is
+  started.
+- **Counters on the existing surface.** The server is per turn, so each call appends one
+  content-free line (time, tool, outcome, ms, rows) to `<state_dir>/healthdb-mcp-calls.log`, mode
+  `0600`; `GET /health` tallies it into `healthdb.counters` as `healthdb_mcp_query_total` and
+  `healthdb_mcp_schema_total` by outcome (`ok`, `rejected`, `timeout`, `error`, `unavailable`).
+  Stderr gets the same four fields. No SQL, value, message or URL in either.
+- **Tests.** Unit: two statements rejected, semicolons inside quotes and comments allowed,
+  unterminated text and non-reads rejected, the row cap and truncation flags, route coordinates
+  intact, column order, the guide's facts, the ledger tallies without content, and the
+  `ro_url_file` config (absent gives no environment, `0600` gives paths and no password, group
+  readable and owner role refused). Postgres (`tests/healthdb_mcp_pg.rs`, under
+  `JESSE_TEST_PG_URL`): as a `health_ro`-like role, `INSERT`, `UPDATE`, `CREATE`, `SET ROLE`,
+  write CTEs and `set_config('role', ...)` all fail and nothing moves; as the owner, writes are
+  still refused by the transaction and a `set_config` of the timeout is rolled back;
+  `pg_sleep(20)` times out at 15 s; a 1000-row select returns 500 with the flag; route points
+  come back exact; the schema lists the seeded tables, types and dates.
+- **Not registered, not deployed, not in `deploy-bins.toml`.** The registration change adds it
+  to the deploy set with the server.
+
 ## [App 1.0 (191)] - 2026-10-12
 
 **The phone copies its whole Apple Health history to the Studio's health archive, then keeps it

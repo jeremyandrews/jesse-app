@@ -346,6 +346,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 self?.refresh.schedule(at: date)
             }
             HealthAutoTrigger.shared.startIfEnabled()
+            // The health archive's observers, for the same reason and in the same place.
+            HealthArchiveObserver.shared.startIfEnabled()
             // A recording's run measures lost contact in FOREGROUND time and runs this
             // device's own engine only in the foreground, so the clock must know where the
             // app is from the first instant, including a launch straight into the

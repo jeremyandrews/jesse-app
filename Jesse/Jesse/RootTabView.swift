@@ -269,6 +269,9 @@ struct RootTabView: View {
             // Feed the Studio's daily vitals ledger (sleep, resting HR, HRV and the rest) for
             // the Patterns engine: the backfill once per bridge, then the last few days.
             Task { await VitalsSync.shared.sync() }
+            // The health archive catches up too. A run already going (an observer wake, or
+            // the Settings backfill) is joined, never doubled.
+            Task { await HealthArchiveSync.shared.sync() }
             // The vault index's ONE automatic trigger. Debounced to once per 30 seconds by
             // the indexer itself, off the main actor, and never on a timer: an activation is
             // the moment the local copy may have been resynced behind the app's back. The

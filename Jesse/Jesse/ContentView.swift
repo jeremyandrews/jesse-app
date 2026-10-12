@@ -713,6 +713,7 @@ struct SettingsView: View {
                         // log. "Connect Apple Health" turns it on, which starts them too.
                         .onChange(of: attachHealthContext) { _, _ in
                             HealthAutoTrigger.shared.startIfEnabled()
+                            HealthArchiveObserver.shared.startIfEnabled()
                         }
                     Toggle("Write meals to Apple Health", isOn: $writeMealsToHealth)
                         .disabled(mealWriteDenied)
@@ -746,6 +747,8 @@ struct SettingsView: View {
                         Task { _ = await HealthContextProvider.requestAuthorizationIfTypesGrew() }
                     }
                 }
+
+                HealthArchiveSettingsSection()
 
                 Section {
                     Toggle("Attach location context", isOn: $attachLocationContext)

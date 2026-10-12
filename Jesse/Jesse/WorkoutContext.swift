@@ -186,9 +186,11 @@ nonisolated enum SplitReducer {
 // MARK: - Route elevation
 
 /// One altitude reading from a workout route, as plain Foundation values.
-/// `HealthContextProvider` lifts ONLY these two numbers out of each `CLLocation`;
-/// the coordinates never leave the HealthKit boundary, so nothing downstream of
-/// this type can log or send a position.
+/// `HealthContextProvider` lifts ONLY these two numbers out of each `CLLocation`
+/// for the per-turn block; the coordinates never enter this path, so nothing
+/// downstream of this type can put a position into a turn, a prompt or a log line.
+/// (Whole routes do leave the phone in one place only: the health archive's upload
+/// to the bridge's `/jesse/health/ingest`, into Jeremy's own database.)
 nonisolated struct AltitudeSample: Equatable, Sendable {
     /// Meters above sea level.
     var altitude: Double

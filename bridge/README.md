@@ -1244,6 +1244,32 @@ curl -s -X POST http://127.0.0.1:8765/jesse/health/ingest \
 The database tests in `tests/healthdb_pg.rs` run when `JESSE_TEST_PG_URL` names a server
 they may create databases on (CI provides a `postgres:16` service).
 
+### Reading it from a turn: `jesse-healthdb-mcp` (0.172.0)
+
+A stdio MCP server binary with two tools, `healthdb_schema` (every table and view in `raw` and
+`analytics` with columns, types and row counts, the sample types with units and date ranges,
+and a fixed guide) and `healthdb_query` (one read-only statement). It is started with two
+paths, `JESSE_HEALTHDB_RO_URL_FILE` and `JESSE_HEALTHDB_CA_FILE`
+(`HealthDbSettings::healthdb_mcp_env`, present only when `[healthdb]` has `ro_url_file`), and
+reads the `health_ro` URL itself with the same `0600` and owner checks; it never sees the
+owner's URL. Every guard is in the server (`src/healthquery.rs`), not only in the role: one
+statement beginning `SELECT`, `WITH`, `TABLE` or `VALUES` (a lexer refuses a second one and any
+unterminated quote or comment, and the extended protocol refuses it again), `BEGIN READ ONLY`
+with `statement_timeout` 15 s, `work_mem` 16 MB and `TimeZone` Europe/Rome, then `ROLLBACK`, on
+a fresh connection per call; the statement runs as a subquery under `LIMIT 501`, at most 500
+rows come back, every string is cut at 500 characters, and the reply flags either cut.
+Postgres's error message goes back to the turn and nowhere else.
+
+One content-free line per call (tool, outcome, ms, rows) goes to stderr and to
+`<state_dir>/healthdb-mcp-calls.log`, which `GET /health` tallies into `healthdb.counters` as
+`healthdb_mcp_query_total` and `healthdb_mcp_schema_total` by outcome (`ok`, `rejected`,
+`timeout`, `error`, `unavailable`).
+
+**Not yet registered on any harness.** Adding a server to a child MCP set moves the main row
+labels on every harness, which needs a live containment battery per harness and the owner
+re-signing Codex's `[[accepted]]` blocks. The tests are in `src/healthquery.rs` and
+`tests/healthdb_mcp_pg.rs`.
+
 ## Recent-workouts context (`health_context`)
 
 **`POST /jesse` with an optional `"health_context"` field** — a compact,

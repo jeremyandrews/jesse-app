@@ -86,12 +86,23 @@ pub struct HealthDbToml {
     pub ca_file: Option<String>,
     /// Whether to run the diet mirror. Default true.
     pub mirror_diet: Option<bool>,
+    /// A file holding the connection URL of the READ-ONLY role (`health_ro`), for the
+    /// `jesse-healthdb-mcp` server a turn reads the archive through. Optional; same `0600` and
+    /// owner checks as `url_file`, same `ca_file`. The bridge itself never connects with it.
+    pub ro_url_file: Option<String>,
 }
 
 /// The connection URL. It carries the password, so its `Debug` prints a marker and it has no
 /// `Display`: no `{:?}` of a config can put it in a log.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HealthDbUrl(String);
+
+impl HealthDbUrl {
+    /// The URL's options, as written. Only ever built from a URL that already parsed.
+    pub fn connect_options(&self) -> PgConnectOptions {
+        PgConnectOptions::from_str(&self.0).unwrap_or_else(|_| PgConnectOptions::new())
+    }
+}
 
 impl std::fmt::Debug for HealthDbUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -107,6 +118,10 @@ pub struct HealthDbSettings {
     pub url_file: PathBuf,
     pub ca_file: PathBuf,
     pub mirror_diet: bool,
+    /// The read-only role's URL file, checked at load and handed to `jesse-healthdb-mcp` BY
+    /// PATH ([`HealthDbSettings::healthdb_mcp_env`]); its contents are not kept here, so the
+    /// bridge holds one credential and the server holds the other.
+    pub ro_url_file: Option<PathBuf>,
 }
 
 impl HealthDbSettings {
@@ -118,6 +133,22 @@ impl HealthDbSettings {
             .unwrap_or_else(|_| PgConnectOptions::new())
             .ssl_mode(PgSslMode::VerifyFull)
             .ssl_root_cert(&self.ca_file)
+    }
+
+    /// The environment a `jesse-healthdb-mcp` child is started with, or `None` when no
+    /// `ro_url_file` is configured, in which case the server must not be registered at all.
+    /// Paths only: the server reads and checks the URL file itself, so the read-only password
+    /// never travels through an argv, an environment or a config string, and the owner's URL
+    /// is never offered to it.
+    pub fn healthdb_mcp_env(&self) -> Option<[(&'static str, String); 2]> {
+        let ro = self.ro_url_file.as_ref()?;
+        Some([
+            (HEALTHQ_ENV_RO_URL_FILE, ro.to_string_lossy().into_owned()),
+            (
+                HEALTHQ_ENV_CA_FILE,
+                self.ca_file.to_string_lossy().into_owned(),
+            ),
+        ])
     }
 }
 
@@ -167,6 +198,33 @@ impl HealthDbConfig {
                     None
                 }
             });
+        let ro_url_file = t
+            .ro_url_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        if let Some(ro) = &ro_url_file {
+            match read_url_file_keyed(ro, uid, "ro_url_file") {
+                Ok(ro_url) => {
+                    // The point of a second file is a second ROLE. The same role in both is
+                    // the owner credential reaching the turn's server, which is refused.
+                    let same_role = url.as_ref().is_some_and(|owner| {
+                        owner.0 == ro_url.0
+                            || ro_url.connect_options().get_username()
+                                == owner.connect_options().get_username()
+                    });
+                    if same_role {
+                        problems.push(
+                            "`ro_url_file` names the same role as `url_file`; it must hold the \
+                             read-only role's URL (health_ro), never the owner's"
+                                .to_string(),
+                        );
+                    }
+                }
+                Err(e) => problems.push(e),
+            }
+        }
         if let Some(ca) = &ca_file {
             if let Err(e) = check_ca_file(ca) {
                 problems.push(e);
@@ -179,6 +237,7 @@ impl HealthDbConfig {
                     url_file,
                     ca_file,
                     mirror_diet: t.mirror_diet.unwrap_or(true),
+                    ro_url_file,
                 })
             }
             _ => HealthDbConfig::Refused(problems.join("; ")),
@@ -202,30 +261,36 @@ fn current_euid() -> u32 {
 /// by another user, and one that does not hold a `postgres://` URL. No message here quotes the
 /// file's contents: it holds a password.
 pub fn read_url_file(path: &Path, uid: u32) -> Result<HealthDbUrl, String> {
+    read_url_file_keyed(path, uid, "url_file")
+}
+
+/// [`read_url_file`] for any key, so `ro_url_file` gets the same checks and messages that name
+/// it rather than `url_file`.
+pub fn read_url_file_keyed(path: &Path, uid: u32, key: &str) -> Result<HealthDbUrl, String> {
     let shown = path.display();
     let meta =
-        std::fs::metadata(path).map_err(|e| format!("`url_file` {shown} cannot be read: {e}"))?;
+        std::fs::metadata(path).map_err(|e| format!("`{key}` {shown} cannot be read: {e}"))?;
     if !meta.is_file() {
-        return Err(format!("`url_file` {shown} is not a regular file"));
+        return Err(format!("`{key}` {shown} is not a regular file"));
     }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(format!(
-            "`url_file` {shown} has mode {mode:04o}, open to group or other; it holds a \
+            "`{key}` {shown} has mode {mode:04o}, open to group or other; it holds a \
              password and must be 0600 (chmod 600 {shown})"
         ));
     }
     if meta.uid() != uid {
         return Err(format!(
-            "`url_file` {shown} is owned by uid {}, not by the bridge's uid {uid}",
+            "`{key}` {shown} is owned by uid {}, not by the uid {uid} reading it",
             meta.uid()
         ));
     }
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("`url_file` {shown} cannot be read: {e}"))?;
+        .map_err(|e| format!("`{key}` {shown} cannot be read: {e}"))?;
     let url = text.trim();
     if url.is_empty() {
-        return Err(format!("`url_file` {shown} is empty"));
+        return Err(format!("`{key}` {shown} is empty"));
     }
     if !(url.starts_with("postgres://") || url.starts_with("postgresql://"))
         || url.contains(char::is_whitespace)
@@ -233,14 +298,14 @@ pub fn read_url_file(path: &Path, uid: u32) -> Result<HealthDbUrl, String> {
     {
         // The parser's own message is not passed on: it can echo part of the URL.
         return Err(format!(
-            "`url_file` {shown} must hold one postgres:// connection URL on one line"
+            "`{key}` {shown} must hold one postgres:// connection URL on one line"
         ));
     }
     Ok(HealthDbUrl(url.to_string()))
 }
 
 /// The CA must be readable and hold a PEM certificate.
-fn check_ca_file(path: &Path) -> Result<(), String> {
+pub fn check_ca_file(path: &Path) -> Result<(), String> {
     let shown = path.display();
     let pem = std::fs::read(path).map_err(|e| format!("`ca_file` {shown} cannot be read: {e}"))?;
     if !String::from_utf8_lossy(&pem).contains("-----BEGIN CERTIFICATE-----") {
@@ -1817,6 +1882,7 @@ Htby8Y5sp501
             url_file: Some(url.to_string_lossy().into_owned()),
             ca_file: Some(ca.to_string_lossy().into_owned()),
             mirror_diet: None,
+            ro_url_file: None,
         }
     }
 
@@ -1917,6 +1983,7 @@ Htby8Y5sp501
             url_file: table(&d, 0o600).url_file,
             ca_file: table(&d, 0o600).ca_file,
             mirror_diet: Some(false),
+            ro_url_file: None,
         })) else {
             panic!()
         };
@@ -1930,6 +1997,75 @@ Htby8Y5sp501
             s.connect_options().get_ssl_mode(),
             PgSslMode::VerifyFull
         ));
+    }
+
+    /// A table with an `ro_url_file` holding `url`, at `mode`.
+    fn table_with_ro(dir: &Path, url: &str, mode: u32) -> HealthDbToml {
+        let ro = dir.join("ro-url");
+        std::fs::write(&ro, url).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(mode)).unwrap();
+        HealthDbToml {
+            ro_url_file: Some(ro.to_string_lossy().into_owned()),
+            ..table(dir, 0o600)
+        }
+    }
+
+    const RO_URL: &str =
+        "postgres://health_ro:ROPASSWORD@healthdb.example:5432/health?sslmode=verify-full\n";
+
+    #[test]
+    fn without_ro_url_file_there_is_no_server_environment() {
+        let d = scratch("ro-absent");
+        let HealthDbConfig::Ready(s) = HealthDbConfig::from_toml(Some(table(&d, 0o600))) else {
+            panic!("expected ready");
+        };
+        assert!(s.ro_url_file.is_none());
+        assert!(s.healthdb_mcp_env().is_none());
+    }
+
+    #[test]
+    fn a_0600_ro_url_file_gives_the_server_paths_and_never_a_url() {
+        let d = scratch("ro-ready");
+        let HealthDbConfig::Ready(s) =
+            HealthDbConfig::from_toml(Some(table_with_ro(&d, RO_URL, 0o600)))
+        else {
+            panic!("expected ready");
+        };
+        let env = s.healthdb_mcp_env().expect("configured");
+        assert_eq!(env[0].0, HEALTHQ_ENV_RO_URL_FILE);
+        assert_eq!(env[0].1, d.join("ro-url").to_string_lossy());
+        assert_eq!(env[1].0, HEALTHQ_ENV_CA_FILE);
+        assert_eq!(PathBuf::from(&env[1].1), s.ca_file);
+        let all = format!("{env:?} {s:?}");
+        assert!(!all.contains("PASSWORD"), "{all}");
+    }
+
+    #[test]
+    fn a_group_readable_ro_url_file_is_refused_by_name_without_quoting_it() {
+        let d = scratch("ro-mode");
+        for mode in [0o640, 0o604, 0o644] {
+            match HealthDbConfig::from_toml(Some(table_with_ro(&d, RO_URL, mode))) {
+                HealthDbConfig::Refused(why) => {
+                    assert!(why.contains("`ro_url_file`"), "{why}");
+                    assert!(why.contains("chmod 600"), "{why}");
+                    assert!(!why.contains("PASSWORD"), "{why}");
+                }
+                other => panic!("mode {mode:o}: expected refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_ro_url_file_naming_the_owner_role_is_refused() {
+        let d = scratch("ro-same");
+        let owner = "postgres://health:OTHER@healthdb.example:5432/health\n";
+        let HealthDbConfig::Refused(why) =
+            HealthDbConfig::from_toml(Some(table_with_ro(&d, owner, 0o600)))
+        else {
+            panic!("the owner's role in ro_url_file must refuse");
+        };
+        assert!(why.contains("same role"), "{why}");
+        assert!(!why.contains("OTHER"), "{why}");
     }
 
     // ---- diet CSV ------------------------------------------------------------------------

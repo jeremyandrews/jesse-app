@@ -1154,6 +1154,9 @@ pub struct Config {
     /// The house model (`[house]`): absent, ready, or refused at startup. See
     /// [`crate::HouseConfig`]. Holds the token, which is why `Config` has no `Debug`.
     pub house: HouseConfig,
+    /// The health archive (`[healthdb]`): absent, ready, or refused at startup. See
+    /// [`crate::HealthDbConfig`]. Ready holds the connection URL, which carries a password.
+    pub healthdb: HealthDbConfig,
     /// The per-turn run limit in seconds (`JESSE_TIMEOUT`, default
     /// [`DEFAULT_TIMEOUT_SECS`], clamped to `[1, HARD_TIMEOUT_CEILING]`).
     pub timeout_secs: u64,
@@ -4721,6 +4724,9 @@ impl Config {
             // The `[house]` table, its token read and checked here, once. A refused table is
             // carried as `Refused` and stops the bridge at the startup gate.
             house: HouseConfig::from_toml(load_house_table(&home)),
+            // The `[healthdb]` table, its URL file read and checked here, once. Refused stops
+            // the bridge at the startup gate, exactly as `[house]` does.
+            healthdb: HealthDbConfig::from_toml(load_healthdb_table(&home)),
             // 90m default; clamped to [1, HARD_TIMEOUT_CEILING].
             timeout_secs: clamp_timeout_secs(env_parse("JESSE_TIMEOUT", DEFAULT_TIMEOUT_SECS)),
             // The cut-off turn's partial-answer ring. Blocks are floored at 1 (a

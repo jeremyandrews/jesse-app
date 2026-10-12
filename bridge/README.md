@@ -1199,6 +1199,51 @@ because it is still being logged.
 A missing log is empty to the engine (its questions read "not enough days yet"), never an
 error.
 
+## The health archive (`POST /jesse/health/ingest`, `[healthdb]`, 0.171.0)
+
+Off unless `jesse.local.toml` has a `[healthdb]` table (see `jesse.example.toml`). With it,
+the bridge keeps a lazy Postgres pool (at most 4 connections, TLS verify-full against
+`ca_file`), brings the `raw` schema's tables current from `migrations/healthdb/` on first
+connect, and serves:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/jesse/health/ingest \
+  -H "Authorization: Bearer $JESSE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"schema":1,"kind":"quantity","type":"HKQuantityTypeIdentifierHeartRate",
+       "samples":[{"uuid":"6f1c2c1e-6a43-4c39-9a51-2b7b0e5d6c11","seq":0,
+       "start":"2026-10-09T08:59:00+02:00","end":"2026-10-09T08:59:05+02:00",
+       "value":142.0,"unit":"count/min","source":"com.apple.health.x","source_name":"Watch"}],
+       "deleted":[]}'
+```
+
+- **Kinds**: `quantity` (keyed `(uuid, seq)`, `seq` being a series point's index),
+  `category` (integer `value`, no `unit`), `workout` (its `events` replaced on every resend)
+  and `route` (one route per request, at most 100000 points, all replaced on a resend,
+  loaded with `COPY`).
+- **Limits**: 2000 samples and 8 MiB per request; a route request 16 MiB.
+- **One transaction per request.** `200 {"upserted": n, "deleted": n}` only after commit,
+  because the phone advances its HealthKit anchor on a 200. Every write is an upsert, so a
+  resend is harmless. `deleted` UUIDs remove every row of that kind (every `seq`, a
+  workout's events and a route's points by cascade) and leave a `raw.deleted_sample`
+  tombstone.
+- **Refusals**: `400 {"error": …}` for anything off contract (bad JSON, unknown kind, a
+  missing field, a non-finite number, `start` after `end`, a coordinate off the globe), and
+  nothing is written. Implausible values are stored: it is a raw archive. `413` too large,
+  `401` bad token, `503 {"error":"not_configured"}` without the table,
+  `503 {"error":"unavailable"}` when Postgres cannot be reached (a 5 s wait at most).
+- **Diet mirror** (`mirror_diet`, default on): every 10 minutes, each of `food-log.csv`,
+  `exercise-log.csv`, `weight-log.csv`, `vitals-log.csv` and `daily-targets.csv` whose
+  sha256 changed is reloaded whole into `raw.diet_row` (jsonb keyed by header, `date` from
+  the `Date` column) in its own transaction. A file that does not parse is skipped, by name
+  and line, and its previous mirror kept.
+- **Nothing content-bearing is logged**: lines name the kind, the HealthKit type and counts.
+  Counters (`healthdb_ingest_samples_total` by kind, `healthdb_ingest_errors_total` by
+  reason, `healthdb_diet_reload_total` by file) are under `healthdb.counters` on the
+  authenticated `GET /health`.
+
+The database tests in `tests/healthdb_pg.rs` run when `JESSE_TEST_PG_URL` names a server
+they may create databases on (CI provides a `postgres:16` service).
+
 ## Recent-workouts context (`health_context`)
 
 **`POST /jesse` with an optional `"health_context"` field** — a compact,

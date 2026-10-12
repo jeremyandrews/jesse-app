@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.170.0"
+version = "0.171.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -201,6 +201,15 @@ whisper-rs = "0.16"
 # C, and small; a hand-rolled diff3 is exactly the kind of code that loses a line in the
 # one case nobody tested. Only `merge` is used.
 diffy = "0.4"
+# sqlx: the Postgres client behind the health archive (`src/healthdb.rs`, `[healthdb]`), the
+# one pure-Rust async Postgres driver with a pool, rustls TLS, `COPY` and embedded migrations
+# in one crate. RUNTIME QUERIES ONLY: every statement is a `sqlx::query` string, never the
+# compile-time-checked `query!` family, so `cargo build` needs no database anywhere.
+# `macros` is here for `migrate!`, which only embeds `migrations/healthdb/` into the binary
+# and never connects at build time. rustls on ring with webpki roots, the same TLS stack
+# reqwest already uses, and the `[healthdb]` CA is added for verify-full. Postgres only: no
+# `any`, no mysql or sqlite in the graph. Inert unless `[healthdb]` is configured.
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "macros", "migrate", "json", "chrono", "uuid"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }   # ServiceExt::oneshot

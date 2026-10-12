@@ -528,6 +528,10 @@ struct LocalConfig {
     /// which file holds its token. See [`crate::HouseConfig`].
     #[serde(default)]
     house: Option<HouseToml>,
+    /// The optional top-level `[healthdb]` table: the Postgres archive of Apple Health samples
+    /// and the diet CSV mirror. See [`crate::HealthDbConfig`].
+    #[serde(default)]
+    healthdb: Option<HealthDbToml>,
 }
 
 /// Resolve the local overlay file, first existing wins:
@@ -774,6 +778,12 @@ pub fn load_quota_table(home: &str) -> Option<QuotaToml> {
 /// is `None`: the house model is simply not registered.
 pub fn load_house_table(home: &str) -> Option<HouseToml> {
     load_local_config(home).and_then(|c| c.house)
+}
+
+/// Read the `[healthdb]` table from the same overlay file. Absent or malformed file, or no
+/// table, is `None`: no pool, no task, and the ingest route answers `not_configured`.
+pub fn load_healthdb_table(home: &str) -> Option<HealthDbToml> {
+    load_local_config(home).and_then(|c| c.healthdb)
 }
 
 /// The overlay file the bridge actually loaded, or `None` when there is none.

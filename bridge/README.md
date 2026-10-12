@@ -1232,10 +1232,19 @@ curl -s -X POST http://127.0.0.1:8765/jesse/health/ingest \
   `401` bad token, `503 {"error":"not_configured"}` without the table,
   `503 {"error":"unavailable"}` when Postgres cannot be reached (a 5 s wait at most).
 - **Diet mirror** (`mirror_diet`, default on): every 10 minutes, each of `food-log.csv`,
-  `exercise-log.csv`, `weight-log.csv`, `vitals-log.csv` and `daily-targets.csv` whose
-  sha256 changed is reloaded whole into `raw.diet_row` (jsonb keyed by header, `date` from
-  the `Date` column) in its own transaction. A file that does not parse is skipped, by name
-  and line, and its previous mirror kept.
+  `exercise-log.csv`, `weight-log.csv`, `vitals-log.csv`, `daily-targets.csv`,
+  `calorie-base.csv` and `day-styles.csv` whose sha256 changed is reloaded whole into
+  `raw.diet_row` (jsonb keyed by header, `date` from the `Date` column, null in a file
+  without one) in its own transaction. A row shorter than the header (written before the
+  header grew columns) keys the cells it has and leaves the rest absent; a row longer than
+  it fails the file. A file that does not parse is skipped, by name and line, and its
+  previous mirror kept.
+- **Per-day targets** (0.174.0): in the same pass, each `diet-logs/days/YYYY-MM-DD.js` whose
+  sha256 differs from its row is parsed (as `GET /jesse/diet` parses it) and upserted whole
+  into `raw.diet_day` (`date`, `sha256`, `data`, `loaded_at`), so a day's intake can be
+  compared with that day's own `targets`. A file whose `date` is not its name, or that does
+  not parse, is skipped by name and reason and its row kept. `vault/diet-today.js` is the row
+  for its own date only until `days/` holds that date's file; the archived file wins.
 - **Nothing content-bearing is logged**: lines name the kind, the HealthKit type and counts.
   Counters (`healthdb_ingest_samples_total` by kind, `healthdb_ingest_errors_total` by
   reason, `healthdb_diet_reload_total` by file) are under `healthdb.counters` on the

@@ -154,6 +154,7 @@ async fn migrations_apply_twice_cleanly() {
             "_sqlx_migrations",
             "category_sample",
             "deleted_sample",
+            "diet_day",
             "diet_file",
             "diet_row",
             "quantity_sample",
@@ -503,6 +504,162 @@ async fn a_changed_diet_file_replaces_its_rows_and_an_unchanged_one_is_skipped()
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+    s.drop_db(&db).await;
+}
+
+#[tokio::test]
+async fn a_41_column_header_over_35_cell_rows_reloads_with_the_missing_columns_null() {
+    let Some(s) = Scratch::new().await else {
+        return;
+    };
+    let db = s.db();
+    db.ensure_migrated().await.unwrap();
+    let dir = std::env::temp_dir().join(format!("healthdb-diet-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Not `food-log.csv`: the reload counter is per label and process wide, and another test
+    // counts that label.
+    let file = "food-log-short-rows.csv";
+    let header: Vec<String> = std::iter::once("Date".to_string())
+        .chain((1..41).map(|i| format!("C{i}")))
+        .collect();
+    let row = |date: &str, cells: usize| {
+        std::iter::once(date.to_string())
+            .chain((1..cells).map(|i| i.to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    std::fs::write(
+        dir.join(file),
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            header.join(","),
+            row("2026-04-14", 35),
+            row("2026-04-15", 35),
+            row("2026-10-11", 41)
+        ),
+    )
+    .unwrap();
+    let out = mirror_diet_once(&db, &dir, &[file]).await;
+    assert_eq!(out[0].1, DietMirrorOutcome::Reloaded(3));
+    let (keys, c35, c34): (i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM jsonb_object_keys(data)), data->>'C35', data->>'C34' \
+         FROM raw.diet_row WHERE file = $1 AND row_no = 1",
+    )
+    .bind(file)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!((keys, c35, c34), (35, None, Some("34".to_string())));
+    let full: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM raw.diet_row, jsonb_object_keys(data) WHERE file = $1 AND row_no = 3",
+    )
+    .bind(file)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(full, 41);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    s.drop_db(&db).await;
+}
+
+#[tokio::test]
+async fn a_day_file_is_upserted_skipped_when_unchanged_and_replaced_when_changed() {
+    let Some(s) = Scratch::new().await else {
+        return;
+    };
+    let db = s.db();
+    db.ensure_migrated().await.unwrap();
+    let root = std::env::temp_dir().join(format!("healthdb-days-{}", Uuid::new_v4()));
+    let days = root.join("days");
+    let today = root.join("diet-today.js");
+    std::fs::create_dir_all(&days).unwrap();
+    let js = |date: &str, calories: u32| {
+        format!(
+            "window.DIET_TODAY = {{ date: \"{date}\", dayStyle: \"standard\", \
+             targets: {{ calories: {calories}, protein: 150 }} }};\n"
+        )
+    };
+    let calories = |db: Arc<HealthDb>, date: &'static str| async move {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT (data->'targets'->>'calories')::bigint FROM raw.diet_day \
+             WHERE date = $1::date",
+        )
+        .bind(date)
+        .fetch_optional(db.pool())
+        .await
+        .unwrap()
+        .flatten()
+    };
+    let outcomes = |out: Vec<(String, DietMirrorOutcome)>| -> Vec<DietMirrorOutcome> {
+        out.into_iter().map(|(_, o)| o).collect()
+    };
+
+    std::fs::write(days.join("2026-10-11.js"), js("2026-10-11", 2100)).unwrap();
+    std::fs::write(&today, js("2026-10-12", 2400)).unwrap();
+    let before = healthdb_counter(METRIC_DIET_RELOAD, "days");
+    let out = mirror_diet_days(&db, &days, &today).await;
+    assert_eq!(
+        outcomes(out),
+        [
+            DietMirrorOutcome::Reloaded(1),
+            DietMirrorOutcome::Reloaded(1)
+        ]
+    );
+    assert_eq!(healthdb_counter(METRIC_DIET_RELOAD, "days"), before + 2);
+    assert_eq!(calories(db.clone(), "2026-10-11").await, Some(2100));
+    assert_eq!(calories(db.clone(), "2026-10-12").await, Some(2400));
+    let loaded_at = "SELECT loaded_at FROM raw.diet_day WHERE date = '2026-10-11'";
+    let first: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(loaded_at)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+
+    let out = mirror_diet_days(&db, &days, &today).await;
+    assert_eq!(
+        outcomes(out),
+        [DietMirrorOutcome::Unchanged, DietMirrorOutcome::Unchanged]
+    );
+    let again: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(loaded_at)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(first, again, "an unchanged file is not rewritten");
+
+    // The morning archive: the day file appears with its final targets and wins over
+    // diet-today.js, which now names the same date.
+    std::fs::write(days.join("2026-10-12.js"), js("2026-10-12", 2600)).unwrap();
+    std::fs::write(days.join("2026-10-11.js"), js("2026-10-11", 2200)).unwrap();
+    let out = mirror_diet_days(&db, &days, &today).await;
+    assert_eq!(
+        outcomes(out),
+        [
+            DietMirrorOutcome::Reloaded(1),
+            DietMirrorOutcome::Reloaded(1),
+            DietMirrorOutcome::Superseded
+        ]
+    );
+    assert_eq!(calories(db.clone(), "2026-10-11").await, Some(2200));
+    assert_eq!(calories(db.clone(), "2026-10-12").await, Some(2600));
+
+    // A day file whose date is wrong keeps the previous row.
+    std::fs::write(days.join("2026-10-11.js"), js("2026-10-10", 9999)).unwrap();
+    let out = mirror_diet_days(&db, &days, &today).await;
+    assert_eq!(
+        out[0],
+        (
+            "days/2026-10-11.js".to_string(),
+            DietMirrorOutcome::Skipped("its date does not match its file name")
+        )
+    );
+    assert_eq!(calories(db.clone(), "2026-10-11").await, Some(2200));
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM raw.diet_day")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 2);
+
+    let _ = std::fs::remove_dir_all(&root);
     s.drop_db(&db).await;
 }
 

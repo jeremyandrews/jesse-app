@@ -9,7 +9,9 @@
 //!     upsert (or a whole replacement, for a workout's events and a route's points), so a
 //!     resend of a batch the phone never saw acknowledged is harmless.
 //!   * The diet mirror: every [`DIET_MIRROR_INTERVAL`], each diet CSV whose sha256 changed is
-//!     reloaded whole into `raw.diet_row`, one jsonb object per row keyed by the header.
+//!     reloaded whole into `raw.diet_row`, one jsonb object per row keyed by the header; and
+//!     each day file (`diet-logs/days/YYYY-MM-DD.js`, and the live `diet-today.js` until its
+//!     day is archived) whose sha256 changed is upserted whole into `raw.diet_day`.
 //!
 //! **A RAW ARCHIVE.** A value that is merely implausible (a heart rate of 250) is stored. What
 //! is refused is a body that does not meet the contract: bad JSON, an unknown kind, a missing
@@ -62,13 +64,19 @@ const MIGRATE_RETRY: Duration = Duration::from_secs(60);
 const MAX_BINDS: usize = 30_000;
 
 /// The diet CSVs the mirror keeps, by file name, in `diet-logs/`.
-pub const DIET_MIRROR_FILES: [&str; 5] = [
+pub const DIET_MIRROR_FILES: [&str; 7] = [
     "food-log.csv",
     "exercise-log.csv",
     "weight-log.csv",
     VITALS_LOG,
     "daily-targets.csv",
+    "calorie-base.csv",
+    "day-styles.csv",
 ];
+/// The archived day files, one per day, in `diet-logs/`.
+pub const DIET_DAYS_DIR: &str = "days";
+/// The live day file, in the vault's notes subdirectory, until the next morning archives it.
+pub const DIET_TODAY_FILE: &str = "diet-today.js";
 
 /// The embedded schema. `migrate!` only reads `migrations/healthdb/` into the binary at build
 /// time; it never connects anywhere, so the build needs no database.
@@ -1391,10 +1399,15 @@ pub struct DietRow {
 
 /// Parse a diet CSV with a real RFC 4180 reader (quoted fields hold commas and newlines).
 /// `Err` carries the file line the reader failed on, and nothing of the content.
+///
+/// A row SHORTER than the header is a row written before the header grew columns (the live
+/// `food-log.csv` has 35-cell rows under a 41-column header): it keys the cells it has, and the
+/// missing trailing columns are absent from its object, so they read as null. A row LONGER than
+/// the header has cells no column names, and fails the file at its line.
 pub fn parse_diet_csv(content: &[u8]) -> Result<Vec<DietRow>, u64> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
-        .flexible(false)
+        .flexible(true)
         .from_reader(content);
     let headers: Vec<String> = reader
         .headers()
@@ -1406,6 +1419,9 @@ pub fn parse_diet_csv(content: &[u8]) -> Result<Vec<DietRow>, u64> {
     let mut out = Vec::new();
     for (i, rec) in reader.records().enumerate() {
         let rec = rec.map_err(|e| e.position().map(|p| p.line()).unwrap_or(i as u64 + 2))?;
+        if rec.len() > headers.len() {
+            return Err(rec.position().map(|p| p.line()).unwrap_or(i as u64 + 2));
+        }
         let mut data = serde_json::Map::new();
         for (h, cell) in headers.iter().zip(rec.iter()) {
             data.insert(h.clone(), Value::String(cell.to_string()));
@@ -1435,6 +1451,10 @@ pub enum DietMirrorOutcome {
     ParseFailed(u64),
     /// The file could not be read: the previous mirror is kept.
     Unreadable,
+    /// A day file that is not usable, for this reason: the previous row is kept.
+    Skipped(&'static str),
+    /// `diet-today.js` for a day that already has its archived file, which wins.
+    Superseded,
     /// The database step failed: the previous mirror is kept (the transaction rolled back).
     Failed(DbFailure),
 }
@@ -1505,7 +1525,10 @@ pub async fn mirror_diet_once(
             DietMirrorOutcome::Failed(e) => {
                 eprintln!("healthdb: diet mirror did not reload {file}: {e}")
             }
-            DietMirrorOutcome::Unchanged | DietMirrorOutcome::Missing => {}
+            DietMirrorOutcome::Unchanged
+            | DietMirrorOutcome::Missing
+            | DietMirrorOutcome::Skipped(_)
+            | DietMirrorOutcome::Superseded => {}
         }
         out.push((file.to_string(), outcome));
     }
@@ -1541,9 +1564,172 @@ async fn mirror_one(db: &HealthDb, dir: &Path, file: &str) -> DietMirrorOutcome 
     }
 }
 
+/// The live day file, resolved exactly as `GET /jesse/diet` resolves it:
+/// `<vault>/<VAULT_SUBDIR>/diet-today.js`.
+pub fn diet_today_path(cfg: &Config) -> PathBuf {
+    Path::new(&cfg.vault)
+        .join(crate::config::VAULT_SUBDIR)
+        .join(DIET_TODAY_FILE)
+}
+
+/// One day file, parsed: its `date` field and the whole object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DietDay {
+    pub date: NaiveDate,
+    pub sha256: String,
+    pub data: Value,
+}
+
+/// The date an archived day file is named for: `YYYY-MM-DD.js`, exactly.
+fn day_file_date(name: &str) -> Option<NaiveDate> {
+    let stem = name.strip_suffix(".js")?;
+    let date = NaiveDate::parse_from_str(stem, "%Y-%m-%d").ok()?;
+    (date.format("%Y-%m-%d").to_string() == stem).then_some(date)
+}
+
+/// Parse one day file (`window.DIET_TODAY = { … };`) with the same reader `GET /jesse/diet`
+/// uses. `Err` is a reason that quotes nothing of the content: the JSON5 error can.
+pub fn parse_diet_day(content: &[u8]) -> Result<DietDay, &'static str> {
+    let text = std::str::from_utf8(content).map_err(|_| "it is not UTF-8")?;
+    let data = crate::diet::extract_js_literal(text).map_err(|_| "it does not parse")?;
+    let date = data
+        .get("date")
+        .and_then(Value::as_str)
+        .and_then(|d| NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").ok())
+        .ok_or("it has no YYYY-MM-DD date")?;
+    Ok(DietDay {
+        date,
+        sha256: sha256_hex(content),
+        data,
+    })
+}
+
+fn read_diet_day(path: &Path) -> Result<DietDay, DietMirrorOutcome> {
+    let bytes = std::fs::read(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => DietMirrorOutcome::Missing,
+        _ => DietMirrorOutcome::Unreadable,
+    })?;
+    parse_diet_day(&bytes).map_err(DietMirrorOutcome::Skipped)
+}
+
+/// Every day file the mirror should consider, by label (`days/<name>` or `diet-today.js`), read
+/// and parsed, in date order with `diet-today.js` last. No database: the pass compares each
+/// `Ok` against its row. An archived file whose `date` is not its name's is skipped, and
+/// `diet-today.js` is `Superseded` when `days/` holds a file for its date, so the archived copy
+/// always wins. A missing `days/` or `diet-today.js` contributes nothing.
+pub fn read_diet_days(
+    days_dir: &Path,
+    today: &Path,
+) -> Vec<(String, Result<DietDay, DietMirrorOutcome>)> {
+    let mut names: Vec<(NaiveDate, String)> = match std::fs::read_dir(days_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|n| day_file_date(&n).map(|d| (d, n)))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => {
+            return vec![(
+                format!("{DIET_DAYS_DIR}/"),
+                Err(DietMirrorOutcome::Unreadable),
+            )]
+        }
+    };
+    names.sort();
+    let mut out = Vec::with_capacity(names.len() + 1);
+    for (named, name) in &names {
+        let day = read_diet_day(&days_dir.join(name)).and_then(|d| {
+            if d.date == *named {
+                Ok(d)
+            } else {
+                Err(DietMirrorOutcome::Skipped(
+                    "its date does not match its file name",
+                ))
+            }
+        });
+        out.push((format!("{DIET_DAYS_DIR}/{name}"), day));
+    }
+    match read_diet_day(today) {
+        Err(DietMirrorOutcome::Missing) => {}
+        Ok(d) if names.iter().any(|(named, _)| *named == d.date) => out.push((
+            DIET_TODAY_FILE.to_string(),
+            Err(DietMirrorOutcome::Superseded),
+        )),
+        day => out.push((DIET_TODAY_FILE.to_string(), day)),
+    }
+    out
+}
+
+async fn upsert_diet_day(db: &HealthDb, d: &DietDay) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO raw.diet_day (date, sha256, data, loaded_at) VALUES ($1, $2, $3, now()) \
+         ON CONFLICT (date) DO UPDATE SET sha256 = EXCLUDED.sha256, data = EXCLUDED.data, \
+         loaded_at = now()",
+    )
+    .bind(d.date)
+    .bind(&d.sha256)
+    .bind(&d.data)
+    .execute(db.pool())
+    .await
+    .map(|_| ())
+}
+
+/// One pass over the day files: each whose sha256 differs from its date's row is upserted
+/// whole. A file that is skipped or fails keeps its previous row.
+pub async fn mirror_diet_days(
+    db: &HealthDb,
+    days_dir: &Path,
+    today: &Path,
+) -> Vec<(String, DietMirrorOutcome)> {
+    let days = read_diet_days(days_dir, today);
+    let stored: BTreeMap<NaiveDate, String> =
+        match sqlx::query_as::<_, (NaiveDate, String)>("SELECT date, sha256 FROM raw.diet_day")
+            .fetch_all(db.pool())
+            .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                let e = classify_db_error(&e);
+                eprintln!("healthdb: diet mirror did not read the day rows: {e}");
+                return vec![(format!("{DIET_DAYS_DIR}/"), DietMirrorOutcome::Failed(e))];
+            }
+        };
+    let mut out = Vec::with_capacity(days.len());
+    let mut loaded = 0;
+    for (label, day) in days {
+        let outcome = match day {
+            Err(o) => o,
+            Ok(d) if stored.get(&d.date) == Some(&d.sha256) => DietMirrorOutcome::Unchanged,
+            Ok(d) => match upsert_diet_day(db, &d).await {
+                Ok(()) => DietMirrorOutcome::Reloaded(1),
+                Err(e) => DietMirrorOutcome::Failed(classify_db_error(&e)),
+            },
+        };
+        match &outcome {
+            DietMirrorOutcome::Reloaded(_) => loaded += 1,
+            DietMirrorOutcome::Skipped(why) => {
+                eprintln!("healthdb: diet mirror skipped {label}: {why}; the previous row is kept")
+            }
+            DietMirrorOutcome::Unreadable => {
+                eprintln!("healthdb: diet mirror skipped {label}: it cannot be read")
+            }
+            DietMirrorOutcome::Failed(e) => {
+                eprintln!("healthdb: diet mirror did not load {label}: {e}")
+            }
+            _ => {}
+        }
+        out.push((label, outcome));
+    }
+    if loaded > 0 {
+        healthdb_count(METRIC_DIET_RELOAD, DIET_DAYS_DIR, loaded);
+        eprintln!("healthdb: diet mirror loaded {loaded} day file(s)");
+    }
+    out
+}
+
 /// The mirror task: a pass at startup and every [`DIET_MIRROR_INTERVAL`] after. A pass that
 /// finds Postgres unreachable says so and waits for the next.
-pub fn spawn_diet_mirror(db: Arc<HealthDb>, dir: PathBuf) {
+pub fn spawn_diet_mirror(db: Arc<HealthDb>, dir: PathBuf, today: PathBuf) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(DIET_MIRROR_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1552,6 +1738,7 @@ pub fn spawn_diet_mirror(db: Arc<HealthDb>, dir: PathBuf) {
             match db.ensure_migrated().await {
                 Ok(()) => {
                     mirror_diet_once(&db, &dir, &DIET_MIRROR_FILES).await;
+                    mirror_diet_days(&db, &dir.join(DIET_DAYS_DIR), &today).await;
                 }
                 Err(e) => eprintln!("healthdb: diet mirror pass skipped: {e}"),
             }
@@ -2089,11 +2276,177 @@ Htby8Y5sp501
     }
 
     #[test]
-    fn a_ragged_row_fails_with_its_line_and_a_bad_date_is_null() {
-        let rows = parse_diet_csv(b"Date,A\nnot-a-date,1\n").unwrap();
-        assert_eq!(rows[0].date, None);
+    fn a_short_row_loads_with_its_missing_keys_absent_and_a_bad_date_is_null() {
+        let rows = parse_diet_csv(b"Date,A,B,C\n2026-10-01,1,2,3\nnot-a-date,1\n").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].data,
+            json!({"Date": "2026-10-01", "A": "1", "B": "2", "C": "3"})
+        );
+        assert_eq!(rows[1].data, json!({"Date": "not-a-date", "A": "1"}));
+        assert!(rows[1].data.get("B").is_none() && rows[1].data.get("C").is_none());
+        assert_eq!(rows[1].date, None);
+        assert_eq!(rows[1].row_no, 2);
+    }
+
+    #[test]
+    fn a_long_row_fails_with_its_line() {
         let line = parse_diet_csv(b"Date,A\n2026-10-01,1\n2026-10-02,1,extra\n").unwrap_err();
         assert_eq!(line, 3);
+        // Its line, not its row: a quoted newline in an earlier row moves it down one.
+        let line = parse_diet_csv(b"Date,A\n2026-10-01,\"x\ny\"\n2026-10-02\n2026-10-03,1,extra\n")
+            .unwrap_err();
+        assert_eq!(line, 5);
+    }
+
+    #[test]
+    fn the_mirror_keeps_the_calorie_base_and_day_styles() {
+        assert!(DIET_MIRROR_FILES.contains(&"calorie-base.csv"));
+        assert!(DIET_MIRROR_FILES.contains(&"day-styles.csv"));
+        let rows = parse_diet_csv(b"Start,End,Base,Note\n2026-04-13,,2100,x\n").unwrap();
+        assert_eq!(rows[0].date, None, "no Date column, no date");
+        assert_eq!(rows[0].data["End"], json!(""));
+    }
+
+    /// A scratch vault: `days/` plus a `diet-today.js`, removed on drop.
+    struct DayDir(PathBuf);
+
+    impl DayDir {
+        fn new() -> DayDir {
+            let root = std::env::temp_dir().join(format!("healthdb-days-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("days")).unwrap();
+            DayDir(root)
+        }
+        fn days(&self) -> PathBuf {
+            self.0.join("days")
+        }
+        fn today(&self) -> PathBuf {
+            self.0.join("diet-today.js")
+        }
+    }
+
+    impl Drop for DayDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn day_js(date: &str, calories: u32) -> String {
+        format!(
+            "// Diet tracking data\nwindow.DIET_TODAY = {{\n  date: \"{date}\",\n  \
+             dayStyle: \"standard\",\n  targets: {{ calories: {calories}, protein: 150, \
+             fiber: 30, }},\n}};\n"
+        )
+    }
+
+    fn date(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn a_day_file_loads_with_its_targets() {
+        let d = DayDir::new();
+        std::fs::write(d.days().join("2026-04-14.js"), day_js("2026-04-14", 2100)).unwrap();
+        std::fs::write(d.days().join("README.md"), "not a day").unwrap();
+        let days = read_diet_days(&d.days(), &d.today());
+        assert_eq!(
+            days.len(),
+            1,
+            "only YYYY-MM-DD.js counts; no diet-today.js is fine"
+        );
+        assert_eq!(days[0].0, "days/2026-04-14.js");
+        let day = days[0].1.as_ref().unwrap();
+        assert_eq!(day.date, date("2026-04-14"));
+        assert_eq!(day.data["targets"]["calories"], json!(2100));
+        assert_eq!(day.data["targets"]["fiber"], json!(30));
+        assert_eq!(day.data["dayStyle"], json!("standard"));
+        assert_eq!(day.sha256.len(), 64);
+    }
+
+    #[test]
+    fn a_day_file_whose_date_is_not_its_name_or_that_does_not_parse_is_skipped() {
+        let d = DayDir::new();
+        std::fs::write(d.days().join("2026-04-14.js"), day_js("2026-04-15", 2100)).unwrap();
+        std::fs::write(
+            d.days().join("2026-04-16.js"),
+            "window.DIET_TODAY = { date: ",
+        )
+        .unwrap();
+        std::fs::write(
+            d.days().join("2026-04-17.js"),
+            "window.DIET_TODAY = { a: 1 };",
+        )
+        .unwrap();
+        let days = read_diet_days(&d.days(), &d.today());
+        assert_eq!(
+            days.into_iter()
+                .map(|(l, o)| (l, o.unwrap_err()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "days/2026-04-14.js".to_string(),
+                    DietMirrorOutcome::Skipped("its date does not match its file name")
+                ),
+                (
+                    "days/2026-04-16.js".to_string(),
+                    DietMirrorOutcome::Skipped("it does not parse")
+                ),
+                (
+                    "days/2026-04-17.js".to_string(),
+                    DietMirrorOutcome::Skipped("it has no YYYY-MM-DD date")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn diet_today_yields_to_the_archived_file_for_the_same_date() {
+        let d = DayDir::new();
+        std::fs::write(d.days().join("2026-10-11.js"), day_js("2026-10-11", 2100)).unwrap();
+        std::fs::write(d.today(), day_js("2026-10-11", 2400)).unwrap();
+        let days = read_diet_days(&d.days(), &d.today());
+        assert_eq!(days.len(), 2);
+        assert_eq!(
+            days[0].1.as_ref().unwrap().data["targets"]["calories"],
+            json!(2100)
+        );
+        assert_eq!(
+            days[1],
+            (
+                "diet-today.js".to_string(),
+                Err(DietMirrorOutcome::Superseded)
+            )
+        );
+
+        // A day not yet archived: diet-today.js is the row for it.
+        std::fs::write(d.today(), day_js("2026-10-12", 2400)).unwrap();
+        let days = read_diet_days(&d.days(), &d.today());
+        let today = days[1].1.as_ref().unwrap();
+        assert_eq!(days[1].0, "diet-today.js");
+        assert_eq!(today.date, date("2026-10-12"));
+        assert_eq!(today.data["targets"]["calories"], json!(2400));
+    }
+
+    #[test]
+    fn a_day_file_name_must_be_an_exact_date() {
+        assert_eq!(day_file_date("2026-04-14.js"), Some(date("2026-04-14")));
+        for name in [
+            "2026-4-14.js",
+            "2026-04-14.json",
+            "2026-02-30.js",
+            "x2026-04-14.js",
+        ] {
+            assert_eq!(day_file_date(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_mirror_reads_diet_today_from_where_the_diet_route_reads_it() {
+        let cfg = crate::testutil::test_config();
+        assert_eq!(
+            diet_today_path(&cfg),
+            Path::new(&cfg.vault).join("vault").join("diet-today.js")
+        );
     }
 
     #[test]

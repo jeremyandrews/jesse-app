@@ -14,6 +14,33 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.174.0] - 2026-10-12
+
+**The diet mirror holds every diet CSV, short rows included, and one row per day with that day's
+own targets.** Root cause of the gap: `parse_diet_csv` read with `.flexible(false)`, so a row
+shorter than its header failed the whole file, and live that rejected `food-log.csv` (3065 of
+3573 rows are 35 cells under a 41-column header) and `daily-targets.csv` (8 cells under 9); and
+the per-day targets live in `diet-logs/days/YYYY-MM-DD.js`, which nothing mirrored.
+
+- **Short rows load.** A row shorter than the header keys the cells it has; the missing trailing
+  columns are absent from its jsonb, so they read as null. A row longer than the header still
+  fails the file at its line, and the previous mirror is kept.
+- **Two more CSVs.** `calorie-base.csv` and `day-styles.csv` join `DIET_MIRROR_FILES`; neither has
+  a `Date` column, so their `date` is null.
+- **`raw.diet_day`** (migration `0002_diet_day.sql`: `date` primary key, `sha256`, `data`,
+  `loaded_at`). Each pass upserts every `days/YYYY-MM-DD.js` whose sha256 changed, parsed whole
+  with `diet::extract_js_literal`. A file whose `date` is not its name, or that does not parse, is
+  skipped by name and reason, and its row kept. `vault/diet-today.js` is the row for its own date
+  only until `days/` holds that date's file, which always wins. Read by `health_ro` through the
+  schema's default privileges, and named in the `healthdb_schema` guide.
+- **The startup `unavailable (io)` is not the bridge's.** It happens on the first launch of each
+  newly built binary only (0.171.0 at 08:44, 0.173.0 at 17:53 on 2026-10-12; the restart of the
+  same binary connects at once). Each build is ad hoc signed with a new code identity, and the
+  Studio's unified log shows macOS Local Network privacy (`UserEventAgent … LocalNetwork`)
+  evaluating that new identity at each failed connect to `healthdb.pozza` and not at the one that
+  succeeded about two minutes later. The schema task's existing retry already recovers; no code
+  changed for it.
+
 ## [Bridge 0.173.0] - 2026-10-12
 
 **Bridge turns read the health archive through `healthdb`, on all three harnesses.** Root cause

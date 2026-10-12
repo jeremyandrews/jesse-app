@@ -6,16 +6,16 @@ use std::path::Path;
 
 use jesse_bridge::{
     app, binary_exists, bind_broker, build_apns, detect_binary_drift,
-    detect_unresolved_mcp_servers, diet_logs_dir, env_string, env_truthy, export_mcp_server_env,
-    harness_bin_env, harness_default_bin, harnesses_in_use, is_bind_allowed, load_local_models,
-    manual_pairing_lines, open_inbound_staging, pairing_payload, probe_house, prune_direct_state,
-    qr_env_tristate, search_scale, sentinel_advert, serve_broker, settings_permission_drift,
-    shadowing_direct_mcp_grants, show_qr_opt_in, show_token_opt_in, spawn_diet_mirror,
-    spawn_eviction_task, spawn_healthdb_migrations, spawn_scheduler, spawn_session_gc_task,
-    start_health_prober, validate_healthdb, validate_house, validate_model_config,
-    validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config, ConfigError, HealthDb, QrArt,
-    Runner, TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS, DIRECT_ID, INBOUND_DIR_NAME,
-    SEARCH_SCALE, SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
+    detect_unresolved_mcp_servers, diet_logs_dir, diet_today_path, env_string, env_truthy,
+    export_mcp_server_env, harness_bin_env, harness_default_bin, harnesses_in_use, is_bind_allowed,
+    load_local_models, manual_pairing_lines, open_inbound_staging, pairing_payload, probe_house,
+    prune_direct_state, qr_env_tristate, search_scale, sentinel_advert, serve_broker,
+    settings_permission_drift, shadowing_direct_mcp_grants, show_qr_opt_in, show_token_opt_in,
+    spawn_diet_mirror, spawn_eviction_task, spawn_healthdb_migrations, spawn_scheduler,
+    spawn_session_gc_task, start_health_prober, validate_healthdb, validate_house,
+    validate_model_config, validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config,
+    ConfigError, HealthDb, QrArt, Runner, TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS,
+    DIRECT_ID, INBOUND_DIR_NAME, SEARCH_SCALE, SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
 };
 
 #[tokio::main]
@@ -394,7 +394,11 @@ async fn main() {
         let db = std::sync::Arc::new(HealthDb::connect_lazy(&settings));
         spawn_healthdb_migrations(db.clone());
         if settings.mirror_diet {
-            spawn_diet_mirror(db.clone(), diet_logs_dir(&state.cfg));
+            spawn_diet_mirror(
+                db.clone(),
+                diet_logs_dir(&state.cfg),
+                diet_today_path(&state.cfg),
+            );
         }
         eprintln!(
             "jesse-bridge: health archive ON (URL from {}, diet mirror {})",

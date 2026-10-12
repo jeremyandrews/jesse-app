@@ -603,6 +603,11 @@ pub async fn health(State(st): State<AppState>, headers: HeaderMap) -> Json<Valu
                 "bytes": scale.bytes,
             });
         }
+        // THE HEALTH ARCHIVE's counters, present only where `[healthdb]` is configured. Labels
+        // are kinds, reasons and diet file names, never a value.
+        if st.healthdb.is_some() {
+            body["healthdb"] = json!({ "counters": healthdb_counters_json() });
+        }
         if let Some(drift) = BINARY_DRIFT.get().filter(|d| !d.is_empty()) {
             body["containment_stale"] = json!(drift
                 .iter()
@@ -2758,6 +2763,11 @@ pub fn app(state: AppState) -> Router {
         // Health measured into `diet-logs/vitals-log.csv`, one row per date, replaced in
         // place on a resend. Never touches the diet CSVs. See `vitals`.
         .route("/jesse/diet/vitals", post(jesse_diet_vitals))
+        // THE HEALTH ARCHIVE's one writer: batches of HealthKit samples upserted into Postgres
+        // by UUID in one transaction, `200` only after commit. Reads its own body under its
+        // own 16 MiB cap (a route of 100000 points), after auth. `503 not_configured` without
+        // `[healthdb]`. See `healthdb`.
+        .route("/jesse/health/ingest", post(jesse_health_ingest))
         // The day file, read-only: the same snapshot posture as /jesse/diet, plus a
         // strong ETag so a poll that changes nothing costs one 304.
         .route("/jesse/today", get(jesse_today))

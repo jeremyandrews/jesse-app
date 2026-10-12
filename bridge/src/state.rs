@@ -145,6 +145,12 @@ pub struct AppState {
     // The ids of the app's vault writes already applied, and the lock that serialises
     // `POST /jesse/vault/writes`. See `vaultwrites`.
     pub vault_writes: Arc<crate::vaultwrites::VaultWriteLedger>,
+    // THE HEALTH ARCHIVE: the lazy Postgres pool behind `POST /jesse/health/ingest` and the
+    // diet mirror. `None` unless `[healthdb]` is ready, and set by `main` (as `apns` is), so
+    // `AppState::new` never builds a pool and the tests never touch a database by accident.
+    // `None` IS the unconfigured posture: the route answers `not_configured` and no task,
+    // pool or connection exists. See [`crate::healthdb`].
+    pub healthdb: Option<Arc<HealthDb>>,
 }
 
 impl AppState {
@@ -240,6 +246,8 @@ impl AppState {
             artifacts,
             strand_ticks,
             vault_writes,
+            // `main` installs the pool when `[healthdb]` is ready.
+            healthdb: None,
         };
         // GIVE THE IN-PROCESS HARNESS ITS BROKER. This is the first point in the process where
         // both exist: the harness registry is built inside `Config::from_env`, and the broker

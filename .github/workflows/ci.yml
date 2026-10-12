@@ -121,6 +121,25 @@ jobs:
     defaults:
       run:
         working-directory: bridge
+    # THE HEALTH ARCHIVE'S DATABASE TESTS (`tests/healthdb_pg.rs`). They run only when
+    # JESSE_TEST_PG_URL is set, and each creates and drops its own database on this throwaway
+    # server, so the three test builds below (both feature sets and coverage) never see each
+    # other's rows. Nothing else in the job touches it, and the build itself needs no database:
+    # every query is a runtime `sqlx::query`.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      JESSE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       # Full history, NOT the default depth-1: scripts/version-guard.sh derives its
       # diff base from the merge base with origin/main, and at depth 1 there is no

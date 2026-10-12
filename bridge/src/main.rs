@@ -6,15 +6,16 @@ use std::path::Path;
 
 use jesse_bridge::{
     app, binary_exists, bind_broker, build_apns, detect_binary_drift,
-    detect_unresolved_mcp_servers, env_string, env_truthy, export_mcp_server_env, harness_bin_env,
-    harness_default_bin, harnesses_in_use, is_bind_allowed, load_local_models,
+    detect_unresolved_mcp_servers, diet_logs_dir, env_string, env_truthy, export_mcp_server_env,
+    harness_bin_env, harness_default_bin, harnesses_in_use, is_bind_allowed, load_local_models,
     manual_pairing_lines, open_inbound_staging, pairing_payload, probe_house, prune_direct_state,
     qr_env_tristate, search_scale, sentinel_advert, serve_broker, settings_permission_drift,
-    shadowing_direct_mcp_grants, show_qr_opt_in, show_token_opt_in, spawn_eviction_task,
-    spawn_scheduler, spawn_session_gc_task, start_health_prober, validate_house,
-    validate_model_config, validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config,
-    ConfigError, QrArt, Runner, TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS, DIRECT_ID,
-    INBOUND_DIR_NAME, SEARCH_SCALE, SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
+    shadowing_direct_mcp_grants, show_qr_opt_in, show_token_opt_in, spawn_diet_mirror,
+    spawn_eviction_task, spawn_healthdb_migrations, spawn_scheduler, spawn_session_gc_task,
+    start_health_prober, validate_healthdb, validate_house, validate_model_config,
+    validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config, ConfigError, HealthDb, QrArt,
+    Runner, TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS, DIRECT_ID, INBOUND_DIR_NAME,
+    SEARCH_SCALE, SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
 };
 
 #[tokio::main]
@@ -63,6 +64,9 @@ async fn main() {
     // …and the `[house]` table: present means it must be usable. A token file with the wrong
     // mode or owner is refused here rather than read anyway. Absent is the default and fine.
     errors.extend(validate_house(&cfg));
+    // …and the `[healthdb]` table, the same way: a URL file open to group or other, or a
+    // missing CA, refuses the boot by name. Absent is the default and fine.
+    errors.extend(validate_healthdb(&cfg));
     // The `[concurrency]` table joins the SAME gate. A misspelled model id there is refused by
     // name rather than silently ignored — a config surface that quietly does nothing is the
     // failure mode this project keeps designing against.
@@ -382,6 +386,23 @@ async fn main() {
     // loads). `None` leaves every push path a no-op — the bridge behaves exactly
     // as it did before. `build_apns` logs whether push is enabled or why it isn't.
     state.apns = build_apns();
+    // THE HEALTH ARCHIVE, only where `[healthdb]` is ready. The pool is LAZY, so a Postgres
+    // that is down now costs nothing: the schema task retries in the background and the
+    // ingest route answers `503 unavailable` until it connects. With no table, nothing here
+    // runs: no pool, no task, no connection. The URL is never printed.
+    if let Some(settings) = state.cfg.healthdb.ready().cloned() {
+        let db = std::sync::Arc::new(HealthDb::connect_lazy(&settings));
+        spawn_healthdb_migrations(db.clone());
+        if settings.mirror_diet {
+            spawn_diet_mirror(db.clone(), diet_logs_dir(&state.cfg));
+        }
+        eprintln!(
+            "jesse-bridge: health archive ON (URL from {}, diet mirror {})",
+            settings.url_file.display(),
+            if settings.mirror_diet { "on" } else { "off" }
+        );
+        state.healthdb = Some(db);
+    }
 
     // RECORDED AUDIO: delete whatever a killed process left in custody, then say whether this
     // bridge transcribes. Runs live in memory, so anything under the intake root at boot is

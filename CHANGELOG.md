@@ -14,6 +14,72 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.171.0] - 2026-10-12
+
+**The bridge archives Apple Health samples and the diet CSVs into Postgres when `[healthdb]` is
+configured.** Root cause of the gap: the only health data the bridge kept was one row a day of
+ten vitals in `vitals-log.csv`; every other sample reached it only as text inside a turn and was
+discarded, so nothing on the Studio could chart or query the history. No app change: the phone
+side that sends batches comes later.
+
+- **`POST /jesse/health/ingest`** (`src/healthdb.rs`). Bearer auth, then one batch of one kind:
+  `quantity` (keyed `(uuid, seq)`), `category`, `workout` (with its events) or `route` (one
+  route, at most 100000 points). Validated whole before anything is written: bad JSON, an
+  unknown kind, a missing field, a non-finite number, `start` after `end` or a coordinate off
+  the globe is a `400` and the batch is refused. Implausible values are stored. At most 2000
+  samples and 8 MiB per request, a route request 16 MiB, otherwise `413`. Written in ONE
+  transaction with multi-row `ON CONFLICT DO UPDATE` upserts; a workout's events and a route's
+  points are replaced (points streamed with `COPY`; 100000 points commit in about 1.5 s against
+  a local Postgres 16); `deleted` UUIDs remove every row of that kind (all `seq`s, cascading
+  events and points) and leave one `raw.deleted_sample` tombstone. `200 {"upserted","deleted"}`
+  only after commit, because the phone advances its HealthKit anchor on a 200; a duplicate key
+  inside one batch keeps the last copy.
+- **`[healthdb]` in `jesse.local.toml`** (`url_file`, `ca_file`, `mirror_diet` default true;
+  documented in `jesse.example.toml`). A present table with a missing file, a URL file open to
+  group or other, owned by another user, or not holding a `postgres://` URL refuses the boot by
+  name, as `[house]` does. The URL carries the password: it is held in a type whose `Debug`
+  prints a marker, and no message quotes it. TLS is forced to verify-full against `ca_file`
+  whatever the URL's `sslmode` says.
+- **A lazy pool, so a Postgres that is down never blocks the bridge.** At most 4 connections,
+  a 5 s acquire timeout, `search_path=raw` (sqlx's `_sqlx_migrations` lands in `raw`, not in
+  `public`). The embedded migration (`bridge/migrations/healthdb/0001_raw_schema.sql`) runs on
+  first connect, retried every 60 s by a startup task; until then, or whenever the server is
+  unreachable, the route answers `503 {"error":"unavailable"}`. It creates nine tables in `raw` and
+  nothing else, no schema and no grant: the deployment's default privileges already give
+  `health_ro` read access.
+- **Absent is inert.** Without the table there is no pool, no task and no connection, and the
+  route answers `503 {"error":"not_configured"}`. `POST /jesse/diet/vitals` and
+  `vitals-log.csv` are untouched.
+- **Diet mirror.** Every 10 minutes, each of `food-log.csv`, `exercise-log.csv`,
+  `weight-log.csv`, `vitals-log.csv` and `daily-targets.csv` (from `<vault>/diet-logs`, where
+  the vitals route writes) whose sha256 differs from `raw.diet_file` is reloaded whole in its
+  own transaction: rows as jsonb keyed by header, `date` from the `Date` column, parsed with the
+  `csv` crate. A file that does not parse is skipped, logged by name and line, and its previous
+  mirror kept.
+- **Counters.** There was no counter surface, so this adds one: `healthdb_ingest_samples_total`
+  by kind, `healthdb_ingest_errors_total` by reason, `healthdb_diet_reload_total` by file,
+  served under `healthdb.counters` on the authenticated `GET /health` when the table is
+  configured.
+- **Nothing content-bearing in a log line, error body or label.** Lines carry the kind, the
+  HealthKit type and counts; refusals name the sample index and field; a database error is
+  reported by SQLSTATE only.
+- **Dependency: `sqlx` 0.8.6**, Postgres only, rustls on ring, runtime queries only (no
+  compile-time-checked macros; `migrate!` only embeds the SQL), so the build needs no database.
+  Its lockfile brings `rsa` along through the never-enabled MySQL driver (rust-lang/cargo#10801);
+  `bridge/.cargo/audit.toml` ignores RUSTSEC-2023-0071 with that reasoning, and `cargo tree -i
+  rsa --target all` prints nothing.
+- **Tests.** Thirty-one unit tests: every `400` case, the 2000-sample, 8 MiB and 16 MiB limits,
+  the coordinate bounds, `not_configured`, `401` first, config refusal (missing file,
+  group-readable URL file, foreign owner, non-postgres URL, none quoting the secret),
+  verify-full forced, and a quoted CSV field holding a comma and a newline. Eight Postgres tests
+  in `tests/healthdb_pg.rs`, run when `JESSE_TEST_PG_URL` is set (CI now has a `postgres:16`
+  service on the bridge job), each in its own scratch database: migrations twice, an identical
+  batch twice, an in-place update, a deletion across every `seq` with one tombstone, a workout
+  resend replacing events, a 100000-point route committed and then replaced, an out-of-range
+  latitude refused with nothing written, a route deletion cascading its points, a diet reload
+  replacing rows and an unchanged file skipped, and Postgres cut mid-test (through a TCP relay)
+  answering `503 unavailable`, never a 200.
+
 ## [Bridge 0.170.0, Agent 0.13.0] - 2026-10-11
 
 **A `direct` turn can call the same `house` tools a Claude Code or Codex turn can.**

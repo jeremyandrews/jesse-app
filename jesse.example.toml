@@ -214,6 +214,39 @@ Answer the question I asked, not the one you wish I had asked.
 # ca_file = "/path/to/house-ca.crt"
 
 # =============================================================================
+# [healthdb]: the health archive in Postgres (optional)
+# =============================================================================
+#
+# With this table present the bridge archives Apple Health samples the phone sends to
+# POST /jesse/health/ingest (quantity, category, workout and route batches, upserted by
+# HealthKit UUID) and, unless mirror_diet is false, mirrors the diet CSVs (food, exercise,
+# weight, vitals, daily targets) every 10 minutes. Everything goes into the `raw` schema,
+# which the database must already have, owned by the role in the URL; the bridge creates its
+# tables there on first connect. Without the table nothing is built, no connection is ever
+# made, and the route answers 503 {"error":"not_configured"}.
+#
+# url_file: a file holding the connection URL, ONE line, password included, for example
+#   postgres://health:PASSWORD@healthdb.pozza:5432/health?sslmode=verify-full
+# It must be a regular file owned by the user the bridge runs as, with no group or other
+# permission (chmod 600); anything else refuses to start, naming the problem. The URL is
+# never logged.
+#
+# ca_file: the PEM certificate of the CA that signed the server's certificate. TLS is always
+# verify-full against it (the host name in the URL must match the certificate), whatever the
+# URL's own sslmode says. A missing or unreadable file refuses to start.
+#
+# mirror_diet (optional, default true): false turns the diet CSV mirror off and leaves the
+# ingest route on.
+#
+# If Postgres is down at start the bridge still starts; the route answers
+# 503 {"error":"unavailable"} until it can connect. Changing this table needs a restart.
+#
+# [healthdb]
+# url_file = "/path/to/healthdb-url"
+# ca_file = "/path/to/healthdb-ca.crt"
+# mirror_diet = true
+
+# =============================================================================
 # [[models]] — the global model switch's registry (declarative, operator-configurable)
 # =============================================================================
 #

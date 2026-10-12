@@ -106,6 +106,7 @@ pub fn test_config() -> Config {
         // No Fireworks account and the per-scope TTLs, as in the unit fixture.
         quota: QuotaSettings::default(),
         house: HouseConfig::Absent,
+        healthdb: HealthDbConfig::Absent,
         // Speech OFF, as in the unit fixture: no intake or models directory is touched.
         speech: jesse_bridge::speech::SpeechConfig::disabled(),
     }

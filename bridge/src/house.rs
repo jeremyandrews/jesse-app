@@ -660,13 +660,13 @@ mod tests {
         assert_eq!(env_of(&cmd), None);
     }
 
-    /// CLAUDE CODE, THE WHOLE ARGV: with a ready table the main turn declares twenty-three
+    /// CLAUDE CODE, THE WHOLE ARGV: with a ready table the main turn declares twenty-four
     /// servers and `house` carries the configured URL and the token BY NAME; without one it
-    /// declares twenty-two. The placeholder and the token value are on no argv either way.
+    /// declares twenty-three. The placeholder and the token value are on no argv either way.
     #[test]
     fn a_claude_code_main_turn_carries_house_exactly_when_the_table_is_ready() {
         let mut cfg = test_config();
-        for (house, count) in [(ready(), 23), (HouseConfig::Absent, 22)] {
+        for (house, count) in [(ready(), 24), (HouseConfig::Absent, 23)] {
             let loads = house.ready().is_some();
             cfg.house = house;
             let args = build_claude_args(
@@ -872,7 +872,9 @@ mod tests {
         assert!(HOUSE_MCP_ENTRY.contains(HOUSE_URL_PLACEHOLDER));
         assert!(HOUSE_MCP_ENTRY.contains(&format!("${{{HOUSE_TOKEN_ENV}}}")));
         assert!(
-            MAIN_CHILD_MCP_CONFIG.ends_with(&format!("{HOUSE_MCP_ENTRY}{HEALTHDB_MCP_ENTRY}}}}}"))
+            MAIN_CHILD_MCP_CONFIG.ends_with(&format!(
+                r#"{HOUSE_MCP_ENTRY}{HEALTHDB_MCP_ENTRY},"clockify-rs":{{"type":"stdio","command":"clockify-rs-mcp","args":[]}}}}}}"#
+            ))
         );
     }
 }

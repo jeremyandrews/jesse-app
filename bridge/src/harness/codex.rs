@@ -977,6 +977,12 @@ pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
             "JESSE_HEALTHDB_MCP_LEDGER",
         ],
     ),
+    // `clockify-rs` (0.175.0) is a stdio server, so its key travels by NAME here and never in
+    // a bearer or header table. `JESSE_CLOCKIFY_API_KEY` is the same variable the hosted
+    // `clockify` server's `x-api-key` header uses ([`CODEX_MCP_HEADER_ENV`]); the
+    // `clockify-rs-mcp` launcher renames it to the `CLOCKIFY_API_KEY` the server reads and
+    // `exec`s the binary. Without it the launcher exits at once and registers nothing.
+    ("clockify-rs", &["JESSE_CLOCKIFY_API_KEY"]),
 ];
 
 /// Fixed, NON-SECRET environment values a stdio server is started with on Codex, set with
@@ -3788,6 +3794,64 @@ mod tests {
                 "{withheld}: {enabled}"
             );
         }
+    }
+
+    /// THE CLOCKIFY-RS SERVER REACHES CODEX AS THE BARE LAUNCHER, with its key FORWARDED BY
+    /// NAME and never valued. It is stdio, so the key rides `env_vars` and no bearer or header
+    /// route; the name is the hosted `clockify` server's own variable. Its grant is exactly the
+    /// twelve read tools Claude Code's turn gets.
+    #[test]
+    fn the_shipped_clockify_rs_server_travels_with_its_key_named_not_valued() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG,
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped main set renders for Codex");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.clockify-rs.command="clockify-rs-mcp""#),
+            "{args:?}"
+        );
+        assert!(flat.contains("mcp_servers.clockify-rs.args=[]"), "{args:?}");
+        assert!(
+            flat.contains(r#"mcp_servers.clockify-rs.env_vars=["JESSE_CLOCKIFY_API_KEY"]"#),
+            "{args:?}"
+        );
+        assert!(!flat.contains("mcp_servers.clockify-rs.env="), "{args:?}");
+        assert!(
+            !flat.contains("mcp_servers.clockify-rs.bearer_token_env_var"),
+            "{args:?}"
+        );
+        assert!(
+            !flat.contains("mcp_servers.clockify-rs.env_http_headers"),
+            "{args:?}"
+        );
+        // THE NAME APPEARS ONLY AS A FORWARDED NAME OR A HEADER'S VARIABLE NAME, never as a
+        // value: no `${…}` expansion and no `NAME=` assignment anywhere on the argv.
+        assert!(!flat.contains("${JESSE_CLOCKIFY_API_KEY}"), "{args:?}");
+        assert!(!flat.contains("JESSE_CLOCKIFY_API_KEY="), "{args:?}");
+        assert!(!flat.contains("CLOCKIFY_API_KEY="), "{args:?}");
+        for arg in args.iter().filter(|a| a.contains("JESSE_CLOCKIFY_API_KEY")) {
+            assert!(
+                arg == r#"mcp_servers.clockify-rs.env_vars=["JESSE_CLOCKIFY_API_KEY"]"#
+                    || arg
+                        == r#"mcp_servers.clockify.env_http_headers={"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}"#,
+                "the key's name in an unexpected place: {arg}"
+            );
+        }
+        assert!(
+            flat.contains(r#"mcp_servers.clockify-rs.default_tools_approval_mode="approve""#),
+            "{args:?}"
+        );
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.clockify-rs.enabled_tools="))
+            .expect("clockify-rs carries an enabled_tools override");
+        assert_eq!(
+            enabled,
+            r#"mcp_servers.clockify-rs.enabled_tools=["list_users", "list_user_groups", "hours_by_user", "monthly_hours", "detailed_entries", "resolve_user", "check", "trend", "audit", "projects", "daily", "team_summary"]"#
+        );
     }
 
     /// A transport neither harness can express is REFUSED, never silently dropped — a child

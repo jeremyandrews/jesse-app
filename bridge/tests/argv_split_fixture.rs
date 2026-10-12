@@ -171,6 +171,14 @@
 //! a `JESSE_HEALTHDB_*` variable. The rendering is pinned by the unit tests in
 //! `src/healthquery.rs`.
 //!
+//! **AND AGAIN, in bridge 0.175.0, for `clockify-rs`, on both harnesses' three main sites only.**
+//! `clockify-rs` is unconditional, so Claude Code's rendered `--mcp-config` digest moved on all
+//! three main sites (the twenty-two-server set plus `clockify-rs`) and its two write sites'
+//! `--allowedTools` digest moved for the twelve `mcp__clockify-rs__*` grants. Codex's three main
+//! sites gained ten arguments each: the launcher command, empty args, `JESSE_CLOCKIFY_API_KEY`
+//! forwarded BY NAME in `env_vars`, `enabled_tools` (empty on the read site, the twelve tools on
+//! the write sites) and the approve mode. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

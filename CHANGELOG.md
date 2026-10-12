@@ -14,6 +14,80 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.175.0] - 2026-10-12
+
+**Bridge turns can answer how many client billable and internal hours each person logged,
+through Tag1's own read-only `clockify-rs` server, on both harnesses.** Root cause of the gap:
+the hosted `clockify` server's summary report returns only name, duration and percentage per
+group, with no billable field and no user filter, and its detailed report carries no user and
+stops at 50 entries without paging. `clockify-rs` is now the twenty-fifth server on every
+Claude Code and Codex main turn. The hosted `clockify` server stays alongside it, unchanged.
+
+- **Declared as a stdio launcher.** `MAIN_CHILD_MCP_CONFIG` gains
+  `"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}` (`mcp_clockify_rs!`):
+  `tag1consulting/clockify-rs`, crate `clockify-mcp` 0.5.0 at `7255f1d`, installed on the host
+  and started through the `clockify-rs-mcp` launcher, which renames `JESSE_CLOCKIFY_API_KEY` to
+  `CLOCKIFY_API_KEY` and `exec`s the binary. Report periods default to Europe/Rome. It is
+  unconditional: no config table switches it off.
+- **Codex route: the key forwarded by name.** `CODEX_MCP_ENV_PASSTHROUGH` gains
+  `("clockify-rs", &["JESSE_CLOCKIFY_API_KEY"])`, the same variable the hosted server's
+  `x-api-key` header uses; it is in no bearer or header table. A shipped-config test asserts the
+  launcher command, the forwarded name, the approve mode, the twelve `enabled_tools`, and that
+  the variable appears only as a name, never as a value.
+- **All twelve tools granted, by name.** From a bare environment `tools/list` on 2026-10-12,
+  every one annotated `readOnlyHint`: `list_users`, `list_user_groups`, `hours_by_user`,
+  `monthly_hours`, `detailed_entries`, `resolve_user`, `check`, `trend`, `audit`, `projects`,
+  `daily`, `team_summary`. Tests pin the twelve by equality and refuse a wildcard; the hosted
+  server's thirteen grants are untouched and still pinned; the Codex/Claude Code parity test
+  stays green with no exception.
+- **New row label on both harnesses,**
+  `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs`
+  (`…+house+healthdb+clockify-rs`); the twenty-four-server set is kept as a retired label and
+  const. `capability-map.toml` gains the twelve grants (`upstream-pod`) and
+  `golden/capability-args.json` the moved main rows.
+- **Both records re-recorded live on the Studio** from the bridge LaunchAgent's environment
+  and the deployed config (so `house` and `healthdb` both registered), each battery run alone,
+  from a scratch target directory. Claude Code (2.1.296): gate pass, 5 rows x 22 probes. Codex
+  (codex-cli 0.153.4): 5 x 22; the file-level gate stays `fail` for the standing `basic/none`
+  reason only, and every hard gate on the main rows passes. On both, every probe on every row
+  kept its id, class, verdict and status, and only the two main row labels moved. The main
+  roots gained exactly the twelve `mcp__clockify-rs__*` tools (Codex: on the write row; its
+  read row enables no MCP tools, as before), and no server recorded zero tools on a row that
+  grants them.
+- **One server count moved besides `clockify-rs`, and it is a repair.** The committed 0.173.0
+  Claude Code record held `house` with ZERO root tools on both main rows (0.169.0 held 24),
+  which is exactly the zero-tool defect a re-run exists to catch. This run records 26: the 24
+  granted plus `connections` and `set_site_origin`, which `house-mcp` has added since and which
+  the allowlist does not grant. No other server's count changed on either harness.
+- **Codex's two main-row `[[accepted]]` blocks re-pointed** to the new labels under the
+  owner's written authorization in this change's launch prompt, conditioned on the
+  identical-probe result above; earlier rationale unchanged below the new paragraph.
+- **Version re-stamped after the batteries.** Both batteries ran on this branch as 0.174.0;
+  `main` then shipped its own 0.174.0 (the diet mirror, #278), which touches no tool list, MCP
+  set or spawn argv, so this change rebased onto it as 0.175.0 and the two records'
+  informational `bridge_version` was moved to match. No probe was re-run for that.
+- **`quinn-proto` 0.11.15 to 0.11.19 in the lockfile**, a transitive dependency of the HTTP
+  client. Five RUSTSEC advisories against 0.11.15 (2026-0338 to 2026-0342: stream reassembly and
+  DATAGRAM limits bypassed, unbounded connection ID retirements, two remote panics) were
+  published after `main`'s last green run and failed this change's `cargo audit` step. The
+  update moves its own `rand` chain from 0.9 to 0.10; nothing else in the bridge changes.
+- **The argv fixture** moved on both harnesses' three main sites only: Claude Code's
+  `--mcp-config` digest on all three and its `--allowedTools` digest on the two write sites;
+  Codex gained ten arguments per main site.
+- **SECURITY.md** has a new section after the hosted Clockify one: no new credential (the same
+  key, now also held by a local child process), no new host (`api.clockify.me` and
+  `reports.api.clockify.me`, reads only), every tool reads, no dollar figure in any output
+  (enforced by the library's `no_money` tests), time entry descriptions from
+  `detailed_entries` as a new source of untrusted text, and a Deployment subsection with the
+  install command, the launcher rules and a handshake that keeps the key off every argv.
+- **Proved against live Clockify before any repo change**, in the Tag1 Consulting workspace:
+  `hours_by_user` (summary reports grouped by user then client) and `monthly_hours` (one
+  detailed sweep) for September 2026, in Europe/Rome and UTC, raw and rounded. All 62 people
+  agreed on all four columns and the total in all four combinations (raw to within 0.01 hours,
+  in fact exactly); `outside_range` was 0 on every `monthly_hours` run; 40 people had internal
+  hours and 50 had client billable hours; no output carried a money field.
+- **Not deployed.**
+
 ## [Bridge 0.174.0] - 2026-10-12
 
 **The diet mirror holds every diet CSV, short rows included, and one row per day with that day's

@@ -3517,3 +3517,111 @@ placement = "core"
 dependency = "jesse-healthdb-mcp (this repository, in deploy-bins.toml); the [healthdb] ro_url_file (health_ro role, 0600) and ca_file, handed to the server by path; Postgres healthdb.pozza:5432 database health, verify-full TLS"
 workflows = "health questions past the per-turn health block: finding which tables, views and sample types exist before querying"
 reason = "Describes the health archive's tables, views, sample types and a fixed guide to reading them; reads only."
+
+[grant."mcp__clockify-rs__list_users"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Lists the workspace's users, from Tag1's own read-only Clockify server."
+
+[grant."mcp__clockify-rs__list_user_groups"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Lists the workspace's user groups and their members, from Tag1's own read-only Clockify server."
+
+[grant."mcp__clockify-rs__hours_by_user"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads each person's hours over a date range split four ways, from summary reports; no money figures."
+
+[grant."mcp__clockify-rs__monthly_hours"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads each person's hours per month split four ways, from every detailed report entry; no money figures."
+
+[grant."mcp__clockify-rs__detailed_entries"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads one page of individual time entries (user, project, client, billable, times, description); no money figures."
+
+[grant."mcp__clockify-rs__resolve_user"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Resolves a name or email to one Clockify user."
+
+[grant."mcp__clockify-rs__check"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads whether one person logged client billable hours over a period."
+
+[grant."mcp__clockify-rs__trend"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads client billable hours per month over recent complete months, with the change month to month."
+
+[grant."mcp__clockify-rs__audit"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Flags people whose client billable hours fell below a share of their own recent average; reads only."
+
+[grant."mcp__clockify-rs__projects"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads one person's hours by project over a period, largest first."
+
+[grant."mcp__clockify-rs__daily"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads hours per day over a period split four ways, for one person, a group or everyone."
+
+[grant."mcp__clockify-rs__team_summary"]
+kind = "mcp"
+server = "clockify-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
+workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
+reason = "Reads every person's hours over a period split four ways, most hours first."

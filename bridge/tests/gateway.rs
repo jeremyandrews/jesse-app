@@ -402,9 +402,11 @@ async fn three_upstreams_from_one_turn_reach_only_granted_tools() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A message outside the four-message subset is a protocol error that CLOSES the session.
+/// A message outside the four-message subset is a protocol error that CLOSES the session at
+/// the gateway; the STUB answers such a request itself and never forwards it, so a client's
+/// feature probe (Claude Code's `server/discover`) costs nothing.
 #[tokio::test]
-async fn a_method_outside_the_subset_closes_the_session() {
+async fn outside_the_subset_the_gateway_closes_and_the_stub_answers_locally() {
     let _env = ENV_LOCK.lock().await;
     let dir = short_tmp("subset");
     plant_bridge_env(&dir);
@@ -430,31 +432,46 @@ async fn a_method_outside_the_subset_closes_the_session() {
         })
         .await
         .unwrap();
-    let sock = gateway::socket_path(guard.dir(), "gwprobe")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let sock = gateway::socket_path(guard.dir(), "gwprobe");
+    // THE GATEWAY, spoken to directly (as a child with a shell could): closed.
+    let sock2 = sock.clone();
     let closed = tokio::task::spawn_blocking(move || {
-        let mut s = Stub::start(&["--upstream", "gwprobe", "--socket", &sock]);
-        s.handshake();
-        let r = s
-            .ask(json!({"jsonrpc":"2.0","id":9,"method":"resources/list","params":{}}))
-            .expect("an error reply");
-        assert_eq!(r["error"]["code"], -32601, "{r}");
-        // The session is gone: the stub's connection was closed and the stub exited.
-        let mut exited = false;
-        for _ in 0..50 {
-            if let Ok(Some(_)) = s.child.try_wait() {
-                exited = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        exited
+        use std::os::unix::net::UnixStream;
+        let s = UnixStream::connect(&sock2).unwrap();
+        let mut w = s.try_clone().unwrap();
+        writeln!(
+            w,
+            r#"{{"jsonrpc":"2.0","id":9,"method":"resources/list","params":{{}}}}"#
+        )
+        .unwrap();
+        let mut r = BufReader::new(s);
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["error"]["code"], -32601, "{v}");
+        let mut rest = String::new();
+        r.read_line(&mut rest).unwrap() == 0
     })
     .await
     .unwrap();
-    assert!(closed, "the stub exits when the gateway closes its session");
+    assert!(
+        closed,
+        "the gateway closes the session after a message outside the subset"
+    );
+    // THE STUB: answers the probe itself and goes on to initialise.
+    let sock = sock.to_str().unwrap().to_string();
+    let names = tokio::task::spawn_blocking(move || {
+        let mut s = Stub::start(&["--upstream", "gwprobe", "--socket", &sock]);
+        let r = s
+            .ask(json!({"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover"}))
+            .expect("answered");
+        assert_eq!(r["error"]["code"], -32601, "{r}");
+        s.handshake();
+        s.list()
+    })
+    .await
+    .unwrap();
+    assert_eq!(names, vec!["probe_echo"]);
     drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -840,5 +857,92 @@ async fn a_scratch_bridge_turn_drives_three_upstreams_through_the_gateway() {
     );
     drop(adapter);
     let _ = std::fs::remove_file(&fake);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// LIVE, BY HAND (`CLAUDE=<claude bin> cargo test --features containment-probe --test gateway
+/// -- --ignored`): a real `claude -p` registers every stub server through a real gateway turn,
+/// with exactly the granted tools. This is the check that caught Claude Code 2.1.296 opening
+/// every server with `server/discover`. It needs the CLI's login and the public tag1 server.
+#[tokio::test]
+#[ignore]
+async fn live_claude_code_registers_every_stub_server() {
+    let _env = ENV_LOCK.lock().await;
+    let dir = short_tmp("realclaude");
+    plant_bridge_env(&dir);
+    let settings = GatewaySettings {
+        enabled: true,
+        stub: Some(PathBuf::from(STUB)),
+        ..GatewaySettings::default()
+    };
+    let gw = Arc::new(Gateway::new(
+        &dir.join("s"),
+        settings.clone(),
+        HashMap::new(),
+        None,
+    ));
+    let guard = gw
+        .open_turn(TurnSpec {
+            job_id: "job-real".into(),
+            capability: Capability::Write,
+            servers: vec![
+                admitted(&settings, "gwprobe", &["probe_echo"]),
+                admitted(&settings, "tag1", &["search_tag1"]),
+            ],
+            harness_env_value: None,
+            deadline: Duration::from_secs(120),
+            bind_sockets: true,
+            env_overlay: Default::default(),
+        })
+        .await
+        .unwrap();
+    let cfg = gateway::child_mcp_config(
+        &settings,
+        r#"{"mcpServers":{"gwprobe":{"type":"stdio","command":"x","args":[]},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"}}}"#,
+        &dir.join("s"),
+        "job-real",
+        Path::new(STUB),
+    )
+    .unwrap();
+    let out = tokio::process::Command::new(std::env::var("CLAUDE").unwrap_or("claude".into()))
+        .args([
+            "-p",
+            "Reply with the single word ok.",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--strict-mcp-config",
+            "--mcp-config",
+            &cfg,
+            "--tools",
+            "",
+        ])
+        .current_dir(&dir)
+        .output()
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let init: Value = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "system")
+        .expect("the CLI's start-of-turn event");
+    eprintln!("mcp_servers: {}", init["mcp_servers"]);
+    for s in init["mcp_servers"].as_array().unwrap() {
+        assert_eq!(s["status"], "connected", "{s}");
+    }
+    let mut tools: Vec<&str> = init["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x.as_str())
+        .filter(|s| s.starts_with("mcp__"))
+        .collect();
+    tools.sort();
+    assert_eq!(
+        tools,
+        vec!["mcp__gwprobe__probe_echo", "mcp__tag1__search_tag1"]
+    );
+    drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
 }

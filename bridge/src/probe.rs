@@ -775,7 +775,12 @@ pub const PROBES: &[Probe] = &[
         answer_carried: false,
         class: ProbeClass::HardGate,
         summary: "call a tool the gateway does not grant, by MCP or by speaking to its socket",
-        tools: &["mcp__gwprobe", "Bash"],
+        // THE EXACT UNGRANTED NAME, which the gateway never lists: its absence from the root
+        // IS the first half of the boundary. The second half, a child that speaks to the
+        // socket itself and asks for it by name, is refused by the gateway's exact-name check
+        // and exercised deterministically in `tests/gateway.rs`; whichever route a child
+        // tries, the verdict is the probe upstream's own log.
+        tools: &["mcp__gwprobe__probe_hidden"],
         settle_secs: 0,
         denial_caveat: "",
         prompt: |e| {

@@ -10,9 +10,13 @@
 //! gateway: a unix socket under the turn's `0700` directory on the Studio, or `POST
 //! <base>/mcp/<name>` with the turn token in the cluster. It forwards the four messages of the
 //! gateway's subset (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`)
-//! and relays every response. Any other notification is dropped here; any other request is
-//! forwarded, so the gateway's refusal (which closes the session) is the one place the rule
-//! is enforced.
+//! and relays every response. NOTHING ELSE CROSSES: any other notification is dropped, and any
+//! other request is answered HERE with "method not found" and goes no further. That is not a
+//! courtesy. A client probes for protocol features it might use (Claude Code 2.1.296 opens
+//! every server with `server/discover` and falls back to `initialize` on method-not-found),
+//! and the gateway closes a session on the first message outside its subset, so a stub that
+//! forwarded the probe would lose the server before it was ever initialised. The gateway's
+//! close stays the rule for anything that reaches it by any other route.
 //!
 //! **IT READS NO ENVIRONMENT VARIABLE**, holds nothing but the token file's contents (URL
 //! mode), opens nothing but its one connection, and exits when stdin closes. That is the whole
@@ -98,19 +102,33 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(Args { upstream, mode })
 }
 
-/// Whether a line from the child goes to the gateway.
-fn forwarded(line: &str) -> bool {
+/// What the stub does with one line from the child.
+#[derive(Debug, PartialEq)]
+enum Route {
+    /// One of the four: send it to the gateway.
+    Forward,
+    /// A request outside the subset: answer it here with this "method not found" line.
+    Answer(String),
+    /// A notification outside the subset, a response, or not JSON: nothing.
+    Drop,
+}
+
+fn route(line: &str) -> Route {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
+        return Route::Drop;
     };
-    match v.get("method").and_then(|m| m.as_str()) {
-        Some(m) if SUBSET.contains(&m) => true,
-        // A request outside the subset goes through, so the gateway refuses it and closes;
-        // a notification outside it is dropped here.
-        Some(_) => v.get("id").is_some(),
-        // A response to a server request: the gateway never sends one, so there is nothing to
-        // answer.
-        None => false,
+    match (v.get("method").and_then(|m| m.as_str()), v.get("id")) {
+        (Some(m), _) if SUBSET.contains(&m) => Route::Forward,
+        (Some(m), Some(id)) => Route::Answer(
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {
+                "code": -32601,
+                "message": format!("method not found: {m}"),
+            }})
+            .to_string(),
+        ),
+        // A notification outside the subset, or a response to a server request (the gateway
+        // never sends one): nothing to do.
+        _ => Route::Drop,
     }
 }
 
@@ -146,24 +164,35 @@ fn run_socket(path: &str) -> Result<(), String> {
     // Gateway -> child, on its own thread. When the gateway closes the connection (the turn
     // ended, or it refused a message), the whole process ends.
     std::thread::spawn(move || {
-        let mut out = std::io::stdout().lock();
         let reader = BufReader::new(sock);
         for line in reader.lines() {
             let Ok(line) = line else { break };
+            // Locked PER LINE: the main thread answers out-of-subset requests on the same
+            // stdout, and a lock held for the life of this thread would starve it.
+            let mut out = std::io::stdout().lock();
             if writeln!(out, "{line}").is_err() || out.flush().is_err() {
                 break;
             }
         }
         std::process::exit(0);
     });
-    // Child -> gateway.
+    // Child -> gateway. A request outside the subset is answered on stdout from here, under
+    // the same lock the relay thread writes with, so two replies never interleave.
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        if !forwarded(&line) {
-            continue;
-        }
-        if writeln!(to_gateway, "{line}").is_err() {
-            break;
+        match route(&line) {
+            Route::Forward => {
+                if writeln!(to_gateway, "{line}").is_err() {
+                    break;
+                }
+            }
+            Route::Answer(reply) => {
+                let mut out = std::io::stdout().lock();
+                if writeln!(out, "{reply}").is_err() || out.flush().is_err() {
+                    break;
+                }
+            }
+            Route::Drop => {}
         }
     }
     let _ = to_gateway.shutdown(std::net::Shutdown::Both);
@@ -186,8 +215,15 @@ fn run_url(upstream: &str, base: &str, token_file: &str) -> Result<(), String> {
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        if !forwarded(&line) {
-            continue;
+        match route(&line) {
+            Route::Forward => {}
+            Route::Answer(reply) => {
+                if writeln!(out, "{reply}").is_err() || out.flush().is_err() {
+                    break;
+                }
+                continue;
+            }
+            Route::Drop => continue,
         }
         let id = serde_json::from_str::<serde_json::Value>(&line)
             .ok()
@@ -403,23 +439,37 @@ mod tests {
     }
 
     #[test]
-    fn only_the_subset_and_requests_are_forwarded() {
+    fn only_the_subset_is_forwarded_and_any_other_request_is_answered_here() {
         for m in SUBSET {
             let msg = if m.starts_with("notifications/") {
                 format!(r#"{{"jsonrpc":"2.0","method":"{m}"}}"#)
             } else {
                 format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}"}}"#)
             };
-            assert!(forwarded(&msg), "{m}");
+            assert_eq!(route(&msg), Route::Forward, "{m}");
         }
-        assert!(!forwarded(
-            r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#
+        assert_eq!(
+            route(r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#),
+            Route::Drop
+        );
+        // Claude Code's opening probe: answered method-not-found, never forwarded.
+        let Route::Answer(a) =
+            route(r#"{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover"}"#)
+        else {
+            panic!("a request outside the subset is answered here");
+        };
+        let a: serde_json::Value = serde_json::from_str(&a).unwrap();
+        assert_eq!(a["id"], "server-discover-probe-1");
+        assert_eq!(a["error"]["code"], -32601);
+        assert!(matches!(
+            route(r#"{"jsonrpc":"2.0","id":2,"method":"resources/list"}"#),
+            Route::Answer(_)
         ));
-        assert!(forwarded(
-            r#"{"jsonrpc":"2.0","id":2,"method":"resources/list"}"#
-        ));
-        assert!(!forwarded(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#));
-        assert!(!forwarded("not json"));
+        assert_eq!(
+            route(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#),
+            Route::Drop
+        );
+        assert_eq!(route("not json"), Route::Drop);
     }
 
     #[test]

@@ -40,6 +40,14 @@ impl ClaudeCode {
         // sets a variable, so the child and everything it runs hold no MCP credential.
         if cfg.gateway.enabled {
             crate::gateway::scrub_child_env(&mut cmd);
+            // Every gateway server reaches the CLI as a LOCAL stub, and the CLI connects local
+            // servers three at a time (remote ones twenty) without blocking the turn on them,
+            // so a slow upstream cold start left the servers queued behind it out of the
+            // turn's toolset. A count, not a credential.
+            cmd.env(
+                crate::gateway::CLAUDE_CONNECT_BATCH_ENV,
+                crate::gateway::CLAUDE_CONNECT_BATCH,
+            );
         }
         // The write lock's hooks, when this turn is one that can write the vault. A failure to
         // WRITE the settings file leaves `None`, and the caller's own gate (a turn is only
@@ -2888,6 +2896,36 @@ mod tests {
         let mut routed = build_diet_child_command(&test_config(), "hi");
         apply_routed_env(&mut routed, &routed_pick("local-oss"));
         vec![ambient, routed]
+    }
+
+    /// With the gateway on, the CLI connects every stub at once rather than three at a time;
+    /// with it off, the variable is not set and the command is what it was.
+    #[test]
+    fn the_gateway_widens_the_cli_s_local_connect_batch_and_only_then() {
+        for enabled in [false, true] {
+            let mut cfg = test_config();
+            cfg.gateway.enabled = enabled;
+            let active = ActiveModel::ambient();
+            let req = main_turn_request(
+                &cfg,
+                "PROMPT",
+                None,
+                &active,
+                Capability::Write,
+                main_mcp_config(&cfg, &ClaudeCode),
+                BUILDER_TURN_ID,
+            );
+            let cmd = ClaudeCode
+                .build_turn(&cfg, &req)
+                .expect("claude never refuses");
+            let env = cmd_env_overrides(&cmd);
+            assert_eq!(
+                env.get(crate::gateway::CLAUDE_CONNECT_BATCH_ENV)
+                    .map(String::as_str),
+                enabled.then_some(crate::gateway::CLAUDE_CONNECT_BATCH),
+                "gateway enabled = {enabled}"
+            );
+        }
     }
 
     /// The routed applier layers exactly the three `ANTHROPIC_*` vars for a pick that

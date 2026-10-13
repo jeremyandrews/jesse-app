@@ -76,6 +76,14 @@ pub const CHILD_ENV_PASSTHROUGH: &[&str] = &[
     "PATH", "HOME", "TMPDIR", "LANG", "TZ", "USER", "LOGNAME", "SHELL",
 ];
 
+/// The Claude Code CLI's batch size for connecting LOCAL MCP servers, set on a gateway-on
+/// child. Its default is 3 (remote servers: 20), and with the gateway every server is a local
+/// stub; the CLI does not hold the turn for servers still connecting, so a small batch drops
+/// the ones queued behind a slow upstream from the turn's toolset. Not a credential.
+pub const CLAUDE_CONNECT_BATCH_ENV: &str = "MCP_SERVER_CONNECTION_BATCH_SIZE";
+/// Above the main set's server count, so every stub connects in one batch.
+pub const CLAUDE_CONNECT_BATCH: &str = "64";
+
 // ---- SETTINGS ------------------------------------------------------------------------
 
 /// `[gateway]` in the bridge TOML.

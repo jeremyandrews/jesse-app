@@ -14,6 +14,64 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.176.0] - 2026-10-13
+
+**Bridge turns have one Clockify server, `clockify-rs`, on both harnesses, and no bridge turn
+can write to Clockify any more.** Root cause of the change: 0.175.0 added `clockify-rs` beside
+Clockify's hosted MCP server, so every main turn saw two Clockify servers and could pick the one
+that cannot split hours per person. The hosted `clockify` server is retired from every main turn,
+and with it the only Clockify tools that wrote: starting and stopping timers, logging time and
+creating projects.
+
+- **The declaration is gone.** `MAIN_CHILD_MCP_CONFIG` no longer carries
+  `"clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp",…}`.
+  `mcp_clockify!` stays only because the retired consts still spell their sets with it, and its
+  doc comment says so. The `mcp_clockify_rs!` comment no longer says the hosted server runs
+  beside it.
+- **Codex's header table is deleted.** `CODEX_MCP_HEADER_ENV` had one entry, `clockify`, and
+  nothing else read it, so the table, its `env_http_headers` rendering branch and the two tests
+  that existed only for it are removed rather than kept as dead code. The `clockify-rs`
+  passthrough is unchanged; its test now requires `JESSE_CLOCKIFY_API_KEY` in exactly one
+  argument, the `clockify-rs` `env_vars` one, and no `mcp_servers.clockify.` key at all.
+- **Thirteen grants removed.** Every `mcp__clockify__*` entry leaves `DEFAULT_ALLOWED_TOOLS` and
+  `capability-map.toml` (MCP grants 362 to 349, servers 25 to 24). The equality test on the
+  thirteen and the wildcard test are replaced by one test that refuses any `mcp__clockify__`
+  entry and a bare `mcp__clockify`. The `clockify-rs` grant tests and the Codex/Claude Code
+  parity test pass with no exception.
+- **New row label on both harnesses,**
+  `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs`
+  (`…+plex+house+healthdb+clockify-rs`), twenty-four servers. The twenty-five-server
+  `…+plex+clockify+house+healthdb+clockify-rs` set is kept as a retired label and const.
+  `golden/capability-args.json` moves the four main rows: the write rows' `--allowedTools` lose
+  the thirteen grants and Codex's rows lose `mcp_servers.clockify.enabled_tools`.
+- **Both records re-recorded live on the Studio** from the bridge LaunchAgent's environment and
+  the deployed config, each battery run alone, from a scratch target directory. Claude Code
+  (2.1.296): gate pass, 5 rows x 22 probes, every probe kept its id, class, verdict and status,
+  and only the two main row labels moved. The main roots lost exactly the thirteen
+  `mcp__clockify__*` tools (read 409 to 396, write 436 to 423), and no other server's count
+  changed. Two earlier runs were discarded because `imcp` recorded zero tools on every row that
+  loads it, while the iMCP app was not answering clients; the kept run was made after it
+  recovered, with a health check every three minutes throughout.
+  Codex (codex-cli 0.153.4): 5 x 22; the file-level gate stays `fail` for the standing
+  `basic/none` reason only (`read_vault_file`, `search_vault`), and every hard gate on the main
+  rows passes. Every probe kept its id, class, verdict and status; the write row's root lost
+  exactly the thirteen `mcp__clockify__*` tools (363 to 350) and its read row still enables no
+  MCP tools, as before. No server recorded zero tools on a row that grants them.
+- **Codex's two main-row `[[accepted]]` blocks re-pointed** to the new labels under the
+  owner's written authorization in this change's launch prompt, conditioned on the
+  identical-probe result above, with a reason saying the move removes the hosted `clockify`
+  server; earlier rationale unchanged below the new paragraph.
+- **The argv fixture** moved on both harnesses' three main sites only: Claude Code's
+  `--mcp-config` digest on all three and its `--allowedTools` digest on the two write sites;
+  Codex lost eight arguments per main site (the url, the header route, `enabled_tools` and the
+  approve mode).
+- **SECURITY.md**: `clockify` leaves the main turn server list and the server table
+  (`clockify-rs` takes its row), the hosted Clockify section is marked retired in its heading
+  and first paragraph and cut to a short history, and the `clockify-rs` section now says
+  `api.clockify.me/mcp-server` is no longer contacted, the key is held only by the `clockify-rs`
+  child process, and no bridge turn can write to Clockify.
+- **Not deployed.**
+
 ## [Bridge 0.175.0] - 2026-10-12
 
 **Bridge turns can answer how many client billable and internal hours each person logged,

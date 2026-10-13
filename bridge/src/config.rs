@@ -881,16 +881,13 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `background_path`; it is the one collection editor the server has, and SECURITY.md records
 // that residual read path.
 //
-// CLOCKIFY: ALL THIRTEEN TOOLS ON CLOCKIFY'S OWN HOSTED SERVER, WRITES INCLUDED.
+// CLOCKIFY (HOSTED): RETIRED IN 0.176.0, NOTHING GRANTED.
 //
-// A live, authenticated `tools/list` against `https://api.clockify.me/mcp-server/mcp` on
-// 2026-10-06 returned thirteen tools, none annotated. Every one is granted by name, on the
-// owner's decision that read only is not required: the reads (`get_current_user_profile`,
-// `get_current_time`, `get_current_timer`, `get_summary_report`, `get_detailed_report`,
-// `list_clients`, `list_projects`, `list_tasks`, `list_tags`) and the writes (`start_timer`,
-// `stop_timer`, `log_past_time`, `create_project`). Each acts with the API key owner's
-// Clockify permissions. Never a wildcard: a tool Clockify adds later is ungranted until it is a
-// decision.
+// Clockify's own hosted server (`https://api.clockify.me/mcp-server/mcp`) had all thirteen of
+// its tools granted from 0.167.0, its four writes (`start_timer`, `stop_timer`, `log_past_time`,
+// `create_project`) included. It left every main turn in 0.176.0 and its thirteen grants went
+// with it: `clockify-rs`, below, is the one Clockify server, and it only reads. A test refuses
+// any `mcp__clockify__` entry.
 //
 // HOUSE: ALL TWENTY-FOUR TOOLS ON THE OWNER'S HOUSE MODEL, WRITES INCLUDED.
 //
@@ -917,8 +914,8 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // A bare environment `tools/list` against `clockify-mcp` 0.5.0 (commit `7255f1d`) on 2026-10-12
 // returned twelve tools, every one annotated `readOnlyHint`: `list_users`, `list_user_groups`,
 // `hours_by_user`, `monthly_hours`, `detailed_entries`, `resolve_user`, `check`, `trend`,
-// `audit`, `projects`, `daily` and `team_summary`. All twelve are granted by name. The hosted
-// `clockify` server's thirteen grants above are unchanged. Never a wildcard.
+// `audit`, `projects`, `daily` and `team_summary`. All twelve are granted by name. From 0.176.0
+// these are the only Clockify grants. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1094,11 +1091,6 @@ mcp__plex__collection_remove_from,mcp__plex__collection_edit,mcp__plex__collecti
 mcp__plex__media_search,mcp__plex__media_get_details,mcp__plex__media_edit_metadata,\
 mcp__plex__media_list_available_artwork,\
 mcp__plex__client_list,mcp__plex__client_get_details,mcp__plex__client_get_timelines,\
-mcp__clockify__get_current_user_profile,mcp__clockify__get_current_time,\
-mcp__clockify__get_current_timer,mcp__clockify__start_timer,mcp__clockify__log_past_time,\
-mcp__clockify__stop_timer,mcp__clockify__get_summary_report,\
-mcp__clockify__get_detailed_report,mcp__clockify__list_clients,mcp__clockify__list_projects,\
-mcp__clockify__create_project,mcp__clockify__list_tasks,mcp__clockify__list_tags,\
 mcp__house__add_note,mcp__house__create_site,mcp__house__delete,mcp__house__find,\
 mcp__house__get_file,mcp__house__get_floor,mcp__house__history,mcp__house__import_dxf,\
 mcp__house__import_geojson,mcp__house__in_space,mcp__house__link_ref,mcp__house__list_files,\
@@ -5369,53 +5361,18 @@ mod tests {
         }
     }
 
-    /// THE CLOCKIFY GRANT IS EXACTLY THE THIRTEEN TOOLS THE SERVER ADVERTISED ON 2026-10-06.
-    ///
-    /// Taken from a live, authenticated `tools/list` against Clockify's hosted MCP server,
-    /// which annotates none of them. Every advertised tool is granted, writes included, on the
-    /// owner's decision. Equality, so a missing grant and a grant for a name the server does
-    /// not register both fail, and a failure names the tool.
+    /// THE HOSTED CLOCKIFY SERVER IS GRANTED NOTHING. It was retired from every main turn in
+    /// 0.176.0, and its thirteen grants, four of them writes, went with it. Neither a named tool
+    /// nor a bare server grant may come back without a new decision and a live battery run.
     #[test]
-    fn the_clockify_grant_is_every_advertised_tool_and_nothing_else() {
-        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+    fn nothing_on_the_retired_hosted_clockify_server_is_granted() {
+        let granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
             .split(',')
-            .filter(|e| e.starts_with("mcp__clockify__"))
+            .filter(|e| e.starts_with("mcp__clockify__") || *e == "mcp__clockify")
             .collect();
-        let mut expected: Vec<String> = [
-            "get_current_user_profile",
-            "get_current_time",
-            "get_current_timer",
-            "start_timer",
-            "log_past_time",
-            "stop_timer",
-            "get_summary_report",
-            "get_detailed_report",
-            "list_clients",
-            "list_projects",
-            "create_project",
-            "list_tasks",
-            "list_tags",
-        ]
-        .iter()
-        .map(|t| format!("mcp__clockify__{t}"))
-        .collect();
-        granted.sort_unstable();
-        expected.sort_unstable();
-        assert_eq!(
-            granted, expected,
-            "the clockify grant moved; re-probe the server's tools/list and record the decision \
-             before changing this list; it moves `toolset_args`, which costs a live battery run"
-        );
-    }
-
-    /// NO WILDCARD ON THE CLOCKIFY SERVER: a wildcard grants whatever Clockify ships next.
-    #[test]
-    fn no_clockify_wildcard_is_granted() {
         assert!(
-            !DEFAULT_ALLOWED_TOOLS
-                .split(',')
-                .any(|e| e == "mcp__clockify__*" || e == "mcp__clockify"),
-            "a wildcard grant on the clockify server is never acceptable"
+            granted.is_empty(),
+            "the hosted clockify server is retired; nothing on it may be granted: {granted:?}"
         );
     }
 
@@ -5424,7 +5381,7 @@ mod tests {
     /// Taken from a bare environment `tools/list` against `clockify-mcp` 0.5.0 (commit
     /// `7255f1d`) on 2026-10-12, every tool annotated `readOnlyHint`. Equality, so a missing
     /// grant and a grant for a name the server does not register both fail, and a failure names
-    /// the tool. The hosted server's grant is pinned separately, above, and is not this one.
+    /// the tool. From 0.176.0 these are the only Clockify grants (see the test above).
     #[test]
     fn the_clockify_rs_grant_is_every_registered_tool_and_nothing_else() {
         let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS

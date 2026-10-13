@@ -77,10 +77,9 @@ private struct ArtifactItemView: View {
                 guard case .idle = state else { return }
                 await load()
             }
-            .sheet(item: $previewing) { item in
-                QuickLookSheet(item: item)
-                    .ignoresSafeArea()
-            }
+            // Not a `.sheet`: see `QuickLookPresenter` for why QuickLook has to be PRESENTED
+            // by UIKit rather than embedded in one.
+            .background(QuickLookPresenter(item: $previewing))
     }
 
     @ViewBuilder private var content: some View {
@@ -156,6 +155,10 @@ private struct ArtifactItemView: View {
                 .frame(width: computed.width, height: computed.height)
         }
         .modifier(InlineImageChrome(label: artifact.filename))
+        // Something for the tap to land on. Inline, the web view has user interaction off
+        // (so the transcript keeps the drag), which also left a touch on the drawing with
+        // nothing to hit: the tap gesture never fired and an inline SVG could not be opened.
+        .overlay(Color.clear.contentShape(Rectangle()))
         .onTapGesture { showFullScreen = true }
         .fullScreenCover(isPresented: $showFullScreen) {
             ArtifactFullScreenView(content: .svg(data), artifact: artifact, url: url)
@@ -315,6 +318,9 @@ private struct SandboxedSVGView: UIViewRepresentable {
     /// Full screen lets the user pinch the drawing itself; inline does not, so the gesture
     /// belongs to the transcript's scroll view rather than being stolen by a subview.
     let allowsZoom: Bool
+    /// Full screen only: the swipe down that puts the viewer away while the drawing is not
+    /// zoomed. Nil inline, where a drag belongs to the transcript.
+    var swipeToDismiss: SwipeDownToDismiss? = nil
 
     func makeCoordinator() -> NavigationBlocker { NavigationBlocker() }
 
@@ -333,6 +339,10 @@ private struct SandboxedSVGView: UIViewRepresentable {
         view.scrollView.isScrollEnabled = allowsZoom
         view.scrollView.bouncesZoom = allowsZoom
         view.isUserInteractionEnabled = allowsZoom
+        // Not part of the sandbox: a gesture on the view, which changes nothing about what
+        // the document may load, run or navigate to.
+        swipeToDismiss?.attach(to: view, scrollView: view.scrollView)
+        context.coordinator.swipe = swipeToDismiss
         return view
     }
 
@@ -371,6 +381,8 @@ private struct SandboxedSVGView: UIViewRepresentable {
         /// The bytes currently loaded, so a re-render of the same drawing does not reload
         /// the web view on every SwiftUI update.
         var loaded: Data?
+        /// Held here because the gesture recognizer holds it only weakly.
+        var swipe: SwipeDownToDismiss?
 
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationAction: WKNavigationAction)
@@ -385,25 +397,108 @@ private struct SandboxedSVGView: UIViewRepresentable {
 
 // ---- QuickLook -------------------------------------------------------------
 
-/// `QLPreviewController` as a SwiftUI sheet, given the item rather than a bare URL.
-private struct QuickLookSheet: UIViewControllerRepresentable {
-    let item: ArtifactPreviewItem
+/// Presents `QLPreviewController` from UIKit, in a navigation controller under the app's own
+/// Done, whenever `item` is set.
+///
+/// # Why not a SwiftUI sheet
+///
+/// This used to be a `.sheet` whose content was a bare `QLPreviewController`, and an opened
+/// file had no way out. QuickLook draws its bar (close, the title, share) only when UIKit
+/// presents it or it sits in a navigation controller; embedded as a child of a sheet it draws
+/// the document and nothing else. And the sheet ignored the safe area, so its grabber sat
+/// under a PDF or web preview that is a scroll view and took every downward drag. No button
+/// and no swipe: the user force quit the app to leave.
+///
+/// # Why our Done and not QuickLook's own close
+///
+/// Presented directly, QuickLook does draw a close control, but it IGNORES A TAP while an
+/// HTML preview is still loading (seen on every try in the simulator: the first tap does
+/// nothing, a tap after the page appears works). A Done owned by the app works the moment
+/// the sheet is up, whatever QuickLook is doing. As the root of a navigation controller,
+/// QuickLook still supplies the title from `ArtifactPreviewItem` and share.
+///
+/// # The swipe
+///
+/// A page sheet supplies the swipe down. It starts on the sheet's bar: QuickLook draws the
+/// document out of process and keeps a drag that starts on the page.
+///
+/// This view is zero sized and draws nothing. It exists for its view controller, which is
+/// in the hierarchy and so can present.
+private struct QuickLookPresenter: UIViewControllerRepresentable {
+    @Binding var item: ArtifactPreviewItem?
 
-    func makeCoordinator() -> Source { Source(item: item) }
+    func makeCoordinator() -> Coordinator { Coordinator(item: $item) }
 
-    func makeUIViewController(context: Context) -> QLPreviewController {
-        let controller = QLPreviewController()
-        controller.dataSource = context.coordinator
-        return controller
+    func makeUIViewController(context: Context) -> UIViewController {
+        let host = UIViewController()
+        host.view.isHidden = true
+        host.view.isUserInteractionEnabled = false
+        return host
     }
 
-    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
-        context.coordinator.item = item
-        controller.reloadData()
+    func updateUIViewController(_ host: UIViewController, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.item = $item
+        switch (item, coordinator.presented) {
+        case (let item?, nil):
+            // Presented from the top of whatever is already up, so a file opened from a
+            // conversation that is itself in a sheet still lands above it.
+            var presenter: UIViewController = host
+            while let next = presenter.presentedViewController { presenter = next }
+            let preview = QLPreviewController()
+            // `dataSource` is weak; the coordinator keeps the source alive for as long as
+            // the preview is up.
+            let source = Source(item: item)
+            coordinator.source = source
+            preview.dataSource = source
+            preview.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                systemItem: .done,
+                primaryAction: UIAction { [weak coordinator] _ in coordinator?.close() })
+            let navigation = UINavigationController(rootViewController: preview)
+            navigation.modalPresentationStyle = .pageSheet
+            navigation.presentationController?.delegate = coordinator
+            coordinator.presented = navigation
+            presenter.present(navigation, animated: true)
+        case (nil, let presented?):
+            // Cleared from SwiftUI's side (the row went away): take the preview with it.
+            coordinator.presented = nil
+            presented.dismiss(animated: true)
+        default:
+            break
+        }
+    }
+
+    /// What is up: the presented sheet and the one item it shows.
+    final class Coordinator: NSObject, UIAdaptivePresentationControllerDelegate {
+        var item: Binding<ArtifactPreviewItem?>
+        var source: Source?
+        weak var presented: UIViewController?
+
+        init(item: Binding<ArtifactPreviewItem?>) { self.item = item }
+
+        /// Done.
+        func close() {
+            let sheet = presented
+            cleared()
+            sheet?.dismiss(animated: true)
+        }
+
+        /// The swipe down, which UIKit finishes on its own and only reports.
+        func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+            cleared()
+        }
+
+        /// Clearing the binding on either exit is what lets the same chip open again: left
+        /// set, the next tap would assign an item SwiftUI sees as no change at all.
+        private func cleared() {
+            presented = nil
+            source = nil
+            item.wrappedValue = nil
+        }
     }
 
     final class Source: NSObject, QLPreviewControllerDataSource {
-        var item: ArtifactPreviewItem
+        let item: ArtifactPreviewItem
         init(item: ArtifactPreviewItem) { self.item = item }
 
         func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
@@ -430,14 +525,23 @@ private struct ArtifactFullScreenView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var saveOutcome: PhotoSaveOutcome?
+    /// How far a swipe down has carried the picture, so it follows the finger.
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         NavigationStack {
             picture
+                .offset(y: dragOffset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.92))
+                .background(Color.black.opacity(0.92 * (1 - min(dragOffset / 600, 0.6))))
                 .navigationTitle(artifact.filename)
                 .navigationBarTitleDisplayMode(.inline)
+                // A full screen cover has no swipe of its own and the backdrop is near black,
+                // so the bar must never depend on what is under it to be seen. It always draws
+                // its own background, and always the dark one: in light mode the title used to
+                // render black on the black backdrop.
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbarColorScheme(.dark, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Done") { dismiss() }
@@ -467,12 +571,25 @@ private struct ArtifactFullScreenView: View {
     @ViewBuilder private var picture: some View {
         switch content {
         case .raster(let image):
-            ZoomableImageView(image: image)
+            ZoomableImageView(image: image, swipeToDismiss: swipe)
         case .svg(let data):
             // WebKit's own pinch-zoom, which is the vector one: zooming re-rasterizes at
             // the new scale instead of magnifying pixels.
-            SandboxedSVGView(data: data, allowsZoom: true)
+            SandboxedSVGView(data: data, allowsZoom: true, swipeToDismiss: swipe)
         }
+    }
+
+    /// The second way out, beside Done: drag the picture down to put it away.
+    private var swipe: SwipeDownToDismiss {
+        SwipeDownToDismiss(
+            onDrag: { dragOffset = max(0, $0) },
+            onEnd: { commit in
+                if commit {
+                    dismiss()
+                } else {
+                    withAnimation(.spring(duration: 0.3)) { dragOffset = 0 }
+                }
+            })
     }
 
     private var saveAlertBinding: Binding<Bool> {
@@ -518,6 +635,69 @@ private enum PhotoSaver {
     }
 }
 
+/// A swipe down that dismisses a full screen viewer, only while its content is at minimum
+/// zoom.
+///
+/// A full screen cover has no swipe of its own, and both pictures sit in a scroll view
+/// (the raster one in ours, the SVG in WebKit's) whose pan would otherwise own every drag.
+/// So this is a pan of its own on that view, recognized alongside the scroll view's, that
+/// BEGINS only for a mostly downward drag while the scroll view is at its minimum zoom.
+/// Zoomed in, it never begins and the drag pans the picture as before.
+@MainActor
+private final class SwipeDownToDismiss: NSObject, UIGestureRecognizerDelegate {
+    /// How far the drag has gone, in points, as it moves.
+    let onDrag: (CGFloat) -> Void
+    /// Whether the drag ended far or fast enough to dismiss.
+    let onEnd: (Bool) -> Void
+    private weak var scrollView: UIScrollView?
+
+    /// Far enough, or fast enough, to read as "put it away" rather than a stray touch.
+    private static let distance: CGFloat = 120
+    private static let velocity: CGFloat = 800
+
+    init(onDrag: @escaping (CGFloat) -> Void, onEnd: @escaping (Bool) -> Void) {
+        self.onDrag = onDrag
+        self.onEnd = onEnd
+    }
+
+    /// Install on `view`, judging zoom from `scrollView`. A recognizer holds neither its
+    /// target nor its delegate strongly, so the caller's coordinator keeps this alive.
+    func attach(to view: UIView, scrollView: UIScrollView) {
+        self.scrollView = scrollView
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handle(_:)))
+        pan.delegate = self
+        view.addGestureRecognizer(pan)
+    }
+
+    @objc private func handle(_ pan: UIPanGestureRecognizer) {
+        let dy = pan.translation(in: pan.view).y
+        switch pan.state {
+        case .changed:
+            onDrag(dy)
+        case .ended:
+            onEnd(dy > Self.distance || pan.velocity(in: pan.view).y > Self.velocity)
+        case .cancelled, .failed:
+            onEnd(false)
+        default:
+            break
+        }
+    }
+
+    func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        guard let pan = recognizer as? UIPanGestureRecognizer, let scrollView else { return false }
+        // A small tolerance: WebKit reports its minimum as a float that a fit-to-width
+        // layout does not always land on exactly.
+        guard scrollView.zoomScale <= scrollView.minimumZoomScale + 0.01 else { return false }
+        let v = pan.velocity(in: pan.view)
+        return v.y > 0 && abs(v.y) > abs(v.x)
+    }
+
+    func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+}
+
 /// A picture in a `UIScrollView`, which is where pinch, pan and double-tap zoom already
 /// work correctly.
 ///
@@ -526,6 +706,8 @@ private enum PhotoSaver {
 /// makes zooming feel like the rest of the system. This is the control that does.
 private struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
+    /// The swipe down that puts the viewer away while the picture is at minimum zoom.
+    var swipeToDismiss: SwipeDownToDismiss? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -544,6 +726,8 @@ private struct ZoomableImageView: UIViewRepresentable {
                                                action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         scrollView.addGestureRecognizer(doubleTap)
+        swipeToDismiss?.attach(to: scrollView, scrollView: scrollView)
+        context.coordinator.swipe = swipeToDismiss
         return scrollView
     }
 
@@ -586,6 +770,8 @@ private struct ZoomableImageView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
         var imageView: UIImageView?
+        /// Held here because the gesture recognizer holds it only weakly.
+        var swipe: SwipeDownToDismiss?
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
 

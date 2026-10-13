@@ -1171,6 +1171,9 @@ pub struct Config {
     /// The health archive (`[healthdb]`): absent, ready, or refused at startup. See
     /// [`crate::HealthDbConfig`]. Ready holds the connection URL, which carries a password.
     pub healthdb: HealthDbConfig,
+    /// The tool gateway (`[gateway]`, `[mcp.<name>]`): off unless the table turns it on. See
+    /// [`crate::gateway`].
+    pub gateway: crate::gateway::GatewaySettings,
     /// The per-turn run limit in seconds (`JESSE_TIMEOUT`, default
     /// [`DEFAULT_TIMEOUT_SECS`], clamped to `[1, HARD_TIMEOUT_CEILING]`).
     pub timeout_secs: u64,
@@ -4741,6 +4744,8 @@ impl Config {
             // The `[healthdb]` table, its URL file read and checked here, once. Refused stops
             // the bridge at the startup gate, exactly as `[house]` does.
             healthdb: HealthDbConfig::from_toml(load_healthdb_table(&home)),
+            // The `[gateway]` table and `[mcp.*]` overrides. Off when absent.
+            gateway: load_gateway_settings(&home),
             // 90m default; clamped to [1, HARD_TIMEOUT_CEILING].
             timeout_secs: clamp_timeout_secs(env_parse("JESSE_TIMEOUT", DEFAULT_TIMEOUT_SECS)),
             // The cut-off turn's partial-answer ring. Blocks are floored at 1 (a

@@ -164,6 +164,10 @@ pub struct AdvertisedTool {
     pub description: String,
     /// `inputSchema`, or `{"type":"object"}` when the server sent none.
     pub input_schema: Value,
+    /// The whole entry as the server sent it (annotations, `outputSchema`, `title`), for a
+    /// host that RELAYS a server rather than consuming it (the bridge's gateway, 0.14.0).
+    /// UNTRUSTED, exactly as the description is.
+    pub raw: Value,
 }
 
 /// One `tools/call` result, in the shape the tool layer maps to [`crate::tools::ResultBlock`]s.
@@ -175,7 +179,13 @@ pub struct CallOutcome {
     pub structured: Option<Value>,
     /// The server's own `isError` flag — a TOOL failure, not a protocol one.
     pub is_error: bool,
+    /// The whole `result` object as the server sent it, for a relaying host (0.14.0).
+    pub raw: Value,
 }
+
+/// A callback that receives each stderr line of a stdio server; see
+/// [`McpClient::connect_logging`].
+pub type StderrLog = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What this client counted on a server's stderr. Numbers only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -265,6 +275,21 @@ impl McpClient {
         per_call: Duration,
         connect_timeout: Duration,
     ) -> Result<McpClient, McpError> {
+        McpClient::connect_logging(name, command, args, env, per_call, connect_timeout, None).await
+    }
+
+    /// [`McpClient::connect`], with every stderr line ALSO handed to `log` as it is drained
+    /// (0.14.0). For a host whose job is to run one server and keep its log, such as the
+    /// bridge's HTTP adapter; the counts and the ring are kept either way.
+    pub async fn connect_logging(
+        name: &str,
+        command: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+        per_call: Duration,
+        connect_timeout: Duration,
+        log: Option<StderrLog>,
+    ) -> Result<McpClient, McpError> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .env_clear()
@@ -305,6 +330,9 @@ impl McpClient {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(log) = &log {
+                    log(&line);
+                }
                 if let Ok(mut c) = sink_task.counts.lock() {
                     c.lines += 1;
                     c.bytes += line.len() as u64;
@@ -527,6 +555,7 @@ impl McpClient {
                     ));
                 };
                 out.push(AdvertisedTool {
+                    raw: t.clone(),
                     name: name.to_string(),
                     description: t
                         .get("description")
@@ -571,6 +600,7 @@ impl McpClient {
                 .get("isError")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            raw: result,
         })
     }
 

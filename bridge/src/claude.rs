@@ -290,6 +290,12 @@ async fn run_stateless_oneshot(
     timeout_secs: u64,
     label: &str,
 ) -> Result<(String, ShadowUsage), ApiError> {
+    // THE GATEWAY TURN this child's stubs connect to, held until the child is reaped. `None`
+    // with the gateway off, or for a child that loads no gateway server.
+    let _gateway =
+        crate::gateway::open_for_child(cfg, req, harness.id(), Duration::from_secs(timeout_secs))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
     let mut child = cmd.spawn().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -825,6 +831,17 @@ async fn run_spawned_turn(
         // staging directory from the prompt, so no child's argv changes because this exists.
         req.artifact_dir = artifact_dir;
         let mut cmd = harness.build_turn(cfg, &req)?;
+        // THE GATEWAY TURN for this attempt, held until the attempt's child is done: its
+        // sockets exist before the child starts its stubs, and dropping it kills every
+        // upstream the attempt started and revokes its token.
+        let _gateway = crate::gateway::open_for_child(
+            cfg,
+            &req,
+            harness.id(),
+            Duration::from_secs(cfg.timeout_secs),
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
 
         let mut child = cmd.spawn().map_err(|e| {
             (

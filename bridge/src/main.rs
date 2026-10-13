@@ -67,6 +67,9 @@ async fn main() {
     // …and the `[healthdb]` table, the same way: a URL file open to group or other, or a
     // missing CA, refuses the boot by name. Absent is the default and fine.
     errors.extend(validate_healthdb(&cfg));
+    // …and the tool gateway: when `[gateway] enabled`, its stub must exist and every
+    // `[mcp.<name>]` override must resolve. Off is the default and checks nothing.
+    errors.extend(jesse_bridge::gateway::validate_gateway(&cfg));
     // The `[concurrency]` table joins the SAME gate. A misspelled model id there is refused by
     // name rather than silently ignored — a config surface that quietly does nothing is the
     // failure mode this project keeps designing against.
@@ -580,6 +583,53 @@ async fn main() {
     // bridge starts, because a bridge that will not boot over housekeeping is worse than one
     // holding a month of extra records.
     prune_direct_state(&state.cfg, &state.conversations);
+    // THE ACTIVITY LEDGER'S 90-DAY RETENTION, at startup and then daily, and THE GATEWAY'S
+    // leftover turn directories from a previous process, swept before any turn is admitted.
+    if let Some(ledger) = jesse_bridge::activity::global(&state.cfg) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            loop {
+                tick.tick().await;
+                let n = ledger.prune(chrono::Local::now().date_naive());
+                if n > 0 {
+                    eprintln!("jesse-bridge: activity ledger: pruned {n} day file(s)");
+                }
+            }
+        });
+    }
+    if let Some(dir) = state.cfg.state_dir.as_deref() {
+        let n = jesse_bridge::gateway::Gateway::sweep(&jesse_bridge::gateway::gw_root(
+            &state.cfg.gateway,
+            Path::new(dir),
+        ));
+        if n > 0 {
+            eprintln!("jesse-bridge: gateway: swept {n} leftover turn director(ies)");
+        }
+    }
+    // THE GATEWAY: on or off, said once at boot. The TCP listener only when configured, which
+    // the Studio never is in this step.
+    match jesse_bridge::gateway::global(&state.cfg) {
+        None => eprintln!("jesse-bridge: gateway: off"),
+        Some(gw) => {
+            eprintln!(
+                "jesse-bridge: gateway: on (stub {})",
+                jesse_bridge::gateway::stub_path(gw.settings())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
+            if let Some(addr) = gw.settings().listen.clone() {
+                match jesse_bridge::gateway::listen::serve_tcp(gw.clone(), &addr).await {
+                    Ok((bound, _task)) => {
+                        eprintln!("jesse-bridge: gateway: TCP listener on {bound}")
+                    }
+                    Err(e) => {
+                        eprintln!("jesse-bridge: gateway: cannot bind {addr}: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
     // Reclaim orphaned vault-project Claude Code sessions older than
     // JESSE_SESSION_TTL_DAYS on a background sweep (one run at startup, then
     // periodic). Scoped to the vault project only; an actively-resumed session

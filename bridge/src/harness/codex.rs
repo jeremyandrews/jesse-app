@@ -737,7 +737,11 @@ pub fn codex_mcp_args(
                 // STDIO ONLY: `env_vars` forwards variables into a SUBPROCESS's environment,
                 // and an HTTP server has no subprocess to forward them into. An HTTP server
                 // needing a credential takes the `bearer_token_env_var` route below instead.
-                if let Some(vars) = crate::mcpservers::codex_env_passthrough(name) {
+                // A GATEWAY STUB takes no environment: it holds nothing, and its server's
+                // credential is the bridge's, not this child's.
+                let stub = crate::gateway::is_stub_command(command);
+                if let Some(vars) = crate::mcpservers::codex_env_passthrough(name).filter(|_| !stub)
+                {
                     let rendered: Vec<String> = vars.iter().map(|v| toml_string(v)).collect();
                     args.push("-c".to_string());
                     args.push(format!(
@@ -745,7 +749,7 @@ pub fn codex_mcp_args(
                         rendered.join(", ")
                     ));
                 }
-                if let Some((k, v)) = crate::mcpservers::codex_env_fixed(name) {
+                if let Some((k, v)) = crate::mcpservers::codex_env_fixed(name).filter(|_| !stub) {
                     args.push("-c".to_string());
                     args.push(format!("mcp_servers.{name}.env={{{k}={}}}", toml_string(v)));
                 }
@@ -816,12 +820,11 @@ pub fn codex_mcp_args(
     Ok(args)
 }
 
-/// **THE THREE CODEX ENVIRONMENT TABLES ARE VIEWS** over [`crate::mcpservers::MCP_SERVERS`]
-/// since 0.177.0: `env_vars` is [`crate::mcpservers::codex_env_passthrough`], `env` is
-/// [`crate::mcpservers::codex_env_fixed`], `bearer_token_env_var` is
-/// [`crate::mcpservers::codex_bearer_env`] and `env_http_headers` is
-/// [`crate::mcpservers::codex_header_env`]. Their rationale, server by server, moved with
-/// them; see that module.
+// **THE THREE CODEX ENVIRONMENT TABLES ARE VIEWS** over `crate::mcpservers::MCP_SERVERS`
+// since 0.177.0: `env_vars` is `codex_env_passthrough`, `env` is `codex_env_fixed`,
+// `bearer_token_env_var` is `codex_bearer_env` and `env_http_headers` is `codex_header_env`,
+// all in `crate::mcpservers`. Their rationale, server by server, moved with them; see that
+// module.
 
 /// One server's `enabled_tools` override, in Codex's `-c key=value` spelling.
 ///
@@ -1738,9 +1741,16 @@ impl Codex {
         // `[house]` table, or is removed when there is no ready table; `healthdb` is removed
         // when `[healthdb]` has no `ro_url_file`. The set, and so the
         // grant, is still resolved from the shipped string.
+        // With the gateway on, every gateway server becomes the credential-free stub under
+        // its own name (see `crate::gateway::child_config_for_turn`), and the translation
+        // below gives a stub entry no environment at all.
         let mcp = codex_mcp_args(
             CODEX_ID,
-            &render_child_mcp(cfg, req.mcp_config),
+            &crate::gateway::child_config_for_turn(
+                cfg,
+                &render_child_mcp(cfg, req.mcp_config),
+                req.turn_id,
+            ),
             row_allowed_tools(
                 cfg,
                 req.capability,
@@ -1760,6 +1770,12 @@ impl Codex {
         // environment, so it gets a home with NO credential in it at all.
         let home = codex_home_for_turn(cfg, req.session_id, provider.is_none())?;
         let mut cmd = Command::new(&cfg.codex_bin);
+        // THE GATEWAY (off by default): the app-server's environment is cleared to the named
+        // list, then `CODEX_HOME` and the provider key are set explicitly below. Its login is
+        // the `auth.json` in that home, so nothing else is needed.
+        if cfg.gateway.enabled {
+            crate::gateway::scrub_child_env(&mut cmd);
+        }
         // Install this turn's hooks into the per-turn home. The child's argv says nothing
         // about them — [`CodexAppServerDriver`] finds this file through `hooks/list` and
         // grants it trust over the protocol, keyed to its content hash. So the only thing
@@ -1824,7 +1840,9 @@ impl Codex {
         // The house token, BY VALUE ON THIS CHILD ONLY, under the name `bearer_token_env_var`
         // above tells Codex to read; absent when this turn's rendered set has no `house`. And
         // the health archive server's paths, which `CODEX_MCP_ENV_PASSTHROUGH` publishes to it.
-        apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
+        if !cfg.gateway.enabled {
+            apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
+        }
         Ok(cmd)
     }
 }

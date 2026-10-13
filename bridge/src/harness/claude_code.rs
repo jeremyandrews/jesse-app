@@ -36,6 +36,11 @@ impl ClaudeCode {
     /// dedicated tests.
     pub fn command(&self, cfg: &Config, req: &TurnRequest<'_>) -> Command {
         let mut cmd = Command::new(&cfg.claude_bin);
+        // THE GATEWAY (off by default): a cleared environment FIRST, before anything below
+        // sets a variable, so the child and everything it runs hold no MCP credential.
+        if cfg.gateway.enabled {
+            crate::gateway::scrub_child_env(&mut cmd);
+        }
         // The write lock's hooks, when this turn is one that can write the vault. A failure to
         // WRITE the settings file leaves `None`, and the caller's own gate (a turn is only
         // given `write_lock` when the broker is armed) means the turn then runs at one slot
@@ -43,27 +48,38 @@ impl ClaudeCode {
         let settings = req
             .write_lock
             .and_then(|wl| install_write_lock_settings(cfg, wl));
-        cmd.args(fill_workspace(
-            build_claude_args(
-                cfg,
-                req.prompt,
-                req.session_id,
-                req.capability,
-                req.mcp_config,
-                settings.as_deref(),
-                req.attachment_dir,
-            ),
-            &req.cwd,
-        ))
-        .current_dir(&req.cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true); // killed if the timeout fires or the task is dropped
+        let mut args = build_claude_args(
+            cfg,
+            req.prompt,
+            req.session_id,
+            req.capability,
+            req.mcp_config,
+            settings.as_deref(),
+            req.attachment_dir,
+        );
+        // …and the stub in place of every gateway server, under the same names. The ONE
+        // value of `--mcp-config` is replaced; nothing else in the argv moves.
+        if cfg.gateway.enabled {
+            if let Some(i) = args.iter().position(|a| a == "--mcp-config") {
+                if let Some(v) = args.get_mut(i + 1) {
+                    *v = crate::gateway::child_config_for_turn(cfg, v, req.turn_id);
+                }
+            }
+        }
+        cmd.args(fill_workspace(args, &req.cwd))
+            .current_dir(&req.cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true); // killed if the timeout fires or the task is dropped
         apply_main_env(&mut cmd, req.active);
         // The house token, as `JESSE_HOUSE_TOKEN`, on a child whose rendered set loads
         // `house` and on no other (the CLI expands it into the server's header); and the
         // health archive server's file paths on a child whose rendered set loads `healthdb`.
-        apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
+        // With the gateway on, the bridge holds the house token and the healthdb paths, and
+        // the child is given neither.
+        if !cfg.gateway.enabled {
+            apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
+        }
         // THE TURN'S EFFORT, when it asked for one. Appended AFTER the containment argv and
         // never part of `capability_args`, so it moves no recorded posture, and absent on a
         // turn that named none — whose argv is then byte-identical to one from before effort
@@ -4881,7 +4897,7 @@ mod tests {
                 None,
                 &ambient,
                 Capability::Basic,
-                &EMPTY_MCP_CONFIG,
+                EMPTY_MCP_CONFIG,
             ),
             "title one-shot",
         );

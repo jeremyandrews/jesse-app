@@ -29,6 +29,16 @@ required-features = ["containment-probe"]
 name = "containment"
 required-features = ["containment-probe"]
 
+# The gateway's fake upstream, and the tests that drive it. Same gate as the battery: a
+# release build contains no binary that pretends to be an MCP server.
+[[bin]]
+name = "jesse-gateway-probe-server"
+required-features = ["containment-probe"]
+
+[[test]]
+name = "gateway"
+required-features = ["containment-probe"]
+
 # THE SENTINEL. Declared so the artifact is `jesse-sentinel` — the name the launchd plist,
 # the installer and `~/.local/bin` all use — rather than `sentinel`, which is what
 # auto-discovery would derive from the file name. The file stays at `src/bin/sentinel.rs`

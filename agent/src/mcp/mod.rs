@@ -51,11 +51,12 @@ pub mod http;
 pub mod toolset;
 
 pub use client::{
-    AdvertisedTool, CallOutcome, McpClient, McpError, StderrCounts, CLIENT_NAME, PROTOCOL_VERSION,
+    AdvertisedTool, CallOutcome, McpClient, McpError, StderrCounts, StderrLog, CLIENT_NAME,
+    PROTOCOL_VERSION,
 };
 pub use http::{Bearer, HttpAuth, MutualTls};
 pub use toolset::{
-    tool_name, validate_grants, CompositeError, CompositeToolSet, McpReport, McpSetError,
-    McpToolSet, McpTransport, NamedHttpAuth, PemBytes, ServerGrant, DEFAULT_CALL_TIMEOUT,
-    DEFAULT_CONNECT_TIMEOUT,
+    exposed_class, tool_name, tool_result_from_mcp, validate_grants, CompositeError,
+    CompositeToolSet, McpReport, McpSetError, McpToolSet, McpTransport, NamedHttpAuth, PemBytes,
+    ServerGrant, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
 };

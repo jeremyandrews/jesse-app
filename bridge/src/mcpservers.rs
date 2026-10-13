@@ -746,8 +746,54 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
 
 /// The row for `name`, or `None`.
 pub fn row(name: &str) -> Option<&'static McpServerRow> {
-    MCP_SERVERS.iter().find(|r| r.name == name)
+    MCP_SERVERS.iter().find(|r| r.name == name).or_else(|| {
+        #[cfg(feature = "containment-probe")]
+        {
+            PROBE_ROWS.iter().find(|r| r.name == name)
+        }
+        #[cfg(not(feature = "containment-probe"))]
+        {
+            None
+        }
+    })
 }
+
+/// THE GATEWAY'S PROBE UPSTREAMS, one per transport, for its tests and its containment probes.
+/// Present only in a `containment-probe` build, so no deployed bridge can resolve them; no
+/// shipped set names them and no shipped allowlist grants them.
+///
+/// `gwprobe` is `jesse-gateway-probe-server` started by the bridge, with the two variables
+/// that tell it where to log calls and dump its environment as its whole environment column.
+/// `gwprobe-http` is the same server behind `jesse-mcp-http-adapter`, its URL supplied per run
+/// by an `[mcp.gwprobe-http]` override. `gwprobe-inproc` is served inside the bridge by
+/// whatever the test registers.
+#[cfg(feature = "containment-probe")]
+pub const PROBE_ROWS: &[McpServerRow] = &[
+    writes(
+        stdio(
+            "gwprobe",
+            "jesse-gateway-probe-server",
+            &[],
+            &["JESSE_GWPROBE_LOG", "JESSE_GWPROBE_ENV_DUMP"],
+        ),
+        &["probe_hidden"],
+    ),
+    writes(
+        http(
+            "gwprobe-http",
+            "http://127.0.0.1:9/mcp",
+            HttpAuthSpec::Bearer("JESSE_GWPROBE_HTTP_TOKEN"),
+        ),
+        &["probe_hidden"],
+    ),
+    McpServerRow {
+        transport: Transport::InProcess,
+        ..writes(
+            http("gwprobe-inproc", "", HttpAuthSpec::None),
+            &["probe_hidden"],
+        )
+    },
+];
 
 // ---- THE SHIPPED SETS -----------------------------------------------------------------
 //

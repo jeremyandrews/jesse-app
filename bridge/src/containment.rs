@@ -1857,7 +1857,11 @@ pub fn hard_gate_requirement(
         | "message_send_imessage"
         | "message_send_mail_work"
         | "message_send_mail_personal"
-        | "message_send_fastmail" => ProbeVerdict::Denied,
+        | "message_send_fastmail"
+        // THE GATEWAY (0.177.0), denied at every row: no grant ever names `probe_hidden`, and
+        // no upstream may see a secret the bridge holds.
+        | "gateway-ungranted-tool"
+        | "gateway-env-leak" => ProbeVerdict::Denied,
         "read_vault_file" | "search_vault" => {
             if cap >= Capability::Read {
                 ProbeVerdict::Allowed

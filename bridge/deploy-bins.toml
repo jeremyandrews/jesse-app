@@ -37,4 +37,12 @@ bins = [
     "jesse-places-mcp",
     "jesse-inbound-mcp",
     "jesse-healthdb-mcp",
+    # The tool gateway's stub: with `[gateway] enabled`, the ONLY program a child's MCP config
+    # starts for a gateway server, so it moves with the bridge that hands it out. A missing
+    # stub is fatal at startup when the gateway is on.
+    "jesse-gateway-mcp",
+    # The HTTP adapter that serves one third-party stdio MCP server over Streamable HTTP. The
+    # Studio does not run it; it ships with the bridge so the cluster's pods and the Studio
+    # run the same build.
+    "jesse-mcp-http-adapter",
 ]

@@ -166,6 +166,11 @@ pub struct JesseRequest {
     // be a hole in the framing the floor and the health block are so careful about.
     #[serde(skip)]
     return_line: Option<String>,
+    /// Where the turn came from, for the activity ledger: `schedule:<id>` when the scheduler
+    /// fired it, absent (`phone`) when a device sent it. Never deserialised: a client cannot
+    /// claim to be a schedule.
+    #[serde(skip)]
+    origin: Option<String>,
 }
 
 impl JesseRequest {
@@ -181,6 +186,11 @@ impl JesseRequest {
     /// ticks); the app sets the same field on the wire.
     pub fn set_sent_for(&mut self, label: impl Into<String>) {
         self.sent_for = Some(label.into());
+    }
+
+    /// Mark the turn as fired by a schedule, for the activity ledger.
+    pub fn set_origin(&mut self, origin: impl Into<String>) {
+        self.origin = Some(origin.into());
     }
 
     /// The request a `[[schedule]]` job submits: a mode, the prompt text, and nothing
@@ -228,6 +238,7 @@ impl JesseRequest {
             meal_corrections_ack: None,
             request_id: None,
             sent_for: None,
+            origin: None,
         }
     }
 }
@@ -609,6 +620,24 @@ pub async fn health(State(st): State<AppState>, headers: HeaderMap) -> Json<Valu
             body["healthdb"] = json!({
                 "counters": healthdb_all_counters_json(st.cfg.state_dir.as_deref())
             });
+        }
+        // THE TOOL GATEWAY: on or off, and with it on, each upstream of the main set with its
+        // transport, placement and whether it can be reached (a stdio command that resolves on
+        // PATH, an HTTP URL that parses, an in-process server that is registered). Names only.
+        match crate::gateway::global(&st.cfg) {
+            None => body["gateway"] = json!("off"),
+            Some(gw) => {
+                body["gateway"] = json!("on");
+                let rendered = crate::render_child_mcp(
+                    &st.cfg,
+                    st.cfg
+                        .main_mcp_config
+                        .as_deref()
+                        .unwrap_or(crate::MAIN_CHILD_MCP_CONFIG.as_str()),
+                );
+                body["gateway_upstreams"] =
+                    json!(gw.upstream_health(&crate::gateway::config_server_names(&rendered)));
+            }
         }
         if let Some(drift) = BINARY_DRIFT.get().filter(|d| !d.is_empty()) {
             body["containment_stale"] = json!(drift
@@ -1146,6 +1175,7 @@ pub async fn start_turn(
     let jobs = st.jobs.clone();
     let jid = job_id.clone();
     let sid = req.session_id.clone();
+    let origin = req.origin.clone().unwrap_or_else(|| "phone".to_string());
     // `active` (WHICH model backs this turn: id + ANTHROPIC_* env + subagent model +
     // effective write permission + price deck) was resolved above from the per-turn `model`
     // field or, absent it, the stored default — moved into the task here. For the ambient
@@ -1340,6 +1370,17 @@ pub async fn start_turn(
             jobs: jobs.clone(),
             job_id: jid.clone(),
         };
+        // ONE CONTENT-FREE LINE PER TURN in the activity ledger, written when the task ends
+        // however it ends, beside the timing record above.
+        let _activity = crate::activity::TurnRecorder::start(
+            crate::activity::global(&cfg),
+            jobs.clone(),
+            &jid,
+            harness.id(),
+            &active.id,
+            crate::gateway::capability_label(turn_capability(&active)),
+            &origin,
+        );
 
         // Where the driver records the session id each spawned child reports on its first
         // line. THE authority on which sessions this turn owns — the terminal step binds

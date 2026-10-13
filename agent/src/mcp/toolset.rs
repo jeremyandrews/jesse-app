@@ -592,7 +592,9 @@ impl ToolSet for McpToolSet {
 
 /// [`ActionClass`] as the class a set may be BUILT with, or `None` for the one arm that has
 /// no builder equivalent.
-fn exposed_class(class: ActionClass) -> Option<ExposedClass> {
+/// The builder class a tool of `class` is added under, or `None` for the class no level
+/// exposes.
+pub fn exposed_class(class: ActionClass) -> Option<ExposedClass> {
     match class {
         ActionClass::Read => Some(ExposedClass::Read),
         ActionClass::VaultWrite => Some(ExposedClass::VaultWrite),
@@ -686,6 +688,30 @@ impl Tool for McpTool {
             }
         })
     }
+}
+
+/// One MCP `tools/call` RESULT OBJECT as this crate's tool result, mapped exactly as
+/// [`McpToolSet`]'s own tools map theirs: every block kept, the server's `isError` a `Failed`,
+/// and a fixed trace summary. For a host that brokers calls itself rather than through an
+/// [`McpClient`] this crate owns — the bridge's tool gateway (0.14.0).
+pub fn tool_result_from_mcp(result: &Value) -> ToolResult {
+    let content: Vec<Value> = result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let blocks = blocks_from_result(&content, result.get("structuredContent"));
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(ToolError::Failed(error_text(&blocks)));
+    }
+    Ok(ToolOk {
+        content: blocks,
+        summary_for_trace: "mcp tool result",
+    })
 }
 
 /// One MCP `content` array as this crate's result blocks.

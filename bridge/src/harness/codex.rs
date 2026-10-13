@@ -737,8 +737,7 @@ pub fn codex_mcp_args(
                 // STDIO ONLY: `env_vars` forwards variables into a SUBPROCESS's environment,
                 // and an HTTP server has no subprocess to forward them into. An HTTP server
                 // needing a credential takes the `bearer_token_env_var` route below instead.
-                if let Some((_, vars)) = CODEX_MCP_ENV_PASSTHROUGH.iter().find(|(s, _)| *s == name)
-                {
+                if let Some(vars) = crate::mcpservers::codex_env_passthrough(name) {
                     let rendered: Vec<String> = vars.iter().map(|v| toml_string(v)).collect();
                     args.push("-c".to_string());
                     args.push(format!(
@@ -746,16 +745,9 @@ pub fn codex_mcp_args(
                         rendered.join(", ")
                     ));
                 }
-                if let Some((_, pairs)) = CODEX_MCP_ENV_FIXED.iter().find(|(s, _)| *s == name) {
-                    let rendered: Vec<String> = pairs
-                        .iter()
-                        .map(|(k, v)| format!("{k}={}", toml_string(v)))
-                        .collect();
+                if let Some((k, v)) = crate::mcpservers::codex_env_fixed(name) {
                     args.push("-c".to_string());
-                    args.push(format!(
-                        "mcp_servers.{name}.env={{{}}}",
-                        rendered.join(", ")
-                    ));
+                    args.push(format!("mcp_servers.{name}.env={{{k}={}}}", toml_string(v)));
                 }
             }
             "http" => {
@@ -770,17 +762,31 @@ pub fn codex_mcp_args(
                 // THE BEARER TOKEN, BY VARIABLE NAME. Codex reads the variable itself, so
                 // the credential never reaches argv, a `ps` listing or a crash dump — the
                 // same property `env_vars` gives a stdio server, reached through a
-                // different key because the transports differ. See [`CODEX_MCP_BEARER_ENV`].
+                // different key because the transports differ. See
+                // [`crate::mcpservers::codex_bearer_env`].
                 //
                 // The canonical config carries the token as an `Authorization` HEADER with a
                 // `${VAR}` placeholder, which is what Claude Code expands. Codex has no
                 // header-expansion equivalent, so the two harnesses spell the SAME secret
                 // two ways; the table below is what keeps them naming one variable.
-                if let Some((_, var)) = CODEX_MCP_BEARER_ENV.iter().find(|(s, _)| *s == name) {
+                if let Some(var) = crate::mcpservers::codex_bearer_env(name) {
                     args.push("-c".to_string());
                     args.push(format!(
                         "mcp_servers.{name}.bearer_token_env_var={}",
                         toml_string(var)
+                    ));
+                }
+                // NAMED HEADERS (a server that takes `x-api-key` rather than a bearer): Codex
+                // reads each variable and sends the header itself, so again only names travel.
+                if let Some(pairs) = crate::mcpservers::codex_header_env(name) {
+                    let rendered: Vec<String> = pairs
+                        .iter()
+                        .map(|(h, var)| format!("{} = {}", toml_string(h), toml_string(var)))
+                        .collect();
+                    args.push("-c".to_string());
+                    args.push(format!(
+                        "mcp_servers.{name}.env_http_headers={{{}}}",
+                        rendered.join(", ")
                     ));
                 }
             }
@@ -810,209 +816,12 @@ pub fn codex_mcp_args(
     Ok(args)
 }
 
-/// The environment variables each MCP server needs forwarded into it, BY NAME.
-///
-/// Codex-only: Claude Code's MCP subprocesses inherit the bridge's environment, so this
-/// table has no Claude Code equivalent and must not grow one. Empty for every server that
-/// needs no secret — qmd and browser take nothing, and adding a name here that a server does
-/// not need widens what a subprocess can read for no gain.
-///
-/// A NAME, NOT A VALUE. The bridge never reads the token; it tells Codex which variable to
-/// pass through from its own environment, where launchd put it. Nothing here is a secret and
-/// nothing here belongs in the plist beyond the value itself.
-/// **THE NAMES HERE ARE THE SERVERS' OWN, NOT THE PLIST'S.** The LaunchAgent stores
-/// `JESSE_*`-prefixed variables (`JESSE_UNIFI_USERNAME`, `JESSE_GITHUB_PAT`, …) so the
-/// bridge's own environment stays legible, but each server reads the name its vendor chose
-/// (`UNIFI_USERNAME`, `GITHUB_PERSONAL_ACCESS_TOKEN`, …). Codex's `env_vars` forwards a
-/// variable BY NAME and cannot rename one in flight, so [`crate::export_mcp_server_env`]
-/// republishes the plist values under the vendor names in the bridge's process environment
-/// before any child spawns — which is also what makes them reachable on Claude Code, whose
-/// MCP subprocesses simply inherit. Name a variable here that `export_mcp_server_env` does
-/// not publish and the server silently registers zero tools.
-///
-/// `proxmox` is deliberately ABSENT and that is not an oversight: it loads its credentials
-/// itself from `__dirname/../.env`, relative to its own file rather than the cwd, so it needs
-/// nothing forwarded and forwarding anything would widen the subprocess for no gain.
-///
-/// **`whatsapp`, `imcp` and `google-perseido` are ABSENT for the same class of reason,
-/// and each was confirmed rather than assumed** — an unforwarded secret means a server that
-/// starts, registers zero tools, and reports itself "not installed", so absence here is a
-/// claim that has to be checked:
-///   * `whatsapp` reads a SQLite store it locates from its own `__file__`, and reaches the Go
-///     bridge at a hard-coded `http://localhost:8080/api`. Neither is configurable by
-///     environment, so there is nothing to name.
-///   * `imcp` reads NOTHING ITSELF and holds no secret. It finds the iMCP app over Bonjour
-///     (`_mcp._tcp` on `local.`) and proxies MCP to it; the app does the reading, under its
-///     own identity, through a security-scoped grant on `~/Library/Messages`. There is no
-///     token to forward and no path to configure — the endpoint is DISCOVERED, not addressed
-///     — so `env_vars` for this server is correctly empty rather than merely unfilled.
-///     CONFIRMED against the running 1.4.1 server on 2026-08-11 rather than assumed: it was
-///     driven to a successful `messages_fetch` from a launchd-spawned job with an environment
-///     carrying nothing of its own. Note what this replaces: `mac-messages-mcp` needed a Full
-///     Disk Access grant, which was equally unforwardable (TCC is a property of a binary, not
-///     a variable) but ALSO never worked, because TCC blames the responsible process.
-///   * `google-perseido` needs the SAME four variables the `google` entry forwards, and must
-///     NOT be given them: they carry the tag1 client and the tag1 credentials directory, and
-///     `workspace-mcp` resolves the client from the environment BEFORE its client-secret
-///     file, so forwarding them is precisely how this instance would silently authenticate as
-///     the wrong account. The `workspace-mcp-perseido` launcher unsets the two `GOOGLE_OAUTH_*`
-///     names for exactly that reason and then points the client and credentials directory at
-///     the Perseido ones itself. Codex's env scrub happens to do the same job here, but the
-///     launcher does not rely on it — Claude Code's MCP children inherit the bridge's full
-///     environment, tag1 client included, and the same launcher has to hold there too.
-pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
-    ("slack", &["SLACK_MCP_XOXP_TOKEN"]),
-    (
-        "google",
-        &[
-            "GOOGLE_OAUTH_CLIENT_ID",
-            "GOOGLE_OAUTH_CLIENT_SECRET",
-            "WORKSPACE_MCP_CREDENTIALS_DIR",
-            "WORKSPACE_ATTACHMENT_DIR",
-            "USER_GOOGLE_EMAIL",
-        ],
-    ),
-    ("github", &["GITHUB_PERSONAL_ACCESS_TOKEN"]),
-    // NO `NODE_OPTIONS` HERE, and that is a measured decision rather than an omission. The
-    // JMAP fork needed `--experimental-require-module` on older node; it does NOT on the
-    // 22.20 first on the bridge's PATH, where `require(esm)` is unflagged (verified
-    // 2026-08-09: 3 tools registered with the variable unset). Forwarding it anyway would
-    // have meant publishing a global node flag into the bridge's own environment, which
-    // every other node MCP child — slack, browser, qmd — would then inherit for no reason.
-    ("fastmail", &["JMAP_TOKEN", "JMAP_SESSION_URL"]),
-    (
-        "unifi",
-        &[
-            "UNIFI_USERNAME",
-            "UNIFI_PASSWORD",
-            "UNIFI_HOST",
-            "UNIFI_PORT",
-            "UNIFI_CONTROLLER_TYPE",
-            "UNIFI_VERIFY_SSL",
-            "UNIFI_SITE",
-        ],
-    ),
-    (
-        "routeros",
-        &["ROUTEROS_DEVICES_CONFIG", "ROUTEROS_SSH_PORT"],
-    ),
-    // THE BRIDGE'S OWN THREE SERVERS read the bridge's own `JESSE_*` names, and every name
-    // each one reads is listed, not only the ones this deployment's plist sets today: Claude
-    // Code's children inherit the whole environment, so a variable an operator adds later
-    // reaches them, and naming it here is what makes it reach Codex's too. An unset name is
-    // simply not forwarded.
-    //
-    // `build` constructs the bridge's `Config` but reads only the vault and the home from it;
-    // `HOME` survives Codex's scrub, `JESSE_VAULT` does not.
-    ("build", &["JESSE_VAULT"]),
-    // `places` without `JESSE_PLACES_GOOGLE_API_KEY` still registers its two tools and answers
-    // from OpenStreetMap alone, so a missing key here would be a silent downgrade rather than
-    // a missing server. `JESSE_STATE_DIR` locates the Google spend ledger.
-    (
-        "places",
-        &[
-            "JESSE_PLACES_OVERPASS_URL",
-            "JESSE_PLACES_NOMINATIM_URL",
-            "JESSE_PLACES_USER_AGENT",
-            "JESSE_PLACES_MIN_INTERVAL_MS",
-            "JESSE_PLACES_CACHE_TTL_SECS",
-            "JESSE_PLACES_HTTP_TIMEOUT_SECS",
-            "JESSE_PLACES_TIMEZONE",
-            "JESSE_PLACES_PROVIDER",
-            "JESSE_PLACES_GOOGLE_API_KEY",
-            "JESSE_PLACES_GOOGLE_BASE_URL",
-            "JESSE_PLACES_GOOGLE_MAX_CALLS",
-            "JESSE_PLACES_GOOGLE_MAX_RICH_CALLS",
-            "JESSE_PLACES_GOOGLE_WINDOW_SECS",
-            "JESSE_PLACES_GOOGLE_LEDGER",
-            "JESSE_STATE_DIR",
-        ],
-    ),
-    // `inbound` fetches attachments with the SAME mail credentials `google` and `fastmail`
-    // read, and stages them under the vault. Without `JESSE_VAULT` it would stage into its own
-    // cwd; without the mail names it would list attachments it could not fetch.
-    (
-        "inbound",
-        &[
-            "JESSE_VAULT",
-            "JESSE_INBOUND_TTL_SECS",
-            "JESSE_INBOUND_MAX_DOCUMENT_BYTES",
-            "JESSE_INBOUND_HTTP_TIMEOUT_SECS",
-            "JESSE_INBOUND_WHATSAPP_API",
-            "JESSE_INBOUND_WHATSAPP_MEDIA_ROOT",
-            "JESSE_INBOUND_GMAIL_PERSEIDO_CREDS",
-            "WORKSPACE_MCP_CREDENTIALS_DIR",
-            "JMAP_SESSION_URL",
-            "JMAP_TOKEN",
-            "JESSE_VISION_PDF_PAGE_CAP",
-            "JESSE_VISION_PDF_DPI",
-            "JESSE_VISION_MAX_TOKENS",
-            "JESSE_VISION_TIMEOUT_SECS",
-        ],
-    ),
-    // `healthdb` (0.173.0) reads two PATHS and a ledger path, never a credential: the bridge
-    // sets them on the Codex child that loads the server ([`crate::apply_healthdb_env`]) and
-    // they are not in the plist. Without the first two it exits at once and registers nothing.
-    (
-        "healthdb",
-        &[
-            "JESSE_HEALTHDB_RO_URL_FILE",
-            "JESSE_HEALTHDB_CA_FILE",
-            "JESSE_HEALTHDB_MCP_LEDGER",
-        ],
-    ),
-    // `clockify-rs` (0.175.0) is a stdio server, so its key travels by NAME here and never in
-    // the bearer table. `JESSE_CLOCKIFY_API_KEY` is set in the plist; the `clockify-rs-mcp`
-    // launcher renames it to the `CLOCKIFY_API_KEY` the server reads and `exec`s the binary.
-    // Without it the launcher exits at once and registers nothing.
-    ("clockify-rs", &["JESSE_CLOCKIFY_API_KEY"]),
-];
-
-/// Fixed, NON-SECRET environment values a stdio server is started with on Codex, set with
-/// Codex's `env` key rather than forwarded from the bridge's environment.
-///
-/// One entry, and it exists because the bridge's process environment is shared by every
-/// harness and so cannot say which one a child serves. `jesse-inbound-mcp` prepares a staged
-/// attachment for the harness that will open it — a PDF that Claude Code's `Read` takes
-/// directly has to become page images for Codex's `view_image` — and it learns which from
-/// `JESSE_INBOUND_HARNESS`, defaulting to Claude Code when unset. This table is what makes
-/// that default correct on both harnesses.
-///
-/// **NEVER A CREDENTIAL.** A value here is on the child's argv and in `ps`. Anything secret is
-/// forwarded BY NAME through [`CODEX_MCP_ENV_PASSTHROUGH`] or [`CODEX_MCP_BEARER_ENV`].
-pub const CODEX_MCP_ENV_FIXED: &[(&str, &[(&str, &str)])] =
-    &[("inbound", &[("JESSE_INBOUND_HARNESS", CODEX_ID)])];
-
-/// The environment variable holding each HTTP MCP server's BEARER TOKEN, BY NAME.
-///
-/// The HTTP counterpart of [`CODEX_MCP_ENV_PASSTHROUGH`], and separate from it because the
-/// mechanisms are genuinely different rather than merely differently spelled: `env_vars`
-/// populates a subprocess's environment, which an HTTP server does not have, while
-/// `bearer_token_env_var` tells Codex to read the variable and send an `Authorization`
-/// header itself. Putting an HTTP server in the stdio table would forward a token to a
-/// process that does not exist and leave the request unauthenticated.
-///
-/// A NAME, NOT A VALUE — the same rule and the same reason as the stdio table. `roon` is
-/// deliberately ABSENT: the Roon bridge serves plain HTTP on the LAN with no auth at all, so
-/// there is no token to name (see SECURITY.md; this adds no credential surface).
-///
-/// `HA_MCP_TOKEN` is a Home Assistant long-lived access token, set in the LaunchAgent plist.
-/// Claude Code reaches the SAME variable through `${HA_MCP_TOKEN}` expansion in the
-/// `Authorization` header of [`MAIN_CHILD_MCP_CONFIG`] — one variable, two spellings, and
-/// they must not drift apart.
-///
-/// `RYBBIT_API_KEY` is a Rybbit personal API key for tag1.com's analytics, scoped to read,
-/// also set in the plist and reached by Claude Code as `${RYBBIT_API_KEY}` in the same way.
-///
-/// `JESSE_HOUSE_TOKEN` (0.169.0) is the house model's read and write token. It is NOT in the
-/// plist: the bridge reads it from the `[house]` table's `token_file` at start and sets it on
-/// each child whose rendered set loads `house` (see [`crate::apply_house_env`]), and Claude
-/// Code reaches it as `${JESSE_HOUSE_TOKEN}` in that server's header.
-pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[
-    ("homeassistant", "HA_MCP_TOKEN"),
-    ("rybbit", "RYBBIT_API_KEY"),
-    ("house", "JESSE_HOUSE_TOKEN"),
-];
+/// **THE THREE CODEX ENVIRONMENT TABLES ARE VIEWS** over [`crate::mcpservers::MCP_SERVERS`]
+/// since 0.177.0: `env_vars` is [`crate::mcpservers::codex_env_passthrough`], `env` is
+/// [`crate::mcpservers::codex_env_fixed`], `bearer_token_env_var` is
+/// [`crate::mcpservers::codex_bearer_env`] and `env_http_headers` is
+/// [`crate::mcpservers::codex_header_env`]. Their rationale, server by server, moved with
+/// them; see that module.
 
 /// One server's `enabled_tools` override, in Codex's `-c key=value` spelling.
 ///
@@ -2224,7 +2033,7 @@ impl SpawnedHarness for Codex {
     /// `Read(./**)` allowlist. Same tools, different read boundary. The only remedy is unix-user
     /// isolation — a dedicated, sandboxed user for the child — which is not implemented.
     fn main_mcp_config(&self) -> &'static str {
-        MAIN_CHILD_MCP_CONFIG
+        MAIN_CHILD_MCP_CONFIG.as_str()
     }
 
     /// Codex names nothing directly — see [`apply_patch_targets`].
@@ -3398,7 +3207,8 @@ mod tests {
         let allowed = "Read(./**),mcp__qmd__query,mcp__qmd__status,\
                        mcp__slack__channels_list,mcp__slack__users_search,\
                        mcp__browser__browser_navigate,WebSearch";
-        let args = codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG, allowed).expect("translates");
+        let args =
+            codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG.as_str(), allowed).expect("translates");
         let flat = args.join(" ");
 
         // The allowlist, per server, derived from the ONE string Claude Code also gets.
@@ -3465,7 +3275,8 @@ mod tests {
     fn an_http_server_travels_as_a_url_with_its_token_named_not_valued() {
         let allowed = "mcp__homeassistant__GetLiveContext,mcp__homeassistant__HassTurnOn,\
                        mcp__roon__hifi_zones";
-        let args = codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG, allowed).expect("translates");
+        let args =
+            codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG.as_str(), allowed).expect("translates");
         let flat = args.join(" ");
 
         // The HA host is NOT spelled out here — it lives in exactly one place in the tree
@@ -3538,7 +3349,7 @@ mod tests {
     fn the_shipped_rybbit_server_travels_with_its_key_named_not_valued() {
         let args = codex_mcp_args(
             CODEX_ID,
-            MAIN_CHILD_MCP_CONFIG,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
             crate::DEFAULT_ALLOWED_TOOLS,
         )
         .expect("the shipped main set renders for Codex");
@@ -3580,7 +3391,7 @@ mod tests {
     fn the_shipped_tag1_server_travels_as_a_bare_url_with_read_tools_only() {
         let args = codex_mcp_args(
             CODEX_ID,
-            MAIN_CHILD_MCP_CONFIG,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
             crate::DEFAULT_ALLOWED_TOOLS,
         )
         .expect("the shipped main set renders for Codex");
@@ -3624,7 +3435,7 @@ mod tests {
     fn the_shipped_plex_server_travels_as_a_bare_launcher_with_the_decided_grant() {
         let args = codex_mcp_args(
             CODEX_ID,
-            MAIN_CHILD_MCP_CONFIG,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
             crate::DEFAULT_ALLOWED_TOOLS,
         )
         .expect("the shipped main set renders for Codex");
@@ -3682,7 +3493,7 @@ mod tests {
     fn the_shipped_clockify_rs_server_travels_with_its_key_named_not_valued() {
         let args = codex_mcp_args(
             CODEX_ID,
-            MAIN_CHILD_MCP_CONFIG,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
             crate::DEFAULT_ALLOWED_TOOLS,
         )
         .expect("the shipped main set renders for Codex");
@@ -3762,8 +3573,12 @@ mod tests {
     /// empty grant means, so this fails CLOSED.
     #[test]
     fn a_server_with_no_granted_tools_is_inert_rather_than_wide_open() {
-        let args = codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG, "Read(./**),WebSearch")
-            .expect("translates");
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
+            "Read(./**),WebSearch",
+        )
+        .expect("translates");
         let flat = args.join(" ");
         for server in ["qmd", "slack", "browser", "homeassistant", "roon"] {
             assert!(

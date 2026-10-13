@@ -112,6 +112,9 @@ mod house;
 mod inbound;
 mod jobstore;
 mod levelgate;
+/// The MCP server table. NOT glob-exported: its item names (`row`, `MCP_SERVERS`) are
+/// addressed through the module, `crate::mcpservers::…`.
+pub mod mcpservers;
 mod mealqueue;
 mod metrics;
 mod modelstore;

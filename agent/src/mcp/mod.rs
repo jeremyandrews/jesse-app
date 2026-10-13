@@ -53,8 +53,9 @@ pub mod toolset;
 pub use client::{
     AdvertisedTool, CallOutcome, McpClient, McpError, StderrCounts, CLIENT_NAME, PROTOCOL_VERSION,
 };
-pub use http::Bearer;
+pub use http::{Bearer, HttpAuth, MutualTls};
 pub use toolset::{
     tool_name, validate_grants, CompositeError, CompositeToolSet, McpReport, McpSetError,
-    McpToolSet, McpTransport, PemBytes, ServerGrant, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
+    McpToolSet, McpTransport, NamedHttpAuth, PemBytes, ServerGrant, DEFAULT_CALL_TIMEOUT,
+    DEFAULT_CONNECT_TIMEOUT,
 };

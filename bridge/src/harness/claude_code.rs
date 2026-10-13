@@ -1,4 +1,10 @@
 use crate::*;
+use std::sync::LazyLock;
+
+use crate::mcpservers::{
+    mcp_config_json, messages_plus, render_entry, row as mcp_row, HOUSE_SET, MAIN_SET,
+    MESSAGES_SET, MORNING_SET, REPLIES_SET,
+};
 
 // ---- The Claude Code harness ------------------------------------------------
 //
@@ -159,7 +165,7 @@ impl SpawnedHarness for ClaudeCode {
 
     /// qmd PLUS the self-hosted read-only Slack server.
     fn main_mcp_config(&self) -> &'static str {
-        MAIN_CHILD_MCP_CONFIG
+        MAIN_CHILD_MCP_CONFIG.as_str()
     }
 
     /// Claude Code names its target directly: `tool_input.file_path`, already ABSOLUTE.
@@ -543,130 +549,126 @@ pub fn interpret_claude_output(
 
 // ---- MCP server sets --------------------------------------------------------
 
-/// The MCP server set for a MAIN turn on EVERY harness, used when `JESSE_MAIN_MCP_CONFIG`
-/// is unset: **qmd**, **slack**, **browser**, **homeassistant** and **roon**. Passed as
-/// `--mcp-config` alongside
-/// `--strict-mcp-config`, so the account-level cloud connectors (Gmail, Slack, Google
-/// Calendar, Google Drive) are never LOADED on a phone turn rather than merely refused at
-/// the permission layer.
-///
-/// `"command": "qmd"` is resolved from the child's `PATH`, mirroring how `claude_bin`
-/// defaults to the bare name `"claude"` with the absolute path supplied by env
-/// (`JESSE_CLAUDE_BIN`) in production. If `qmd` is not on the bridge's `PATH`, set
-/// `JESSE_MAIN_MCP_CONFIG` to a config naming the absolute interpreter + script path;
-/// no user-specific path is baked into this source.
-///
-/// `slack` is a SELF-HOSTED read-only Slack server (npm `slack-mcp-server`), not the
-/// account-level claude.ai Slack connector — that one is still never loaded. It is declared
-/// here rather than supplied through `JESSE_MAIN_MCP_CONFIG` on purpose: the containment
-/// battery probes the SHIPPED consts, so a server reached only through the env override
-/// would be granted in the allowlist but never exercised by any probe. Its token arrives
-/// separately, by environment inheritance (`SLACK_MCP_XOXP_TOKEN`), so no secret is baked
-/// in here. `SLACK_MCP_ADD_MESSAGE_TOOL` and its siblings are deliberately never set:
-/// without them the server does not even register `conversations_add_message`.
-///
-/// # `browser` — what it is, and the three flags that are not decoration
-///
-/// npm `@playwright/mcp`, named for the CAPABILITY rather than the implementation so
-/// [`McpSet::contains_browser`] and a swap of the underlying server do not disagree. It
-/// exists because the built-in `WebFetch` is refused outright on too many hosts to be
-/// useful — measured, not assumed: `WebFetch` returns "Claude Code is unable to fetch from
-/// stackoverflow.com", while this server renders that page in full.
-///
-///   * `--headless` — there is no display on a daemon host. Verified 2026-08-07 that
-///     attaching a real Chrome profile (`--browser chrome --user-data-dir …`) does NOT
-///     defeat the bot walls that block `WebFetch`, so the profile buys only logged-in
-///     sessions — at the cost of handing a phone-triggered agent every cookie the operator
-///     holds. Deliberately not done.
-///   * `--isolated` — the profile lives in memory and is discarded with the turn, so no
-///     cross-turn cookie or history state accumulates on disk.
-///   * `--output-dir` — **load-bearing containment, not tidiness.** `browser_navigate`
-///     writes a snapshot `.yml` and a console `.log` per navigation, and
-///     `browser_take_screenshot` a `.png`; with no output dir they go into the CHILD'S CWD,
-///     which every main turn sets to the vault. An MCP server is not inside either
-///     harness's sandbox (measured: a canary server wrote `/tmp` under Codex's
-///     `sandbox_mode="read-only"`), so nothing else stops it. The path is under `/tmp`
-///     because it must be identical on every deployment — the containment record is
-///     compared by strict equality and a home directory here would pin the record to one
-///     machine (see `the_record_carries_no_absolute_host_paths`). The directory is created
-///     on demand, so nothing has to provision it.
-///   * `--output-max-size` — a 100 MB eviction threshold, because every navigation and
-///     every screenshot leaves a file behind and nothing else ever deletes one. Without a
-///     bound this grows without limit on a long-lived daemon. The number is not tuned to
-///     anything; it is simply far above one turn's worth and far below "fills the disk".
-///
-/// `browser_evaluate` and `browser_run_code_unsafe` are loaded but NOT granted; see
-/// [`crate::DEFAULT_ALLOWED_TOOLS`] for the full granted/omitted split and why.
-///
-/// **`file:` URLs are refused by the server itself** — "Access to 'file:' protocol is
-/// blocked", measured 2026-08-07. So the browser is not a route to local files even before
-/// the allowlist is consulted. Not relied upon as the boundary (it is upstream's choice, not
-/// ours), but worth knowing it is there.
-///
-/// # `homeassistant` and `roon` — the first HTTP servers, and the first PHYSICAL ones
-///
-/// Both are **`type: "http"`** (Streamable HTTP), which every server before them was not.
-/// That was the load-bearing unknown when they landed and it resolved in the good
-/// direction: BOTH harnesses carry an HTTP MCP server natively, so neither needs an
-/// `npx mcp-remote` stdio wrapper. Measured 2026-08-07 against codex-cli 0.146.0 and
-/// claude 2.1.224 — see [`codex_mcp_args`] for the `url` / `bearer_token_env_var` forms
-/// Codex takes. A wrapper would have added a subprocess per turn per server and put the
-/// token on a command line; neither cost is paid.
-///
-/// **The URLs are LAN addresses baked into a const, and that is forced rather than chosen.**
-/// The containment record commits the exact argv it probed and compares it by strict
-/// equality at boot, and `JESSE_MAIN_MCP_CONFIG` is refused by the startup gate — so the
-/// server set a certified posture loads cannot come from the environment. Same reasoning as
-/// the browser's `/tmp/jesse-browser`: the const must read identically on every machine.
-/// The consequence is that these two entries name THIS deployment's hosts; another
-/// deployment pointing elsewhere is a source edit and a fresh battery, not a config change.
-///
-/// `homeassistant` is Home Assistant's built-in Model Context Protocol Server (the Assist
-/// API), reached at `/api/mcp`. Its bearer token arrives by ENV EXPANSION —
-/// `${HA_MCP_TOKEN}`, which the CLI substitutes from the child's environment — so the
-/// literal token is absent from this const, from the `--mcp-config` argument, and from any
-/// file. The variable is set in the LaunchAgent plist, which is where secrets belong.
-///
-/// **`roon` HAS NO AUTH AT ALL**, and that is a fact about the deployment rather than an
-/// omission here: the bridge serves plain HTTP on VLAN 40 with no token, so anyone already
-/// on that VLAN can control the music. Adding it introduces no new credential and no new
-/// secret to protect — only music control. See SECURITY.md.
-///
-/// **WHAT THESE TWO ADD IS PHYSICAL ACTUATION**, which no previous server had: the granted
-/// Home Assistant intents move real hardware (the entrance gate, lights, climate, covers).
-/// Combined with the browser above, that is a prompt-injection-to-physical-action path, and
-/// it was accepted deliberately by the operator rather than mitigated here. The full
-/// reasoning, the residual mitigations that were NOT implemented, and why, are in
-/// SECURITY.md — read it before narrowing or widening this set.
-/// **THE ONE PLACE THIS DEPLOYMENT'S HOME ASSISTANT ADDRESS IS WRITTEN.** A macro rather
-/// than a `const` for one reason: [`MAIN_CHILD_MCP_CONFIG`] must stay a `&'static str`
-/// literal (the record compares argv by strict equality and `McpSet::config` returns
-/// `&'static str`), and `concat!` accepts a macro that expands to a literal while it cannot
-/// accept a `const` item. So this keeps the address to a SINGLE occurrence in the tree
-/// instead of one in the const and one in a doc comment that would drift.
-///
-/// **It is a TAILNET address, and that is load-bearing rather than cosmetic.** Home
-/// Assistant also answers on the LAN at an on-link RFC1918 address, and using that one is
-/// what the bridge shipped in 0.67.0 — where it did not work at all. macOS Local Network
-/// privacy denies the launchd-spawned child a socket to any host on the Studio's own
-/// on-link subnet: the connection fails in ~5ms with `FailedToOpenSocket` and Claude Code
-/// silently drops the server, so a main turn saw four servers and no Home Assistant. There
-/// is no error in any bridge log; the only trace is the child's own `--debug mcp` output.
-/// The tailnet address routes over `utun`, is therefore not "local network" in the sense
-/// macOS gates, and connects from exactly the same launchd context.
-///
-/// Roon is untouched and stays on its LAN address: it is reached THROUGH a gateway rather
-/// than on-link, so it was never gated — which is precisely why Roon working proved nothing
-/// about Home Assistant, and why a same-subnet comparison is the only meaningful one.
-///
-/// `scripts/ci-guards.sh` flags CGNAT addresses as personal infrastructure. This line is
-/// exempted BY NAME (`ci-guards:deployment-address`) so the generic rule keeps covering
-/// every other file; see the guard for the reasoning and the deliberate narrowness.
-macro_rules! home_assistant_mcp_url {
-    () => {
-        "http://100.105.110.60:8123/api/mcp" // ci-guards:deployment-address
-    };
-}
+// ---- `home_assistant_mcp_url` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// The MCP server set for a MAIN turn on EVERY harness, used when `JESSE_MAIN_MCP_CONFIG`
+// is unset: **qmd**, **slack**, **browser**, **homeassistant** and **roon**. Passed as
+// `--mcp-config` alongside
+// `--strict-mcp-config`, so the account-level cloud connectors (Gmail, Slack, Google
+// Calendar, Google Drive) are never LOADED on a phone turn rather than merely refused at
+// the permission layer.
+//
+// `"command": "qmd"` is resolved from the child's `PATH`, mirroring how `claude_bin`
+// defaults to the bare name `"claude"` with the absolute path supplied by env
+// (`JESSE_CLAUDE_BIN`) in production. If `qmd` is not on the bridge's `PATH`, set
+// `JESSE_MAIN_MCP_CONFIG` to a config naming the absolute interpreter + script path;
+// no user-specific path is baked into this source.
+//
+// `slack` is a SELF-HOSTED read-only Slack server (npm `slack-mcp-server`), not the
+// account-level claude.ai Slack connector — that one is still never loaded. It is declared
+// here rather than supplied through `JESSE_MAIN_MCP_CONFIG` on purpose: the containment
+// battery probes the SHIPPED consts, so a server reached only through the env override
+// would be granted in the allowlist but never exercised by any probe. Its token arrives
+// separately, by environment inheritance (`SLACK_MCP_XOXP_TOKEN`), so no secret is baked
+// in here. `SLACK_MCP_ADD_MESSAGE_TOOL` and its siblings are deliberately never set:
+// without them the server does not even register `conversations_add_message`.
+//
+// # `browser` — what it is, and the three flags that are not decoration
+//
+// npm `@playwright/mcp`, named for the CAPABILITY rather than the implementation so
+// [`McpSet::contains_browser`] and a swap of the underlying server do not disagree. It
+// exists because the built-in `WebFetch` is refused outright on too many hosts to be
+// useful — measured, not assumed: `WebFetch` returns "Claude Code is unable to fetch from
+// stackoverflow.com", while this server renders that page in full.
+//
+//   * `--headless` — there is no display on a daemon host. Verified 2026-08-07 that
+//     attaching a real Chrome profile (`--browser chrome --user-data-dir …`) does NOT
+//     defeat the bot walls that block `WebFetch`, so the profile buys only logged-in
+//     sessions — at the cost of handing a phone-triggered agent every cookie the operator
+//     holds. Deliberately not done.
+//   * `--isolated` — the profile lives in memory and is discarded with the turn, so no
+//     cross-turn cookie or history state accumulates on disk.
+//   * `--output-dir` — **load-bearing containment, not tidiness.** `browser_navigate`
+//     writes a snapshot `.yml` and a console `.log` per navigation, and
+//     `browser_take_screenshot` a `.png`; with no output dir they go into the CHILD'S CWD,
+//     which every main turn sets to the vault. An MCP server is not inside either
+//     harness's sandbox (measured: a canary server wrote `/tmp` under Codex's
+//     `sandbox_mode="read-only"`), so nothing else stops it. The path is under `/tmp`
+//     because it must be identical on every deployment — the containment record is
+//     compared by strict equality and a home directory here would pin the record to one
+//     machine (see `the_record_carries_no_absolute_host_paths`). The directory is created
+//     on demand, so nothing has to provision it.
+//   * `--output-max-size` — a 100 MB eviction threshold, because every navigation and
+//     every screenshot leaves a file behind and nothing else ever deletes one. Without a
+//     bound this grows without limit on a long-lived daemon. The number is not tuned to
+//     anything; it is simply far above one turn's worth and far below "fills the disk".
+//
+// `browser_evaluate` and `browser_run_code_unsafe` are loaded but NOT granted; see
+// [`crate::DEFAULT_ALLOWED_TOOLS`] for the full granted/omitted split and why.
+//
+// **`file:` URLs are refused by the server itself** — "Access to 'file:' protocol is
+// blocked", measured 2026-08-07. So the browser is not a route to local files even before
+// the allowlist is consulted. Not relied upon as the boundary (it is upstream's choice, not
+// ours), but worth knowing it is there.
+//
+// # `homeassistant` and `roon` — the first HTTP servers, and the first PHYSICAL ones
+//
+// Both are **`type: "http"`** (Streamable HTTP), which every server before them was not.
+// That was the load-bearing unknown when they landed and it resolved in the good
+// direction: BOTH harnesses carry an HTTP MCP server natively, so neither needs an
+// `npx mcp-remote` stdio wrapper. Measured 2026-08-07 against codex-cli 0.146.0 and
+// claude 2.1.224 — see [`codex_mcp_args`] for the `url` / `bearer_token_env_var` forms
+// Codex takes. A wrapper would have added a subprocess per turn per server and put the
+// token on a command line; neither cost is paid.
+//
+// **The URLs are LAN addresses baked into a const, and that is forced rather than chosen.**
+// The containment record commits the exact argv it probed and compares it by strict
+// equality at boot, and `JESSE_MAIN_MCP_CONFIG` is refused by the startup gate — so the
+// server set a certified posture loads cannot come from the environment. Same reasoning as
+// the browser's `/tmp/jesse-browser`: the const must read identically on every machine.
+// The consequence is that these two entries name THIS deployment's hosts; another
+// deployment pointing elsewhere is a source edit and a fresh battery, not a config change.
+//
+// `homeassistant` is Home Assistant's built-in Model Context Protocol Server (the Assist
+// API), reached at `/api/mcp`. Its bearer token arrives by ENV EXPANSION —
+// `${HA_MCP_TOKEN}`, which the CLI substitutes from the child's environment — so the
+// literal token is absent from this const, from the `--mcp-config` argument, and from any
+// file. The variable is set in the LaunchAgent plist, which is where secrets belong.
+//
+// **`roon` HAS NO AUTH AT ALL**, and that is a fact about the deployment rather than an
+// omission here: the bridge serves plain HTTP on VLAN 40 with no token, so anyone already
+// on that VLAN can control the music. Adding it introduces no new credential and no new
+// secret to protect — only music control. See SECURITY.md.
+//
+// **WHAT THESE TWO ADD IS PHYSICAL ACTUATION**, which no previous server had: the granted
+// Home Assistant intents move real hardware (the entrance gate, lights, climate, covers).
+// Combined with the browser above, that is a prompt-injection-to-physical-action path, and
+// it was accepted deliberately by the operator rather than mitigated here. The full
+// reasoning, the residual mitigations that were NOT implemented, and why, are in
+// SECURITY.md — read it before narrowing or widening this set.
+// **THE ONE PLACE THIS DEPLOYMENT'S HOME ASSISTANT ADDRESS IS WRITTEN.** A macro rather
+// than a `const` for one reason: [`MAIN_CHILD_MCP_CONFIG`] must stay a `&'static str`
+// literal (the record compares argv by strict equality and `McpSet::config` returns
+// `&'static str`), and `concat!` accepts a macro that expands to a literal while it cannot
+// accept a `const` item. So this keeps the address to a SINGLE occurrence in the tree
+// instead of one in the const and one in a doc comment that would drift.
+//
+// **It is a TAILNET address, and that is load-bearing rather than cosmetic.** Home
+// Assistant also answers on the LAN at an on-link RFC1918 address, and using that one is
+// what the bridge shipped in 0.67.0 — where it did not work at all. macOS Local Network
+// privacy denies the launchd-spawned child a socket to any host on the Studio's own
+// on-link subnet: the connection fails in ~5ms with `FailedToOpenSocket` and Claude Code
+// silently drops the server, so a main turn saw four servers and no Home Assistant. There
+// is no error in any bridge log; the only trace is the child's own `--debug mcp` output.
+// The tailnet address routes over `utun`, is therefore not "local network" in the sense
+// macOS gates, and connects from exactly the same launchd context.
+//
+// Roon is untouched and stays on its LAN address: it is reached THROUGH a gateway rather
+// than on-link, so it was never gated — which is precisely why Roon working proved nothing
+// about Home Assistant, and why a same-subnet comparison is the only meaningful one.
+//
+// `scripts/ci-guards.sh` flags CGNAT addresses as personal infrastructure. This line is
+// exempted BY NAME (`ci-guards:deployment-address`) so the generic rule keeps covering
+// every other file; see the guard for the reasoning and the deliberate narrowness.
 
 // ---- ONE declaration of every main-turn MCP server, shared by both harnesses -------
 //
@@ -681,345 +683,179 @@ macro_rules! home_assistant_mcp_url {
 // runtime-built string would move nothing in behaviour and everything in how the posture is
 // pinned. `concat!` of these expands to byte-for-byte the strings they replace.
 
-macro_rules! mcp_qmd {
-    () => {
-        r#""qmd":{"type":"stdio","command":"qmd","args":["mcp"]}"#
-    };
-}
-macro_rules! mcp_slack {
-    () => {
-        r#""slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]}"#
-    };
-}
-macro_rules! mcp_browser {
-    () => {
-        r#""browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]}"#
-    };
-}
-macro_rules! mcp_homeassistant {
-    () => {
-        concat!(
-            r#""homeassistant":{"type":"http","url":""#,
-            home_assistant_mcp_url!(),
-            r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}}"#
-        )
-    };
-}
-macro_rules! mcp_roon {
-    () => {
-        r#""roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"}"#
-    };
-}
-macro_rules! mcp_google {
-    () => {
-        r#""google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]}"#
-    };
-}
-macro_rules! mcp_github {
-    () => {
-        r#""github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]}"#
-    };
-}
-macro_rules! mcp_fastmail {
-    () => {
-        r#""fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]}"#
-    };
-}
-macro_rules! mcp_unifi {
-    () => {
-        r#""unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]}"#
-    };
-}
-macro_rules! mcp_routeros {
-    () => {
-        r#""routeros":{"type":"stdio","command":"routeros-mcp","args":[]}"#
-    };
-}
-macro_rules! mcp_proxmox {
-    () => {
-        r#""proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]}"#
-    };
-}
-macro_rules! mcp_whatsapp {
-    () => {
-        r#""whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]}"#
-    };
-}
-macro_rules! mcp_imcp {
-    () => {
-        r#""imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]}"#
-    };
-}
-macro_rules! mcp_google_perseido {
-    () => {
-        r#""google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]}"#
-    };
-}
-macro_rules! mcp_build {
-    () => {
-        r#""build":{"type":"stdio","command":"jesse-build-mcp","args":[]}"#
-    };
-}
-macro_rules! mcp_places {
-    () => {
-        r#""places":{"type":"stdio","command":"jesse-places-mcp","args":[]}"#
-    };
-}
-macro_rules! mcp_inbound {
-    () => {
-        r#""inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]}"#
-    };
-}
+// ---- `mcp_kubernetes` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The Kubernetes server, and the ONE place this deployment's cluster identity is named
+// indirectly.** `containers/kubernetes-mcp-server`, pinned to **v0.0.67** by the launcher.
+//
+// It is a bare name with a SHORT, EXPLICIT argv, and both halves of that are deliberate.
+// The bare name is the rule every stdio entry here follows — the record commits this argv
+// verbatim and compares it by strict equality at boot, so an absolute path would pin the
+// posture to one home directory and fail `scripts/ci-guards.sh`. The `jesse-k8s-mcp` launcher
+// is what supplies `KUBECONFIG`; it is host setup, documented in SECURITY.md, not repo
+// content.
+//
+// `--toolsets core,config` is the server's own default and is SPELLED ANYWAY, for the reason
+// both `workspace-mcp` instances spell `--read-only` here rather than in their launcher: a
+// launcher is invisible to the containment record, so anything that decides WHICH TOOLS
+// REGISTER has to live in this const, where a test asserts it and a change to it moves the
+// row label. Left implicit, a launcher edit or a stray `--config` drop-in could add the
+// `helm`, `kubevirt`, `tekton`, `kiali` or `netobserv` toolsets to the child's root with
+// nothing in this repository changing. Measured 2026-09-22 against v0.0.67: with this argv
+// the server registers exactly the twenty tools named in [`crate::DEFAULT_ALLOWED_TOOLS`].
+//
+// **`--read-only` IS NOT SET, AND THAT IS THE DECISION RATHER THAN AN OMISSION.** The server
+// offers two narrowing switches — `--read-only` (only `readOnlyHint=true` tools register,
+// which would be fourteen of the twenty) and `--disable-destructive` (drops the five
+// `destructiveHint=true` ones). Neither is used. The bridge holds `cluster-admin` on this
+// cluster by the operator's decision of 2026-09-21, the same posture UniFi and Proxmox have
+// carried since 0.69.0. Read SECURITY.md before narrowing or widening this.
 
-/// **The Kubernetes server, and the ONE place this deployment's cluster identity is named
-/// indirectly.** `containers/kubernetes-mcp-server`, pinned to **v0.0.67** by the launcher.
-///
-/// It is a bare name with a SHORT, EXPLICIT argv, and both halves of that are deliberate.
-/// The bare name is the rule every stdio entry here follows — the record commits this argv
-/// verbatim and compares it by strict equality at boot, so an absolute path would pin the
-/// posture to one home directory and fail `scripts/ci-guards.sh`. The `jesse-k8s-mcp` launcher
-/// is what supplies `KUBECONFIG`; it is host setup, documented in SECURITY.md, not repo
-/// content.
-///
-/// `--toolsets core,config` is the server's own default and is SPELLED ANYWAY, for the reason
-/// both `workspace-mcp` instances spell `--read-only` here rather than in their launcher: a
-/// launcher is invisible to the containment record, so anything that decides WHICH TOOLS
-/// REGISTER has to live in this const, where a test asserts it and a change to it moves the
-/// row label. Left implicit, a launcher edit or a stray `--config` drop-in could add the
-/// `helm`, `kubevirt`, `tekton`, `kiali` or `netobserv` toolsets to the child's root with
-/// nothing in this repository changing. Measured 2026-09-22 against v0.0.67: with this argv
-/// the server registers exactly the twenty tools named in [`crate::DEFAULT_ALLOWED_TOOLS`].
-///
-/// **`--read-only` IS NOT SET, AND THAT IS THE DECISION RATHER THAN AN OMISSION.** The server
-/// offers two narrowing switches — `--read-only` (only `readOnlyHint=true` tools register,
-/// which would be fourteen of the twenty) and `--disable-destructive` (drops the five
-/// `destructiveHint=true` ones). Neither is used. The bridge holds `cluster-admin` on this
-/// cluster by the operator's decision of 2026-09-21, the same posture UniFi and Proxmox have
-/// carried since 0.69.0. Read SECURITY.md before narrowing or widening this.
-macro_rules! mcp_kubernetes {
-    () => {
-        r#""kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]}"#
-    };
-}
+// ---- `mcp_rybbit` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The Rybbit analytics server: tag1.com's web analytics, READ ONLY.** Rybbit's hosted
+// MCP endpoint, `type: "http"` (Streamable HTTP), reached exactly the way `homeassistant` is:
+// the bearer token arrives by ENV EXPANSION, `${RYBBIT_API_KEY}`, which the CLI substitutes
+// from the child's environment. The literal key is absent from this const, from the
+// `--mcp-config` argument, and from any file; the variable is set in the LaunchAgent plist.
+//
+// The URL is a PUBLIC HTTPS host, so none of the Local Network privacy reasoning that forced
+// Home Assistant onto a tailnet address applies, and it names no deployment: Tag1 uses the
+// hosted service, and a self-hosted instance would be a source edit and a fresh battery.
+//
+// **READ ONLY AT TWO LAYERS.** The personal API key is scoped so that the server registers
+// only read tools (twenty-eight, measured 2026-10-01 by `tools/list`, every one annotated
+// `readOnlyHint: true`), and [`crate::DEFAULT_ALLOWED_TOOLS`] grants those twenty-eight by
+// name and nothing else. A key re-issued with wider scopes would REGISTER the write tools,
+// and the allowlist alone would still withhold them. Read SECURITY.md before widening this.
+//
+// **AN UNSET KEY DOES NOT STOP A TURN.** If `RYBBIT_API_KEY` is absent from the child's
+// environment the CLI sends the placeholder unexpanded, the server answers 401, Claude Code
+// marks this one server failed and every other server loads. Measured, not assumed.
 
-/// **The Rybbit analytics server: tag1.com's web analytics, READ ONLY.** Rybbit's hosted
-/// MCP endpoint, `type: "http"` (Streamable HTTP), reached exactly the way `homeassistant` is:
-/// the bearer token arrives by ENV EXPANSION, `${RYBBIT_API_KEY}`, which the CLI substitutes
-/// from the child's environment. The literal key is absent from this const, from the
-/// `--mcp-config` argument, and from any file; the variable is set in the LaunchAgent plist.
-///
-/// The URL is a PUBLIC HTTPS host, so none of the Local Network privacy reasoning that forced
-/// Home Assistant onto a tailnet address applies, and it names no deployment: Tag1 uses the
-/// hosted service, and a self-hosted instance would be a source edit and a fresh battery.
-///
-/// **READ ONLY AT TWO LAYERS.** The personal API key is scoped so that the server registers
-/// only read tools (twenty-eight, measured 2026-10-01 by `tools/list`, every one annotated
-/// `readOnlyHint: true`), and [`crate::DEFAULT_ALLOWED_TOOLS`] grants those twenty-eight by
-/// name and nothing else. A key re-issued with wider scopes would REGISTER the write tools,
-/// and the allowlist alone would still withhold them. Read SECURITY.md before widening this.
-///
-/// **AN UNSET KEY DOES NOT STOP A TURN.** If `RYBBIT_API_KEY` is absent from the child's
-/// environment the CLI sends the placeholder unexpanded, the server answers 401, Claude Code
-/// marks this one server failed and every other server loads. Measured, not assumed.
-macro_rules! mcp_rybbit {
-    () => {
-        r#""rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}}"#
-    };
-}
+// ---- `mcp_tag1` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The tag1.com site server: Tag1's own public website, READ ONLY.** Tag1 Consulting's public
+// MCP endpoint, `type: "http"` (Streamable HTTP), stateless and unauthenticated. It MUST be the
+// `www` host: the bare `tag1.com` redirects, and the connection then fails.
+//
+// **NO CREDENTIAL AT ALL.** No header, no environment variable, nothing in the plist: the
+// server serves only what tag1.com already publishes to anyone.
+//
+// **SIX TOOLS, ALL READ.** A live `tools/list` on 2026-10-02 returned `search_tag1`,
+// `get_page`, `list_case_studies`, `list_services`, `list_products` and `find_expert`, every one
+// annotated `readOnlyHint: true`, and [`crate::DEFAULT_ALLOWED_TOOLS`] grants those six by name
+// and nothing else. A tool the site adds later, a contact form above all, is ungranted until it
+// is a decision. Read SECURITY.md before widening this.
 
-/// **The tag1.com site server: Tag1's own public website, READ ONLY.** Tag1 Consulting's public
-/// MCP endpoint, `type: "http"` (Streamable HTTP), stateless and unauthenticated. It MUST be the
-/// `www` host: the bare `tag1.com` redirects, and the connection then fails.
-///
-/// **NO CREDENTIAL AT ALL.** No header, no environment variable, nothing in the plist: the
-/// server serves only what tag1.com already publishes to anyone.
-///
-/// **SIX TOOLS, ALL READ.** A live `tools/list` on 2026-10-02 returned `search_tag1`,
-/// `get_page`, `list_case_studies`, `list_services`, `list_products` and `find_expert`, every one
-/// annotated `readOnlyHint: true`, and [`crate::DEFAULT_ALLOWED_TOOLS`] grants those six by name
-/// and nothing else. A tool the site adds later, a contact form above all, is ungranted until it
-/// is a decision. Read SECURITY.md before widening this.
-macro_rules! mcp_tag1 {
-    () => {
-        r#""tag1":{"type":"http","url":"https://www.tag1.com/mcp"}"#
-    };
-}
+// ---- `mcp_plex` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The Plex server: the owner's LAN media library, READ plus collection, playlist and
+// metadata EDITS.** The third party `plex-mcp-server` (PyPI), stdio, reached through the bare
+// host launcher `plex-mcp` resolved off the bridge `PATH`, like `mcp-proxmox`.
+//
+// **NO URL AND NO TOKEN HERE.** The launcher exports `PLEX_URL` and `PLEX_TOKEN` from a file
+// readable only by the bridge user and then `exec`s the pinned server with stdio transport,
+// so the token never reaches argv, the plist, a record or this repo, and Codex's scrub of an
+// MCP child's environment cannot lose it. It must `exec` the real program, never be a
+// symlink to it.
+//
+// **FORTY OF FIFTY-FIVE TOOLS.** A live `tools/list` against `plex-mcp-server` 1.1.7 on
+// 2026-10-04 returned fifty-five tools carrying no annotations at all, and
+// [`crate::DEFAULT_ALLOWED_TOOLS`] grants forty by name. Withheld: everything that deletes
+// media, runs server maintenance, shares with another user, controls playback, or reads or
+// writes a file on the bridge host. Read SECURITY.md before widening this.
 
-/// **The Plex server: the owner's LAN media library, READ plus collection, playlist and
-/// metadata EDITS.** The third party `plex-mcp-server` (PyPI), stdio, reached through the bare
-/// host launcher `plex-mcp` resolved off the bridge `PATH`, like `mcp-proxmox`.
-///
-/// **NO URL AND NO TOKEN HERE.** The launcher exports `PLEX_URL` and `PLEX_TOKEN` from a file
-/// readable only by the bridge user and then `exec`s the pinned server with stdio transport,
-/// so the token never reaches argv, the plist, a record or this repo, and Codex's scrub of an
-/// MCP child's environment cannot lose it. It must `exec` the real program, never be a
-/// symlink to it.
-///
-/// **FORTY OF FIFTY-FIVE TOOLS.** A live `tools/list` against `plex-mcp-server` 1.1.7 on
-/// 2026-10-04 returned fifty-five tools carrying no annotations at all, and
-/// [`crate::DEFAULT_ALLOWED_TOOLS`] grants forty by name. Withheld: everything that deletes
-/// media, runs server maintenance, shares with another user, controls playback, or reads or
-/// writes a file on the bridge host. Read SECURITY.md before widening this.
-macro_rules! mcp_plex {
-    () => {
-        r#""plex":{"type":"stdio","command":"plex-mcp","args":[]}"#
-    };
-}
+// ---- `mcp_clockify` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The Clockify server: Tag1's time tracking, through Clockify's OWN hosted MCP server.**
+// `type: "http"` (Streamable HTTP) at `api.clockify.me`, a public HTTPS host. The API key
+// arrives by ENV EXPANSION in an `x-api-key` header, `${JESSE_CLOCKIFY_API_KEY}`, which the
+// CLI substitutes from the child's environment; the literal key is absent from this const,
+// from the `--mcp-config` argument and from every file, and the variable is set in the
+// LaunchAgent plist. Clockify does NOT accept the key as `Authorization: Bearer` (measured
+// 2026-10-06: `tools/list` answers either way, but every call made with a bearer fails), so
+// Codex reaches the same variable through `env_http_headers`, not `bearer_token_env_var`.
+//
+// **EVERY ADVERTISED TOOL IS GRANTED, WRITES INCLUDED.** A live, authenticated `tools/list`
+// on 2026-10-06 returned thirteen tools carrying no annotations, and
+// [`crate::DEFAULT_ALLOWED_TOOLS`] grants all thirteen by name: the reads, and
+// `start_timer`, `stop_timer`, `log_past_time` and `create_project`. Each acts with the key
+// owner's Clockify permissions. Read SECURITY.md before changing this.
+//
+// **RETIRED FROM MAIN TURNS IN 0.176.0.** No main turn declares it any more and its thirteen
+// grants are gone; `clockify-rs` is the one Clockify server. It stays only because the retired
+// consts still spell their sets with it, so their labels keep resolving.
 
-/// **The Clockify server: Tag1's time tracking, through Clockify's OWN hosted MCP server.**
-/// `type: "http"` (Streamable HTTP) at `api.clockify.me`, a public HTTPS host. The API key
-/// arrives by ENV EXPANSION in an `x-api-key` header, `${JESSE_CLOCKIFY_API_KEY}`, which the
-/// CLI substitutes from the child's environment; the literal key is absent from this const,
-/// from the `--mcp-config` argument and from every file, and the variable is set in the
-/// LaunchAgent plist. Clockify does NOT accept the key as `Authorization: Bearer` (measured
-/// 2026-10-06: `tools/list` answers either way, but every call made with a bearer fails), so
-/// Codex reaches the same variable through `env_http_headers`, not `bearer_token_env_var`.
-///
-/// **EVERY ADVERTISED TOOL IS GRANTED, WRITES INCLUDED.** A live, authenticated `tools/list`
-/// on 2026-10-06 returned thirteen tools carrying no annotations, and
-/// [`crate::DEFAULT_ALLOWED_TOOLS`] grants all thirteen by name: the reads, and
-/// `start_timer`, `stop_timer`, `log_past_time` and `create_project`. Each acts with the key
-/// owner's Clockify permissions. Read SECURITY.md before changing this.
-///
-/// **RETIRED FROM MAIN TURNS IN 0.176.0.** No main turn declares it any more and its thirteen
-/// grants are gone; `clockify-rs` is the one Clockify server. It stays only because the retired
-/// consts still spell their sets with it, so their labels keep resolving.
-macro_rules! mcp_clockify {
-    () => {
-        r#""clockify":{"type":"http","url":"https://api.clockify.me/mcp-server/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}}"#
-    };
-}
+// ---- `mcp_house` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The house model: `house-mcp` on the home k3s cluster**, a spatial model of the owner's
+// house and grounds in PostGIS. `type: "http"` (Streamable HTTP) on the LAN, behind a
+// certificate from the internal CA `pozza-ca`, which both harnesses' TLS clients take from the
+// macOS keychain.
+//
+// **THE ONE DECLARATION WITH NO FIXED URL, AND THE ONE SERVER A DEPLOYMENT CAN SWITCH OFF.**
+// The URL comes from the bridge config's `[house]` table, so this fragment carries the
+// placeholder [`crate::HOUSE_URL_PLACEHOLDER`] and [`crate::render_house_mcp`] replaces it with
+// the configured URL when it renders a child's `--mcp-config`, or removes the whole entry when
+// the deployment has no ready `[house]` table. The placeholder never reaches a child: a test
+// renders every harness's main turn and asserts it is gone.
+//
+// The token arrives by ENV EXPANSION, `${JESSE_HOUSE_TOKEN}`, which the CLI substitutes from
+// the child's environment. The bridge reads it from the `[house]` table's `token_file` at
+// start and sets the variable on each child that loads this server; it is never in this
+// const, on an argv or in a file the bridge writes. Codex reaches the same variable through
+// `bearer_token_env_var`.
+//
+// **EVERY ADVERTISED TOOL IS GRANTED, WRITES INCLUDED.** A live, authenticated `tools/list`
+// on 2026-10-10 returned twenty-four tools, none annotated, and
+// [`crate::DEFAULT_ALLOWED_TOOLS`] grants all of them by name. Every write takes a required
+// `reason` the server records. Read SECURITY.md before changing this.
 
-/// **The house model: `house-mcp` on the home k3s cluster**, a spatial model of the owner's
-/// house and grounds in PostGIS. `type: "http"` (Streamable HTTP) on the LAN, behind a
-/// certificate from the internal CA `pozza-ca`, which both harnesses' TLS clients take from the
-/// macOS keychain.
-///
-/// **THE ONE DECLARATION WITH NO FIXED URL, AND THE ONE SERVER A DEPLOYMENT CAN SWITCH OFF.**
-/// The URL comes from the bridge config's `[house]` table, so this fragment carries the
-/// placeholder [`crate::HOUSE_URL_PLACEHOLDER`] and [`crate::render_house_mcp`] replaces it with
-/// the configured URL when it renders a child's `--mcp-config`, or removes the whole entry when
-/// the deployment has no ready `[house]` table. The placeholder never reaches a child: a test
-/// renders every harness's main turn and asserts it is gone.
-///
-/// The token arrives by ENV EXPANSION, `${JESSE_HOUSE_TOKEN}`, which the CLI substitutes from
-/// the child's environment. The bridge reads it from the `[house]` table's `token_file` at
-/// start and sets the variable on each child that loads this server; it is never in this
-/// const, on an argv or in a file the bridge writes. Codex reaches the same variable through
-/// `bearer_token_env_var`.
-///
-/// **EVERY ADVERTISED TOOL IS GRANTED, WRITES INCLUDED.** A live, authenticated `tools/list`
-/// on 2026-10-10 returned twenty-four tools, none annotated, and
-/// [`crate::DEFAULT_ALLOWED_TOOLS`] grants all of them by name. Every write takes a required
-/// `reason` the server records. Read SECURITY.md before changing this.
-macro_rules! mcp_house {
-    () => {
-        r#""house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}}"#
-    };
-}
+// ---- `mcp_healthdb` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The health archive, read only: `jesse-healthdb-mcp`**, this repository's own stdio server
+// over the Postgres archive of Apple Health samples, workouts, routes and diet rows. A BARE
+// NAME resolved from the child's `PATH`, like `jesse-places-mcp`, and in `deploy-bins.toml`.
+//
+// **THE SECOND SERVER A DEPLOYMENT CAN SWITCH OFF.** It is kept in a child's rendered config
+// only when the `[healthdb]` table has an `ro_url_file` ([`crate::render_healthdb_mcp`]), and
+// it reaches its credential by PATH: the bridge sets `JESSE_HEALTHDB_RO_URL_FILE` and
+// `JESSE_HEALTHDB_CA_FILE` on a child that loads it ([`crate::apply_healthdb_env`]) and the
+// server reads and checks the `0600` file itself. Nothing secret is in this const or on an argv.
+//
+// **BOTH TOOLS ARE GRANTED**, `healthdb_schema` and `healthdb_query`, and they are the whole
+// server: a live `tools/list` returns those two, both annotated `readOnlyHint`. The query tool
+// takes free SQL, so every guard lives in the server (one read statement, `BEGIN READ ONLY`,
+// a 15 s timeout, a 500 row cap), not only in the `health_ro` role. Read SECURITY.md before
+// changing this.
 
-/// **The health archive, read only: `jesse-healthdb-mcp`**, this repository's own stdio server
-/// over the Postgres archive of Apple Health samples, workouts, routes and diet rows. A BARE
-/// NAME resolved from the child's `PATH`, like `jesse-places-mcp`, and in `deploy-bins.toml`.
-///
-/// **THE SECOND SERVER A DEPLOYMENT CAN SWITCH OFF.** It is kept in a child's rendered config
-/// only when the `[healthdb]` table has an `ro_url_file` ([`crate::render_healthdb_mcp`]), and
-/// it reaches its credential by PATH: the bridge sets `JESSE_HEALTHDB_RO_URL_FILE` and
-/// `JESSE_HEALTHDB_CA_FILE` on a child that loads it ([`crate::apply_healthdb_env`]) and the
-/// server reads and checks the `0600` file itself. Nothing secret is in this const or on an argv.
-///
-/// **BOTH TOOLS ARE GRANTED**, `healthdb_schema` and `healthdb_query`, and they are the whole
-/// server: a live `tools/list` returns those two, both annotated `readOnlyHint`. The query tool
-/// takes free SQL, so every guard lives in the server (one read statement, `BEGIN READ ONLY`,
-/// a 15 s timeout, a 500 row cap), not only in the `health_ro` role. Read SECURITY.md before
-/// changing this.
-macro_rules! mcp_healthdb {
-    () => {
-        r#""healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]}"#
-    };
-}
+// ---- `mcp_clockify_rs` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **Tag1's own Clockify server, read only: `clockify-rs`** (`tag1consulting/clockify-rs`,
+// crate `clockify-mcp` 0.5.0 at pinned commit `7255f1d`), a stdio server that reports each
+// person's hours split four ways (client or internal, billable or not) with no dollar figure.
+// Its report periods default to Europe/Rome, the zone Tag1 bills in, and every request it makes
+// names its zone. It is NOT built here: it is installed on the host with `cargo install` and
+// started through the `clockify-rs-mcp` launcher on the bridge's `PATH`, like `plex-mcp`.
+//
+// The key arrives BY ENVIRONMENT: the launcher reads `JESSE_CLOCKIFY_API_KEY` (set in the
+// LaunchAgent plist), exports it as `CLOCKIFY_API_KEY` and `exec`s the binary. Nothing secret is
+// in this const or on an argv. Codex forwards the variable by name through
+// `CODEX_MCP_ENV_PASSTHROUGH`. From 0.176.0 this child process is the only holder of the key on
+// a bridge turn.
+//
+// **ALL TWELVE TOOLS ARE GRANTED, AND ALL TWELVE READ.** A bare environment `tools/list` on
+// 2026-10-12 returned `list_users`, `list_user_groups`, `hours_by_user`, `monthly_hours`,
+// `detailed_entries`, `resolve_user`, `check`, `trend`, `audit`, `projects`, `daily` and
+// `team_summary`, every one annotated `readOnlyHint`, and [`crate::DEFAULT_ALLOWED_TOOLS`]
+// grants all twelve by name. From 0.176.0 it is the main turn's ONLY Clockify server: the hosted
+// `clockify` server, the one that could write, is retired. Read SECURITY.md before changing
+// this.
 
-/// **Tag1's own Clockify server, read only: `clockify-rs`** (`tag1consulting/clockify-rs`,
-/// crate `clockify-mcp` 0.5.0 at pinned commit `7255f1d`), a stdio server that reports each
-/// person's hours split four ways (client or internal, billable or not) with no dollar figure.
-/// Its report periods default to Europe/Rome, the zone Tag1 bills in, and every request it makes
-/// names its zone. It is NOT built here: it is installed on the host with `cargo install` and
-/// started through the `clockify-rs-mcp` launcher on the bridge's `PATH`, like `plex-mcp`.
-///
-/// The key arrives BY ENVIRONMENT: the launcher reads `JESSE_CLOCKIFY_API_KEY` (set in the
-/// LaunchAgent plist), exports it as `CLOCKIFY_API_KEY` and `exec`s the binary. Nothing secret is
-/// in this const or on an argv. Codex forwards the variable by name through
-/// `CODEX_MCP_ENV_PASSTHROUGH`. From 0.176.0 this child process is the only holder of the key on
-/// a bridge turn.
-///
-/// **ALL TWELVE TOOLS ARE GRANTED, AND ALL TWELVE READ.** A bare environment `tools/list` on
-/// 2026-10-12 returned `list_users`, `list_user_groups`, `hours_by_user`, `monthly_hours`,
-/// `detailed_entries`, `resolve_user`, `check`, `trend`, `audit`, `projects`, `daily` and
-/// `team_summary`, every one annotated `readOnlyHint`, and [`crate::DEFAULT_ALLOWED_TOOLS`]
-/// grants all twelve by name. From 0.176.0 it is the main turn's ONLY Clockify server: the hosted
-/// `clockify` server, the one that could write, is retired. Read SECURITY.md before changing
-/// this.
-macro_rules! mcp_clockify_rs {
-    () => {
-        r#""clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}"#
-    };
-}
-
-/// The five house servers, in order.
-macro_rules! house_servers {
-    () => {
-        concat!(
-            mcp_qmd!(),
-            ",",
-            mcp_slack!(),
-            ",",
-            mcp_browser!(),
-            ",",
-            mcp_homeassistant!(),
-            ",",
-            mcp_roon!()
-        )
-    };
-}
-/// The house set plus the six morning-routine servers.
-macro_rules! morning_servers {
-    () => {
-        concat!(
-            house_servers!(),
-            ",",
-            mcp_google!(),
-            ",",
-            mcp_github!(),
-            ",",
-            mcp_fastmail!(),
-            ",",
-            mcp_unifi!(),
-            ",",
-            mcp_routeros!(),
-            ",",
-            mcp_proxmox!()
-        )
-    };
-}
-/// The fourteen servers that were the COMMON CORE of both harnesses' main turns from 0.73.0:
-/// the morning set plus the two message sources and the second Google account. The main set
-/// is still assembled from this — adding `build`, `places`, `inbound`, `kubernetes`, `rybbit`
-/// and `tag1` — so it is no longer what either harness's turn carries on its own. It stays a
-/// macro rather than being folded into its callers because `MESSAGES_MCP_CONFIG` is a RETIRED
-/// ROW LABEL that must keep meaning what it meant.
-macro_rules! messages_servers {
-    () => {
-        concat!(
-            morning_servers!(),
-            ",",
-            mcp_whatsapp!(),
-            ",",
-            mcp_imcp!(),
-            ",",
-            mcp_google_perseido!()
-        )
-    };
-}
+// ---- `house_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// The five house servers, in order.
+// ---- `morning_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// The house set plus the six morning-routine servers.
+// ---- `messages_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// The fourteen servers that were the COMMON CORE of both harnesses' main turns from 0.73.0:
+// the morning set plus the two message sources and the second Google account. The main set
+// is still assembled from this — adding `build`, `places`, `inbound`, `kubernetes`, `rybbit`
+// and `tag1` — so it is no longer what either harness's turn carries on its own. It stays a
+// macro rather than being folded into its callers because `MESSAGES_MCP_CONFIG` is a RETIRED
+// ROW LABEL that must keep meaning what it meant.
 
 /// qmd + Slack + browser + Home Assistant + Roon — the main turn's server set from bridge
 /// 0.67.0 until the morning-routine servers were added in 0.68.0. No shipped spawn site uses
@@ -1028,7 +864,7 @@ macro_rules! messages_servers {
 /// the two were the same string, so growing the main set in place would have silently
 /// re-pointed the `qmd+slack+browser+homeassistant+roon` row label at a set that also reads
 /// Jeremy's mail and holds full control of the network and the hypervisor.
-pub const HOUSE_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, house_servers!(), "}}");
+pub static HOUSE_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_json(HOUSE_SET));
 
 /// The house set PLUS the six morning-routine servers — the main turn's server set from
 /// bridge 0.69.0 until the two message sources and the second Google account were added in
@@ -1060,7 +896,7 @@ pub const HOUSE_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, house_servers!(
 /// write-capable by design and the granted tools include every mutator, up to
 /// `proxmox_execute_vm_command` (arbitrary command execution inside a guest). Read SECURITY.md
 /// before narrowing or widening this set.
-pub const MORNING_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, morning_servers!(), "}}");
+pub static MORNING_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_json(MORNING_SET));
 
 /// The morning set PLUS **WhatsApp**, **iMessage** and a SECOND Google account — every main
 /// turn on every harness from bridge 0.73.0. Fourteen servers.
@@ -1143,7 +979,7 @@ pub const MORNING_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, morning_serve
 /// [`crate::CODEX_SHIPPED_ROWS`] still names it, because Codex's record was taken against
 /// exactly these fourteen servers and nothing here has re-probed it. See
 /// [`crate::CodexHarness::main_mcp_config`].
-pub const MESSAGES_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, messages_servers!(), "}}");
+pub static MESSAGES_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_json(MESSAGES_SET));
 
 /// The fourteen-server set PLUS **`build`** — every **Claude Code** main turn from bridge
 /// 0.86.0 until `places` landed in 0.100.0. Fifteen servers.
@@ -1182,13 +1018,8 @@ pub const MESSAGES_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, messages_ser
 /// command here, so this const reads identically on every deployment. Unlike the others it is
 /// THIS repository's own binary; installing it on the bridge's `PATH` is host setup,
 /// documented in SECURITY.md.
-pub const MESSAGES_BUILD_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build"])));
 
 /// The fifteen-server set PLUS **`places`** — every **Claude Code** main turn from bridge
 /// 0.100.0. Sixteen servers.
@@ -1245,15 +1076,8 @@ pub const MESSAGES_BUILD_MCP_CONFIG: &str = concat!(
 /// keyed by those labels, and demand a live Codex battery this change does not run. The
 /// asymmetry is deliberate and recorded rather than quietly introduced. See
 /// [`crate::CodexHarness::main_mcp_config`].
-pub const MESSAGES_BUILD_PLACES_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places"])));
 
 /// The sixteen-server set PLUS **`inbound`** — every **Claude Code** main turn from bridge
 /// 0.115.0. Seventeen servers.
@@ -1316,17 +1140,8 @@ pub const MESSAGES_BUILD_PLACES_MCP_CONFIG: &str = concat!(
 /// folding it into the current main set would silently re-point the
 /// `…+build+places+inbound` row label at a set that also holds `cluster-admin` on a
 /// Kubernetes cluster.
-pub const MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound"])));
 
 /// The fourteen-server set PLUS **`kubernetes`** — every **Codex** main turn from bridge
 /// 0.146.0 until 0.165.0. Fifteen servers.
@@ -1340,13 +1155,8 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG: &str = concat!(
 /// `kubernetes` moved Codex's labels from `…+google-perseido` to `…+google-perseido+kubernetes`
 /// on the owner's decision of 2026-09-22, rather than accept a cluster capability that existed
 /// on one harness only.
-pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_kubernetes!(),
-    "}}"
-);
+pub static MESSAGES_KUBERNETES_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["kubernetes"])));
 
 /// The seventeen-server set PLUS **`kubernetes`** — every **Claude Code** main turn from
 /// bridge 0.146.0 until `rybbit` landed in 0.163.0. Eighteen servers.
@@ -1393,19 +1203,15 @@ pub const MESSAGES_KUBERNETES_MCP_CONFIG: &str = concat!(
 /// rather than fixed.
 ///
 /// Codex got the same server in the same release, on [`MESSAGES_KUBERNETES_MCP_CONFIG`].
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| {
+        mcp_config_json(&messages_plus(&[
+            "build",
+            "places",
+            "inbound",
+            "kubernetes",
+        ]))
+    });
 
 /// The eighteen-server set PLUS **`rybbit`** — every **Claude Code** main turn from bridge
 /// 0.163.0 until `tag1` landed in 0.164.0. Nineteen servers.
@@ -1417,26 +1223,21 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG: &str = concat!(
 /// What it adds is READ access to tag1.com's web analytics on Rybbit's hosted service: one
 /// new credential (`RYBBIT_API_KEY`, in the plist, expanded by the CLI), one new public host
 /// (`app.rybbit.io`), and no write tool, withheld both by the key's scope and by the
-/// allowlist. See the `mcp_rybbit!` declaration and SECURITY.md.
+/// allowlist. See the `rybbit` row in `crate::mcpservers` declaration and SECURITY.md.
 ///
 /// What it also adds is a new source of UNTRUSTED TEXT: page titles, paths, referrers, event
 /// names, search queries and user traits are written by whoever visits tag1.com, and they
 /// enter the turn at the same trust level as the message bodies this set already carries.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| {
+        mcp_config_json(&messages_plus(&[
+            "build",
+            "places",
+            "inbound",
+            "kubernetes",
+            "rybbit",
+        ]))
+    });
 
 /// The nineteen-server set PLUS **`tag1`** — every **Claude Code** main turn from bridge
 /// 0.164.0, and every **Codex** main turn from 0.165.0, until `plex` landed in 0.166.0. Twenty
@@ -1448,7 +1249,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = con
 ///
 /// What it adds is READ access to Tag1 Consulting's public website through the site's own MCP
 /// server: one new public host (`www.tag1.com`), no credential, and six read tools, granted by
-/// name. See the `mcp_tag1!` declaration and SECURITY.md.
+/// name. See the `tag1` row in `crate::mcpservers` declaration and SECURITY.md.
 ///
 /// What it also adds is a new source of UNTRUSTED TEXT: page bodies, search results and team
 /// bios are whatever is published on tag1.com, so anyone who can get content published there
@@ -1456,23 +1257,17 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG: &str = con
 /// already carries.
 ///
 /// It was **BOTH HARNESSES' MAIN SET** from bridge 0.165.0 until 0.166.0.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| {
+        mcp_config_json(&messages_plus(&[
+            "build",
+            "places",
+            "inbound",
+            "kubernetes",
+            "rybbit",
+            "tag1",
+        ]))
+    });
 
 /// The twenty-server set PLUS **`plex`**: every main turn on BOTH harnesses from bridge
 /// 0.166.0 until `clockify` landed in 0.167.0. Twenty-one servers.
@@ -1480,7 +1275,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: &str 
 /// What it adds is the owner's Plex media server on the LAN: one new credential (a Plex token,
 /// held by the `plex-mcp` launcher and never by the bridge), one new LAN host, read access to
 /// the library, watch history and server status, and the power to create, edit and delete
-/// collections and playlists and to edit item metadata. See the `mcp_plex!` declaration and
+/// collections and playlists and to edit item metadata. See the `plex` row in `crate::mcpservers` declaration and
 /// SECURITY.md.
 ///
 /// What it also adds is a new source of UNTRUSTED TEXT: titles, summaries, tags and collection
@@ -1490,25 +1285,18 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG: &str 
 /// **RETIRED AS THE MAIN SET IN 0.167.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex`]
 /// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.166.0 until 0.167.0.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    ",",
-    mcp_plex!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| {
+        mcp_config_json(&messages_plus(&[
+            "build",
+            "places",
+            "inbound",
+            "kubernetes",
+            "rybbit",
+            "tag1",
+            "plex",
+        ]))
+    });
 
 /// The twenty-one-server set PLUS **`clockify`**: every main turn on BOTH harnesses from
 /// bridge 0.167.0 until `house` landed in 0.169.0. Twenty-two servers.
@@ -1517,7 +1305,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: 
 /// credential (`JESSE_CLOCKIFY_API_KEY`, in the plist, expanded by the CLI into an `x-api-key`
 /// header), one new public host (`api.clockify.me`), read access to time reports, clients,
 /// projects, tasks and tags, and the power to start and stop timers, log time and create
-/// projects, all with the key owner's Clockify permissions. See the `mcp_clockify!`
+/// projects, all with the key owner's Clockify permissions. See the `clockify` row in `crate::mcpservers`
 /// declaration and SECURITY.md.
 ///
 /// What it also adds is a new source of UNTRUSTED TEXT: time entry descriptions and project,
@@ -1527,27 +1315,20 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG: 
 /// **RETIRED AS THE MAIN SET IN 0.169.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify`]
 /// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.167.0 until 0.169.0.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    ",",
-    mcp_plex!(),
-    ",",
-    mcp_clockify!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG: LazyLock<
+    String,
+> = LazyLock::new(|| {
+    mcp_config_json(&messages_plus(&[
+        "build",
+        "places",
+        "inbound",
+        "kubernetes",
+        "rybbit",
+        "tag1",
+        "plex",
+        "clockify",
+    ]))
+});
 
 /// The twenty-two-server set PLUS **`house`**: every main turn on BOTH harnesses from bridge
 /// 0.169.0. Twenty-three servers.
@@ -1557,7 +1338,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP
 /// `token_file` and handed to the child as `JESSE_HOUSE_TOKEN`), one new LAN host behind the
 /// internal CA, read access to the spatial model of the house and grounds, and the power to
 /// create, edit, soft delete and restore sites, floors, spaces, objects, files and notes, every
-/// write with a recorded `reason`. See the `mcp_house!` declaration and SECURITY.md.
+/// write with a recorded `reason`. See the `house` row in `crate::mcpservers` declaration and SECURITY.md.
 ///
 /// What it also adds is a new source of UNTRUSTED TEXT: names, notes, attributes and stored
 /// files are whatever anyone holding the write token put there, at the same trust level as the
@@ -1571,30 +1352,20 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP
 /// **RETIRED AS THE MAIN SET IN 0.173.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse`]
 /// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.169.0 until 0.173.0.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG:
-    &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    ",",
-    mcp_plex!(),
-    ",",
-    mcp_clockify!(),
-    ",",
-    mcp_house!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG:
+    LazyLock<String> = LazyLock::new(|| {
+    mcp_config_json(&messages_plus(&[
+        "build",
+        "places",
+        "inbound",
+        "kubernetes",
+        "rybbit",
+        "tag1",
+        "plex",
+        "clockify",
+        "house",
+    ]))
+});
 
 /// The twenty-three-server set PLUS **`healthdb`**: every main turn on BOTH harnesses from
 /// bridge 0.173.0. Twenty-four servers.
@@ -1605,7 +1376,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// the server itself from the `[healthdb]` table's `ro_url_file` (the child gets the file's
 /// PATH, never the URL), one new LAN host, and no write of any kind: every guard (one statement,
 /// a read-only transaction, a timeout, a row cap) is enforced in the server as well as by the
-/// role. See the `mcp_healthdb!` declaration and SECURITY.md.
+/// role. See the `healthdb` row in `crate::mcpservers` declaration and SECURITY.md.
 ///
 /// **TWO SERVERS ARE NOW CONDITIONAL; THE SET IS NOT.** This const always declares `house` and
 /// `healthdb`, so the row label, the grant and the record are one fixed posture.
@@ -1616,32 +1387,8 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// **RETIRED AS THE MAIN SET IN 0.175.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb`]
 /// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.173.0 until 0.175.0.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG:
-    &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    ",",
-    mcp_plex!(),
-    ",",
-    mcp_clockify!(),
-    ",",
-    mcp_house!(),
-    ",",
-    mcp_healthdb!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "clockify", "house", "healthdb"])));
 
 /// The twenty-four-server set PLUS **`clockify-rs`**: every main turn on BOTH harnesses from
 /// bridge 0.175.0 until 0.176.0. Twenty-five servers.
@@ -1651,7 +1398,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// internal, billable or not), paged in full, with no dollar figure in any output. No new
 /// credential (the same `JESSE_CLOCKIFY_API_KEY`, now also held by a local child process) and no
 /// new host (`api.clockify.me` and `reports.api.clockify.me`, reads only). See the
-/// `mcp_clockify_rs!` declaration and SECURITY.md.
+/// `clockify-rs` row in `crate::mcpservers` and SECURITY.md.
 ///
 /// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
 /// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
@@ -1660,34 +1407,8 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// **RETIRED AS THE MAIN SET IN 0.176.0**, split out rather than shrunk in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs`]
 /// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.175.0 until 0.176.0.
-pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG:
-    &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    ",",
-    mcp_plex!(),
-    ",",
-    mcp_clockify!(),
-    ",",
-    mcp_house!(),
-    ",",
-    mcp_healthdb!(),
-    ",",
-    mcp_clockify_rs!(),
-    "}}"
-);
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "clockify", "house", "healthdb", "clockify-rs"])));
 
 /// The twenty-five-server set MINUS the hosted **`clockify`** server: every main turn on BOTH
 /// harnesses from bridge 0.176.0. Twenty-four servers.
@@ -1697,7 +1418,7 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// permissions. `clockify-rs`, which only reads, is now the turn's one Clockify server, so a
 /// turn can no longer pick the server that cannot split hours per person, and no bridge turn
 /// can write to Clockify. One host fewer (`api.clockify.me/mcp-server`); the same key, now held
-/// only by the `clockify-rs` child process. See the `mcp_clockify_rs!` declaration and
+/// only by the `clockify-rs` child process. See the `clockify-rs` row in `crate::mcpservers` declaration and
 /// SECURITY.md.
 ///
 /// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
@@ -1708,42 +1429,28 @@ pub const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOU
 /// carry one server set and differ only in how each spells it on its command line.
 /// `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the build if that
 /// ever stops being true.
-pub const MAIN_CHILD_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    messages_servers!(),
-    ",",
-    mcp_build!(),
-    ",",
-    mcp_places!(),
-    ",",
-    mcp_inbound!(),
-    ",",
-    mcp_kubernetes!(),
-    ",",
-    mcp_rybbit!(),
-    ",",
-    mcp_tag1!(),
-    ",",
-    mcp_plex!(),
-    ",",
-    mcp_house!(),
-    ",",
-    mcp_healthdb!(),
-    ",",
-    mcp_clockify_rs!(),
-    "}}"
-);
+pub static MAIN_CHILD_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_json(MAIN_SET));
 
 /// The `healthdb` entry exactly as [`MAIN_CHILD_MCP_CONFIG`] declares it, WITH its leading
 /// separator, for [`crate::render_healthdb_mcp`]: the same string surgery as
 /// [`HOUSE_MCP_ENTRY`], for the same reason.
-pub const HEALTHDB_MCP_ENTRY: &str = concat!(",", mcp_healthdb!());
+pub static HEALTHDB_MCP_ENTRY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        ",{}",
+        render_entry(mcp_row("healthdb").expect("a shipped row"))
+    )
+});
 
 /// The `house` entry exactly as [`MAIN_CHILD_MCP_CONFIG`] declares it, WITH its leading
 /// separator, so [`crate::render_house_mcp`] can remove it from a rendered config without
 /// parsing and re-serializing the JSON (which would reorder every other server's keys and move
 /// every argv fixture for nothing).
-pub const HOUSE_MCP_ENTRY: &str = concat!(",", mcp_house!());
+pub static HOUSE_MCP_ENTRY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        ",{}",
+        render_entry(mcp_row("house").expect("a shipped row"))
+    )
+});
 
 /// **The six servers the owner's own replies arrive on** — `google`, `google-perseido`,
 /// `fastmail`, `slack`, `whatsapp`, `imcp` — and nothing else. The TODAY-BRIEF child's set when
@@ -1756,21 +1463,7 @@ pub const HOUSE_MCP_ENTRY: &str = concat!(",", mcp_house!());
 /// spelling and this set cannot drift from the main turn's.
 ///
 /// The declaration order matches [`McpSet::Replies`]'s label, which is the row key.
-pub const REPLIES_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    mcp_google!(),
-    ",",
-    mcp_google_perseido!(),
-    ",",
-    mcp_fastmail!(),
-    ",",
-    mcp_slack!(),
-    ",",
-    mcp_whatsapp!(),
-    ",",
-    mcp_imcp!(),
-    "}}"
-);
+pub static REPLIES_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_json(REPLIES_SET));
 
 /// qmd PLUS slack PLUS browser — the main turn's server set from bridge 0.66.0 until Home
 /// Assistant and Roon were added in 0.67.0. No shipped spawn site uses it today; retained
@@ -1778,27 +1471,20 @@ pub const REPLIES_MCP_CONFIG: &str = concat!(
 /// than left as an alias of [`MAIN_CHILD_MCP_CONFIG`]: until 0.67.0 the two were the same
 /// string, so growing the main set in place would have silently re-pointed the
 /// `qmd+slack+browser` row label at a set that also actuates the house.
-pub const QMD_SLACK_BROWSER_MCP_CONFIG: &str = concat!(
-    r#"{"mcpServers":{"#,
-    mcp_qmd!(),
-    ",",
-    mcp_slack!(),
-    ",",
-    mcp_browser!(),
-    "}}"
-);
+pub static QMD_SLACK_BROWSER_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&["qmd", "slack", "browser"]));
 
 /// qmd PLUS slack — the main turn's server set from bridge 0.57.0 until the browser was
 /// added in 0.66.0. No shipped spawn site uses it today; it is retained because
 /// [`McpSet::QmdSlack`] still names a posture a deployment can express, and because dropping
 /// it would silently re-point that label at a set containing the browser.
-pub const QMD_SLACK_MCP_CONFIG: &str =
-    concat!(r#"{"mcpServers":{"#, mcp_qmd!(), ",", mcp_slack!(), "}}");
+pub static QMD_SLACK_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&["qmd", "slack"]));
 
 /// The qmd server ALONE — the main turn's server set before slack was added (bridge 0.57.0),
 /// and Codex's until 0.66.0. No shipped spawn site uses it today; retained for the same
 /// reason as [`QMD_SLACK_MCP_CONFIG`].
-pub const QMD_ONLY_MCP_CONFIG: &str = concat!(r#"{"mcpServers":{"#, mcp_qmd!(), "}}");
+pub static QMD_ONLY_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_json(&["qmd"]));
 
 /// An EMPTY MCP server set, passed as `--mcp-config` alongside `--strict-mcp-config` so
 /// the child loads NO MCP servers at all. `--strict-mcp-config` tells the CLI to use only
@@ -4299,37 +3985,25 @@ mod tests {
     /// environment at startup, so none of it appears in the argv the containment record
     /// commits. That is what lets an operator repoint a backend without invalidating a
     /// record, and a flag appearing here would silently end that property.
-    const GOLDEN_QMD_MCP: &str = concat!(
-        r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
-        home_assistant_mcp_url!(),
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}}}"#
-    );
+    /// The golden lives beside the table it pins: [`crate::mcpservers::golden_main_config`].
+    static GOLDEN_QMD_MCP: LazyLock<String> = LazyLock::new(crate::mcpservers::golden_main_config);
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
     /// The main set as a child renders it under the test fixture, which has no `[house]` table
     /// and no `[healthdb] ro_url_file`: the twenty-one-server set (no hosted `clockify` since
     /// 0.176.0) plus `clockify-rs`, the one server after the two conditional ones that is always
     /// kept.
-    const RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS: &str = concat!(
-        r#"{"mcpServers":{"#,
-        messages_servers!(),
-        ",",
-        mcp_build!(),
-        ",",
-        mcp_places!(),
-        ",",
-        mcp_inbound!(),
-        ",",
-        mcp_kubernetes!(),
-        ",",
-        mcp_rybbit!(),
-        ",",
-        mcp_tag1!(),
-        ",",
-        mcp_plex!(),
-        ",",
-        mcp_clockify_rs!(),
-        "}}"
-    );
+    static RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS: LazyLock<String> = LazyLock::new(|| {
+        mcp_config_json(&messages_plus(&[
+            "build",
+            "places",
+            "inbound",
+            "kubernetes",
+            "rybbit",
+            "tag1",
+            "plex",
+            "clockify-rs",
+        ]))
+    });
 
     /// EVERY COPY OF THE CHILD MCP CONFIG SAYS THE SAME THING.
     ///
@@ -4348,7 +4022,8 @@ mod tests {
     #[test]
     fn every_copy_of_the_child_mcp_config_agrees() {
         assert_eq!(
-            MAIN_CHILD_MCP_CONFIG, GOLDEN_QMD_MCP,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
+            GOLDEN_QMD_MCP.as_str(),
             "the golden copy of the main child MCP config has drifted from the shipped const"
         );
         assert_eq!(EMPTY_MCP_CONFIG, GOLDEN_EMPTY_MCP);
@@ -4365,93 +4040,93 @@ mod tests {
                 .cloned()
                 .expect("… with an mcpServers object")
         };
-        let main = servers(MAIN_CHILD_MCP_CONFIG);
+        let main = servers(MAIN_CHILD_MCP_CONFIG.as_str());
         // From 0.176.0 the shipped set also LOST a server: the hosted `clockify` server, which
         // every retired set from 0.167.0 to 0.175.0 still declares. So each retired set is the
         // shipped one minus the servers added after it, plus the servers removed after it, and
         // every server they share must still agree byte for byte.
-        let retired_clockify = servers(concat!(r#"{"mcpServers":{"#, mcp_clockify!(), "}}"));
+        let retired_clockify = servers(&mcp_config_json(&["clockify"]));
         for (label, older, added, removed) in [
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
                 vec![],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
                 vec!["clockify-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
-                MESSAGES_BUILD_PLACES_MCP_CONFIG,
+                &MESSAGES_BUILD_PLACES_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
-                MESSAGES_BUILD_MCP_CONFIG,
+                &MESSAGES_BUILD_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
                 vec![],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
-                MESSAGES_KUBERNETES_MCP_CONFIG,
+                &MESSAGES_KUBERNETES_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
                 vec![],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
-                MESSAGES_MCP_CONFIG,
+                &MESSAGES_MCP_CONFIG,
                 vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
                 vec![],
             ),
         ] {
-            let older = servers(older);
+            let older = servers(older.as_str());
             for (name, spec) in &older {
                 if removed.contains(&name.as_str()) {
                     assert!(
@@ -4995,7 +4670,7 @@ mod tests {
                     // The fixture has no `[house]` table, so the rendered set is the
                     // twenty-one-server one plus `clockify-rs`: `house` and `healthdb` are
                     // declared in the const and dropped here.
-                    RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS,
+                    RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--allowedTools",
                     &allow,
                     "--disallowedTools",
@@ -5024,7 +4699,7 @@ mod tests {
                     // The fixture has no `[house]` table, so the rendered set is the
                     // twenty-one-server one plus `clockify-rs`: `house` and `healthdb` are
                     // declared in the const and dropped here.
-                    RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS,
+                    RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--tools",
                     "Read,Grep,Glob",
                     "--allowedTools",
@@ -5067,7 +4742,7 @@ mod tests {
             golden(&[
                 "--strict-mcp-config",
                 "--mcp-config",
-                QMD_ONLY_MCP_CONFIG,
+                QMD_ONLY_MCP_CONFIG.as_str(),
                 "--tools",
                 "Read,Grep,Glob",
                 "--allowedTools",
@@ -5206,7 +4881,7 @@ mod tests {
                 None,
                 &ambient,
                 Capability::Basic,
-                EMPTY_MCP_CONFIG,
+                &EMPTY_MCP_CONFIG,
             ),
             "title one-shot",
         );
@@ -5387,7 +5062,7 @@ mod tests {
         let cmd = build_vaultqa_child_command(&cfg, "hi");
         assert_eq!(
             cmd_arg_value(&cmd, "--mcp-config").as_deref(),
-            Some(QMD_ONLY_MCP_CONFIG),
+            Some(QMD_ONLY_MCP_CONFIG.as_str()),
             "the child must load the shipped const for the named set"
         );
         assert!(cmd_has_flag(&cmd, "--strict-mcp-config"));

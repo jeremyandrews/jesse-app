@@ -66,7 +66,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{timeout_at, Instant};
 
-use crate::mcp::http::{Bearer, HttpConnection};
+use crate::mcp::http::{Bearer, HttpAuth, HttpConnection};
 
 /// The protocol version this client asks for.
 ///
@@ -222,6 +222,8 @@ pub struct McpClient {
     conn: tokio::sync::Mutex<Option<Wire>>,
     /// Why the connection died, once it has. Set exactly once.
     death: Mutex<Option<String>>,
+    /// The stdio child's pid, which is also its PROCESS GROUP id; `None` over HTTP.
+    pid: Option<u32>,
 }
 
 impl std::fmt::Debug for McpClient {
@@ -274,7 +276,13 @@ impl McpClient {
             // fate beyond the kill on drop; `kill_on_drop` is what makes the Drop impl below
             // effective even when the future is cancelled mid-call.
             .kill_on_drop(true);
+        // ITS OWN PROCESS GROUP (0.14.0), so a caller can kill the server AND everything it
+        // started — `npx` runs the real server as a grandchild that `kill_on_drop` (which
+        // signals the direct child only) would leave behind. See [`McpClient::pid`].
+        #[cfg(unix)]
+        cmd.process_group(0);
         let mut child = cmd.spawn().map_err(|e| McpError::Spawn(e.to_string()))?;
+        let pid = child.id();
 
         let stdin = child
             .stdin
@@ -323,6 +331,7 @@ impl McpClient {
                 stdout: BufReader::new(stdout).lines(),
             }))),
             death: Mutex::new(None),
+            pid,
         };
         client.handshake(connect_timeout).await
     }
@@ -345,7 +354,24 @@ impl McpClient {
         per_call: Duration,
         connect_timeout: Duration,
     ) -> Result<McpClient, McpError> {
-        let conn = HttpConnection::new(name, url, bearer, ca_pem, connect_timeout)?;
+        let auth = HttpAuth {
+            bearer: bearer.cloned(),
+            ca_pem: ca_pem.map(<[u8]>::to_vec),
+            ..HttpAuth::default()
+        };
+        McpClient::connect_http_with(name, url, &auth, per_call, connect_timeout).await
+    }
+
+    /// [`McpClient::connect_http`] with the whole of [`HttpAuth`]: a bearer or any header read
+    /// from a NAMED variable on every message, and mutual TLS with a pinned CA.
+    pub async fn connect_http_with(
+        name: &str,
+        url: &str,
+        auth: &HttpAuth,
+        per_call: Duration,
+        connect_timeout: Duration,
+    ) -> Result<McpClient, McpError> {
+        let conn = HttpConnection::new(name, url, auth, connect_timeout)?;
         let client = McpClient {
             name: name.to_string(),
             server_protocol: String::new(),
@@ -355,6 +381,7 @@ impl McpClient {
             stderr: Arc::new(StderrSink::default()),
             conn: tokio::sync::Mutex::new(Some(Wire::Http(conn))),
             death: Mutex::new(None),
+            pid: None,
         };
         client.handshake(connect_timeout).await
     }
@@ -427,6 +454,13 @@ impl McpClient {
         client.server_protocol = protocol;
         client.server_info = info;
         Ok(self)
+    }
+
+    /// The stdio child's pid, which is also its process group id (the child is started as the
+    /// leader of a new group), so `killpg(pid)` ends the server and every process it started.
+    /// `None` for an HTTP server.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 
     /// The configured server name.

@@ -52,7 +52,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::mcp::client::{McpClient, McpError};
-use crate::mcp::http::Bearer;
+use crate::mcp::http::{Bearer, HttpAuth, MutualTls};
 use crate::provider::{BoxFuture, ToolSpec};
 use crate::scope::Scope;
 use crate::tools::{
@@ -98,7 +98,19 @@ pub enum McpTransport {
         bearer: Option<Bearer>,
         /// One extra trust root for this server's client only, as PEM.
         ca_pem: Option<PemBytes>,
+        /// Credentials NAMED rather than held (0.14.0): a bearer variable, header variables
+        /// and mutual TLS. Read when each message is sent; see [`HttpAuth`].
+        named: NamedHttpAuth,
     },
+}
+
+/// The named half of an HTTP grant's credentials: variable NAMES and file PATHS only, so the
+/// whole struct is safe to print.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NamedHttpAuth {
+    pub bearer_env: Option<String>,
+    pub header_env: Vec<(String, String)>,
+    pub mtls: Option<MutualTls>,
 }
 
 /// A PEM certificate's bytes. A newtype only so `Debug` prints a length rather than a page of
@@ -161,6 +173,7 @@ impl ServerGrant {
                 url: url.into(),
                 bearer: None,
                 ca_pem: None,
+                named: NamedHttpAuth::default(),
             },
             tools: tools.into_iter().map(Into::into).collect(),
             action_class_default: class,
@@ -196,6 +209,14 @@ impl ServerGrant {
     pub fn with_ca_pem(mut self, pem: Vec<u8>) -> Self {
         if let McpTransport::Http { ca_pem, .. } = &mut self.transport {
             *ca_pem = Some(PemBytes(pem));
+        }
+        self
+    }
+
+    /// HTTP only: credentials read from named variables and files. A no-op on a stdio grant.
+    pub fn with_named_auth(mut self, auth: NamedHttpAuth) -> Self {
+        if let McpTransport::Http { named, .. } = &mut self.transport {
+            *named = auth;
         }
         self
     }
@@ -438,16 +459,17 @@ impl McpToolSet {
                     url,
                     bearer,
                     ca_pem,
+                    named,
                 } => {
-                    McpClient::connect_http(
-                        &g.name,
-                        url,
-                        bearer.as_ref(),
-                        ca_pem.as_ref().map(|p| p.0.as_slice()),
-                        call_timeout,
-                        connect_timeout,
-                    )
-                    .await
+                    let auth = HttpAuth {
+                        bearer: bearer.clone(),
+                        bearer_env: named.bearer_env.clone(),
+                        header_env: named.header_env.clone(),
+                        ca_pem: ca_pem.as_ref().map(|p| p.0.clone()),
+                        mtls: named.mtls.clone(),
+                    };
+                    McpClient::connect_http_with(&g.name, url, &auth, call_timeout, connect_timeout)
+                        .await
                 }
             };
             let client = match connected {

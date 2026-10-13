@@ -29,8 +29,13 @@
 //! * `--advertise-vault-tool` — also advertises `vault_read`, so the battery can show that an
 //!   MCP tool CANNOT shadow a vault tool (it is exposed as `mcp__<server>__vault_read`).
 //!
+//! * `--dump-env <file>` — writes this process's WHOLE environment to `<file>` at startup, one
+//!   `NAME=value` per line, so the gateway's environment-leak probe can show from the server's
+//!   own account that a nonce planted in the bridge never reached it.
+//!
 //! `JESSE_MCP_PROBE_LOG` names a file this server appends one line to per `tools/call`
-//! received: the tool's name. Absent means no log. **Nothing else is ever written anywhere.**
+//! received: the tool's name. Absent means no log. **Nothing else is ever written anywhere**
+//! except the `--dump-env` file a caller explicitly asked for.
 
 use std::io::{BufRead, Write};
 
@@ -56,6 +61,14 @@ fn main() {
     let hang = args.iter().any(|a| a == "--hang");
     let advertise_vault_tool = args.iter().any(|a| a == "--advertise-vault-tool");
     let log = std::env::var("JESSE_MCP_PROBE_LOG").ok();
+    if let Some(i) = args.iter().position(|a| a == "--dump-env") {
+        if let Some(path) = args.get(i + 1) {
+            let dump: String = std::env::vars()
+                .map(|(k, v)| format!("{k}={v}\n"))
+                .collect();
+            let _ = std::fs::write(path, dump);
+        }
+    }
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();

@@ -33,13 +33,24 @@
 //! an error (errors name the server and the status, never the header, and never the response
 //! body, which a broken server could use to echo the header back), not in a log line.
 //!
+//! **A CREDENTIAL CAN ALSO BE NAMED RATHER THAN HELD** ([`HttpAuth`], 0.14.0): a bearer, or any
+//! header, each read from a NAMED process variable at the moment a message is sent, so a
+//! caller that brokers many servers holds names in its config and the value lives only in its
+//! environment and on the wire. An unset variable fails the message with an error that names
+//! the variable and the server, never a value.
+//!
 //! **TRUST** is the bundled webpki roots plus, when the grant carries one, ONE extra PEM root
 //! added to THIS client only. Certificate verification is never switched off, and redirects are
 //! not followed: a redirect is a server asking for the credential to be sent somewhere else.
+//!
+//! **MUTUAL TLS** ([`MutualTls`], 0.14.0) presents a client certificate and key read from named
+//! files, and PINS the server to one CA read from a named file: the bundled roots are switched
+//! off for that client, so only a server certificate issued by that CA is accepted.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use tokio::time::{timeout_at, Instant};
 
@@ -79,6 +90,39 @@ impl std::fmt::Debug for Bearer {
     }
 }
 
+/// Mutual TLS for one server: a client certificate and its key, and the ONE CA the server's
+/// certificate must chain to. Paths, never contents; each file is read once, at connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutualTls {
+    /// The client certificate (chain), PEM.
+    pub cert_file: PathBuf,
+    /// The client certificate's private key, PEM.
+    pub key_file: PathBuf,
+    /// The pinned CA, PEM. The bundled roots are OFF for a client that carries this.
+    pub ca_file: PathBuf,
+}
+
+/// Everything one HTTP server's client presents, in one place.
+///
+/// **NAMES, NOT VALUES**, except for [`Bearer`], which is kept for the caller that has already
+/// read its token (the `direct` harness's house grant). `bearer_env` and `header_env` name
+/// process variables that are read when each message is built, so a value is never stored in
+/// this struct, in a config or in a `Debug` line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HttpAuth {
+    /// A bearer VALUE, already read by the caller.
+    pub bearer: Option<Bearer>,
+    /// The NAME of a variable whose value is sent as `Authorization: Bearer <value>`.
+    pub bearer_env: Option<String>,
+    /// `(header name, variable NAME)` pairs: each header carries that variable's value. This is
+    /// the shape a server that takes `x-api-key` rather than a bearer needs.
+    pub header_env: Vec<(String, String)>,
+    /// One extra trust root, beside the bundled ones, as PEM bytes.
+    pub ca_pem: Option<Vec<u8>>,
+    /// A client certificate, and a CA pinned in place of the bundled roots.
+    pub mtls: Option<MutualTls>,
+}
+
 /// One live HTTP session with one server.
 pub(crate) struct HttpConnection {
     /// The configured server name, for errors.
@@ -87,6 +131,10 @@ pub(crate) struct HttpConnection {
     url: String,
     /// The `Authorization` header, prebuilt and marked sensitive, when the grant has a bearer.
     auth: Option<HeaderValue>,
+    /// A bearer read from this variable on every message, when the grant names one.
+    bearer_env: Option<String>,
+    /// Headers read from variables on every message.
+    header_env: Vec<(HeaderName, String)>,
     /// Assigned by the server on `initialize`, then carried on every message.
     session: Option<String>,
     /// The negotiated protocol version, once `initialize` has answered.
@@ -98,14 +146,44 @@ impl HttpConnection {
     pub(crate) fn new(
         server: &str,
         url: &str,
-        bearer: Option<&Bearer>,
-        ca_pem: Option<&[u8]>,
+        auth: &HttpAuth,
         connect_timeout: Duration,
     ) -> Result<HttpConnection, McpError> {
+        let creds = auth;
+        let bearer = creds.bearer.as_ref();
+        let ca_pem = creds.ca_pem.as_deref();
         let mut builder = reqwest::Client::builder()
             .use_rustls_tls()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(connect_timeout);
+        if let Some(m) = &creds.mtls {
+            let read = |what: &str, p: &PathBuf| {
+                std::fs::read(p).map_err(|e| {
+                    McpError::Unreachable(format!(
+                        "could not read the {what} for '{server}' ({}): {e}",
+                        p.display()
+                    ))
+                })
+            };
+            let mut identity = read("client certificate", &m.cert_file)?;
+            identity.push(b'\n');
+            identity.extend_from_slice(&read("client key", &m.key_file)?);
+            let identity = reqwest::Identity::from_pem(&identity).map_err(|e| {
+                McpError::Unreachable(format!(
+                    "the client certificate and key for '{server}' are not usable PEM: {e}"
+                ))
+            })?;
+            let ca =
+                reqwest::Certificate::from_pem(&read("pinned CA", &m.ca_file)?).map_err(|e| {
+                    McpError::Unreachable(format!(
+                        "the pinned CA for '{server}' is not a PEM certificate: {e}"
+                    ))
+                })?;
+            builder = builder
+                .identity(identity)
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(ca);
+        }
         if let Some(pem) = ca_pem {
             let cert = reqwest::Certificate::from_pem(pem).map_err(|e| {
                 McpError::Unreachable(format!(
@@ -119,7 +197,7 @@ impl HttpConnection {
                 "could not build an HTTP client for '{server}': {e}"
             ))
         })?;
-        let auth = match bearer {
+        let auth_header = match bearer {
             None => None,
             Some(b) => {
                 let mut v = HeaderValue::from_str(&format!("Bearer {}", b.0)).map_err(|_| {
@@ -132,11 +210,22 @@ impl HttpConnection {
                 Some(v)
             }
         };
+        let mut header_env = Vec::new();
+        for (name, var) in &creds.header_env {
+            let h = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                McpError::Unreachable(format!(
+                    "the header name '{name}' configured for '{server}' is not a valid header name"
+                ))
+            })?;
+            header_env.push((h, var.clone()));
+        }
         Ok(HttpConnection {
             server: server.to_string(),
             client,
             url: url.to_string(),
-            auth,
+            auth: auth_header,
+            bearer_env: creds.bearer_env.clone(),
+            header_env,
             session: None,
             protocol: None,
         })
@@ -147,7 +236,7 @@ impl HttpConnection {
         self.protocol = Some(version.to_string());
     }
 
-    fn headers(&self) -> HeaderMap {
+    fn headers(&self) -> Result<HeaderMap, McpError> {
         let mut h = HeaderMap::new();
         h.insert(
             ACCEPT,
@@ -155,6 +244,16 @@ impl HttpConnection {
         );
         if let Some(a) = &self.auth {
             h.insert(AUTHORIZATION, a.clone());
+        }
+        // NAMED credentials are read NOW, per message, so a rotated value is picked up by the
+        // next call and nothing here holds one between calls.
+        if let Some(var) = &self.bearer_env {
+            let v = self.read_var(var)?;
+            h.insert(AUTHORIZATION, self.sensitive(&format!("Bearer {v}"), var)?);
+        }
+        for (name, var) in &self.header_env {
+            let v = self.read_var(var)?;
+            h.insert(name.clone(), self.sensitive(&v, var)?);
         }
         // Both were checked to be visible ASCII when they arrived, so neither can fail here.
         if let Some(s) = self
@@ -171,15 +270,40 @@ impl HttpConnection {
         {
             h.insert(PROTOCOL_HEADER, p);
         }
-        h
+        Ok(h)
     }
 
-    fn post(&self, body: &str) -> reqwest::RequestBuilder {
-        self.client
+    /// One named variable's value. The error names the variable and the server, never a value.
+    fn read_var(&self, var: &str) -> Result<String, McpError> {
+        std::env::var(var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                McpError::Unreachable(format!(
+                    "the credential variable {var} for '{}' is unset",
+                    self.server
+                ))
+            })
+    }
+
+    fn sensitive(&self, value: &str, var: &str) -> Result<HeaderValue, McpError> {
+        let mut v = HeaderValue::from_str(value).map_err(|_| {
+            McpError::Unreachable(format!(
+                "the value of {var} for '{}' is not a valid header value",
+                self.server
+            ))
+        })?;
+        v.set_sensitive(true);
+        Ok(v)
+    }
+
+    fn post(&self, body: &str) -> Result<reqwest::RequestBuilder, McpError> {
+        Ok(self
+            .client
             .post(&self.url)
-            .headers(self.headers())
+            .headers(self.headers()?)
             .header(CONTENT_TYPE, "application/json")
-            .body(body.to_string())
+            .body(body.to_string()))
     }
 
     /// One request and its reply, under one deadline that covers the whole exchange.
@@ -204,7 +328,7 @@ impl HttpConnection {
         method: &str,
     ) -> Result<Value, McpError> {
         let resp = self
-            .post(body)
+            .post(body)?
             .send()
             .await
             .map_err(|e| self.unreachable(&e))?;
@@ -240,7 +364,7 @@ impl HttpConnection {
     pub(crate) async fn notify(&mut self, body: &str, deadline: Instant) -> Result<(), McpError> {
         let send = async {
             let resp = self
-                .post(body)
+                .post(body)?
                 .send()
                 .await
                 .map_err(|e| self.unreachable(&e))?;
@@ -260,7 +384,11 @@ impl HttpConnection {
         if self.session.is_none() {
             return;
         }
-        let req = self.client.delete(&self.url).headers(self.headers());
+        let Ok(headers) = self.headers() else {
+            self.session = None;
+            return;
+        };
+        let req = self.client.delete(&self.url).headers(headers);
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, req.send()).await;
         self.session = None;
     }
@@ -269,7 +397,7 @@ impl HttpConnection {
     /// request to send, or `None` when there is no session to end.
     pub(crate) fn close_request(&self) -> Option<reqwest::RequestBuilder> {
         self.session.as_ref()?;
-        Some(self.client.delete(&self.url).headers(self.headers()))
+        Some(self.client.delete(&self.url).headers(self.headers().ok()?))
     }
 
     fn check_status(&self, resp: &reqwest::Response) -> Result<(), McpError> {

@@ -35,6 +35,8 @@ model, so diagnostics still see unarmed entries.
 - **The non-streaming record** (`NonStreamingModelStore.record`) now reads the full model list
   rather than `offered`, so hiding a model from the picker changes nothing about what the
   transcript knows of a model's shape.
+- **The Settings footer** on iPhone and Mac now says only configured models are listed and an
+  unreachable one is shown disabled, instead of "unreachable or not yet configured".
 - **Docs:** the doc comments in both Settings views, both thread pickers and `ModelInfo`, and
   the model section of `jesse.example.toml`, now say an unconfigured model is hidden.
 - **Tests:** `testOnlyConfiguredModelsAreOfferedAndAnUnreachableOneStaysDisabled` (a healthy

@@ -291,7 +291,7 @@ struct MacSettingsView: View {
         } header: {
             Text("Default model for new conversations")
         } footer: {
-            Text("Sets which model NEW conversations on this Mac start on. Each conversation keeps its own choice — change it from the picker inside a conversation — and this is per device, so your Mac and phone can differ. The background helpers (titles, diet, vault lookups) are unaffected. A non-default model reads your vault but can't write it until you enable writes for it. A model that is unreachable or not yet configured is shown disabled.")
+            Text("Sets which model NEW conversations on this Mac start on. Each conversation keeps its own choice — change it from the picker inside a conversation — and this is per device, so your Mac and phone can differ. The background helpers (titles, diet, vault lookups) are unaffected. A non-default model reads your vault but can't write it until you enable writes for it. Only models the bridge has configured are listed; one that is unreachable is shown disabled.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         // Poll on appear and every `modelPollInterval` while Settings is open; SwiftUI cancels

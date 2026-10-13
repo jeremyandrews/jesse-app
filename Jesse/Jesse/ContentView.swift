@@ -1058,7 +1058,7 @@ struct SettingsView: View {
         } header: {
             Text("Default model for new conversations")
         } footer: {
-            Text("Sets which model NEW conversations on this device start on (and the sub-agents it runs). Each conversation keeps its own choice — change it from the picker inside a conversation — and this is per device, so your phone and Mac can differ. The cheap background helpers — titles, diet logging, vault lookups — are unaffected. A non-default model can read your vault but not write it until you enable writes for it. A model that is unreachable or not yet configured is shown disabled.")
+            Text("Sets which model NEW conversations on this device start on (and the sub-agents it runs). Each conversation keeps its own choice — change it from the picker inside a conversation — and this is per device, so your phone and Mac can differ. The cheap background helpers — titles, diet logging, vault lookups — are unaffected. A non-default model can read your vault but not write it until you enable writes for it. Only models the bridge has configured are listed; one that is unreachable is shown disabled.")
         }
         // Poll on appear AND on a light interval WHILE this settings screen is visible, so a
         // model going healthy/unhealthy shows up live. The `.task` is cancelled when the view

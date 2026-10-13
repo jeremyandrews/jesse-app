@@ -14,6 +14,41 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (194)] - 2026-10-13
+
+**A file Jesse returned, opened on the phone, always has a way to close.** Root cause: a chip
+opened a `QLPreviewController` embedded as the child of a SwiftUI sheet, and QuickLook draws
+its navigation bar (close, title, share) only when UIKit presents it, so the sheet showed the
+document and no control at all; the sheet also ignored the safe area, so its grabber sat under
+a scrolling PDF or web page that took every downward drag. With no button and no swipe, the
+only way back to the conversation was a force quit.
+
+- **QuickLook is presented by UIKit, under the app's own Done.** A zero sized
+  `QuickLookPresenter` presents the controller as the root of a navigation controller in a
+  page sheet, with a Done bar button the app owns; QuickLook still supplies the file's display
+  name as the title, and share. `.ignoresSafeArea()` is gone from the preview path.
+- **Why not QuickLook's own close control.** Presented directly, QuickLook draws an xmark,
+  but it ignores a tap while an HTML preview is still loading (every try in the simulator:
+  the first tap did nothing, a tap after the page appeared worked). The app's Done works the
+  moment the sheet is up.
+- **The swipe down works.** The page sheet supplies it, starting on the sheet's bar:
+  QuickLook draws the document out of process and keeps a drag that starts on the page.
+- **The same chip opens again.** The preview state is cleared on either exit (Done, and the
+  swipe, which UIKit reports through the presentation controller's delegate), so a second
+  tap is not a no change assignment SwiftUI ignores.
+- **Full screen pictures** (PNG, JPEG, SVG) keep Done, now on a navigation bar that always
+  draws its own dark background (in light mode the title was black on the near black
+  backdrop), and gain a swipe down that dismisses at minimum zoom; zoomed in, a drag still
+  pans.
+- **An inline SVG can be opened at all.** Its web view has user interaction off so the
+  transcript keeps the drag, which left a tap on the drawing nothing to land on; a clear hit
+  target over it lets the tap through. The SVG sandbox is unchanged.
+- **Tests:** `ArtifactViewerUITests` (PDF, HTML, PNG and SVG, each opened, its content
+  rendered, then closed with Done and with a swipe down, and the same chip and picture
+  reopened; 9 of the 10 fail on the previous build), driven by a DEBUG
+  only `ArtifactViewerUITestSeam` that seeds a conversation with the four files already in the
+  artifact cache.
+
 ## [App 1.0 (193)] - 2026-10-13
 
 **The model picker lists only the models the bridge has configured.** Root cause:

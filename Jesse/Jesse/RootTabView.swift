@@ -257,6 +257,8 @@ struct RootTabView: View {
             ThreadLandingUITestSeam.arm(context: context)
             // The same, for the transcript folds' screenshots (see `TranscriptFoldUITestSeam`).
             TranscriptFoldUITestSeam.arm(context: context)
+            // The same, for the returned-file viewers (see `ArtifactViewerUITestSeam`).
+            ArtifactViewerUITestSeam.arm(context: context)
             buildTheReplayer()
             todayModel.refreshPending()
             healthModel.refreshPending()

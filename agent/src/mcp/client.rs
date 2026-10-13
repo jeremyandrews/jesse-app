@@ -80,6 +80,26 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// a server logs this line and a server's log is not a place to put deployment facts.
 pub const CLIENT_NAME: &str = "jesse-agent";
 
+/// What a client calls itself in `initialize`: [`CLIENT_NAME`] and this crate's version unless
+/// a host that RELAYS another client's session says otherwise (0.14.0). The bridge's gateway
+/// starts an upstream on behalf of an agent child and passes that child's own `clientInfo`
+/// through, so a server that decides whom to trust by client name (the iMCP app does) sees the
+/// same client it always has. A name, not a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInfo {
+    pub name: String,
+    pub version: String,
+}
+
+impl Default for ClientInfo {
+    fn default() -> ClientInfo {
+        ClientInfo {
+            name: CLIENT_NAME.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
 /// How many `tools/list` pages will be followed before the server is called out of spec.
 ///
 /// A server that returns a `nextCursor` forever is not paginating, it is looping, and a
@@ -275,7 +295,17 @@ impl McpClient {
         per_call: Duration,
         connect_timeout: Duration,
     ) -> Result<McpClient, McpError> {
-        McpClient::connect_logging(name, command, args, env, per_call, connect_timeout, None).await
+        McpClient::connect_logging(
+            name,
+            command,
+            args,
+            env,
+            per_call,
+            connect_timeout,
+            None,
+            &ClientInfo::default(),
+        )
+        .await
     }
 
     /// [`McpClient::connect`], with every stderr line ALSO handed to `log` as it is drained
@@ -289,6 +319,7 @@ impl McpClient {
         per_call: Duration,
         connect_timeout: Duration,
         log: Option<StderrLog>,
+        identity: &ClientInfo,
     ) -> Result<McpClient, McpError> {
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -361,7 +392,7 @@ impl McpClient {
             death: Mutex::new(None),
             pid,
         };
-        client.handshake(connect_timeout).await
+        client.handshake(connect_timeout, identity).await
     }
 
     /// Open a session with a Streamable HTTP server, negotiate, and return a client ready for
@@ -387,7 +418,15 @@ impl McpClient {
             ca_pem: ca_pem.map(<[u8]>::to_vec),
             ..HttpAuth::default()
         };
-        McpClient::connect_http_with(name, url, &auth, per_call, connect_timeout).await
+        McpClient::connect_http_with(
+            name,
+            url,
+            &auth,
+            per_call,
+            connect_timeout,
+            &ClientInfo::default(),
+        )
+        .await
     }
 
     /// [`McpClient::connect_http`] with the whole of [`HttpAuth`]: a bearer or any header read
@@ -398,6 +437,7 @@ impl McpClient {
         auth: &HttpAuth,
         per_call: Duration,
         connect_timeout: Duration,
+        identity: &ClientInfo,
     ) -> Result<McpClient, McpError> {
         let conn = HttpConnection::new(name, url, auth, connect_timeout)?;
         let client = McpClient {
@@ -411,11 +451,15 @@ impl McpClient {
             death: Mutex::new(None),
             pid: None,
         };
-        client.handshake(connect_timeout).await
+        client.handshake(connect_timeout, identity).await
     }
 
     /// `initialize`, the capability check, and `notifications/initialized`, on either wire.
-    async fn handshake(mut self, connect_timeout: Duration) -> Result<McpClient, McpError> {
+    async fn handshake(
+        mut self,
+        connect_timeout: Duration,
+        info: &ClientInfo,
+    ) -> Result<McpClient, McpError> {
         let client = &mut self;
         let result = client
             .request_with_timeout(
@@ -426,7 +470,7 @@ impl McpClient {
                     // elicitation. A conforming server may not ask this client for any of
                     // them, and a non-conforming one gets a protocol error.
                     "capabilities": {},
-                    "clientInfo": {"name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION")},
+                    "clientInfo": {"name": info.name, "version": info.version},
                 }),
                 connect_timeout,
             )

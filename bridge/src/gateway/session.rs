@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use jesse_agent::mcp::{HttpAuth, McpClient, MutualTls};
+use jesse_agent::mcp::{ClientInfo, HttpAuth, McpClient, MutualTls};
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
 
@@ -92,6 +92,10 @@ pub struct TurnSession {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Live HTTP session ids handed out on `initialize`, per server.
     http_sessions: Mutex<HashMap<String, String>>,
+    /// The `clientInfo` each server's downstream client named in its `initialize`, relayed to
+    /// the upstream when it starts: a server that trusts clients by name (the iMCP app) then
+    /// sees the same client it saw before the gateway. A name, never a credential.
+    client_info: Mutex<HashMap<String, ClientInfo>>,
 }
 
 impl std::fmt::Debug for TurnSession {
@@ -131,6 +135,7 @@ impl TurnSession {
             pgids: Mutex::new(Vec::new()),
             tasks: Mutex::new(Vec::new()),
             http_sessions: Mutex::new(HashMap::new()),
+            client_info: Mutex::new(HashMap::new()),
         }
     }
 
@@ -219,6 +224,30 @@ impl TurnSession {
         };
         match method {
             "initialize" => {
+                // WHO IS ASKING, kept for the upstream's own `initialize` (see `client_info`).
+                // Bounded and printable, or ignored.
+                let ci = &msg["params"]["clientInfo"];
+                let printable = |v: &Value| {
+                    v.as_str()
+                        .filter(|s| {
+                            !s.is_empty()
+                                && s.len() <= 64
+                                && s.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+                        })
+                        .map(str::to_string)
+                };
+                if let Some(name) = printable(&ci["name"]) {
+                    self.client_info
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(
+                            server.to_string(),
+                            ClientInfo {
+                                name,
+                                version: printable(&ci["version"]).unwrap_or_default(),
+                            },
+                        );
+                }
                 // The client's requested version is echoed: the subset's three requests have
                 // the same shape in every published version.
                 let version = msg["params"]["protocolVersion"]
@@ -397,6 +426,13 @@ impl TurnSession {
             .ok_or_else(|| format!("'{server}' is not admitted"))?;
         let r = &a.server;
         let gw = &self.gateway;
+        let identity = self
+            .client_info
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(server)
+            .cloned()
+            .unwrap_or_default();
         match r.transport {
             Transport::InProcess => gw
                 .in_process
@@ -419,13 +455,15 @@ impl TurnSession {
                 if let (Some(var), Some(v)) = (r.row.harness_env, &self.harness_env_value) {
                     env.insert(var.to_string(), v.clone());
                 }
-                let c = McpClient::connect(
+                let c = McpClient::connect_logging(
                     server,
                     &r.command,
                     &r.args,
                     &env,
                     gw.call_timeout,
                     gw.connect_timeout,
+                    None,
+                    &identity,
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -470,6 +508,7 @@ impl TurnSession {
                     &auth,
                     gw.call_timeout,
                     gw.connect_timeout,
+                    &identity,
                 )
                 .await
                 .map_err(|e| e.to_string())?;

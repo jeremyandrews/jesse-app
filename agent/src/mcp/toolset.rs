@@ -468,8 +468,15 @@ impl McpToolSet {
                         ca_pem: ca_pem.as_ref().map(|p| p.0.clone()),
                         mtls: named.mtls.clone(),
                     };
-                    McpClient::connect_http_with(&g.name, url, &auth, call_timeout, connect_timeout)
-                        .await
+                    McpClient::connect_http_with(
+                        &g.name,
+                        url,
+                        &auth,
+                        call_timeout,
+                        connect_timeout,
+                        &crate::mcp::ClientInfo::default(),
+                    )
+                    .await
                 }
             };
             let client = match connected {

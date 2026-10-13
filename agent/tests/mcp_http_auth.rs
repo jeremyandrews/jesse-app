@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use jesse_agent::mcp::{HttpAuth, McpClient, MutualTls};
+use jesse_agent::mcp::{ClientInfo, HttpAuth, McpClient, MutualTls};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -129,7 +129,7 @@ async fn a_named_bearer_and_a_named_header_are_read_from_their_variables_on_ever
         header_env: vec![("x-api-key".into(), "JESSE_TEST_NAMED_APIKEY_81f2".into())],
         ..HttpAuth::default()
     };
-    let c = McpClient::connect_http_with("named", &url, &auth, T, T)
+    let c = McpClient::connect_http_with("named", &url, &auth, T, T, &ClientInfo::default())
         .await
         .expect("connects");
     // A ROTATED VALUE is picked up by the next message: read at call time, not at connect.
@@ -162,7 +162,7 @@ async fn an_unset_credential_variable_fails_the_message_and_names_only_the_varia
         header_env: vec![("x-api-key".into(), "JESSE_TEST_UNSET_VAR_c03e".into())],
         ..HttpAuth::default()
     };
-    let err = McpClient::connect_http_with("unset", &url, &auth, T, T)
+    let err = McpClient::connect_http_with("unset", &url, &auth, T, T, &ClientInfo::default())
         .await
         .expect_err("no value, no request");
     let text = err.to_string();
@@ -312,7 +312,7 @@ async fn mutual_tls_presents_the_client_certificate_and_pins_the_server_ca() {
         }),
         ..HttpAuth::default()
     };
-    let c = McpClient::connect_http_with("mac", &url, &auth, T, T)
+    let c = McpClient::connect_http_with("mac", &url, &auth, T, T, &ClientInfo::default())
         .await
         .expect("an issued client certificate is accepted");
     let out = c.call_tool("ping", json!({})).await.expect("calls");
@@ -330,7 +330,7 @@ async fn without_a_client_certificate_the_server_refuses_the_handshake() {
         ca_pem: Some(ca),
         ..HttpAuth::default()
     };
-    McpClient::connect_http_with("mac", &url, &auth, T, T)
+    McpClient::connect_http_with("mac", &url, &auth, T, T, &ClientInfo::default())
         .await
         .expect_err("no client certificate, no session");
     assert!(log.lock().unwrap().is_empty(), "no request got through");
@@ -352,7 +352,7 @@ async fn a_server_certificate_from_another_ca_is_refused_by_the_pin() {
         }),
         ..HttpAuth::default()
     };
-    McpClient::connect_http_with("mac", &url, &auth, T, T)
+    McpClient::connect_http_with("mac", &url, &auth, T, T, &ClientInfo::default())
         .await
         .expect_err("the pin refuses a server from another CA");
     assert!(log.lock().unwrap().is_empty());

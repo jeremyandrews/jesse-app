@@ -344,6 +344,8 @@ async fn three_upstreams_from_one_turn_reach_only_granted_tools() {
 
     // THE UPSTREAMS' OWN ACCOUNTS.
     assert_eq!(read(&dir.join("stdio.log")), "probe_echo\n");
+    // The child's own client name reached the upstream, not the gateway's.
+    assert_eq!(read(&dir.join("stdio.env.client")), "t");
     assert_eq!(read(&dir.join("http.log")), "probe_echo\n");
     assert_eq!(
         *inproc.calls.lock().unwrap(),

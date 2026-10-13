@@ -11,6 +11,8 @@
 //!     one `NAME=value` per line. A probe that the bridge's secrets stayed in the bridge reads
 //!     this file and finds no planted nonce.
 //!
+//! At `initialize` it also writes the `clientInfo` name it was given to `<dump>.client`.
+//!
 //! Both arrive by NAME through the gateway's environment column (they are the probe row's
 //! `env`), which is itself part of what is being shown: a named variable reaches the
 //! upstream, and an unnamed one does not.
@@ -24,7 +26,8 @@ const HIDDEN_CANARY: &str = "CANARY-GATEWAY-HIDDEN-9d41c6e2a07b";
 
 fn main() {
     let log = std::env::var("JESSE_GWPROBE_LOG").ok();
-    if let Ok(path) = std::env::var("JESSE_GWPROBE_ENV_DUMP") {
+    let dump = std::env::var("JESSE_GWPROBE_ENV_DUMP").ok();
+    if let Some(path) = &dump {
         let dump: String = std::env::vars()
             .map(|(k, v)| format!("{k}={v}\n"))
             .collect();
@@ -40,6 +43,14 @@ fn main() {
             continue;
         };
         let method = msg["method"].as_str().unwrap_or("");
+        if method == "initialize" {
+            // The client name it was introduced to, beside the dump, so a test can see the
+            // gateway relay the child's own `clientInfo`.
+            if let Some(path) = &dump {
+                let name = msg["params"]["clientInfo"]["name"].as_str().unwrap_or("");
+                let _ = std::fs::write(format!("{path}.client"), name);
+            }
+        }
         let result = match method {
             "initialize" => serde_json::json!({
                 "protocolVersion": "2025-06-18",

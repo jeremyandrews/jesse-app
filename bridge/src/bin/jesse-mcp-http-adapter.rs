@@ -34,7 +34,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use jesse_agent::mcp::{McpClient, StderrLog, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT};
+use jesse_agent::mcp::{
+    ClientInfo, McpClient, StderrLog, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
+};
 use serde_json::{json, Value};
 
 const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
@@ -137,6 +139,7 @@ impl Adapter {
             DEFAULT_CALL_TIMEOUT,
             DEFAULT_CONNECT_TIMEOUT,
             Some(log),
+            &ClientInfo::default(),
         )
         .await
         .map_err(|e| e.to_string())?;

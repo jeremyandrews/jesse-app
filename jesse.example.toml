@@ -254,6 +254,35 @@ Answer the question I asked, not the one you wish I had asked.
 # mirror_diet = true
 # ro_url_file = "/path/to/healthdb-ro-url"
 
+# -----------------------------------------------------------------------------
+# [gateway]: the tool gateway (optional, OFF by default)
+# -----------------------------------------------------------------------------
+#
+# With `enabled = true` the bridge brokers every MCP call: each child is handed a credential-free
+# stub (`jesse-gateway-mcp`) per server, under the server's own name, and its environment is
+# cleared; the bridge starts or calls each upstream itself with only the variable names its row
+# lists. Off means exactly the behaviour before 0.177.0. Rollback is `false` and a restart.
+# See SECURITY.md ("The tool gateway") and bridge/README.md.
+#
+# listen (optional): host:port for the token-checked TCP listener (`POST /mcp/<server>`). Off when
+#   absent; the Studio does not set it.
+# child_url (optional): hand children `--url <child_url> --token-file <path>` instead of a socket.
+# socket_dir (optional): where the per-turn `0700` socket directories go; default <state_dir>/gw.
+# stub (optional): the stub's path; default beside the bridge binary, then PATH. Missing is fatal.
+#
+# [gateway]
+# enabled = true
+#
+# [mcp.<name>]: per-deployment overrides of one server row, read only while the gateway is on:
+#   transport = "bridge_stdio" | "http", url, placement = "gateway" | "child" (qmd only), and at
+#   most one of bearer_env = "VAR", header_env = { "header" = "VAR" }, client_cert = "<name>"
+#   (a [gateway.client_certs.<name>] table with cert_file, key_file and ca_file).
+#
+# [mcp.slack]
+# transport = "http"
+# url = "http://slack-mcp.jesse:8080/mcp"
+# bearer_env = "SLACK_ADAPTER_TOKEN"
+
 # =============================================================================
 # [[models]] — the global model switch's registry (declarative, operator-configurable)
 # =============================================================================

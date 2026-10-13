@@ -1,0 +1,36 @@
+# K03: the `glm-direct` cell with the tool gateway ON. Generated from
+# `../glm-direct.toml` (copied below unchanged) plus the [gateway] table.
+#
+# `socket_dir` is short and per cell: the scratch state dir is too deep for a unix socket
+# path, and each scratch bridge's startup sweep empties its own socket_dir.
+
+# Arms `glm-direct` for a jesse-eval bridge run: GLM on Fireworks, on the DIRECT harness (the
+# bridge's in-process agent loop) over the OpenAI chat wire. The deployment has no such
+# entry, because its `glm` runs on claude-code; this one exists so the baseline has a
+# Fireworks cell on `direct`. Same key as `glm`: pass `--pass-env JESSE_MODEL_GLM_AUTH_TOKEN`.
+#
+# `base_url` is the API ROOT the chat wire appends `/chat/completions` to.
+[[models]]
+id = "glm-direct"
+family = "GLM"
+version = "5.3 (direct)"
+kind = "hosted"
+harness = "direct"
+wire = "chat"
+base_url = "https://api.fireworks.ai/inference/v1"
+model = "accounts/fireworks/models/glm-5p3"
+auth_token_env = "JESSE_MODEL_GLM_AUTH_TOKEN"
+price = { in_per_m = 1.40, cached_per_m = 0.26, out_per_m = 4.40 }
+health = { timeout_secs = 15 }
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-eval-glm-direct"
+
+# A direct turn reaches iMCP as `jesse-agent`, a client name the iMCP app has not been
+# asked to trust, and the app answers a new name with an on-screen approval prompt. An
+# unattended eval must not raise one, so iMCP is pointed at a closed port for these cells:
+# its two tools are absent, and no workflows-v1 task uses them.
+[mcp.imcp]
+transport = "http"
+url = "http://127.0.0.1:9/mcp"

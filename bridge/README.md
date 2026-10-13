@@ -696,6 +696,52 @@ To run a battery with the server registered, point `JESSE_CONFIG` at a config wi
 the battery renders each child exactly as the bridge does, so without it the battery records
 the row minus `house`. See [SECURITY.md](../SECURITY.md#house-model-spatial-reads-and-writes-2026-10-10).
 
+### The tool gateway (`[gateway]`, 0.177.0)
+
+Off by default. With it on, the bridge brokers every MCP call and a child holds no MCP
+credential; SECURITY.md has the posture and the per-server table, `src/gateway/` the code and
+`src/mcpservers.rs` the server table everything is derived from.
+
+```toml
+[gateway]
+enabled = true                 # default false: every child exactly as before 0.177.0
+# listen = "0.0.0.0:7443"      # the token-checked TCP listener; OFF unless set
+# child_url = "http://bridge.jesse:7443"   # hand children a URL and a token file, not a socket
+# socket_dir = "/tmp/jesse-gw" # when <state_dir>/gw would make a socket path over 103 bytes
+# stub = "/path/to/jesse-gateway-mcp"      # default: beside the bridge binary, then PATH
+
+# Per-deployment row overrides, read only while the gateway is on.
+[mcp.slack]
+transport = "http"
+url = "http://slack-mcp.jesse:8080/mcp"
+bearer_env = "SLACK_ADAPTER_TOKEN"
+# header_env = { "x-api-key" = "SOME_VAR" }   # or a named header
+# client_cert = "mac"                          # or mutual TLS, from [gateway.client_certs.mac]
+```
+
+- **Rollback** is `enabled = false` and a restart. The flag changes no `capability_args`, so no
+  containment record moves with it.
+- **A missing stub is fatal** when the flag is on (`validate_gateway`), as is an override that
+  does not resolve. `GET /health` reports `gateway: "on"|"off"` and, when on,
+  `gateway_upstreams`: each server's transport, placement and whether it can be reached.
+- **Per turn** the bridge mints a token, binds `<socket_dir>/<job_id>/<server>.sock` (dir
+  `0700`), rewrites the child's `--mcp-config` (or Codex `-c mcp_servers.*`) so each gateway
+  server is `jesse-gateway-mcp --upstream <name> --socket <path>`, and clears the child's
+  environment. A Claude Code child also gets `MCP_SERVER_CONNECTION_BATCH_SIZE=64`: every stub
+  is a local server to the CLI, which connects those three at a time by default and starts the
+  turn without the ones still waiting. Upstreams start lazily, in their own process groups; at turn end they are killed
+  by group and the directory is removed.
+- **The TCP listener** routes `POST /mcp/<server>` (Streamable HTTP, JSON responses) by the turn
+  token in `Authorization: Bearer`. It exists for the cluster, where turn pods cannot share a
+  socket with the bridge; the Studio does not set it.
+- **`jesse-mcp-http-adapter`** runs one third-party stdio server and serves it over Streamable
+  HTTP: `--listen`, `--name`, `--bearer-env` (required on every request), `--allow-tool`
+  (repeatable; nothing else is listed or callable), `--pass-env` (repeatable; the child's whole
+  environment), `--max-result-bytes`, then `-- <command> [args…]`. It is how a vendor server
+  becomes a pod; point a row at it with an `[mcp.<name>]` override.
+- **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
+  turn and per gateway call, kept 90 days.
+
 ### How `claude` is run
 
 The bridge runs the turn as:

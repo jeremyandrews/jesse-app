@@ -191,6 +191,107 @@ The residual risks this harness does **not** remove: it runs as the same unix us
 bridge, so a bug in the path jail would have that user's reach; and its provider calls carry
 vault content to whatever endpoint the model names, exactly as every other harness's do.
 
+## The tool gateway (0.177.0; off by default)
+
+`[gateway] enabled = true` in the bridge TOML moves every MCP call into the bridge. With it
+off (the default, and the Studio's posture until the flag is flipped) nothing below runs and
+every child is spawned exactly as before 0.177.0, including the leak described under
+"Residuals". `bridge/src/gateway/` is the code; `bridge/src/mcpservers.rs` is the one table
+every server is a row of.
+
+### What runs where
+
+| Piece | Runs as | Holds |
+|---|---|---|
+| The bridge (`jesse-bridge`) | the launchd service | every credential, as before; the gateway's token key (generated at boot, memory only) |
+| The agent child (`claude -p`, `codex app-server`) | spawned per turn | **no MCP credential**: its environment is cleared to `PATH HOME TMPDIR LANG TZ USER LOGNAME SHELL` (`CHILD_ENV_PASSTHROUGH`) before the harness sets its own model variables and `CODEX_HOME` (and, for Claude Code, `MCP_SERVER_CONNECTION_BATCH_SIZE=64`: every gateway server is a local stub to the CLI, which otherwise connects local servers three at a time and starts the turn without the ones still queued) |
+| The stub (`jesse-gateway-mcp`), one per gateway server | started by the child under the server's own name | nothing: no environment variable is read; it holds one socket path (or, in the cluster, a URL and the contents of a token file) |
+| A `bridge_stdio` upstream (`slack`, `google`, `build`, …) | started by the bridge on the turn's first `tools/list` or `tools/call` for it, in its own process group | `env_clear()` plus `PATH HOME TMPDIR LANG TZ` plus exactly the names in its row (below) |
+| An `http` upstream (`homeassistant`, `rybbit`, `tag1`, `roon`, `house`) | called by the bridge | nothing of the bridge's: the bridge reads the bearer, named headers or client certificate when it calls |
+| `qmd` (placement `child`) | started by the child, as before | no credential; it reads a local index |
+
+`direct` turns get the same servers in-process, through the same session code with no socket.
+
+### What each upstream receives (names only)
+
+| Server | Transport | Variables (beside `PATH HOME TMPDIR LANG TZ`) or credential |
+|---|---|---|
+| slack | bridge_stdio | `SLACK_MCP_XOXP_TOKEN` |
+| browser | bridge_stdio | none |
+| homeassistant | http | bearer from `HA_MCP_TOKEN` |
+| roon | http | none |
+| google | bridge_stdio | `GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET WORKSPACE_MCP_CREDENTIALS_DIR WORKSPACE_ATTACHMENT_DIR USER_GOOGLE_EMAIL` |
+| github | bridge_stdio | `GITHUB_PERSONAL_ACCESS_TOKEN` |
+| fastmail | bridge_stdio | `JMAP_TOKEN JMAP_SESSION_URL` |
+| unifi | bridge_stdio | `UNIFI_USERNAME UNIFI_PASSWORD UNIFI_HOST UNIFI_PORT UNIFI_CONTROLLER_TYPE UNIFI_VERIFY_SSL UNIFI_SITE` |
+| routeros | bridge_stdio | `ROUTEROS_DEVICES_CONFIG ROUTEROS_SSH_PORT` |
+| proxmox | bridge_stdio | none (its launcher reads its own `.env`) |
+| whatsapp | bridge_stdio | none |
+| imcp | bridge_stdio | none (Bonjour to the iMCP app) |
+| google-perseido | bridge_stdio | none (its launcher points at its own credentials) |
+| build | bridge_stdio | `JESSE_VAULT` |
+| places | bridge_stdio | the fourteen `JESSE_PLACES_*` names and `JESSE_STATE_DIR` |
+| inbound | bridge_stdio | `JESSE_VAULT`, the `JESSE_INBOUND_*`, `JESSE_VISION_*`, `WORKSPACE_MCP_CREDENTIALS_DIR`, `JMAP_SESSION_URL`, `JMAP_TOKEN`; `JESSE_INBOUND_HARNESS` set to the turn's harness id |
+| kubernetes | bridge_stdio | none (its launcher supplies the kubeconfig) |
+| rybbit | http | bearer from `RYBBIT_API_KEY` |
+| tag1 | http | none |
+| plex | bridge_stdio | none (`plex-mcp` reads `~/.config/jesse-plex/plex.env`) |
+| house | http | bearer from `[house] token_file` (`JESSE_HOUSE_TOKEN`), extra CA from `[house] ca_file` |
+| healthdb | bridge_stdio | `JESSE_HEALTHDB_RO_URL_FILE JESSE_HEALTHDB_CA_FILE JESSE_HEALTHDB_MCP_LEDGER` (paths) |
+| clockify-rs | bridge_stdio | `JESSE_CLOCKIFY_API_KEY` |
+| qmd | child | none |
+
+The sets were measured by starting each server with a stripped environment (2026-10-13): every
+row without a variable listed and answered a read call with none; `google` without its four
+fails every call and `slack` without its token does not start.
+
+### The subset, the grant, and the token
+
+The gateway serves `initialize`, `notifications/initialized`, `tools/list` and `tools/call`,
+nothing else; any other message closes the session. `tools/list` is the intersection of what
+the upstream advertises and what the turn's allowlist grants (the same `--allowedTools` /
+`enabled_tools` string as before, so `capability_args` did not move); a `tools/call` for any
+other name is refused by exact match and never reaches the upstream. The stub forwards only
+the four and answers any other request itself with method-not-found (Claude Code 2.1.296 opens
+every server with `server/discover`).
+
+Each turn gets a token: an HMAC-SHA256 over the job id, the capability, the granted server set,
+a tier field (empty) and an expiry of the turn deadline plus 60 s, under a key generated at boot
+and never written down. The unix socket path is the Studio's access control (a `0700` directory
+per turn under `<state_dir>/gw/`, or `[gateway] socket_dir`). The optional TCP listener
+(`[gateway] listen`, off by default and never set on the Studio in this step) checks the token
+on every `POST /mcp/<server>`: signature, expiry, server in the granted set, and that the
+turn is still open and issued that exact token. A forged, expired, misdirected or revoked token
+is a 401 (`tests/gateway.rs`). At turn end every upstream is killed by process group, the token
+is revoked with its session, and the directory is removed; a startup sweep removes leftovers.
+
+### The activity ledger
+
+`<state_dir>/activity/YYYY-MM-DD.jsonl`, `0600`, one line per turn (`kind: "turn"`: job id,
+harness, model id, capability, origin `phone` or `schedule:<id>`, start, end, outcome) and per
+gateway call (`kind: "tool_call"`: job id, server, tool, duration, `ok`, `refused`, `failed` or
+`truncated`, request and response byte counts). Every string field is an identifier or the
+word `_invalid`; no field can hold an argument, a body or a URL path
+(`activity::tests::no_field_of_any_kind_can_carry_content`). Pruned at 90 days.
+
+### Residuals
+
+- **The bridge process holds everything.** The gateway moves credentials out of the agent's
+  reach, not out of the bridge's. A bridge compromise is every credential, as before.
+- **A `bridge_stdio` upstream is unsandboxed on the Studio.** It runs as the bridge's user with
+  its own credentials and whatever else that user can reach on disk. Its environment is the
+  only thing narrowed. Pods are the cluster's answer.
+- **With the gateway off, the leak stands.** Claude Code's MCP children still inherit the
+  bridge's whole environment, and npm rewriting its process title still puts that environment in
+  `ps` output. The separate launcher fix (a bridge-owned launcher that clears the environment and
+  takes secrets out of the bridge's global environment) had not merged when this shipped.
+- **iMCP trusts clients by name.** The gateway relays the child's own `clientInfo` to the upstream
+  it starts, so a Claude Code or Codex turn reaches iMCP as the client it always was. A `direct`
+  turn reaches it as `jesse-agent`, a name iMCP has not been asked to trust; approve it once in
+  the iMCP app before direct turns run with the gateway on, or the first one raises its prompt.
+- **Results are capped per server** (8 MiB, 32 MiB for `browser` and `house`); a larger result
+  is withheld as a tool error and recorded `truncated`.
+
 ## Agent tool allowlist (in-process boundary)
 
 The bridge launches `claude` with `--permission-mode default` plus an explicit

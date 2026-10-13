@@ -1,0 +1,26 @@
+# K03: the `codex-write` cell with the tool gateway ON. Generated from
+# `../codex-write.toml` (copied below unchanged) plus the [gateway] table.
+#
+# `socket_dir` is short and per cell: the scratch state dir is too deep for a unix socket
+# path, and each scratch bridge's startup sweep empties its own socket_dir.
+
+# Arms `codex-write` for a jesse-eval bridge run: the Codex harness at write, off the codex
+# CLI's own subscription login (`~/.codex`, which the bridge copies into a per-turn
+# CODEX_HOME under the scratch state dir). Mirrors the deployment's entry of the same id.
+#
+# `base_url` exists only so the startup health probe has a target that answers; the turn
+# itself never uses it. `auth_token_env` names the variable the probe authenticates with;
+# pass it through with `--pass-env JESSE_CODEX_TOKEN`.
+[[models]]
+id = "codex-write"
+label = "Codex (write)"
+kind = "hosted"
+base_url = "http://127.0.0.1:9100"
+model = "gpt-6-astra"
+auth_token_env = "JESSE_CODEX_TOKEN"
+harness = "codex"
+level = "write"
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-eval-codex-write"

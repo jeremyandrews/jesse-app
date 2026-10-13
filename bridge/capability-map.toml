@@ -17,6 +17,9 @@
 #                   `enabled_tools` (its shell and file edits are an OS sandbox, not grants);
 #                 * direct takes MCP tools only from a deployment's `[[direct.mcp]]` table
 #                   (stdio servers only), and the shipped posture and the Studio grant none.
+#                   With `[gateway] enabled` (0.177.0, off by default, so not reflected in the
+#                   rows below) direct also takes every gateway server's tools a main turn's
+#                   allowlist grants at its level, through the bridge's tool gateway.
 #               The full set reaches a main turn at the write level only: a read-level turn
 #               gets `READ_ALLOWED_TOOLS` (or `REPLIES_ALLOWED_TOOLS` for the brief child).
 #               An mcp row that does not list all three is a PARITY DEFECT, recorded as it

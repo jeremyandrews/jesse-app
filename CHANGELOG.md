@@ -14,6 +14,31 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (192)] - 2026-10-13
+
+**The automatic workout log lets the agent apply its standing inferences, above all the office
+treadmill walk.** Root cause: the app's fixed workout log message (`HealthWorkoutLog.prompt`)
+said "Never estimate a distance, a pace or an activity the watch did not record". That direct
+instruction in the turn overrode the agent's standing rule that a low heart rate "Other" watch
+session in office hours is the office treadmill walk at 5 km/h, so on 2026-10-07 and 2026-10-08
+those sessions were logged as "Other" with no distance and corrected by hand. The bridge does
+not change.
+
+- **The new wording.** Use the figures the device reported and never invent a distance, pace or
+  activity from nothing; the one exception is a standing inference the diet logging rules
+  already define, such as the office treadmill walk, applied without asking; every other
+  unmeasured field stays blank. Each row's notes now also say which fields, if any, were
+  inferred and from what. The thresholds stay on the agent side; the app only names that such
+  inferences exist.
+- **The doc comment gains a fourth property:** the prompt must not forbid the agent's standing
+  inferences.
+- **Queued turns from the old build are still held while the phone is locked.**
+  `HealthWorkoutLog.previousPrompts` keeps the exact old wording, and
+  `HealthContextLockHold.shouldHold` matches the current prompt or any earlier one.
+- **Tests:** the prompt keeps "do only this" and "exercise-log.csv", names the office treadmill
+  and no longer says "Never estimate"; a locked workout log in the old wording is held, and an
+  unlocked one is not.
+
 ## [Bridge 0.176.0] - 2026-10-13
 
 **Bridge turns have one Clockify server, `clockify-rs`, on both harnesses, and no bridge turn

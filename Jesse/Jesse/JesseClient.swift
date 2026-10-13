@@ -812,10 +812,15 @@ enum BridgeVersionStore {
 /// A workout log can be staged unlocked and sent later (an outbox retry, the capture queue
 /// replay), which is why this is asked at send time. It is recognized by its prompt text,
 /// because the replayed one is labeled `Automatic` rather than the workout log's own label.
+/// A turn staged by an older build carries that build's wording, so the earlier wordings in
+/// `HealthWorkoutLog.previousPrompts` are recognized too.
 nonisolated enum HealthContextLockHold {
     static func shouldHold(text: String, locked: Bool) -> Bool {
-        locked && text.trimmingCharacters(in: .whitespacesAndNewlines)
-            == HealthWorkoutLog.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard locked else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ([HealthWorkoutLog.prompt] + HealthWorkoutLog.previousPrompts).contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed
+        }
     }
 }
 

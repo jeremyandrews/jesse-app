@@ -805,6 +805,15 @@ final class HealthContextTests: XCTestCase {
         XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: true))
     }
 
+    /// A workout log staged by an older build and replayed after an upgrade carries the old
+    /// wording; it is held the same way.
+    func testALockedWorkoutLogInThePreviousWordingIsHeld() throws {
+        let old = try XCTUnwrap(HealthWorkoutLog.previousPrompts.first)
+        XCTAssertNotEqual(old, HealthWorkoutLog.prompt)
+        XCTAssertTrue(HealthContextLockHold.shouldHold(text: old, locked: true))
+        XCTAssertFalse(HealthContextLockHold.shouldHold(text: old, locked: false))
+    }
+
     // MARK: - Timeout
 
     func testTimeoutFastOperationReturnsItsValue() async {

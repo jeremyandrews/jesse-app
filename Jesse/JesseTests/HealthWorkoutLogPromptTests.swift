@@ -14,6 +14,17 @@ final class HealthWorkoutLogPromptTests: XCTestCase {
         XCTAssertTrue(HealthKeywordClassifier.matches(HealthWorkoutLog.prompt))
     }
 
+    /// The prompt keeps its scope and its diff, and leaves room for the agent's standing
+    /// inferences: the earlier "Never estimate" wording overrode the office treadmill rule.
+    func testWorkoutLogPromptAllowsStandingInferences() {
+        let p = HealthWorkoutLog.prompt
+        XCTAssertTrue(p.lowercased().contains("do only this"))
+        XCTAssertTrue(p.contains("exercise-log.csv"))
+        XCTAssertTrue(p.contains("office treadmill"))
+        XCTAssertFalse(p.contains("Never estimate"))
+        XCTAssertFalse(p.contains("\n"))
+    }
+
     /// The automatic weigh-in sends the button's own text, so it classifies the same way.
     @MainActor
     func testAutomaticWeighInPromptClassifiesAsHealth() {

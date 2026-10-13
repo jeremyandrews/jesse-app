@@ -1002,14 +1002,15 @@ struct SettingsView: View {
     /// default checked. Selecting a model here sets THIS device's default for NEW conversations
     /// only (`LastUsedModelStore`) — it never changes the bridge's global default and never
     /// touches an existing conversation (each thread keeps its own choice, changed from the
-    /// thread's own picker). An unavailable model is disabled with a short reason — "not
-    /// configured" or "unreachable" — so a health change shows live. Hidden until models load
+    /// thread's own picker). Only configured models are listed (`offered`); one that is
+    /// configured but unreachable is disabled with the reason "unreachable", so a health change
+    /// shows live. Hidden until models load
     /// (an older bridge has no route).
     @ViewBuilder
     private var modelSwitchSection: some View {
         Section {
             if let modelState {
-                ForEach(modelState.models) { model in
+                ForEach(modelState.offered) { model in
                     Button {
                         selectDefaultModel(model)
                     } label: {
@@ -1143,9 +1144,9 @@ struct SettingsView: View {
     /// each model may do.
     @ViewBuilder
     private var writeAccessSection: some View {
-        if let modelState, modelState.models.contains(where: { $0.available && !$0.isDefault }) {
+        if let modelState, modelState.offered.contains(where: { $0.available && !$0.isDefault }) {
             Section {
-                ForEach(modelState.models.filter { $0.available && !$0.isDefault }) { model in
+                ForEach(modelState.offered.filter { $0.available && !$0.isDefault }) { model in
                     HStack {
                         Text(model.label)
                         Spacer()

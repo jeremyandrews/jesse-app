@@ -1785,7 +1785,8 @@ private struct ModelPickerMenu: View {
 
     /// One family's rows. The resolved model carries the checkmark and, as secondary text, the
     /// harness and version it runs on — information, never a control. A disabled row still
-    /// explains WHY (not configured / unreachable): an outage must not look like a deletion.
+    /// explains WHY ("unreachable"): an outage must not look like a deletion. An unconfigured
+    /// model is never offered (`ModelSwitchState.offered`), so it has no row at all.
     @ViewBuilder
     private func rows(_ section: ModelMenuSection, in state: ModelSwitchState) -> some View {
         ForEach(section.rows) { row in

@@ -248,14 +248,14 @@ struct MacSettingsView: View {
     /// Selecting a model sets THIS Mac's default for NEW conversations only
     /// (`LastUsedModelStore`) — it never changes the bridge's global default and never touches
     /// an existing conversation (each thread keeps its own choice, changed from the thread's own
-    /// picker). An unavailable model is disabled with a short reason — "not configured" or
-    /// "unreachable" — and the list polls on a light interval while Settings is open so a health
-    /// change shows live.
+    /// picker). Only configured models are listed (`offered`); one that is configured but
+    /// unreachable is disabled with the reason "unreachable", and the list polls on a light
+    /// interval while Settings is open so a health change shows live.
     @ViewBuilder
     private var modelSwitchSection: some View {
         Section {
             if let modelState {
-                ForEach(modelState.models) { model in
+                ForEach(modelState.offered) { model in
                     Button {
                         selectDefaultModel(model)
                     } label: {
@@ -361,9 +361,9 @@ struct MacSettingsView: View {
     /// switcher still SHOWS what each model may do — see `ModelInfo.levelCaveat`.
     @ViewBuilder
     private var writeAccessSection: some View {
-        if let modelState, modelState.models.contains(where: { $0.available && !$0.isDefault }) {
+        if let modelState, modelState.offered.contains(where: { $0.available && !$0.isDefault }) {
             Section {
-                ForEach(modelState.models.filter { $0.available && !$0.isDefault }) { model in
+                ForEach(modelState.offered.filter { $0.available && !$0.isDefault }) { model in
                     HStack {
                         Text(model.label)
                         Spacer()

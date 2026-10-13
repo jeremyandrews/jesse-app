@@ -365,7 +365,8 @@ Answer the question I asked, not the one you wish I had asked.
 #               because there is no token to set:
 #                   JESSE_MODEL_FABLE_MODEL=claude-fable-5-1
 #                   JESSE_MODEL_FABLE_VERSION=5.1              # picker reads "Claude Fable 5.1"
-#               Unset, it is listed and disabled as "not configured". Verified on the
+#               Unset, the apps hide it (GET /jesse/models still reports it, with
+#               configured=false). Verified on the
 #               subscription login 2026-09-10: a real turn ran `claude-fable-5-1` with
 #               apiKeySource "none". Level `write`, like opus: same harness, same record.
 #
@@ -376,8 +377,10 @@ Answer the question I asked, not the one you wish I had asked.
 # the same thing the badge reports for opus; override with JESSE_MODEL_FABLE_PRICE_*.
 #
 # Adding a model is a PURE CONFIG EDIT here plus ONE env var for its token — no bridge
-# code change. Each model is health-probed on an interval; the apps only offer a model
-# that is CONFIGURED (its token env var is set) AND HEALTHY (its last probe passed).
+# code change. Each model is health-probed on an interval; the apps list only a model that
+# is CONFIGURED (its token env var is set), and let it be picked only while it is also
+# HEALTHY (its last probe passed); a configured model that fails its probe shows disabled
+# as "unreachable".
 #
 # Fields (id, kind, base_url, model are REQUIRED; the rest are optional):
 #   id             stable key the switch persists — A FAMILY NAME, NO VERSION IN IT

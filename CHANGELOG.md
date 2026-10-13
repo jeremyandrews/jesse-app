@@ -14,6 +14,35 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (193)] - 2026-10-13
+
+**The model picker lists only the models the bridge has configured.** Root cause:
+`ModelSwitchState.offered` returned every model the bridge reported, armed or not, so an
+unconfigured entry (today the built-in `local` model) showed as a dead, disabled row reading
+"not configured" in each conversation's picker; and the iPhone and Mac Settings default model
+lists read `modelState.models` directly instead of `offered`, so they would have kept the row
+even with the picker fixed. The bridge does not change: `GET /jesse/models` still reports every
+model, so diagnostics still see unarmed entries.
+
+- **One filter.** `offered` now returns only models whose `configured` is true, in registry
+  order. The thread picker (iPhone and Mac), both Settings default model lists and the Settings
+  "what each model may do" lists all read it; no view filters on its own.
+- **Unreachable stays visible.** A configured model whose health probe failed still renders
+  disabled with the reason "unreachable", so an outage never looks like a deletion.
+- **A stored choice of a now hidden model** (per conversation or per device) falls back exactly
+  as any unselectable id already did in `resolvedModel`: thread, then device default, then the
+  ambient default. No migration.
+- **The non-streaming record** (`NonStreamingModelStore.record`) now reads the full model list
+  rather than `offered`, so hiding a model from the picker changes nothing about what the
+  transcript knows of a model's shape.
+- **Docs:** the doc comments in both Settings views, both thread pickers and `ModelInfo`, and
+  the model section of `jesse.example.toml`, now say an unconfigured model is hidden.
+- **Tests:** `testOnlyConfiguredModelsAreOfferedAndAnUnreachableOneStaysDisabled` (a healthy
+  configured model, a configured unreachable one and an unconfigured one: exactly the first two
+  are offered, in order, the second disabled as "unreachable", and a stored id for the hidden
+  one resolves to the ambient default); the existing unhealthy row test now asserts the
+  unconfigured row is absent.
+
 ## [App 1.0 (192)] - 2026-10-13
 
 **The automatic workout log lets the agent apply its standing inferences, above all the office

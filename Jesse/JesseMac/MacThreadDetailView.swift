@@ -741,7 +741,8 @@ private struct MacModelPickerMenu: View {
     }
 
     /// One family's rows: the checkmark and the harness/version detail on the resolved model, a
-    /// disabled row with its reason for one that cannot be picked right now.
+    /// disabled row with its reason ("unreachable") for a configured model that cannot be picked
+    /// right now. An unconfigured model is never offered (`ModelSwitchState.offered`).
     @ViewBuilder
     private func rows(_ section: ModelMenuSection, in state: ModelSwitchState) -> some View {
         ForEach(section.rows) { row in

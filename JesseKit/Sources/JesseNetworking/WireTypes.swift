@@ -1086,7 +1086,8 @@ public struct ModelInfo: Decodable, Equatable, Sendable, Identifiable {
     /// anything to the client (it is the always-available default — see `isDefault`).
     public let kind: String
     /// Whether this model may be selected RIGHT NOW: the bridge's `available` = `configured`
-    /// AND `healthy`. The switcher renders an unavailable model disabled with `unavailableReason`.
+    /// AND `healthy`. The switcher hides an unconfigured model (`ModelSwitchState.offered`) and
+    /// renders a configured but unhealthy one disabled with `unavailableReason`.
     public let available: Bool
     /// Whether the model's backend/token RESOLVED (an unconfigured model is `kimi-k3` until a
     /// live slug is armed, or a declarative entry whose token env var is unset). Defaults to
@@ -1217,9 +1218,10 @@ public struct ModelInfo: Decodable, Equatable, Sendable, Identifiable {
     /// The ambient default (`opus`) — never applies overrides and is always writes-on.
     public var isDefault: Bool { kind == "ambient" }
 
-    /// A short reason this model is NOT selectable, or `nil` when it is. Distinguishes the two
-    /// disabled states the switcher explains: `not configured` (no token/triple armed) vs
-    /// `unreachable` (configured, but the last health probe failed).
+    /// A short reason this model is NOT selectable, or `nil` when it is: `not configured` (no
+    /// token/triple armed) vs `unreachable` (configured, but the last health probe failed). The
+    /// pickers only ever show `unreachable`, because they list `ModelSwitchState.offered`, which
+    /// hides unconfigured models; `not configured` remains for diagnostics.
     public var unavailableReason: String? {
         if available { return nil }
         if !configured { return "not configured" }

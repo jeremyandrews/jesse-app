@@ -4,8 +4,8 @@ import XCTest
 // The picker's layout (`ModelMenuLayout`) and its selection rules (`ModelMenuAction`), which
 // both apps render and neither re-derives. One menu; families are sections, not submenus; a
 // family of one has no header; effort is one inline control for the resolved model only, and
-// only when that model declares a scale; an unavailable model still renders, disabled, with
-// its reason.
+// only when that model declares a scale; a configured but unreachable model still renders,
+// disabled, with its reason, and an unconfigured model is not offered at all.
 final class ModelMenuTests: XCTestCase {
 
     private func model(_ id: String, family: String? = nil, available: Bool = true,
@@ -110,7 +110,30 @@ final class ModelMenuTests: XCTestCase {
         let glm = try? XCTUnwrap(rows.first { $0.id == "glm" })
         XCTAssertEqual(glm?.isEnabled, false, "present and disabled, not hidden")
         XCTAssertEqual(glm?.title, "Glm — unreachable", "an outage must not look like a deletion")
-        XCTAssertEqual(rows.first { $0.id == "qwen" }?.title, "Qwen — not configured")
+        XCTAssertNil(rows.first { $0.id == "qwen" }, "an unconfigured model is not a choice")
+    }
+
+    func testOnlyConfiguredModelsAreOfferedAndAnUnreachableOneStaysDisabled() {
+        // The bridge reports every model, armed or not (`GET /jesse/models` is diagnostics
+        // too), but a picker lists only what this deployment has configured. The built-in
+        // `local` entry with no backend set was the case that showed up as a dead row.
+        let models = [model("opus", kind: "ambient"),
+                      model("glm", available: false, configured: true, healthy: false),
+                      model("local", available: false, configured: false, healthy: false,
+                            kind: "local")]
+        let switchState = state(models)
+        XCTAssertEqual(switchState.offered.map(\.id), ["opus", "glm"], "registry order, unarmed gone")
+
+        let rows = ModelMenuLayout(state: switchState, threadModelID: nil, deviceDefaultID: nil,
+                                   threadEffort: nil).sections.flatMap(\.rows)
+        XCTAssertEqual(rows.map(\.id), ["opus", "glm"])
+        XCTAssertEqual(rows.map(\.isEnabled), [true, false])
+        XCTAssertEqual(rows[1].title, "Glm — unreachable")
+
+        // A thread or device still pointing at the hidden model falls back exactly as any
+        // unselectable id does: no migration, the next turn runs on the ambient default.
+        XCTAssertEqual(switchState.resolvedModel(threadModelID: "local",
+                                                 deviceDefaultID: "local")?.id, "opus")
     }
 
     func testTheResolvedModelCarriesTheCheckmarkAndTheHarnessDetail() {

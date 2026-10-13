@@ -20,10 +20,13 @@ public extension ModelInfo {
 }
 
 public extension ModelSwitchState {
-    /// The models to OFFER in a switcher, in registry order — ALL of them, so an unavailable
-    /// model renders disabled (with `menuRowLabel`'s reason) rather than vanishing. The caller
-    /// gates selection on each model's `available`.
-    var offered: [ModelInfo] { models }
+    /// The models to OFFER in a switcher, in registry order — every CONFIGURED model. An
+    /// unconfigured model (no token, no slug: the bridge has not armed it) is hidden, because
+    /// it is not a choice on this deployment. A configured but unreachable model still renders,
+    /// disabled with `menuRowLabel`'s "unreachable" reason, so an outage never looks like a
+    /// deletion. The caller gates selection on each model's `available`. Every list a user
+    /// picks from (the thread picker and both Settings default lists) reads this, and only this.
+    var offered: [ModelInfo] { models.filter { $0.configured } }
 
     /// Just the models selectable RIGHT NOW (configured AND healthy). Used to default a new
     /// conversation and to validate a stored per-thread/per-device id still resolves.
@@ -317,7 +320,7 @@ public enum NonStreamingModelStore {
     /// Record the non-streaming ids from a freshly loaded list. Replaces rather than merges:
     /// the list is authoritative, so a model that starts streaming stops being remembered.
     public static func record(_ state: ModelSwitchState) {
-        let ids = state.offered.filter { !$0.streamsText }.map(\.id).sorted()
+        let ids = state.models.filter { !$0.streamsText }.map(\.id).sorted()
         if ids.isEmpty {
             defaults.removeObject(forKey: defaultsKey)
         } else {

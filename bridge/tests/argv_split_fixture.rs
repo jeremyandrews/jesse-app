@@ -179,6 +179,13 @@
 //! forwarded BY NAME in `env_vars`, `enabled_tools` (empty on the read site, the twelve tools on
 //! the write sites) and the approve mode. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.176.0, for the hosted `clockify` server's retirement, on both
+//! harnesses' three main sites only.** Claude Code's rendered `--mcp-config` digest moved on all
+//! three main sites (the server's declaration is gone) and its two write sites' `--allowedTools`
+//! digest moved for the thirteen removed `mcp__clockify__*` grants. Codex's three main sites lost
+//! eight arguments each: the url, the `env_http_headers` key route, `enabled_tools` and the
+//! approve mode. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

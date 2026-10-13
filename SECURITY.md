@@ -173,7 +173,7 @@ cannot, and the gap is the whole point rather than a limitation to close:
   instructions and scripts.
 - **23 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `clockify`, `house` (when the deployment configures it) — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `house` (when the deployment configures it), `clockify-rs` — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -902,7 +902,7 @@ and read-only). Only the servers named in that config load:
 | `rybbit` | tag1.com web analytics, **read only**, added 2026-10-01 — twenty-eight `mcp__rybbit__*` read tools, no write tool. See [Rybbit](#rybbit-web-analytics-read-only-2026-10-01) |
 | `tag1` | Tag1's public website, **read only**, added 2026-10-02 — six `mcp__tag1__*` read tools, no credential, no write or contact tool. See [tag1.com](#tag1com-public-site-read-only-2026-10-02) |
 | `plex` | The owner's LAN Plex server, added 2026-10-04: forty of fifty-five `mcp__plex__*` tools: reads, search, and collection, playlist and metadata edits. Nothing that deletes media, runs maintenance, shares, plays back or touches the host's files. See [Plex](#plex-lan-media-server-reads-and-collection-edits-2026-10-04) |
-| `clockify` | Tag1's Clockify workspace through Clockify's hosted server, added 2026-10-06: all thirteen `mcp__clockify__*` tools, reads plus timer, time entry and project creation writes, acting with the API key owner's permissions. See [Clockify](#clockify-time-tracking-every-advertised-tool-2026-10-06) |
+| `clockify-rs` | Tag1's own Clockify server, **read only**, added 2026-10-12 — all twelve `mcp__clockify-rs__*` tools, every one a read, no dollar figure in any output. The only Clockify server since 0.176.0, when the hosted `clockify` server was retired. See [Clockify, Tag1's own server](#clockify-tag1s-own-server-four-way-hours-read-only-2026-10-12) |
 | `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
@@ -1405,54 +1405,21 @@ The Plex server is on the LAN, so on macOS the process tree that reaches it need
 Network grant. A turn that gets `EHOSTUNREACH` to the Plex host is missing that grant, not
 broken.
 
-### Clockify (time tracking, every advertised tool, 2026-10-06)
+### Clockify (time tracking, every advertised tool, 2026-10-06; retired 2026-10-13)
 
-Bridge 0.167.0 adds Clockify's own hosted MCP server to every main turn on **both harnesses in
-the same change**, as the twenty-second server. It is `clockify`, `type: "http"` (Streamable
-HTTP) at `https://api.clockify.me/mcp-server/mcp`, a public HTTPS host run by Clockify.
+**Retired in bridge 0.176.0, replaced by `clockify-rs` (below).** From 0.167.0 to 0.175.0 every
+main turn on both harnesses loaded Clockify's own hosted MCP server, `clockify`, `type: "http"`
+at `https://api.clockify.me/mcp-server/mcp`, with the owner's Clockify API key in an `x-api-key`
+header (Claude Code as `${JESSE_CLOCKIFY_API_KEY}`, Codex through a `CODEX_MCP_HEADER_ENV`
+table rendered as `env_http_headers`). All thirteen of its tools were granted, the four writes
+`start_timer`, `stop_timer`, `log_past_time` and `create_project` included, on the owner's
+decision that read only was not required.
 
-#### The credential
-
-The server takes a Clockify API key in an `x-api-key` header, and **the key goes to Clockify**.
-Every tool acts with **the key owner's Clockify permissions**: whatever that user can see and do
-in the workspace, a turn can see and, for the write tools below, do.
-
-The key is `JESSE_CLOCKIFY_API_KEY` in the bridge LaunchAgent plist's `EnvironmentVariables`,
-and nowhere else: not in the repo, an argv, a record, a fixture or a log.
-
-- **Claude Code** gets the header as `"x-api-key": "${JESSE_CLOCKIFY_API_KEY}"`, which the CLI
-  expands from the child's environment. A golden test pins the unexpanded placeholder.
-- **Codex** gets `env_http_headers = {"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}`: Codex reads the
-  variable by name and builds the header itself. The bearer route that `homeassistant` and
-  `rybbit` use does not work here: measured on 2026-10-06, Clockify answers `tools/list` with
-  the key sent as `Authorization: Bearer`, but every tool call made that way fails as
-  unauthenticated. A test asserts the Codex argv carries the variable name, no
-  `bearer_token_env_var`, and no literal `${JESSE_CLOCKIFY_API_KEY}`.
-
-#### Granted: all thirteen tools
-
-A live, authenticated `tools/list` on 2026-10-06 returned thirteen tools, none annotated. On the
-owner's decision every one is granted, by name, never `mcp__clockify__*`, and a test pins the
-thirteen by equality:
-
-- **Reads:** `get_current_user_profile`, `get_current_time`, `get_current_timer`,
-  `get_summary_report`, `get_detailed_report`, `list_clients`, `list_projects`, `list_tasks`,
-  `list_tags`.
-- **Writes:** `start_timer`, `stop_timer`, `log_past_time`, `create_project`.
-
-#### What it adds to the risk
-
-- **One new credential**, the owner's Clockify API key, sent to Clockify on every call.
-- **One new public host**, `api.clockify.me`.
-- **Workspace-wide reads.** The summary and detailed reports cover every user the key owner
-  can report on, so a turn can read the team's hours, projects and clients.
-- **Writes to the time record.** A phone-injected turn can start or stop the owner's timer, log
-  past time entries and create projects. None of that deletes anything, and there is no delete
-  tool on the server, but a wrong entry lands in Tag1's billing data until someone removes it.
-  Accepted, on the owner's decision that read only is not required.
-- **A new source of untrusted text.** Time entry descriptions and project, client, task and tag
-  names are whatever anyone in the workspace typed, and they enter the turn at the same trust
-  level as message bodies.
+0.176.0 removed the declaration from the main set, the Codex header table (it had no other
+entry) and all thirteen grants; a test now refuses any `mcp__clockify__` grant. The retired
+`clockify`-bearing sets stay in the code only so their row labels in older records still
+resolve. No bridge turn can write to Clockify any more, and `api.clockify.me/mcp-server` is no
+longer contacted.
 
 ### Clockify, Tag1's own server (four way hours, read only, 2026-10-12)
 
@@ -1460,8 +1427,9 @@ Bridge 0.175.0 adds `clockify-rs`, Tag1's own Clockify server, to every main tur
 harnesses in the same change**, as the twenty-fifth server. It is the private
 `tag1consulting/clockify-rs` repository's `clockify-mcp` crate, version 0.5.0 at commit
 `7255f1d`, stdio transport, declared with the bare command `clockify-rs-mcp` and no arguments,
-resolved off the bridge `PATH` like `plex-mcp`. The hosted `clockify` server above stays
-alongside it, unchanged: same key route, same thirteen grants.
+resolved off the bridge `PATH` like `plex-mcp`. Until 0.176.0 the hosted `clockify` server
+above ran alongside it; 0.176.0 retired that server, and `clockify-rs` is now the one Clockify
+server on a bridge turn.
 
 It exists because the hosted server cannot answer "how many client billable and internal hours
 did each person log": its summary report carries no billable field and no user filter, and its
@@ -1471,22 +1439,23 @@ full, and counts its periods in Europe/Rome, the zone Tag1 bills in, unless a ca
 
 #### No new credential
 
-The server reads `CLOCKIFY_API_KEY`, and it gets **the same key the hosted server uses**,
-`JESSE_CLOCKIFY_API_KEY` from the bridge LaunchAgent plist. What changes is who holds it: the
-key now also sits in the environment of a local child process, not only in a header sent to
-Clockify. It is not in the repo, an argv, a record, a fixture or a log.
+The server reads `CLOCKIFY_API_KEY`, and it gets **the same key the hosted server used**,
+`JESSE_CLOCKIFY_API_KEY` from the bridge LaunchAgent plist. From 0.176.0 the key is held on a
+bridge turn **only by the `clockify-rs` child process**: no turn sends it to
+`api.clockify.me/mcp-server` in a header any more. It is not in the repo, an argv, a record, a
+fixture or a log.
 
 - **Claude Code** children inherit the bridge's environment, so the launcher finds the variable.
 - **Codex** scrubs an MCP child's environment, so `CODEX_MCP_ENV_PASSTHROUGH` forwards
-  `JESSE_CLOCKIFY_API_KEY` to `clockify-rs` **by name**, the same variable the hosted server's
-  `x-api-key` header reads. It is in no bearer or header table: this is a stdio server. A test
-  asserts the name appears on the Codex argv only as a forwarded name (or as the hosted server's
-  header variable), never as a value, a `${…}` placeholder or a `NAME=` assignment.
+  `JESSE_CLOCKIFY_API_KEY` to `clockify-rs` **by name**. It is in no bearer table: this is a
+  stdio server. A test asserts the name appears on the Codex argv in exactly one argument, the
+  `clockify-rs` `env_vars` one, never as a value, a `${…}` placeholder or a `NAME=` assignment,
+  and that no `mcp_servers.clockify.` key is rendered at all.
 
 #### No new host
 
-`api.clockify.me` and `reports.api.clockify.me`, the same Clockify the hosted server already
-reaches. Reads only.
+`api.clockify.me` and `reports.api.clockify.me`, reads only. With the hosted server retired,
+`api.clockify.me/mcp-server` is no longer contacted.
 
 #### Granted: all twelve tools, and every one reads
 
@@ -1500,9 +1469,12 @@ has no timer, time entry, project or delete call at all.
 
 #### What it adds to the risk
 
-- **No new credential and no new host**, as above; one more process holds the key.
+- **No new credential and no new host**, as above; from 0.176.0 this process is the key's only
+  holder on a bridge turn.
 - **Workspace-wide reads, now complete.** The hosted server could already read the team's hours.
   This one reads every entry in a range, per person, which is the point.
+- **No writes at all, from 0.176.0.** With the hosted server retired, no bridge turn can start or
+  stop a timer, log time or create a project in Clockify.
 - **No dollar figure reaches any output.** No tool returns a money field, and the library's
   `no_money` tests enforce that. The live proof below grepped every output for money fields
   and found none.
@@ -2083,11 +2055,11 @@ auto-approve. None of its tools is annotated at all, so the auto-approve changes
 it today; it is there so a future release that annotates its edit tools as destructive does
 not silently cancel them on Codex alone.
 
-**`clockify` (0.167.0) followed the same rule.** It is an HTTP server whose key travels in an
-`x-api-key` header, which the bearer table cannot express, so Codex gets a second table beside
-`CODEX_MCP_BEARER_ENV`: `CODEX_MCP_HEADER_ENV`, rendered as `env_http_headers`, which names the
-header and the variable and never carries the value. Its thirteen-tool `enabled_tools` and the
-auto-approve match Claude Code's grant exactly.
+**`clockify` (0.167.0, retired in 0.176.0) followed the same rule.** It was an HTTP server whose
+key travelled in an `x-api-key` header, which the bearer table cannot express, so Codex got a
+second table beside `CODEX_MCP_BEARER_ENV`, `CODEX_MCP_HEADER_ENV`, rendered as
+`env_http_headers`. `clockify` was its only entry, so 0.176.0 deleted the table and its
+rendering branch with the server.
 
 **`house` (0.169.0) followed the same rule.** It is an HTTP server with a bearer, so it joins
 `CODEX_MCP_BEARER_ENV` as `("house", "JESSE_HOUSE_TOKEN")`. Its URL comes from the deployment's

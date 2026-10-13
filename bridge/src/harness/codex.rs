@@ -783,22 +783,6 @@ pub fn codex_mcp_args(
                         toml_string(var)
                     ));
                 }
-                // A NON-BEARER HEADER, BY VARIABLE NAME, for a server that takes its key in
-                // some other header. Same property as the bearer route: Codex reads the
-                // variable and builds the header itself. See [`CODEX_MCP_HEADER_ENV`].
-                if let Some((_, pairs)) = CODEX_MCP_HEADER_ENV.iter().find(|(s, _)| *s == name) {
-                    let rendered: Vec<String> = pairs
-                        .iter()
-                        .map(|(header, var)| {
-                            format!("{} = {}", toml_string(header), toml_string(var))
-                        })
-                        .collect();
-                    args.push("-c".to_string());
-                    args.push(format!(
-                        "mcp_servers.{name}.env_http_headers={{{}}}",
-                        rendered.join(", ")
-                    ));
-                }
             }
             other => {
                 return Err(HarnessError::unsupported(
@@ -978,10 +962,9 @@ pub const CODEX_MCP_ENV_PASSTHROUGH: &[(&str, &[&str])] = &[
         ],
     ),
     // `clockify-rs` (0.175.0) is a stdio server, so its key travels by NAME here and never in
-    // a bearer or header table. `JESSE_CLOCKIFY_API_KEY` is the same variable the hosted
-    // `clockify` server's `x-api-key` header uses ([`CODEX_MCP_HEADER_ENV`]); the
-    // `clockify-rs-mcp` launcher renames it to the `CLOCKIFY_API_KEY` the server reads and
-    // `exec`s the binary. Without it the launcher exits at once and registers nothing.
+    // the bearer table. `JESSE_CLOCKIFY_API_KEY` is set in the plist; the `clockify-rs-mcp`
+    // launcher renames it to the `CLOCKIFY_API_KEY` the server reads and `exec`s the binary.
+    // Without it the launcher exits at once and registers nothing.
     ("clockify-rs", &["JESSE_CLOCKIFY_API_KEY"]),
 ];
 
@@ -1030,24 +1013,6 @@ pub const CODEX_MCP_BEARER_ENV: &[(&str, &str)] = &[
     ("rybbit", "RYBBIT_API_KEY"),
     ("house", "JESSE_HOUSE_TOKEN"),
 ];
-
-/// The environment variable behind each NON-BEARER HTTP header a server authenticates with,
-/// BY NAME, as `(server, [(header, variable)])`.
-///
-/// The sibling of [`CODEX_MCP_BEARER_ENV`] for a server whose key does not travel as
-/// `Authorization: Bearer`. Codex's `env_http_headers` maps a header name to a variable name,
-/// and Codex reads the variable and sets the header itself, so the value never reaches argv.
-/// A literal `http_headers` entry would put the key on the command line, which is why that
-/// key is never rendered.
-///
-/// `clockify` (0.167.0): Clockify's hosted MCP server takes its API key ONLY in `x-api-key`.
-/// Measured 2026-10-06: with the key as a bearer, `tools/list` still answers but every tool
-/// call fails as unauthenticated, so the bearer table cannot carry it. `JESSE_CLOCKIFY_API_KEY`
-/// is set in the plist, and Claude Code reaches the SAME variable as
-/// `${JESSE_CLOCKIFY_API_KEY}` in the header of [`MAIN_CHILD_MCP_CONFIG`]: one variable, two
-/// spellings, and they must not drift apart.
-pub const CODEX_MCP_HEADER_ENV: &[(&str, &[(&str, &str)])] =
-    &[("clockify", &[("x-api-key", "JESSE_CLOCKIFY_API_KEY")])];
 
 /// One server's `enabled_tools` override, in Codex's `-c key=value` spelling.
 ///
@@ -3650,93 +3615,6 @@ mod tests {
         assert!(!enabled.contains("request_contact"), "{enabled}");
     }
 
-    /// AN `env_http_headers` ENTRY RENDERS AS AN INLINE TOML TABLE OF NAMES, for any server in
-    /// [`CODEX_MCP_HEADER_ENV`], and only for an http server. Built from a hand-written config
-    /// so the rendering is pinned independently of what ships.
-    #[test]
-    fn a_header_by_variable_name_renders_as_env_http_headers() {
-        let config = r#"{"mcpServers":{"clockify":{"type":"http","url":"https://example.invalid/mcp","headers":{"x-api-key":"${JESSE_CLOCKIFY_API_KEY}"}},"other":{"type":"http","url":"https://example.invalid/other"}}}"#;
-        let args = codex_mcp_args(CODEX_ID, config, "").expect("renders");
-        assert!(
-            args.iter().any(|a| a
-                == r#"mcp_servers.clockify.env_http_headers={"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}"#),
-            "{args:?}"
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|a| a.starts_with("mcp_servers.other.env_http_headers")),
-            "a server not in the table gets no header: {args:?}"
-        );
-        // Never the literal `http_headers` key, which would put a value on argv, and never
-        // the bearer route, which Clockify rejects.
-        assert!(
-            !args.iter().any(|a| a.contains(".http_headers=")),
-            "{args:?}"
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|a| a.starts_with("mcp_servers.clockify.bearer_token_env_var")),
-            "{args:?}"
-        );
-    }
-
-    /// THE CLOCKIFY KEY REACHES CODEX BY NAME, in the `x-api-key` header, rendered from the
-    /// SHIPPED declaration, so a change to the declaration or to [`CODEX_MCP_HEADER_ENV`] that
-    /// drops the credential, or bakes a value in, fails here. Its grant is the same thirteen
-    /// tools Claude Code's turn gets.
-    #[test]
-    fn the_shipped_clockify_server_travels_with_its_key_named_not_valued() {
-        let args = codex_mcp_args(
-            CODEX_ID,
-            MAIN_CHILD_MCP_CONFIG,
-            crate::DEFAULT_ALLOWED_TOOLS,
-        )
-        .expect("the shipped main set renders for Codex");
-        let flat = args.join("\n");
-        assert!(
-            flat.contains(r#"mcp_servers.clockify.url="https://api.clockify.me/mcp-server/mcp""#),
-            "{args:?}"
-        );
-        assert!(
-            flat.contains(
-                r#"mcp_servers.clockify.env_http_headers={"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}"#
-            ),
-            "{args:?}"
-        );
-        assert!(
-            !flat.contains("mcp_servers.clockify.bearer_token_env_var"),
-            "{args:?}"
-        );
-        assert!(!flat.contains("mcp_servers.clockify.command"), "{args:?}");
-        // The Claude Code spelling must not leak through: Codex has no header expansion, so a
-        // literal `${JESSE_CLOCKIFY_API_KEY}` here would be sent to Clockify as the key itself.
-        assert!(!flat.contains("${JESSE_CLOCKIFY_API_KEY}"), "{args:?}");
-        assert!(
-            flat.contains(r#"mcp_servers.clockify.default_tools_approval_mode="approve""#),
-            "{args:?}"
-        );
-        let enabled = args
-            .iter()
-            .find(|a| a.starts_with("mcp_servers.clockify.enabled_tools="))
-            .expect("clockify carries an enabled_tools override");
-        for granted in [
-            "get_summary_report",
-            "get_detailed_report",
-            "list_projects",
-            "start_timer",
-            "stop_timer",
-            "log_past_time",
-            "create_project",
-        ] {
-            assert!(
-                enabled.contains(&format!(r#""{granted}""#)),
-                "{granted}: {enabled}"
-            );
-        }
-    }
-
     /// THE PLEX SERVER REACHES CODEX AS THE BARE LAUNCHER, with NOTHING forwarded and NOTHING
     /// fixed. The `plex-mcp` launcher reads its URL and token from its own env file, so Codex's
     /// scrub of an MCP child's environment cannot lose them and no variable needs naming here;
@@ -3797,9 +3675,9 @@ mod tests {
     }
 
     /// THE CLOCKIFY-RS SERVER REACHES CODEX AS THE BARE LAUNCHER, with its key FORWARDED BY
-    /// NAME and never valued. It is stdio, so the key rides `env_vars` and no bearer or header
-    /// route; the name is the hosted `clockify` server's own variable. Its grant is exactly the
-    /// twelve read tools Claude Code's turn gets.
+    /// NAME and never valued. It is stdio, so the key rides `env_vars` and no bearer route, and
+    /// from 0.176.0 it is the only Clockify server on the Codex main turn. Its grant is exactly
+    /// the twelve read tools Claude Code's turn gets.
     #[test]
     fn the_shipped_clockify_rs_server_travels_with_its_key_named_not_valued() {
         let args = codex_mcp_args(
@@ -3827,19 +3705,23 @@ mod tests {
             !flat.contains("mcp_servers.clockify-rs.env_http_headers"),
             "{args:?}"
         );
-        // THE NAME APPEARS ONLY AS A FORWARDED NAME OR A HEADER'S VARIABLE NAME, never as a
-        // value: no `${…}` expansion and no `NAME=` assignment anywhere on the argv.
+        // THE NAME APPEARS ONLY AS A FORWARDED NAME, never as a value: no `${…}` expansion and
+        // no `NAME=` assignment anywhere on the argv. From 0.176.0 it appears in exactly ONE
+        // argument: the hosted `clockify` server and its `x-api-key` header route are retired.
         assert!(!flat.contains("${JESSE_CLOCKIFY_API_KEY}"), "{args:?}");
         assert!(!flat.contains("JESSE_CLOCKIFY_API_KEY="), "{args:?}");
         assert!(!flat.contains("CLOCKIFY_API_KEY="), "{args:?}");
-        for arg in args.iter().filter(|a| a.contains("JESSE_CLOCKIFY_API_KEY")) {
-            assert!(
-                arg == r#"mcp_servers.clockify-rs.env_vars=["JESSE_CLOCKIFY_API_KEY"]"#
-                    || arg
-                        == r#"mcp_servers.clockify.env_http_headers={"x-api-key" = "JESSE_CLOCKIFY_API_KEY"}"#,
-                "the key's name in an unexpected place: {arg}"
-            );
-        }
+        let carrying: Vec<&String> = args
+            .iter()
+            .filter(|a| a.contains("JESSE_CLOCKIFY_API_KEY"))
+            .collect();
+        assert_eq!(
+            carrying,
+            vec![r#"mcp_servers.clockify-rs.env_vars=["JESSE_CLOCKIFY_API_KEY"]"#],
+            "the key's name must appear in exactly one argument, clockify-rs's env_vars"
+        );
+        // The hosted server is gone from the Codex main turn entirely, under any key.
+        assert!(!flat.contains("mcp_servers.clockify."), "{args:?}");
         assert!(
             flat.contains(r#"mcp_servers.clockify-rs.default_tools_approval_mode="approve""#),
             "{args:?}"

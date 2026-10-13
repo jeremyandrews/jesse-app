@@ -443,7 +443,7 @@ mod tests {
                 "{s}"
             );
         }
-        for s in ["qmd", "tag1", "rybbit", "clockify"] {
+        for s in ["qmd", "tag1", "rybbit"] {
             assert_eq!(
                 server_placement(s),
                 BTreeSet::from([GrantPlacement::Core]),
@@ -495,8 +495,8 @@ mod tests {
             ),
             (4, 29, 6)
         );
-        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 362));
-        assert_eq!(servers.len(), 25);
+        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 349));
+        assert_eq!(servers.len(), 24);
     }
 
     /// **`capability_args` STAYS BYTE-IDENTICAL.** A committed golden of every harness's

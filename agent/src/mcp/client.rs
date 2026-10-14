@@ -334,6 +334,7 @@ impl McpClient {
     /// [`McpClient::connect`], with every stderr line ALSO handed to `log` as it is drained
     /// (0.14.0). For a host whose job is to run one server and keep its log, such as the
     /// bridge's HTTP adapter; the counts and the ring are kept either way.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_logging(
         name: &str,
         command: &str,

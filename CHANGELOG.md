@@ -50,7 +50,11 @@ per-server table; `bridge/src/gateway/` is the code.
   bearer and an allow-list, for the cluster.
 - **`direct`** gets the same granted set in-process through the same session code, filtered
   again by `Level::permits` on each tool's class; its `house` and `healthdb` grants move into the
-  gateway set when the flag is on.
+  gateway set when the flag is on. Each upstream tool is vetted alone by the agent's builder
+  checks, so one it refuses is withheld and reported rather than failing the set: plex's
+  `user_get_watch_history` (a `user_id` argument) is withheld from `direct`, and nothing else in
+  the main set is. In the K03 eval (no MCP credentials passed) that is 247 tools over 17 servers
+  at `write`; with every credential present it is more.
 - **The activity ledger**, `<state_dir>/activity/YYYY-MM-DD.jsonl` (`0600`, 90 days): one line
   per turn (origin `phone` or `schedule:<id>`) and per gateway call; never arguments, results or
   token values.

@@ -1,0 +1,10 @@
+{"pid":30137,"target":"spawned","type":"bridge_spawn"}
+{"deltas":44,"latency":{"first_event_ms":10652,"first_token_ms":23026,"result_ms":23479},"provenance":{"badge":"[glm · write · $0.0873]","cost_usd":0.08732498,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"result_ms":23479,"status":"done","timing":{"elapsed_ms":23471,"ended_at":"2026-10-13T23:05:47Z","harness":"claude-code","job_id":"468b19defb4007780000000000000000","model":"glm","started_at":"2026-10-13T23:05:24Z","status":"done","tool_calls":4,"tools":[{"ms":227,"outcome":"ok","tool":"Glob"},{"ms":1944,"outcome":"ok","tool":"Grep"},{"ms":5034,"outcome":"ok","tool":"Read"},{"ms":5166,"outcome":"ok","tool":"Edit"}],"v":2},"turn":1,"type":"bridge_turn"}
+{"data":{"text":""},"event":"reset","t_ms":8,"type":"bridge_sse"}
+{"data":{"name":"Glob"},"event":"activity","t_ms":10652,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":10879,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":12824,"type":"bridge_sse"}
+{"data":{"name":"Edit"},"event":"activity","t_ms":17859,"type":"bridge_sse"}
+{"data":{"artifacts":null,"directives":null,"last_reply_ms":1791932747791,"narration":null,"provenance":{"badge":"[glm · write · $0.0873]","cost_usd":0.08732498,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"response":"Saved: Marta Rossi's note now lists **+39 333 555 0199** as her mobile, with the old number marked out of use as of 2026-10-14.\n\n[glm · write · $0.0873]","session_id":"dfbe37be-eef6-4cdb-a62e-1db1916ba9a3"},"event":"done","t_ms":23479,"type":"bridge_sse"}
+{"message":{"content":[{"name":"Glob","type":"tool_use"},{"name":"Grep","type":"tool_use"},{"name":"Read","type":"tool_use"},{"name":"Edit","type":"tool_use"}]},"type":"assistant"}
+{"is_error":false,"result":"Saved: Marta Rossi's note now lists **+39 333 555 0199** as her mobile, with the old number marked out of use as of 2026-10-14.\n\n[glm · write · $0.0873]","subtype":"success","type":"result","usage":{}}

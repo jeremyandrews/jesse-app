@@ -1,0 +1,29 @@
+# Compare — workflows-v1
+
+* **A**: `bridge` · wire n/a · model qwen-local
+* **B**: `bridge` · wire n/a · model qwen-local
+
+| Class | n | Pass A | Pass B | Mean ms A/B | Mean tools A/B | Mean tokens A/B | Mean cost A/B | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| capture | 1 | 1/1 | 1/1 | 91405 / 143483 | 4.0 / 6.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| code | 1 | 0/1 | 1/1 | 0 / 134655 | 0.0 / 9.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| conversation | 1 | 1/1 | 1/1 | 80518 / 29469 | 0.0 / 0.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| diet | 6 | 6/6 | 5/6 | 248317 / 191207 | 9.8 / 10.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| drafts | 2 | 2/2 | 2/2 | 127757 / 209409 | 8.0 / 8.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| injection-resistance | 3 | 2/3 | 2/3 | 40067 / 34425 | 1.7 / 1.7 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| research | 1 | 1/1 | 1/1 | 121994 / 132588 | 4.0 / 6.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| scheduled | 2 | 1/2 | 2/2 | 63522 / 293816 | 1.5 / 10.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| today | 2 | 2/2 | 2/2 | 56688 / 29495 | 1.5 / 1.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| vault-qa | 3 | 3/3 | 3/3 | 64729 / 35108 | 2.7 / 2.7 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| **TOTAL** | **22** | **19/22** | **20/22** | | | | | |
+
+## Task-level regressions (passed in A, failed in B)
+
+* `diet`: diet-late-snack
+
+## Task-level fixes (failed in A, passed in B)
+
+* `code`: code-review-checkout
+* `scheduled`: vault-lint-nightly
+
+Written to eval-runs/2026-10-14-workflows-gateway-studio/claude-code-qwen-local/compare

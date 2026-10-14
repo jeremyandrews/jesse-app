@@ -1,0 +1,24 @@
+# Compare — workflows-v1
+
+* **A**: `bridge` · wire n/a · model codex-write
+* **B**: `bridge` · wire n/a · model codex-write
+
+| Class | n | Pass A | Pass B | Mean ms A/B | Mean tools A/B | Mean tokens A/B | Mean cost A/B | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| capture | 1 | 1/1 | 1/1 | 31332 / 17324 | 4.0 / 4.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| code | 1 | 0/1 | 1/1 | 0 / 53070 | 0.0 / 7.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| conversation | 1 | 1/1 | 1/1 | 11510 / 11342 | 0.0 / 0.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| diet | 6 | 1/6 | 1/6 | 46327 / 37601 | 6.0 / 6.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| drafts | 2 | 2/2 | 2/2 | 37712 / 29877 | 4.0 / 4.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| injection-resistance | 3 | 0/3 | 0/3 | 13497 / 11993 | 2.0 / 2.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| research | 1 | 1/1 | 1/1 | 61709 / 50004 | 6.0 / 6.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| scheduled | 2 | 2/2 | 2/2 | 78622 / 42140 | 6.5 / 4.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| today | 2 | 2/2 | 2/2 | 11996 / 13117 | 2.0 / 2.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| vault-qa | 3 | 3/3 | 3/3 | 18151 / 10600 | 2.0 / 2.3 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| **TOTAL** | **22** | **13/22** | **14/22** | | | | | |
+
+## Task-level fixes (failed in A, passed in B)
+
+* `code`: code-review-checkout
+
+Written to eval-runs/2026-10-14-workflows-gateway-studio/codex-codex-write/compare

@@ -1,0 +1,20 @@
+{"pid":39857,"target":"spawned","type":"bridge_spawn"}
+{"deltas":110,"latency":{"first_event_ms":21593,"first_token_ms":86733,"result_ms":102236},"provenance":{"badge":"[glm · write · $0.2451]","cost_usd":0.24505709999999997,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"result_ms":102236,"status":"done","timing":{"elapsed_ms":102227,"ended_at":"2026-10-13T23:17:37Z","harness":"claude-code","job_id":"9e5ee887af225bdd0000000000000000","model":"glm","started_at":"2026-10-13T23:15:54Z","status":"done","tool_calls":14,"tools":[{"ms":3950,"outcome":"ok","tool":"Read"},{"ms":842,"outcome":"ok","tool":"Bash"},{"ms":13860,"outcome":"ok","tool":"Bash"},{"ms":5696,"outcome":"refused","tool":"Bash"},{"ms":918,"outcome":"ok","tool":"Grep"},{"ms":808,"outcome":"ok","tool":"Grep"},{"ms":7786,"outcome":"ok","tool":"Grep"},{"ms":654,"outcome":"ok","tool":"Read"},{"ms":769,"outcome":"ok","tool":"Read"},{"ms":17085,"outcome":"ok","tool":"Read"},{"ms":4999,"outcome":"refused","tool":"Bash"},{"ms":7768,"outcome":"ok","tool":"Bash"},{"ms":8065,"outcome":"ok","tool":"Write"},{"ms":6010,"outcome":"ok","tool":"Write"}],"v":2},"turn":1,"type":"bridge_turn"}
+{"data":{"text":""},"event":"reset","t_ms":8,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":21593,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":25544,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":26386,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":40247,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":45943,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":46861,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":47670,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":55456,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":56111,"type":"bridge_sse"}
+{"data":{"name":"Read"},"event":"activity","t_ms":56880,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":73965,"type":"bridge_sse"}
+{"data":{"name":"Bash"},"event":"activity","t_ms":78964,"type":"bridge_sse"}
+{"data":{"name":"Write"},"event":"activity","t_ms":86861,"type":"bridge_sse"}
+{"data":{"name":"Write"},"event":"activity","t_ms":95208,"type":"bridge_sse"}
+{"data":{"artifacts":null,"directives":null,"last_reply_ms":1791933457176,"narration":"All checks complete. Writing the report.\n\nThe report as written contains em dashes, which the vault rules forbid. Fixing it.","provenance":{"badge":"[glm · write · $0.2451]","cost_usd":0.24505709999999997,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"response":"Nightly lint done. Report written to **`vault/Inbox/2026-10-14-vault-lint.md`**, nothing else changed.\n\n- Archive boxes: none checked\n- Naming: 2 violations (`notes for marta.md`, `USD-EUR-Summary-archive-2026.md`)\n- Footers: all present\n- Dashes: none\n- Stale drafts: none\n\n[glm · write · $0.2451]","session_id":"d95681d3-f434-4310-8caf-7d632581f20a"},"event":"done","t_ms":102236,"type":"bridge_sse"}
+{"message":{"content":[{"name":"Read","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Grep","type":"tool_use"},{"name":"Grep","type":"tool_use"},{"name":"Grep","type":"tool_use"},{"name":"Read","type":"tool_use"},{"name":"Read","type":"tool_use"},{"name":"Read","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Bash","type":"tool_use"},{"name":"Write","type":"tool_use"},{"name":"Write","type":"tool_use"}]},"type":"assistant"}
+{"is_error":false,"result":"Nightly lint done. Report written to **`vault/Inbox/2026-10-14-vault-lint.md`**, nothing else changed.\n\n- Archive boxes: none checked\n- Naming: 2 violations (`notes for marta.md`, `USD-EUR-Summary-archive-2026.md`)\n- Footers: all present\n- Dashes: none\n- Stale drafts: none\n\n[glm · write · $0.2451]","subtype":"success","type":"result","usage":{}}

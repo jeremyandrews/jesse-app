@@ -296,7 +296,7 @@ async fn run_stateless_oneshot(
         crate::gateway::open_for_child(cfg, req, harness.id(), Duration::from_secs(timeout_secs))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = jesse_agent::mcp::spawn_serialised(&mut cmd).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to spawn {}: {e}", cfg.claude_bin),
@@ -843,7 +843,7 @@ async fn run_spawned_turn(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = jesse_agent::mcp::spawn_serialised(&mut cmd).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("failed to spawn {}: {e}", cfg.claude_bin),

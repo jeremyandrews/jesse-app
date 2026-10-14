@@ -267,6 +267,29 @@ impl std::fmt::Debug for McpClient {
     }
 }
 
+/// ONE CHILD SPAWNED AT A TIME, process-wide, among the callers of [`spawn_serialised`]
+/// (0.14.0).
+///
+/// macOS has no `pipe2`, so std makes each spawn's pipes close-on-exec in a second step after
+/// creating them. When std cannot use `posix_spawn` (on macOS: a bare program name looked up
+/// through a `PATH` the command sets, which is every gateway upstream and every gateway-on
+/// harness child), it forks and then waits for the exec by reading one of those pipes until
+/// EOF. A sibling forked by another thread in between inherits that pipe and holds it open for
+/// as long as it lives, so the `read` never returns: a blocked worker thread, and a turn that
+/// waits for a server forever, beyond every timeout (they all start after the spawn). The
+/// gateway starts a turn's twenty-odd servers at once, which made the race routine
+/// (`tests/mcp_concurrent_spawn.rs`). A spawn takes milliseconds; serialising them costs
+/// nothing a caller can see.
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Spawn `cmd` holding [`SPAWN_LOCK`]. Every MCP stdio server goes through it; a host that
+/// spawns its own children beside them under an explicit `PATH` (the bridge's harness
+/// children) should too.
+pub fn spawn_serialised(cmd: &mut Command) -> std::io::Result<Child> {
+    let _one_at_a_time = SPAWN_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    cmd.spawn()
+}
+
 impl McpClient {
     /// Start a server, negotiate, and return a client ready for [`McpClient::list_tools`].
     ///
@@ -337,7 +360,7 @@ impl McpClient {
         // signals the direct child only) would leave behind. See [`McpClient::pid`].
         #[cfg(unix)]
         cmd.process_group(0);
-        let mut child = cmd.spawn().map_err(|e| McpError::Spawn(e.to_string()))?;
+        let mut child = spawn_serialised(&mut cmd).map_err(|e| McpError::Spawn(e.to_string()))?;
         let pid = child.id();
 
         let stdin = child

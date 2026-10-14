@@ -56,8 +56,8 @@ pub mod http;
 pub mod toolset;
 
 pub use client::{
-    AdvertisedTool, CallOutcome, ClientInfo, McpClient, McpError, StderrCounts, StderrLog,
-    CLIENT_NAME, PROTOCOL_VERSION,
+    spawn_serialised, AdvertisedTool, CallOutcome, ClientInfo, McpClient, McpError, StderrCounts,
+    StderrLog, CLIENT_NAME, PROTOCOL_VERSION,
 };
 pub use http::{Bearer, HttpAuth, MutualTls};
 pub use toolset::{

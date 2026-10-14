@@ -2686,7 +2686,7 @@ async fn run_probe_child(
     cwd: &Path,
     timeout_secs: u64,
 ) -> ProbeRun {
-    let mut child = match cmd.spawn() {
+    let mut child = match jesse_agent::mcp::spawn_serialised(&mut cmd) {
         Ok(c) => c,
         Err(e) => return ProbeRun::SpawnFailed(e.to_string()),
     };

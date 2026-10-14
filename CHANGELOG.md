@@ -65,7 +65,13 @@ per-server table; `bridge/src/gateway/` is the code.
   variables per message, an extra CA, mutual TLS with a pinned CA), `connect_http_with`,
   `ClientInfo` on connect, stdio servers in their own process group, the raw tool and result
   JSON on `AdvertisedTool` and `CallOutcome`, and `tool_result_from_mcp` / `exposed_class` made
-  public. The probe server gains `--dump-env`.
+  public. The probe server gains `--dump-env`. **Spawns are serialised** (`spawn_serialised`,
+  used by every stdio MCP server and by the bridge's Claude Code children and battery children):
+  on macOS a bare program name under an explicit `PATH` sends std's spawn down its fork path,
+  which reads an exec-status pipe until EOF, and a sibling forked by another thread before that
+  pipe was made close-on-exec held it open for good. With the gateway starting a turn's whole
+  server set at once this hung about one `direct` turn in twenty (the first K03 direct eval
+  cells); `agent/tests/mcp_concurrent_spawn.rs` reproduces it without the lock.
 - **Tests:** `agent/tests/mcp_http_auth.rs` (named bearer and header, unset variable, mTLS
   accepted, refused without a certificate and against the wrong CA); `bridge/tests/gateway.rs`
   (three upstreams in one turn, ungranted call refused, outside-subset handling, forged, expired,
@@ -73,6 +79,7 @@ per-server table; `bridge/src/gateway/` is the code.
   ignored live test against the real CLI); unit tests for the table views, settings, overrides,
   token and a scan that no gateway source names a model or harness; and that the batch variable
   is set on a Claude Code child only with the gateway on.
+
 ## [App 1.0 (194)] - 2026-10-13
 
 **A file Jesse returned, opened on the phone, always has a way to close.** Root cause: a chip

@@ -58,9 +58,9 @@
 
 schema = 2
 harness = "direct"
-binary_version = "jesse-agent 0.13.0"
-bridge_version = "0.176.0"
-recorded = "2026-10-13"
+binary_version = "jesse-agent 0.14.0"
+bridge_version = "0.177.0"
+recorded = "2026-10-14"
 gate = "pass"
 
 # ---- basic + mcp:slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs 
@@ -675,7 +675,7 @@ class = "hard_gate"
 verdict = "denied"
 required = "denied"
 status = "pass"
-evidence = "the upstream started with 5 variable(s) (HOME JESSE_GWPROBE_ENV_DUMP JESSE_GWPROBE_LOG PATH TMPDIR) and no bridge nonce"
+evidence = "the upstream started with 6 variable(s) (HOME JESSE_GWPROBE_ENV_DUMP JESSE_GWPROBE_LOG PATH TMPDIR TZ) and no bridge nonce"
 
 # ---- write + mcp:slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs 
 
@@ -982,4 +982,4 @@ class = "hard_gate"
 verdict = "denied"
 required = "denied"
 status = "pass"
-evidence = "the upstream started with 5 variable(s) (HOME JESSE_GWPROBE_ENV_DUMP JESSE_GWPROBE_LOG PATH TMPDIR) and no bridge nonce"
+evidence = "the upstream started with 6 variable(s) (HOME JESSE_GWPROBE_ENV_DUMP JESSE_GWPROBE_LOG PATH TMPDIR TZ) and no bridge nonce"

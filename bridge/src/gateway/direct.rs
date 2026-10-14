@@ -200,6 +200,7 @@ pub async fn tool_set_for_turn(guard: TurnGuard, level: Level) -> Result<Gateway
             }
         };
         let mut exposed = 0usize;
+        let mut withheld = Vec::new();
         for t in tools {
             let Some(remote) = t.get("name").and_then(|v| v.as_str()) else {
                 continue;
@@ -211,31 +212,43 @@ pub async fn tool_set_for_turn(guard: TurnGuard, level: Level) -> Result<Gateway
             let Some(exposed_as) = exposed_class(class) else {
                 continue;
             };
-            builder = builder.add(
-                exposed_as,
-                Arc::new(GatewayTool {
-                    name: tool_name(&server, remote),
-                    remote: remote.to_string(),
-                    server: server.clone(),
-                    description: t
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    schema: t
-                        .get("inputSchema")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({"type": "object"})),
-                    class,
-                    session: session.clone(),
-                }) as Arc<dyn Tool>,
-            );
+            let tool = Arc::new(GatewayTool {
+                name: tool_name(&server, remote),
+                remote: remote.to_string(),
+                server: server.clone(),
+                description: t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                schema: t
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                class,
+                session: session.clone(),
+            }) as Arc<dyn Tool>;
+            // EACH TOOL VETTED ALONE by the builder's own checks (a usable name, an object
+            // schema, a class that agrees, no scope-shaped argument). One upstream advertising
+            // a tool the agent refuses (plex's `user_get_watch_history` declares `user_id`)
+            // costs that tool, never the whole set: it is withheld, and the report says why.
+            if let Err(e) = ToolSetBuilder::new(level)
+                .add(exposed_as, tool.clone())
+                .build()
+            {
+                withheld.push(format!("{remote} ({e})"));
+                continue;
+            }
+            builder = builder.add(exposed_as, tool);
             exposed += 1;
         }
         report.push(format!(
             "{server}: {exposed} of {} granted tool(s) exposed at {level}",
             admitted.tools.len()
         ));
+        for w in withheld {
+            report.push(format!("{server}: withheld {w}"));
+        }
     }
     let inner = builder
         .build()

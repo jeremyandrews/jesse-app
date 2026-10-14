@@ -946,3 +946,74 @@ async fn live_claude_code_registers_every_stub_server() {
     drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An in-process upstream advertising one tool the agent refuses (a scope-shaped argument).
+struct ScopeShaped;
+
+impl InProcessServer for ScopeShaped {
+    fn tools(&self) -> Vec<Value> {
+        vec![
+            json!({"name": "probe_echo", "description": "echo", "inputSchema": {"type": "object"}}),
+            json!({"name": "probe_hidden", "description": "asks for a user",
+                   "inputSchema": {"type": "object", "properties": {"user_id": {"type": "string"}}}}),
+        ]
+    }
+
+    fn call<'a>(
+        &'a self,
+        tool: &'a str,
+        _arguments: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move { Ok(json!({"content": [{"type": "text", "text": tool}]})) })
+    }
+}
+
+/// `direct`'s gateway set withholds a tool the agent's builder refuses and keeps the rest: one
+/// upstream with a `user_id` argument once cost every direct turn its whole gateway set.
+#[tokio::test]
+async fn direct_set_withholds_a_refused_tool_and_keeps_the_others() {
+    let dir = short_tmp("withhold");
+    let settings = GatewaySettings {
+        enabled: true,
+        ..GatewaySettings::default()
+    };
+    let mut registry: HashMap<String, Arc<dyn InProcessServer>> = HashMap::new();
+    registry.insert("gwprobe-inproc".into(), Arc::new(ScopeShaped));
+    let gw = Arc::new(Gateway::new(
+        &dir.join("s"),
+        settings.clone(),
+        registry,
+        None,
+    ));
+    let guard = gw
+        .open_turn(TurnSpec {
+            job_id: "job-withhold".into(),
+            capability: Capability::Write,
+            servers: vec![admitted(
+                &settings,
+                "gwprobe-inproc",
+                &["probe_echo", "probe_hidden"],
+            )],
+            harness_env_value: None,
+            deadline: Duration::from_secs(30),
+            bind_sockets: false,
+            env_overlay: Default::default(),
+        })
+        .await
+        .expect("the turn opens");
+    let set = gateway::direct::tool_set_for_turn(guard, jesse_agent::tools::Level::Write)
+        .await
+        .expect("the set builds despite the refused tool");
+    use jesse_agent::tools::ToolSet;
+    let names: Vec<String> = set.manifest().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, vec!["mcp__gwprobe-inproc__probe_echo".to_string()]);
+    assert!(
+        set.report()
+            .iter()
+            .any(|l| l.contains("withheld probe_hidden") && l.contains("user_id")),
+        "{:?}",
+        set.report()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

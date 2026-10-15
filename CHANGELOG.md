@@ -14,6 +14,21 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.177.2] - 2026-10-15
+
+**A scheduled turn that replies `JESSE_QUIET` is quiet again: no push, no unread dot.** Root
+cause: `finalize_reply_badge` appended the model badge to every non-empty reply before it
+reached the job store, and the scheduler's quiet check (`is_quiet_reply`) matches the WHOLE
+trimmed reply. A quiet run was stored as `JESSE_QUIET\n\n[opus · $1.0665]`, recorded as an
+ordinary `ran`, and pushed to the phone. Found on the first fire of the hourly `comms-sweep`
+job, whose log said `notified: no` while the bridge log said `schedule PUSH ... sent`.
+
+- **`finalize_reply_badge` leaves the sentinel alone**, exactly as it already leaves an empty
+  reply alone, using `scheduler::is_quiet_reply` so the two cannot drift. A reply that only
+  mentions the word is a report and is still badged.
+- **Test:** `finalize_is_a_noop_when_off_or_on_error_or_empty` now covers the sentinel (with a
+  trailing newline) and a reply that names it inside a sentence.
+
 ## [Bridge 0.177.1] - 2026-10-15
 
 **`rustls` 0.23.45 to 0.23.46 in both lockfiles; dependency only, no code change.** Root cause:

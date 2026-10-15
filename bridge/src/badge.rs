@@ -319,6 +319,11 @@ pub fn provenance_to_value(provenance: Option<&Provenance>) -> Value {
 /// before it lands in the job store. A no-op when badges are off, on an error
 /// outcome, or on an EMPTY reply (a `JESSE_NEEDS_HEALTH` directive-only turn strips
 /// to `""` and the app retries — a badge would make it non-empty and defeat that).
+///
+/// Also a no-op on the QUIET SENTINEL. A scheduled turn that replies exactly
+/// `JESSE_QUIET` is saying "nothing to report", and the scheduler matches that against
+/// the WHOLE trimmed reply as stored here. A badge appended first turned every quiet run
+/// into `JESSE_QUIET\n\n[opus · $…]`, which is not the sentinel, so it was pushed.
 pub fn finalize_reply_badge(
     outcome: Result<(String, Option<String>, Option<Directives>), ApiError>,
     cfg: &Config,
@@ -330,7 +335,7 @@ pub fn finalize_reply_badge(
         return outcome;
     };
     outcome.map(|(text, session_id, directives)| {
-        let text = if text.trim().is_empty() {
+        let text = if text.trim().is_empty() || crate::scheduler::is_quiet_reply(&text) {
             text
         } else {
             append_badge(&text, &badge)
@@ -584,6 +589,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.0, "", "an empty reply must not be badged");
+
+        // On, but the QUIET SENTINEL is a control word, not a reply: badging it would stop
+        // the scheduler recognising it and push "JESSE_QUIET [opus · $…]" to the phone.
+        let out = finalize_reply_badge(
+            Ok(("JESSE_QUIET\n".into(), None, None)),
+            &cfg,
+            &health,
+            BadgeSource::Hosted,
+            &hb("opus", false, Some(1.0665)),
+        )
+        .unwrap();
+        assert!(
+            crate::scheduler::is_quiet_reply(&out.0),
+            "the quiet sentinel must survive finalization unbadged, got {:?}",
+            out.0
+        );
+
+        // A reply that merely MENTIONS the sentinel is a report, and is badged as one.
+        let out = finalize_reply_badge(
+            Ok(("JESSE_QUIET, except Mark needs you".into(), None, None)),
+            &cfg,
+            &health,
+            BadgeSource::Hosted,
+            &HostedBadge::opus(),
+        )
+        .unwrap();
+        assert!(out.0.ends_with(']'), "a report that names the sentinel is badged");
 
         // On, but an error outcome passes through unchanged.
         let err = finalize_reply_badge(

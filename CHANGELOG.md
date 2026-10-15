@@ -14,6 +14,22 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.177.1] - 2026-10-15
+
+**`rustls` 0.23.45 to 0.23.46 in both lockfiles; dependency only, no code change.** Root cause:
+four RUSTSEC advisories against `rustls` 0.23.45, published 2026-10-14 after 0.177.0 was
+written, failed `main`'s "Dependency CVE audit" step (run #684, `2238c8b`). This was not a
+regression in our code: build, tests, clippy and fmt all passed on that run, and the advisory
+database moved underneath it.
+
+- **`rustls` 0.23.46** in `bridge/Cargo.lock` and the root `Cargo.lock` fixes RUSTSEC-2026-0346
+  (medium: its `Debug` impls expose TLS secrets), RUSTSEC-2026-0347, RUSTSEC-2026-0348 and
+  RUSTSEC-2026-0349 (low). `cargo update -p rustls --precise 0.23.46` pulled in nothing else.
+- **`quinn-proto` 0.11.17 to 0.11.18 in the root `Cargo.lock`** (the agent and eval workspace),
+  for RUSTSEC-2026-0338, RUSTSEC-2026-0340 and RUSTSEC-2026-0343. The bridge's own lockfile
+  already had 0.11.19 (0.176.0). It is a lockfile change only and pulled in nothing else.
+- `cargo audit` is clean in both workspaces.
+
 ## [Bridge 0.177.0, Agent 0.14.0] - 2026-10-14
 
 **The tool gateway: with `[gateway] enabled = true` the bridge brokers every MCP call, and no

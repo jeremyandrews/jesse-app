@@ -615,7 +615,10 @@ mod tests {
             &HostedBadge::opus(),
         )
         .unwrap();
-        assert!(out.0.ends_with(']'), "a report that names the sentinel is badged");
+        assert!(
+            out.0.ends_with(']'),
+            "a report that names the sentinel is badged"
+        );
 
         // On, but an error outcome passes through unchanged.
         let err = finalize_reply_badge(

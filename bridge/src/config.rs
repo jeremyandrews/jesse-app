@@ -2527,12 +2527,27 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 /// | Opus 5 (09-10, superseded)| 976 / 1,164  | —              | 682 / 1,774*   | —              | 4,974 / 4,095    | (was high, max)     |
 /// | Fable 5.1 (09-10)        | 973 / 3,470   | —              | 3,949 / 2,087* | —              | 5,635 / 5,547    | high, max           |
 /// | Kimi K3 (09-10)          | 6,039 / 3,035 | —              | —              | —              | 3,575 / 10,694   | none                |
+/// | Muse Spark Open (10-15)  | 1,759 / 1,131 | 2,053 / 2,001  | 4,128 / 3,877* | 4,279 / 3,921  | 3,129 / 3,181    | low, medium, high   |
 ///
 /// (Output tokens; dates are 2026. GLM's `medium` measured with its `high`, so it is left out.
 /// Opus 5 and Fable were re-run on a second prompt with the same result: `low` indistinguishable
 /// from the default, `max` two to four times the output.) Kimi declares nothing because `low`
 /// and `max` overlapped completely on two prompts — its vendor documents three levels, and on
 /// this surface they did not do anything a person could see.
+///
+/// **Muse Spark Open was measured on 2026-10-15** against Fireworks' `/v1/messages` with
+/// `output_config.effort` set as the CLI sets it, on two prompts. The row above is the second
+/// (a short number-theory count that finished at every level). The first, a much harder count,
+/// read `low` 2,942 / 2,062, `medium` 14,363 / 23,714, `high` 31,784 / 32,000+, `xhigh`
+/// 12,493 / 32,000+, `max` 32,000+ / 32,000+ (`+`: stopped at the 32,000 `max_tokens` cap).
+/// `low` < `medium` < `high` held on both prompts, so those three are declared. `xhigh` sat on
+/// `high` on the second prompt and was no higher on the first, and `max` came out BELOW
+/// `high` on the second, so neither cleared the bar; Meta's card recommends `high` or `xhigh`
+/// for hard work, and `JESSE_MODEL_MUSE_EFFORT` re-declares `xhigh` if a workload shows it
+/// doing something. The surface itself accepts `minimal`, `low`, `medium`, `high`, `xhigh`,
+/// `max`, `none` and `adaptive` (its validation error lists them) — wider than the CLI's set,
+/// which is the binding one here. With no `--effort` the pinned CLI (2.1.300) sends `high` for
+/// this slug (captured against a local listener, nothing sent to a provider).
 ///
 /// **Opus 5.5 was measured on 2026-09-24**, on the pinned CLI (2.1.281) with
 /// `ANTHROPIC_MODEL=claude-opus-5-5` and no API-key variables, in two sweeps. The row above is
@@ -3025,8 +3040,9 @@ impl ModelRegistry {
     ///   1. the built-in ambient `opus` (always present, never configurable — a declarative
     ///      or env entry that tries to redefine it is refused);
     ///   2. the `JESSE_MODEL_GLM_*` / `JESSE_MODEL_KIMI_*` / `JESSE_MODEL_QWEN_*` /
-    ///      `JESSE_MODEL_LOCAL_*` env triples — one entry per model, each on one harness, with
-    ///      every id a model used to answer to kept as an alias so nothing deployed breaks;
+    ///      `JESSE_MODEL_MUSE_*` / `JESSE_MODEL_LOCAL_*` env triples — one entry per model,
+    ///      each on one harness, with every id a model used to answer to kept as an alias so
+    ///      nothing deployed breaks;
     ///   3. the declarative `[[models]]` array from the bridge config file (the same TOML the
     ///      persona loads from — see [`load_local_models`]).
     ///
@@ -3054,7 +3070,7 @@ impl ModelRegistry {
 
         // Source 2: the built-in env triples. ONE ENTRY PER MODEL, ON ONE HARNESS: each model
         // is registered once, on the Anthropic surface wherever the provider serves it on
-        // `/v1/messages` (all three Fireworks families do), and on the codex harness only
+        // `/v1/messages` (all four Fireworks families do), and on the codex harness only
         // where it does not. A second entry for the same weights on another harness is two
         // containment postures for one choice, and the picker cannot explain the difference.
         upsert_model(
@@ -3068,6 +3084,10 @@ impl ModelRegistry {
         upsert_model(
             &mut models,
             qwen_env_entry(default_health_interval, global_health_timeout),
+        );
+        upsert_model(
+            &mut models,
+            muse_env_entry(default_health_interval, global_health_timeout),
         );
         // The three Gemini entries. Unlike every built-in entry above them these run on the
         // `direct` harness over the `chat` wire, because Google serves no Messages surface
@@ -3412,6 +3432,104 @@ fn kimi_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
         vision: parse_vision_partners(&env_string("JESSE_MODEL_KIMI_VISION").unwrap_or_default()),
         vision_complementary: env_flag_true("JESSE_MODEL_KIMI_VISION_COMPLEMENTARY"),
         transcription: transcription_from_env("JESSE_MODEL_KIMI", Some(fireworks_transcription())),
+        // A backend triple carries its own slug; nothing for the login to be told.
+        login_model: None,
+    }
+}
+
+/// The `muse` env-triple entry: Meta's Muse Spark Open (816B total / 42B active MoE, text and
+/// image in, ~1M context) on Fireworks' Anthropic surface, shaped exactly like
+/// [`kimi_env_entry`] — base_url and slug default to the live Fireworks values and only
+/// `JESSE_MODEL_MUSE_AUTH_TOKEN` must be exported to arm it. Absent that token the entry still
+/// ships UNCONFIGURED and is hidden from the picker.
+///
+/// **THE EVIDENCE, all of it measured on 2026-10-15:**
+/// * the slug `accounts/fireworks/models/muse-spark-open` is in `GET /inference/v1/models`
+///   (`supports_image_input` and `supports_tools` true, `context_length` 1,048,576);
+/// * `/v1/messages` serves it: a plain turn answered, and a turn defining one tool came back
+///   with `stop_reason: tool_use` and a well-formed `tool_use` block (id `chatcmpl-tool-<hash>`,
+///   the GLM id shape, so no cross-turn collision of the kind Kimi once had). One harness,
+///   `claude-code`, so no Responses-surface entry;
+/// * it sees images on that surface: a two-colour PNG was described correctly on eight of ten
+///   calls. The two misses were the first image call on each of `/v1/messages` and chat
+///   completions, back to back, where the image was dropped (no image tokens billed) and the
+///   model said it could not see one; every call after them saw it;
+/// * effort: `low`, `medium`, `high` declared, default `high` — see the table above
+///   [`effort_from_env`] for the counts and why `xhigh` and `max` are not;
+/// * the deck is the model page's (see [`FW_MUSE_SPARK_OPEN_IN_PER_M`]).
+///
+/// **NO VERSION, AND THAT IS THE MODEL'S NAME RATHER THAN A GAP.** Meta's Hugging Face card
+/// (`meta-models/Muse-Spark-Open-816B-A42B`) names it "Muse Spark Open" — its license block
+/// reads `version: Muse Spark Open` — and describes it as the open-weights version with extra
+/// safety post-training, which is not the same model as the hosted Muse Spark 1.2. Labelling it
+/// "1.2" would name a model this slug does not run. `JESSE_MODEL_MUSE_VERSION` adds one when
+/// Meta publishes one.
+///
+/// NO vision pairing by default, for Kimi's reason: the model reads images itself, so an
+/// UNPAIRED entry sends attachments down the scratch-file + Read-tool path where the CLI child
+/// hands it the actual image (see [`crate::vision`]). `JESSE_MODEL_MUSE_VISION` remains
+/// available for an operator who wants a helper anyway.
+fn muse_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) -> RegistryModel {
+    let backend = resolve_model_backend(
+        "muse",
+        env_string("JESSE_MODEL_MUSE_BASE_URL"),
+        env_string("JESSE_MODEL_MUSE_AUTH_TOKEN"),
+        env_string("JESSE_MODEL_MUSE_MODEL"),
+        Some(FIREWORKS_ANTHROPIC_BASE_URL),
+        Some("accounts/fireworks/models/muse-spark-open"),
+    );
+    let version = model_version_from_env("JESSE_MODEL_MUSE", None);
+    RegistryModel {
+        family: Some("Muse Spark Open".to_string()),
+        effort: effort_from_env(
+            "JESSE_MODEL_MUSE",
+            "muse",
+            Some(EffortScale::scale(&["low", "medium", "high"], "high")),
+        ),
+        codex: CodexTuning::default(),
+        id: "muse".to_string(),
+        label: derive_model_label("Muse Spark Open", version.as_deref(), None),
+        version,
+        // A new family: no id it used to be called.
+        aliases: Vec::new(),
+        kind: ModelKind::Hosted,
+        wire: model_wire_from_env("JESSE_MODEL_MUSE", "muse", ModelKind::Hosted),
+        subagent_model: backend.as_ref().map(|(_, _, m)| m.clone()),
+        configured: backend.is_some(),
+        backend,
+        // READ-WRITE unless `JESSE_MODEL_MUSE_READ_ONLY` says otherwise — the same default
+        // every model has. See [`DEFAULT_MODEL_LEVEL`].
+        level: access_level(env_flag_true("JESSE_MODEL_MUSE_READ_ONLY")),
+        harness: CLAUDE_CODE_ID.to_string(),
+        auth_scheme: None,
+        quirks: DirectQuirks::default(),
+        thinking: None,
+        // The model page's deck (1.25 / 0.15 / 4.25), overridable from env via
+        // `JESSE_MODEL_MUSE_PRICE_{IN,CACHED,OUT}` if Fireworks reprices.
+        price: model_price_from_env(
+            "JESSE_MODEL_MUSE",
+            PriceDeck {
+                in_per_m: FW_MUSE_SPARK_OPEN_IN_PER_M,
+                cached_per_m: FW_MUSE_SPARK_OPEN_CACHED_PER_M,
+                cache_write_per_m: None,
+                out_per_m: FW_MUSE_SPARK_OPEN_OUT_PER_M,
+            },
+        ),
+        health: HealthConfig {
+            interval_secs: default_interval_secs,
+            // It thinks before it answers — a thinking block came back on every live call, and
+            // the CLI turns adaptive thinking on for it — so the 3 s default would be a coin
+            // toss. See [`REASONING_HEALTH_TIMEOUT_SECS`].
+            timeout_secs: resolve_health_timeout(
+                None,
+                global_timeout_secs,
+                REASONING_HEALTH_TIMEOUT_SECS,
+            ),
+            ..HealthConfig::default()
+        },
+        vision: parse_vision_partners(&env_string("JESSE_MODEL_MUSE_VISION").unwrap_or_default()),
+        vision_complementary: env_flag_true("JESSE_MODEL_MUSE_VISION_COMPLEMENTARY"),
+        transcription: transcription_from_env("JESSE_MODEL_MUSE", Some(fireworks_transcription())),
         // A backend triple carries its own slug; nothing for the login to be told.
         login_model: None,
     }
@@ -6850,7 +6968,7 @@ mod tests {
     }
 
     /// The `JESSE_MODEL_*` env-triple vars, cleared so a test's registry is deterministic.
-    const MODEL_ENV_VARS: [&str; 23] = [
+    const MODEL_ENV_VARS: [&str; 26] = [
         // The two subscription-login slugs: one arms `fable`, the other pins `opus`.
         "JESSE_MODEL_FABLE_MODEL",
         "JESSE_MODEL_OPUS_MODEL",
@@ -6863,6 +6981,9 @@ mod tests {
         "JESSE_MODEL_QWEN_BASE_URL",
         "JESSE_MODEL_QWEN_AUTH_TOKEN",
         "JESSE_MODEL_QWEN_MODEL",
+        "JESSE_MODEL_MUSE_BASE_URL",
+        "JESSE_MODEL_MUSE_AUTH_TOKEN",
+        "JESSE_MODEL_MUSE_MODEL",
         "JESSE_MODEL_GEMINI_PRO_BASE_URL",
         "JESSE_MODEL_GEMINI_PRO_AUTH_TOKEN",
         "JESSE_MODEL_GEMINI_PRO_MODEL",
@@ -7478,7 +7599,7 @@ mod tests {
     fn from_env_with_no_model_config_is_todays_behavior_opus_only_selectable() {
         // With no JESSE_MODEL_* and no [[models]], the ONLY selectable (configured) model is
         // opus — byte-for-byte today: opus present + configured, and the built-in env-triple
-        // placeholders (glm/kimi/qwen/local) present but UNCONFIGURED (not selectable). No
+        // placeholders (glm/kimi/qwen/muse/local) present but UNCONFIGURED (not selectable). No
         // declarative entry appears.
         let _g = ENV_LOCK.lock_ok();
         let saved: Vec<(&str, Option<String>)> = MODEL_ENV_VARS
@@ -7504,6 +7625,7 @@ mod tests {
             "kimi-k3-codex",
             "kimi-codex",
             "qwen",
+            "muse",
             // The three Gemini entries, present and — with no token set — unarmed, exactly
             // like the Fireworks families above them. Being on a different harness changes
             // nothing about this property.
@@ -7533,6 +7655,7 @@ mod tests {
                 "glm",
                 "kimi",
                 "qwen",
+                "muse",
                 "gemini-pro",
                 "gemini-flash",
                 "gemini-flash-lite",
@@ -7550,8 +7673,9 @@ mod tests {
     }
 
     /// ONE MODEL, ONE HARNESS. Each built-in model is registered once, and every Fireworks
-    /// family sits on the Anthropic surface because Fireworks serves all three there — each was
-    /// run through a resumed two-turn tool loop on the pinned CLI on 2026-09-10.
+    /// family sits on the Anthropic surface because Fireworks serves all four there — GLM, Kimi
+    /// and Qwen were run through a resumed two-turn tool loop on the pinned CLI on 2026-09-10,
+    /// Muse Spark Open through a `tool_use` round trip on 2026-10-15.
     ///
     /// What this replaces is a test asserting the opposite: two Kimi entries, one per surface,
     /// told apart by a parenthetical in the label. That was two containment postures behind one
@@ -7565,6 +7689,7 @@ mod tests {
             "JESSE_MODEL_GLM_VERSION",
             "JESSE_MODEL_KIMI_VERSION",
             "JESSE_MODEL_QWEN_VERSION",
+            "JESSE_MODEL_MUSE_VERSION",
         ];
         let saved: Vec<(&str, Option<String>)> = MODEL_ENV_VARS
             .iter()
@@ -7575,10 +7700,11 @@ mod tests {
             std::env::remove_var(k);
         }
         std::env::set_var("JESSE_CONFIG", "/nonexistent/jesse.local.toml");
-        // Each family is armed by ITS OWN variable, and the three are spelled the same way.
+        // Each family is armed by ITS OWN variable, and the four are spelled the same way.
         std::env::set_var("JESSE_MODEL_GLM_AUTH_TOKEN", "fw-glm");
         std::env::set_var("JESSE_MODEL_KIMI_AUTH_TOKEN", "fw-kimi");
         std::env::set_var("JESSE_MODEL_QWEN_AUTH_TOKEN", "fw-qwen");
+        std::env::set_var("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse");
 
         let r = ModelRegistry::from_env("");
         for (id, token, slug, label) in [
@@ -7599,6 +7725,12 @@ mod tests {
                 "fw-qwen",
                 "accounts/fireworks/models/qwen3p8-max",
                 "Qwen 3.8 Max",
+            ),
+            (
+                "muse",
+                "fw-muse",
+                "accounts/fireworks/models/muse-spark-open",
+                "Muse Spark Open",
             ),
         ] {
             let m = r.get(id).unwrap_or_else(|| panic!("{id} is registered"));
@@ -7751,6 +7883,192 @@ mod tests {
                 None => std::env::remove_var(&k),
             }
         }
+    }
+
+    // ---- Muse Spark Open ----------------------------------------------------------------
+    //
+    // Every Muse test reaches the entry through `ModelRegistry::from_env` and compares against
+    // literal values, never through `muse_env_entry` or the deck constants, so it still
+    // compiles — and fails — on a bridge that has no Muse entry at all.
+
+    /// Every variable a Muse test touches, saved, cleared, and put back by [`muse_registry`].
+    const MUSE_TEST_ENV: [&str; 17] = [
+        "JESSE_CONFIG",
+        "JESSE_STATE_DIR",
+        "JESSE_HEALTH_TIMEOUT_SECS",
+        "JESSE_HEALTH_INTERVAL_SECS",
+        "JESSE_MODEL_MUSE_BASE_URL",
+        "JESSE_MODEL_MUSE_AUTH_TOKEN",
+        "JESSE_MODEL_MUSE_MODEL",
+        "JESSE_MODEL_MUSE_VERSION",
+        "JESSE_MODEL_MUSE_EFFORT",
+        "JESSE_MODEL_MUSE_READ_ONLY",
+        "JESSE_MODEL_MUSE_WIRE",
+        "JESSE_MODEL_MUSE_VISION",
+        "JESSE_MODEL_MUSE_VISION_COMPLEMENTARY",
+        "JESSE_MODEL_MUSE_PRICE_IN",
+        "JESSE_MODEL_MUSE_PRICE_CACHED",
+        "JESSE_MODEL_MUSE_PRICE_OUT",
+        "JESSE_MODEL_MUSE_PRICE_CACHE_WRITE",
+    ];
+
+    /// The registry an operator gets with exactly `set` in the launch environment (and no
+    /// config file), with every variable it touched restored afterwards. The caller holds
+    /// `ENV_LOCK`.
+    fn muse_registry(set: &[(&str, &str)]) -> ModelRegistry {
+        let saved: Vec<(&str, Option<String>)> = MUSE_TEST_ENV
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for k in MUSE_TEST_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("JESSE_CONFIG", "/nonexistent/jesse.local.toml");
+        for (k, v) in set {
+            std::env::set_var(k, v);
+        }
+        let r = ModelRegistry::from_env("");
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        r
+    }
+
+    /// No token, no Muse: the entry is registered, so the id resolves and a selection of it
+    /// is refused rather than unknown, but it is unconfigured, which is what keeps it out of
+    /// the picker (the app lists configured models only). Nothing arms it by itself.
+    #[test]
+    fn muse_is_present_but_unconfigured_and_hidden_without_its_token() {
+        let _g = ENV_LOCK.lock_ok();
+        let r = muse_registry(&[]);
+        let m = r.get("muse").expect("muse is registered with no env");
+        assert!(!m.configured, "unarmed with no token");
+        assert!(m.backend.is_none(), "no backend without a token");
+        assert!(!r.is_configured("muse"), "not selectable, so not offered");
+        // Registered right after Qwen, and nowhere else.
+        let ids: Vec<&str> = r.models.iter().map(|m| m.id.as_str()).collect();
+        let qwen = ids.iter().position(|id| *id == "qwen").expect("qwen");
+        assert_eq!(ids.get(qwen + 1), Some(&"muse"), "{ids:?}");
+        // The base URL or slug alone arms nothing: the token is the switch.
+        let r = muse_registry(&[
+            (
+                "JESSE_MODEL_MUSE_BASE_URL",
+                "https://api.fireworks.ai/inference",
+            ),
+            (
+                "JESSE_MODEL_MUSE_MODEL",
+                "accounts/fireworks/models/muse-spark-open",
+            ),
+        ]);
+        assert!(!r.is_configured("muse"));
+    }
+
+    /// The token arms it, and every default is the measured one: Fireworks' Anthropic surface,
+    /// the verified slug, claude-code, the reasoning probe budget, the measured effort scale,
+    /// no vision helper, and a label that is the model's name, not its slug.
+    #[test]
+    fn muse_arms_from_its_own_token_on_the_fireworks_anthropic_surface() {
+        let _g = ENV_LOCK.lock_ok();
+        let r = muse_registry(&[("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse")]);
+        let m = r.get("muse").expect("muse is registered");
+        assert!(m.configured, "armed by JESSE_MODEL_MUSE_AUTH_TOKEN alone");
+        assert_eq!(
+            m.backend
+                .as_ref()
+                .map(|(b, t, s)| (b.as_str(), t.as_str(), s.as_str())),
+            Some((
+                "https://api.fireworks.ai/inference",
+                "fw-muse",
+                "accounts/fireworks/models/muse-spark-open"
+            ))
+        );
+        assert_eq!(
+            m.subagent_model.as_deref(),
+            Some("accounts/fireworks/models/muse-spark-open"),
+            "its subagents follow the switch"
+        );
+        assert_eq!(m.harness, CLAUDE_CODE_ID, "one harness, claude-code");
+        assert!(matches!(m.kind, ModelKind::Hosted));
+        assert_eq!(m.wire, Wire::Messages, "it speaks /v1/messages");
+        assert_eq!(
+            m.health.path, "/v1/messages",
+            "probed on the surface it runs on"
+        );
+        assert_eq!(
+            m.health.timeout_secs, 15,
+            "the reasoning probe budget, as wide as Kimi's"
+        );
+        assert_eq!(
+            m.health.timeout_secs,
+            r.get("kimi").expect("kimi").health.timeout_secs
+        );
+        assert_eq!(m.family.as_deref(), Some("Muse Spark Open"));
+        assert_eq!(
+            m.version, None,
+            "Meta publishes no version for the open weights"
+        );
+        assert_eq!(m.label, "Muse Spark Open");
+        assert_eq!(m.level, Capability::Write, "read-write, like every model");
+        assert!(
+            m.vision.is_empty(),
+            "natively multimodal: no helper by default"
+        );
+        assert!(!m.vision_complementary);
+        assert_eq!(
+            m.effort
+                .as_ref()
+                .map(|s| (s.values.clone(), s.default.clone())),
+            Some((
+                vec!["low".to_string(), "medium".into(), "high".into()],
+                "high".to_string()
+            )),
+            "the measured scale, defaulting to what the CLI sends"
+        );
+
+        // A version, when Meta publishes one, extends the label rather than replacing it.
+        let r = muse_registry(&[
+            ("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse"),
+            ("JESSE_MODEL_MUSE_VERSION", "1.3"),
+        ]);
+        assert_eq!(r.get("muse").expect("muse").label, "Muse Spark Open 1.3");
+    }
+
+    /// The deck is populated. An absent deck reads as ZERO, which is "free", and every Muse
+    /// turn would badge `$0.00` and under-report spend — cache reads most of all.
+    #[test]
+    fn muse_ships_the_model_pages_price_deck_and_env_overrides_it() {
+        let _g = ENV_LOCK.lock_ok();
+        let r = muse_registry(&[("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse")]);
+        let p = &r.get("muse").expect("muse").price;
+        assert_eq!(
+            (p.in_per_m, p.cached_per_m, p.out_per_m, p.cache_write_per_m),
+            (1.25, 0.15, 4.25, None),
+            "Fireworks' model page, 2026-10-15"
+        );
+        let r = muse_registry(&[
+            ("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse"),
+            ("JESSE_MODEL_MUSE_PRICE_IN", "2.5"),
+            ("JESSE_MODEL_MUSE_PRICE_CACHED", "0.3"),
+            ("JESSE_MODEL_MUSE_PRICE_OUT", "9"),
+        ]);
+        let p = &r.get("muse").expect("muse").price;
+        assert_eq!((p.in_per_m, p.cached_per_m, p.out_per_m), (2.5, 0.3, 9.0));
+    }
+
+    /// `JESSE_MODEL_MUSE_READ_ONLY` narrows it to read, exactly as Kimi's variable does.
+    #[test]
+    fn muse_read_only_drops_its_level_to_read() {
+        let _g = ENV_LOCK.lock_ok();
+        let r = muse_registry(&[
+            ("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse"),
+            ("JESSE_MODEL_MUSE_READ_ONLY", "1"),
+        ]);
+        let m = r.get("muse").expect("muse");
+        assert!(m.configured, "still armed");
+        assert_eq!(m.level, Capability::Read);
     }
 
     #[test]

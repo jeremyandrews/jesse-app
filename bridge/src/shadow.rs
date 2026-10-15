@@ -67,6 +67,15 @@ pub const FW_QWEN3P8_MAX_IN_PER_M: f64 = 2.00;
 pub const FW_QWEN3P8_MAX_CACHED_PER_M: f64 = 0.25;
 pub const FW_QWEN3P8_MAX_OUT_PER_M: f64 = 6.00;
 
+/// Muse Spark Open on Fireworks (`muse-spark-open`): $1.25 in / $0.15 cached / $4.25 out
+/// (model page https://fireworks.ai/models/fireworks/muse-spark-open, 2026-10-15). Neither
+/// pricing page (fireworks.ai/pricing, docs.fireworks.ai/serverless/pricing) had a row for it
+/// on that date, so the model page is the one published source. The DEFAULT deck for the
+/// `muse` registry entry, overridable via `JESSE_MODEL_MUSE_PRICE_{IN,CACHED,OUT}`.
+pub const FW_MUSE_SPARK_OPEN_IN_PER_M: f64 = 1.25;
+pub const FW_MUSE_SPARK_OPEN_CACHED_PER_M: f64 = 0.15;
+pub const FW_MUSE_SPARK_OPEN_OUT_PER_M: f64 = 4.25;
+
 // ---------------------------------------------------------------------------
 // Google's Gemini API (`generativelanguage.googleapis.com`), NOT Fireworks. Same
 // naming rule as the decks above: named for the MODEL, version dots written `p`.

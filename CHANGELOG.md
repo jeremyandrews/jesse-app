@@ -14,6 +14,57 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.178.0] - 2026-10-15
+
+**Muse Spark Open is selectable on Fireworks, as `muse`, once `JESSE_MODEL_MUSE_AUTH_TOKEN` is
+set.** Meta's open-weights model (816B total / 42B active MoE, text and image in, ~1M context)
+is the fourth built-in Fireworks family, registered exactly as Kimi K3 is: one entry, on
+claude-code, over Fireworks' Anthropic surface, with base URL and slug defaulted so one
+variable arms it. Unset, the entry is present and unconfigured, so the picker hides it and the
+bridge behaves as 0.177.2 did. It is in no default, fallback or routed job selection.
+
+- **`muse_env_entry`** in `bridge/src/config.rs`, beside `kimi_env_entry` and registered after
+  `qwen_env_entry`: id `muse`, label "Muse Spark Open", slug
+  `accounts/fireworks/models/muse-spark-open`, base URL `https://api.fireworks.ai/inference`,
+  read-write unless `JESSE_MODEL_MUSE_READ_ONLY`, the 15 s reasoning probe budget, no vision
+  helper. Every `JESSE_MODEL_MUSE_*` variable (`_BASE_URL`, `_MODEL`, `_VERSION`, `_EFFORT`,
+  `_WIRE`, `_VISION`, `_VISION_COMPLEMENTARY`, `_PRICE_*`) behaves as Kimi's does.
+- **Deck** `FW_MUSE_SPARK_OPEN_*` in `bridge/src/shadow.rs`: $1.25 in / $0.15 cached / $4.25
+  out per 1M, from https://fireworks.ai/models/fireworks/muse-spark-open (read 2026-10-15).
+  Neither https://fireworks.ai/pricing nor https://docs.fireworks.ai/serverless/pricing had a
+  row for it that day. Overridable via `JESSE_MODEL_MUSE_PRICE_{IN,CACHED,OUT}`.
+- **No version.** Meta's card (`meta-models/Muse-Spark-Open-816B-A42B`) names the model "Muse
+  Spark Open" (its license block reads `version: Muse Spark Open`) and describes the open
+  weights as having additional safety post-training, so "1.2", the hosted model's version,
+  would name a different model. `JESSE_MODEL_MUSE_VERSION` adds a version when Meta publishes one.
+- **Measured on 2026-10-15, before any code:**
+  - the slug is in `GET /inference/v1/models` (`supports_image_input`, `supports_tools`,
+    1,048,576 context);
+  - `POST /inference/v1/messages` answered a plain turn (200, 2.2 s), and a one-tool turn
+    returned `stop_reason: tool_use` with a well-formed `tool_use` block (`get_weather`,
+    `{"city":"Lisbon"}`, id `chatcmpl-tool-<hash>`). The Responses surface was not needed;
+  - vision: a two-colour PNG was described correctly on 8 of 10 calls. The two misses were
+    the first image call on `/v1/messages` and on chat completions, back to back, where no
+    image tokens were billed and the model said it could not see an image; every call after
+    that saw it. Unpaired claude-code entries hand the image over through the scratch file and
+    the CLI's `Read` tool, which is the path Kimi takes;
+  - effort (`output_config.effort`, one prompt, two samples, output tokens): low 1,759 / 1,131,
+    medium 2,053 / 2,001, high 4,128 / 3,877, xhigh 4,279 / 3,921, max 3,129 / 3,181; a harder
+    prompt agreed for low < medium < high and saturated the 32k cap above that. Declared
+    `low, medium, high`, default `high`, which is what the pinned CLI (2.1.300) sends for this
+    slug with no `--effort` (captured against a local listener). The surface accepts
+    `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `none` and `adaptive`.
+- **Tests:** `muse_is_present_but_unconfigured_and_hidden_without_its_token`,
+  `muse_arms_from_its_own_token_on_the_fireworks_anthropic_surface`,
+  `muse_ships_the_model_pages_price_deck_and_env_overrides_it`,
+  `muse_read_only_drops_its_level_to_read` and
+  `the_muse_slug_reaches_the_claude_code_child_as_anthropic_model`, all through
+  `ModelRegistry::from_env`. Each fails with the entry removed from `config.rs` and passes with
+  it. `from_env_with_no_model_config_is_todays_behavior_opus_only_selectable` and
+  `each_built_in_model_is_registered_once_on_one_harness` now include `muse`.
+- **`jesse.example.toml`:** a Muse paragraph under Qwen's, with the evidence and the
+  equivalent explicit `[[models]]` entry.
+
 ## [Bridge 0.177.2] - 2026-10-15
 
 **A scheduled turn that replies `JESSE_QUIET` is quiet again: no push, no unread dot.** Root

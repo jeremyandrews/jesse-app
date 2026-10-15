@@ -3682,6 +3682,81 @@ mod tests {
         }
     }
 
+    /// THE MUSE SLUG REACHES THE CHILD on a turn, not only the health probe and the label —
+    /// the same chain as the Fireworks test above (entry → `ActiveModel::from_registry` →
+    /// `build_turn` → `apply_main_env`), started from the token an operator exports.
+    #[test]
+    fn the_muse_slug_reaches_the_claude_code_child_as_anthropic_model() {
+        let _g = crate::testutil::ENV_LOCK.lock_ok();
+        let vars = [
+            "JESSE_CONFIG",
+            "JESSE_STATE_DIR",
+            "JESSE_MODEL_MUSE_BASE_URL",
+            "JESSE_MODEL_MUSE_AUTH_TOKEN",
+            "JESSE_MODEL_MUSE_MODEL",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            vars.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in vars {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("JESSE_CONFIG", "/nonexistent/jesse.local.toml");
+        std::env::set_var("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse");
+
+        let registry = ModelRegistry::from_env("");
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        let cfg = test_config();
+        let Runner::Spawned(harness) = cfg.harnesses.fallback_harness().runner() else {
+            panic!("claude-code is a spawned harness")
+        };
+        let entry = registry.get("muse").expect("muse registered");
+        assert_eq!(entry.harness, CLAUDE_CODE_ID, "muse is a claude-code entry");
+        let active = ActiveModel::from_registry(entry);
+        let req = main_turn_request(
+            &cfg,
+            "PROMPT",
+            None,
+            &active,
+            turn_capability(&active),
+            main_mcp_config(&cfg, &ClaudeCode),
+            BUILDER_TURN_ID,
+        );
+        let cmd = harness
+            .build_turn(&cfg, &req)
+            .expect("claude never refuses");
+        let env = cmd_env_overrides(&cmd);
+        let slug = "accounts/fireworks/models/muse-spark-open";
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some(slug),
+            "the turn must run the slug the picker names, not the CLI's default"
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_SUBAGENT_MODEL").map(String::as_str),
+            Some(slug),
+            "and so must the subagents it spawns"
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://api.fireworks.ai/inference"),
+            "on the Anthropic surface, no `/v1` suffix"
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("fw-muse"),
+            "the token rides in the environment"
+        );
+        assert!(
+            !cmd_argv(&cmd).iter().any(|a| a == "fw-muse"),
+            "and never on the command line, where `ps` would show it"
+        );
+    }
+
     /// THE SUBSCRIPTION HALF. An entry on the bridge's own login that names a model reaches
     /// the child as `ANTHROPIC_MODEL` (and the subagent model) with NO base URL and NO token,
     /// so the turn stays on the login's credential and no metered key is involved. The

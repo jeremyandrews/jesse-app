@@ -379,6 +379,46 @@ Answer the question I asked, not the one you wish I had asked.
 # resources; the first is "Qwen 3.8 Max" and has the published price, the second
 # ("Qwen3.8-2.4T-A95B") is a text-only FP8 resource with no row on the pricing page.
 #
+# MUSE SPARK OPEN (`muse`) is the fourth Fireworks family, Meta's open-weights model (816B
+# total / 42B active MoE, text + image in, ~1M context), and it is armed the same way, by one
+# variable holding a Fireworks key:
+#
+#     JESSE_MODEL_MUSE_AUTH_TOKEN=fw-...
+#
+#     id     model                                       version   deck (in / cached / out)
+#     muse   accounts/fireworks/models/muse-spark-open   (none)    1.25 / 0.15 / 4.25
+#
+# Defaults: base_url https://api.fireworks.ai/inference, harness claude-code, read-write,
+# 15s probe budget, effort low | medium | high (default high), no vision helper. The label is
+# "Muse Spark Open" with no version, because Meta publishes none for the open weights (its
+# card's license block reads `version: Muse Spark Open`); the hosted Muse Spark 1.2 is a
+# different model. JESSE_MODEL_MUSE_VERSION adds one. Measured 2026-10-15:
+#   * slug listed by GET /inference/v1/models (image input, tools, 1,048,576 context);
+#   * /v1/messages answered a plain turn, and a one-tool turn returned a well-formed
+#     `tool_use` block with stop_reason tool_use, so it is a claude-code entry;
+#   * a two-colour PNG was described correctly on 8 of 10 calls (the first image call on
+#     each of two surfaces dropped the image; every later call saw it), so it reads images
+#     itself and stays UNPAIRED, like `kimi`;
+#   * effort, output tokens on one prompt, two samples each: low 1,759 / 1,131, medium
+#     2,053 / 2,001, high 4,128 / 3,877, xhigh 4,279 / 3,921, max 3,129 / 3,181. `xhigh` sat
+#     on `high` and `max` came out below it, so neither is declared;
+#   * deck from https://fireworks.ai/models/fireworks/muse-spark-open; neither pricing page
+#     had a row for it on that date.
+# The equivalent explicit entry, to override any field (an entry with id "muse" REPLACES
+# the built-in rather than appearing beside it):
+#
+# [[models]]
+# id = "muse"
+# family = "Muse Spark Open"
+# kind = "hosted"
+# base_url = "https://api.fireworks.ai/inference"
+# model = "accounts/fireworks/models/muse-spark-open"
+# auth_token_env = "JESSE_MODEL_MUSE_AUTH_TOKEN"
+# harness = "claude-code"
+# price = { in_per_m = 1.25, cached_per_m = 0.15, out_per_m = 4.25 }
+# health = { path = "/v1/messages", timeout_secs = 15 }   # it thinks; 3s is a coin toss
+# effort = { kind = "scale", values = ["low", "medium", "high"], default = "high" }
+#
 # THE SUBSCRIPTION LOGIN CAN RUN MORE THAN ONE CLAUDE MODEL, WITH NO API KEY. Two built-in
 # entries sit on the bridge's OWN login — no base_url, no token, nothing metered, no second
 # billing relationship:
@@ -577,6 +617,7 @@ Answer the question I asked, not the one you wish I had asked.
 #                  picker is not allowed to offer. The built-ins' scales were set from live
 #                  turns, not vendor tables (see `effort_from_env` in bridge/src/config.rs):
 #                    glm, qwen ... low, high, max     opus, fable ... high, max
+#                    muse ........ low, medium, high
 #                    kimi ........ none — `low` and `max` did not differ measurably on
 #                                  Fireworks, whatever its vendor documents
 #                  Re-declare a built-in from the launch env as JESSE_MODEL_<ID>_EFFORT=low,high,max
@@ -682,7 +723,7 @@ Answer the question I asked, not the one you wish I had asked.
 #                  A THINKING model needs a wider timeout than 3s — it emits reasoning
 #                  before its first token even at max_tokens 1, and nothing bounds how long
 #                  that takes. Kimi K3 on Fireworks was measured at 1.2–5.4s (2026-08-04).
-#                  The built-in glm, kimi and qwen entries all think, and all set 15.
+#                  The built-in glm, kimi, qwen and muse entries all think, and all set 15.
 #                  A TIMEOUT is confirmed before it counts: the probe is asked once more
 #                  with at least 45s, and only that answer is recorded. A backend queued
 #                  behind a long generation (the single-request local gateway) is busy, not
@@ -694,7 +735,7 @@ Answer the question I asked, not the one you wish I had asked.
 #   full [[models]] block. Seconds, floored at 5; a zero/unparseable value is ignored with
 #   a startup warning. Priority per model, highest first: an explicit per-model
 #   health.interval_secs (below) > JESSE_HEALTH_INTERVAL_SECS > the built-in 60s default.
-#   Applies to the env-triple models (glm, kimi, qwen, local) and any [[models]] entry
+#   Applies to the env-triple models (glm, kimi, qwen, muse, local) and any [[models]] entry
 #   that omits its own interval_secs. Does NOT change the per-probe timeout or path.
 #
 # THREE WAYS TO REACH AN OPENAI-SHAPED MODEL, and they are not interchangeable:

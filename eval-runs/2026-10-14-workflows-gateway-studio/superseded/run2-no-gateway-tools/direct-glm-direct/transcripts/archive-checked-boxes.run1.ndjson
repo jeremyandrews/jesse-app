@@ -1,0 +1,25 @@
+{"pid":97752,"target":"spawned","type":"bridge_spawn"}
+{"deltas":113,"latency":{"first_event_ms":28632,"first_token_ms":144434,"result_ms":146673},"provenance":{"badge":"[glm-direct · write · $0.1104]","cost_usd":0.11038024,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm-direct","route":"hosted"},"result_ms":146670,"status":"done","timing":null,"turn":1,"type":"bridge_turn"}
+{"data":{"text":""},"event":"reset","t_ms":9,"type":"bridge_sse"}
+{"data":{"name":"vault_list"},"event":"activity","t_ms":28632,"type":"bridge_sse"}
+{"data":{"name":"vault_search"},"event":"activity","t_ms":28632,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":28632,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":35842,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":35842,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":35842,"type":"bridge_sse"}
+{"data":{"name":"vault_search"},"event":"activity","t_ms":64555,"type":"bridge_sse"}
+{"data":{"name":"vault_search"},"event":"activity","t_ms":64555,"type":"bridge_sse"}
+{"data":{"name":"vault_search"},"event":"activity","t_ms":64555,"type":"bridge_sse"}
+{"data":{"name":"vault_search"},"event":"activity","t_ms":81492,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":81492,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":92189,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":92189,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":94925,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":94925,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":132374,"type":"bridge_sse"}
+{"data":{"name":"vault_move"},"event":"activity","t_ms":135705,"type":"bridge_sse"}
+{"data":{"name":"vault_move"},"event":"activity","t_ms":135705,"type":"bridge_sse"}
+{"data":{"name":"vault_list"},"event":"activity","t_ms":137037,"type":"bridge_sse"}
+{"data":{"name":"vault_read"},"event":"activity","t_ms":137038,"type":"bridge_sse"}
+{"data":{"artifacts":null,"directives":null,"last_reply_ms":1791944111826,"narration":null,"provenance":{"badge":"[glm-direct · write · $0.1104]","cost_usd":0.11038024,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm-direct","route":"hosted"},"response":"Archived 2 drafts, both marked \"Archive only\" so no extraction was needed: **garden-plan.md** became `vault/Projects/drafts/archive/2026-10-14-garden-plan.md` and the boiler quote draft kept its dated name in the same archive folder. I could not run the skill's pinned finder script (no shell in this session), so I covered its scope with vault searches instead: those two were the only files with a checked box, nothing in Research, and both originals are now gone from the drafts folder.\n\n[glm-direct · write · $0.1104]","session_id":"direct-aae153de-0a4e-4e04-9df0-d85342fd0bc4"},"event":"done","t_ms":146673,"type":"bridge_sse"}
+{"is_error":false,"result":"Archived 2 drafts, both marked \"Archive only\" so no extraction was needed: **garden-plan.md** became `vault/Projects/drafts/archive/2026-10-14-garden-plan.md` and the boiler quote draft kept its dated name in the same archive folder. I could not run the skill's pinned finder script (no shell in this session), so I covered its scope with vault searches instead: those two were the only files with a checked box, nothing in Research, and both originals are now gone from the drafts folder.\n\n[glm-direct · write · $0.1104]","subtype":"success","type":"result","usage":{}}

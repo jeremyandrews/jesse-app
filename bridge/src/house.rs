@@ -396,7 +396,7 @@ pub fn validate_house(cfg: &Config) -> Vec<ConfigError> {
 /// String surgery on the one known entry rather than a JSON round trip, so no other server's
 /// declaration moves by a byte.
 pub fn render_house_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
-    if !config.contains(HOUSE_MCP_ENTRY) {
+    if !config.contains(HOUSE_MCP_ENTRY.as_str()) {
         return Cow::Borrowed(config);
     }
     let entry = match cfg.house.ready() {
@@ -404,7 +404,7 @@ pub fn render_house_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
         Some(h) => HOUSE_MCP_ENTRY.replacen(HOUSE_URL_PLACEHOLDER, &h.url, 1),
         None => String::new(),
     };
-    Cow::Owned(config.replacen(HOUSE_MCP_ENTRY, &entry, 1))
+    Cow::Owned(config.replacen(HOUSE_MCP_ENTRY.as_str(), &entry, 1))
 }
 
 /// Put the house token on a child that loads the server, and on no other.
@@ -414,7 +414,7 @@ pub fn render_house_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
 /// nothing to inherit, and its environment is byte for byte what it was before this server.
 pub fn apply_house_env(cmd: &mut Command, cfg: &Config, config: &str) {
     if let Some(h) = cfg.house.ready() {
-        if config.contains(HOUSE_MCP_ENTRY) {
+        if config.contains(HOUSE_MCP_ENTRY.as_str()) {
             cmd.env(HOUSE_TOKEN_ENV, h.token.expose());
         }
     }
@@ -429,7 +429,7 @@ pub fn main_turn_loads_house(cfg: &Config, harness: &dyn Harness) -> bool {
         return false;
     }
     match harness.runner() {
-        Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HOUSE_MCP_ENTRY),
+        Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HOUSE_MCP_ENTRY.as_str()),
         Runner::InProcess(_) => harness.id() == DIRECT_ID,
     }
 }
@@ -587,7 +587,7 @@ mod tests {
     fn the_main_set_renders_with_the_configured_url_or_without_the_server() {
         let mut cfg = test_config();
         cfg.house = ready();
-        let with = render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG);
+        let with = render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str());
         let v: serde_json::Value = serde_json::from_str(&with).expect("still JSON");
         assert_eq!(
             v["mcpServers"]["house"],
@@ -603,7 +603,8 @@ mod tests {
             cfg.house = absent;
             let without = render_house_mcp(
                 &cfg,
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG
+                    .as_str(),
             );
             let v: serde_json::Value = serde_json::from_str(&without).expect("still JSON");
             assert!(v["mcpServers"].get("house").is_none(), "{without}");
@@ -613,6 +614,7 @@ mod tests {
             assert_eq!(
                 without,
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG
+                    .as_str()
             );
         }
     }
@@ -645,7 +647,7 @@ mod tests {
                 .map(|(_, v)| v.map(|v| v.to_string_lossy().to_string()))
         };
         let mut cmd = Command::new("true");
-        apply_house_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG);
+        apply_house_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG.as_str());
         assert_eq!(env_of(&cmd), Some(Some("t0ken".to_string())));
 
         // A set without the server gets nothing, and neither does any child when there is
@@ -656,7 +658,7 @@ mod tests {
 
         cfg.house = HouseConfig::Absent;
         let mut cmd = Command::new("true");
-        apply_house_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG);
+        apply_house_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG.as_str());
         assert_eq!(env_of(&cmd), None);
     }
 
@@ -707,7 +709,7 @@ mod tests {
         cfg.house = ready();
         let args = codex_mcp_args(
             CODEX_ID,
-            &render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG),
+            &render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str()),
             DEFAULT_ALLOWED_TOOLS,
         )
         .expect("renders");
@@ -746,7 +748,7 @@ mod tests {
         cfg.house = HouseConfig::Absent;
         let args = codex_mcp_args(
             CODEX_ID,
-            &render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG),
+            &render_house_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str()),
             DEFAULT_ALLOWED_TOOLS,
         )
         .expect("renders");
@@ -792,6 +794,7 @@ mod tests {
                 url,
                 bearer,
                 ca_pem,
+                ..
             } => {
                 assert_eq!(url, "https://house.example/mcp");
                 assert_eq!(bearer, &Some(jesse_agent::mcp::Bearer::new("t0ken")));
@@ -871,10 +874,12 @@ mod tests {
     fn the_shipped_entry_carries_the_placeholder_and_the_token_by_name() {
         assert!(HOUSE_MCP_ENTRY.contains(HOUSE_URL_PLACEHOLDER));
         assert!(HOUSE_MCP_ENTRY.contains(&format!("${{{HOUSE_TOKEN_ENV}}}")));
-        assert!(
-            MAIN_CHILD_MCP_CONFIG.ends_with(&format!(
-                r#"{HOUSE_MCP_ENTRY}{HEALTHDB_MCP_ENTRY},"clockify-rs":{{"type":"stdio","command":"clockify-rs-mcp","args":[]}}}}}}"#
-            ))
-        );
+        let clockify_rs =
+            crate::mcpservers::render_entry(crate::mcpservers::row("clockify-rs").unwrap());
+        assert!(MAIN_CHILD_MCP_CONFIG.ends_with(&format!(
+            "{}{},{clockify_rs}}}}}",
+            HOUSE_MCP_ENTRY.as_str(),
+            HEALTHDB_MCP_ENTRY.as_str()
+        )));
     }
 }

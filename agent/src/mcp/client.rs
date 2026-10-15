@@ -66,7 +66,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{timeout_at, Instant};
 
-use crate::mcp::http::{Bearer, HttpConnection};
+use crate::mcp::http::{Bearer, HttpAuth, HttpConnection};
 
 /// The protocol version this client asks for.
 ///
@@ -79,6 +79,26 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// What this client tells a server it is. No version of the host, no hostname, no path:
 /// a server logs this line and a server's log is not a place to put deployment facts.
 pub const CLIENT_NAME: &str = "jesse-agent";
+
+/// What a client calls itself in `initialize`: [`CLIENT_NAME`] and this crate's version unless
+/// a host that RELAYS another client's session says otherwise (0.14.0). The bridge's gateway
+/// starts an upstream on behalf of an agent child and passes that child's own `clientInfo`
+/// through, so a server that decides whom to trust by client name (the iMCP app does) sees the
+/// same client it always has. A name, not a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInfo {
+    pub name: String,
+    pub version: String,
+}
+
+impl Default for ClientInfo {
+    fn default() -> ClientInfo {
+        ClientInfo {
+            name: CLIENT_NAME.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
 
 /// How many `tools/list` pages will be followed before the server is called out of spec.
 ///
@@ -164,6 +184,10 @@ pub struct AdvertisedTool {
     pub description: String,
     /// `inputSchema`, or `{"type":"object"}` when the server sent none.
     pub input_schema: Value,
+    /// The whole entry as the server sent it (annotations, `outputSchema`, `title`), for a
+    /// host that RELAYS a server rather than consuming it (the bridge's gateway, 0.14.0).
+    /// UNTRUSTED, exactly as the description is.
+    pub raw: Value,
 }
 
 /// One `tools/call` result, in the shape the tool layer maps to [`crate::tools::ResultBlock`]s.
@@ -175,7 +199,13 @@ pub struct CallOutcome {
     pub structured: Option<Value>,
     /// The server's own `isError` flag — a TOOL failure, not a protocol one.
     pub is_error: bool,
+    /// The whole `result` object as the server sent it, for a relaying host (0.14.0).
+    pub raw: Value,
 }
+
+/// A callback that receives each stderr line of a stdio server; see
+/// [`McpClient::connect_logging`].
+pub type StderrLog = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What this client counted on a server's stderr. Numbers only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -222,6 +252,8 @@ pub struct McpClient {
     conn: tokio::sync::Mutex<Option<Wire>>,
     /// Why the connection died, once it has. Set exactly once.
     death: Mutex<Option<String>>,
+    /// The stdio child's pid, which is also its PROCESS GROUP id; `None` over HTTP.
+    pid: Option<u32>,
 }
 
 impl std::fmt::Debug for McpClient {
@@ -233,6 +265,29 @@ impl std::fmt::Debug for McpClient {
             .field("dead", &self.death_reason())
             .finish_non_exhaustive()
     }
+}
+
+/// ONE CHILD SPAWNED AT A TIME, process-wide, among the callers of [`spawn_serialised`]
+/// (0.14.0).
+///
+/// macOS has no `pipe2`, so std makes each spawn's pipes close-on-exec in a second step after
+/// creating them. When std cannot use `posix_spawn` (on macOS: a bare program name looked up
+/// through a `PATH` the command sets, which is every gateway upstream and every gateway-on
+/// harness child), it forks and then waits for the exec by reading one of those pipes until
+/// EOF. A sibling forked by another thread in between inherits that pipe and holds it open for
+/// as long as it lives, so the `read` never returns: a blocked worker thread, and a turn that
+/// waits for a server forever, beyond every timeout (they all start after the spawn). The
+/// gateway starts a turn's twenty-odd servers at once, which made the race routine
+/// (`tests/mcp_concurrent_spawn.rs`). A spawn takes milliseconds; serialising them costs
+/// nothing a caller can see.
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Spawn `cmd` holding [`SPAWN_LOCK`]. Every MCP stdio server goes through it; a host that
+/// spawns its own children beside them under an explicit `PATH` (the bridge's harness
+/// children) should too.
+pub fn spawn_serialised(cmd: &mut Command) -> std::io::Result<Child> {
+    let _one_at_a_time = SPAWN_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    cmd.spawn()
 }
 
 impl McpClient {
@@ -263,6 +318,33 @@ impl McpClient {
         per_call: Duration,
         connect_timeout: Duration,
     ) -> Result<McpClient, McpError> {
+        McpClient::connect_logging(
+            name,
+            command,
+            args,
+            env,
+            per_call,
+            connect_timeout,
+            None,
+            &ClientInfo::default(),
+        )
+        .await
+    }
+
+    /// [`McpClient::connect`], with every stderr line ALSO handed to `log` as it is drained
+    /// (0.14.0). For a host whose job is to run one server and keep its log, such as the
+    /// bridge's HTTP adapter; the counts and the ring are kept either way.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn connect_logging(
+        name: &str,
+        command: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+        per_call: Duration,
+        connect_timeout: Duration,
+        log: Option<StderrLog>,
+        identity: &ClientInfo,
+    ) -> Result<McpClient, McpError> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .env_clear()
@@ -274,7 +356,13 @@ impl McpClient {
             // fate beyond the kill on drop; `kill_on_drop` is what makes the Drop impl below
             // effective even when the future is cancelled mid-call.
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| McpError::Spawn(e.to_string()))?;
+        // ITS OWN PROCESS GROUP (0.14.0), so a caller can kill the server AND everything it
+        // started — `npx` runs the real server as a grandchild that `kill_on_drop` (which
+        // signals the direct child only) would leave behind. See [`McpClient::pid`].
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = spawn_serialised(&mut cmd).map_err(|e| McpError::Spawn(e.to_string()))?;
+        let pid = child.id();
 
         let stdin = child
             .stdin
@@ -297,6 +385,9 @@ impl McpClient {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(log) = &log {
+                    log(&line);
+                }
                 if let Ok(mut c) = sink_task.counts.lock() {
                     c.lines += 1;
                     c.bytes += line.len() as u64;
@@ -323,8 +414,9 @@ impl McpClient {
                 stdout: BufReader::new(stdout).lines(),
             }))),
             death: Mutex::new(None),
+            pid,
         };
-        client.handshake(connect_timeout).await
+        client.handshake(connect_timeout, identity).await
     }
 
     /// Open a session with a Streamable HTTP server, negotiate, and return a client ready for
@@ -345,7 +437,33 @@ impl McpClient {
         per_call: Duration,
         connect_timeout: Duration,
     ) -> Result<McpClient, McpError> {
-        let conn = HttpConnection::new(name, url, bearer, ca_pem, connect_timeout)?;
+        let auth = HttpAuth {
+            bearer: bearer.cloned(),
+            ca_pem: ca_pem.map(<[u8]>::to_vec),
+            ..HttpAuth::default()
+        };
+        McpClient::connect_http_with(
+            name,
+            url,
+            &auth,
+            per_call,
+            connect_timeout,
+            &ClientInfo::default(),
+        )
+        .await
+    }
+
+    /// [`McpClient::connect_http`] with the whole of [`HttpAuth`]: a bearer or any header read
+    /// from a NAMED variable on every message, and mutual TLS with a pinned CA.
+    pub async fn connect_http_with(
+        name: &str,
+        url: &str,
+        auth: &HttpAuth,
+        per_call: Duration,
+        connect_timeout: Duration,
+        identity: &ClientInfo,
+    ) -> Result<McpClient, McpError> {
+        let conn = HttpConnection::new(name, url, auth, connect_timeout)?;
         let client = McpClient {
             name: name.to_string(),
             server_protocol: String::new(),
@@ -355,12 +473,17 @@ impl McpClient {
             stderr: Arc::new(StderrSink::default()),
             conn: tokio::sync::Mutex::new(Some(Wire::Http(conn))),
             death: Mutex::new(None),
+            pid: None,
         };
-        client.handshake(connect_timeout).await
+        client.handshake(connect_timeout, identity).await
     }
 
     /// `initialize`, the capability check, and `notifications/initialized`, on either wire.
-    async fn handshake(mut self, connect_timeout: Duration) -> Result<McpClient, McpError> {
+    async fn handshake(
+        mut self,
+        connect_timeout: Duration,
+        info: &ClientInfo,
+    ) -> Result<McpClient, McpError> {
         let client = &mut self;
         let result = client
             .request_with_timeout(
@@ -371,7 +494,7 @@ impl McpClient {
                     // elicitation. A conforming server may not ask this client for any of
                     // them, and a non-conforming one gets a protocol error.
                     "capabilities": {},
-                    "clientInfo": {"name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION")},
+                    "clientInfo": {"name": info.name, "version": info.version},
                 }),
                 connect_timeout,
             )
@@ -427,6 +550,13 @@ impl McpClient {
         client.server_protocol = protocol;
         client.server_info = info;
         Ok(self)
+    }
+
+    /// The stdio child's pid, which is also its process group id (the child is started as the
+    /// leader of a new group), so `killpg(pid)` ends the server and every process it started.
+    /// `None` for an HTTP server.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 
     /// The configured server name.
@@ -493,6 +623,7 @@ impl McpClient {
                     ));
                 };
                 out.push(AdvertisedTool {
+                    raw: t.clone(),
                     name: name.to_string(),
                     description: t
                         .get("description")
@@ -537,6 +668,7 @@ impl McpClient {
                 .get("isError")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            raw: result,
         })
     }
 

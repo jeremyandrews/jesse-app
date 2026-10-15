@@ -40,21 +40,28 @@
 //! tool-list-change notifications, and resource or prompt support.
 //!
 //! HTTP transport was left out until there was a credential story, and the story it got is
-//! deliberately the smallest one: a static bearer VALUE the caller has already read (from a
-//! `0600` file the caller checked, in the bridge's case), held in [`Bearer`] so no `Debug` can
-//! print it, sent as one sensitive header, and one optional extra CA root for that server's
-//! client alone. Nothing here reads a credential, refreshes one or stores one. A server that
-//! needs more than a static bearer is not a server this client can be granted.
+//! deliberately small: a static bearer VALUE the caller has already read (from a `0600` file
+//! the caller checked, in the bridge's case), held in [`Bearer`] so no `Debug` can print it,
+//! sent as one sensitive header, and one optional extra CA root for that server's client alone.
+//!
+//! 0.14.0 added the shapes a host that BROKERS many servers needs ([`HttpAuth`]): a bearer or
+//! any named header read from a NAMED process variable when each message is sent (so the host's
+//! config holds names and the value lives only in its environment and on the wire), and mutual
+//! TLS with a client certificate and key read from named files and the server pinned to one CA.
+//! A relaying host may also pass its own client's [`ClientInfo`] through to `initialize`.
+//! Nothing here refreshes or stores a credential; OAuth is still not a thing this client does.
 
 pub mod client;
 pub mod http;
 pub mod toolset;
 
 pub use client::{
-    AdvertisedTool, CallOutcome, McpClient, McpError, StderrCounts, CLIENT_NAME, PROTOCOL_VERSION,
+    spawn_serialised, AdvertisedTool, CallOutcome, ClientInfo, McpClient, McpError, StderrCounts,
+    StderrLog, CLIENT_NAME, PROTOCOL_VERSION,
 };
-pub use http::Bearer;
+pub use http::{Bearer, HttpAuth, MutualTls};
 pub use toolset::{
-    tool_name, validate_grants, CompositeError, CompositeToolSet, McpReport, McpSetError,
-    McpToolSet, McpTransport, PemBytes, ServerGrant, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
+    exposed_class, tool_name, tool_result_from_mcp, validate_grants, CompositeError,
+    CompositeToolSet, McpReport, McpSetError, McpToolSet, McpTransport, NamedHttpAuth, PemBytes,
+    ServerGrant, DEFAULT_CALL_TIMEOUT, DEFAULT_CONNECT_TIMEOUT,
 };

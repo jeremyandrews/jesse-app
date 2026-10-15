@@ -3350,7 +3350,7 @@ serde = { version = "1", features = ["derive"] }
     fn every_mcp_server_this_repo_builds_is_in_the_deploy_manifest() {
         let bins = embedded_deploy_bins();
         // BOTH harnesses' main set: one const from 0.165.0, when Codex moved onto it.
-        for config in [crate::MAIN_CHILD_MCP_CONFIG] {
+        for config in [crate::MAIN_CHILD_MCP_CONFIG.as_str()] {
             for (server, command) in crate::stdio_commands(config) {
                 if !command.starts_with("jesse-") || HOST_LAUNCHERS.contains(&command.as_str()) {
                     continue;
@@ -3377,7 +3377,7 @@ serde = { version = "1", features = ["derive"] }
             );
             // It must also actually be a server this deployment spawns, so a name that stops
             // being used is caught here rather than sitting as a permanent hole.
-            let spawned = [crate::MAIN_CHILD_MCP_CONFIG]
+            let spawned = [crate::MAIN_CHILD_MCP_CONFIG.as_str()]
                 .iter()
                 .flat_map(|c| crate::stdio_commands(c))
                 .any(|(_, command)| command == launcher);

@@ -1,0 +1,33 @@
+# K03: the `qwen-local-direct` cell with the tool gateway ON. Generated from
+# `../qwen-local-direct.toml` (copied below unchanged) plus the [gateway] table.
+#
+# `socket_dir` is short and per cell: the scratch state dir is too deep for a unix socket
+# path, and each scratch bridge's startup sweep empties its own socket_dir.
+
+# Arms `qwen-local-direct` for a jesse-eval bridge run: the same local model as
+# `qwen-local`, on the DIRECT harness, speaking the Anthropic Messages wire to the gateway
+# on 127.0.0.1:9100. The deployment has no such entry; it exists so the baseline has a local
+# cell on `direct`. Pass `--pass-env JESSE_MODEL_QWEN_LOCAL_TOKEN`.
+[[models]]
+id = "qwen-local-direct"
+family = "Qwen"
+version = "3.8 Flash-Next (local, direct)"
+kind = "local"
+harness = "direct"
+wire = "messages"
+base_url = "http://127.0.0.1:9100"
+model = "local-qwen"
+auth_token_env = "JESSE_MODEL_QWEN_LOCAL_TOKEN"
+health = { timeout_secs = 15 }
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-eval-qwen-local-direct"
+
+# A direct turn reaches iMCP as `jesse-agent`, a client name the iMCP app has not been
+# asked to trust, and the app answers a new name with an on-screen approval prompt. An
+# unattended eval must not raise one, so iMCP is pointed at a closed port for these cells:
+# its two tools are absent, and no workflows-v1 task uses them.
+[mcp.imcp]
+transport = "http"
+url = "http://127.0.0.1:9/mcp"

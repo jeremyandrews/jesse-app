@@ -190,9 +190,18 @@ async fn main() {
             std::process::exit(2);
         }
         let cfg = Config::from_env();
+        // The gateway's probes, run here against the real gateway and probe upstream.
+        let mut gateway_probes = std::collections::BTreeMap::new();
+        for level in ["basic", "read", "write"] {
+            gateway_probes.insert(
+                level.to_string(),
+                jesse_bridge::direct_gateway_probes(level).await,
+            );
+        }
         let fresh = match jesse_bridge::direct_results_from_battery(
             &cfg,
             std::path::Path::new(DIRECT_SUMMARY_PATH),
+            &gateway_probes,
         ) {
             Ok(r) => r,
             Err(e) => {

@@ -499,7 +499,7 @@ fn gate(
         session,
         &active,
         capability,
-        QMD_ONLY_MCP_CONFIG,
+        QMD_ONLY_MCP_CONFIG.as_str(),
         "turn-1",
     );
     rules_gate(cfg, &req, harness)
@@ -710,7 +710,7 @@ fn both_harnesses_actually_call_the_gate_from_build_turn() {
             None,
             &active,
             Capability::Write,
-            QMD_ONLY_MCP_CONFIG,
+            QMD_ONLY_MCP_CONFIG.as_str(),
             "turn-1",
         );
         let harness = registry_harness(&cfg.harnesses, h).expect("registered");

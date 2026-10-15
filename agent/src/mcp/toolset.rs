@@ -52,7 +52,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::mcp::client::{McpClient, McpError};
-use crate::mcp::http::Bearer;
+use crate::mcp::http::{Bearer, HttpAuth, MutualTls};
 use crate::provider::{BoxFuture, ToolSpec};
 use crate::scope::Scope;
 use crate::tools::{
@@ -98,7 +98,19 @@ pub enum McpTransport {
         bearer: Option<Bearer>,
         /// One extra trust root for this server's client only, as PEM.
         ca_pem: Option<PemBytes>,
+        /// Credentials NAMED rather than held (0.14.0): a bearer variable, header variables
+        /// and mutual TLS. Read when each message is sent; see [`HttpAuth`].
+        named: NamedHttpAuth,
     },
+}
+
+/// The named half of an HTTP grant's credentials: variable NAMES and file PATHS only, so the
+/// whole struct is safe to print.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NamedHttpAuth {
+    pub bearer_env: Option<String>,
+    pub header_env: Vec<(String, String)>,
+    pub mtls: Option<MutualTls>,
 }
 
 /// A PEM certificate's bytes. A newtype only so `Debug` prints a length rather than a page of
@@ -161,6 +173,7 @@ impl ServerGrant {
                 url: url.into(),
                 bearer: None,
                 ca_pem: None,
+                named: NamedHttpAuth::default(),
             },
             tools: tools.into_iter().map(Into::into).collect(),
             action_class_default: class,
@@ -196,6 +209,14 @@ impl ServerGrant {
     pub fn with_ca_pem(mut self, pem: Vec<u8>) -> Self {
         if let McpTransport::Http { ca_pem, .. } = &mut self.transport {
             *ca_pem = Some(PemBytes(pem));
+        }
+        self
+    }
+
+    /// HTTP only: credentials read from named variables and files. A no-op on a stdio grant.
+    pub fn with_named_auth(mut self, auth: NamedHttpAuth) -> Self {
+        if let McpTransport::Http { named, .. } = &mut self.transport {
+            *named = auth;
         }
         self
     }
@@ -438,14 +459,22 @@ impl McpToolSet {
                     url,
                     bearer,
                     ca_pem,
+                    named,
                 } => {
-                    McpClient::connect_http(
+                    let auth = HttpAuth {
+                        bearer: bearer.clone(),
+                        bearer_env: named.bearer_env.clone(),
+                        header_env: named.header_env.clone(),
+                        ca_pem: ca_pem.as_ref().map(|p| p.0.clone()),
+                        mtls: named.mtls.clone(),
+                    };
+                    McpClient::connect_http_with(
                         &g.name,
                         url,
-                        bearer.as_ref(),
-                        ca_pem.as_ref().map(|p| p.0.as_slice()),
+                        &auth,
                         call_timeout,
                         connect_timeout,
+                        &crate::mcp::ClientInfo::default(),
                     )
                     .await
                 }
@@ -570,7 +599,9 @@ impl ToolSet for McpToolSet {
 
 /// [`ActionClass`] as the class a set may be BUILT with, or `None` for the one arm that has
 /// no builder equivalent.
-fn exposed_class(class: ActionClass) -> Option<ExposedClass> {
+/// The builder class a tool of `class` is added under, or `None` for the class no level
+/// exposes.
+pub fn exposed_class(class: ActionClass) -> Option<ExposedClass> {
     match class {
         ActionClass::Read => Some(ExposedClass::Read),
         ActionClass::VaultWrite => Some(ExposedClass::VaultWrite),
@@ -664,6 +695,30 @@ impl Tool for McpTool {
             }
         })
     }
+}
+
+/// One MCP `tools/call` RESULT OBJECT as this crate's tool result, mapped exactly as
+/// [`McpToolSet`]'s own tools map theirs: every block kept, the server's `isError` a `Failed`,
+/// and a fixed trace summary. For a host that brokers calls itself rather than through an
+/// [`McpClient`] this crate owns — the bridge's tool gateway (0.14.0).
+pub fn tool_result_from_mcp(result: &Value) -> ToolResult {
+    let content: Vec<Value> = result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let blocks = blocks_from_result(&content, result.get("structuredContent"));
+    if result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(ToolError::Failed(error_text(&blocks)));
+    }
+    Ok(ToolOk {
+        content: blocks,
+        summary_for_trace: "mcp tool result",
+    })
 }
 
 /// One MCP `content` array as this crate's result blocks.

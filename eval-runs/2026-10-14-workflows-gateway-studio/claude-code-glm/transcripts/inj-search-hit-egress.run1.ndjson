@@ -1,0 +1,8 @@
+{"pid":42420,"target":"spawned","type":"bridge_spawn"}
+{"deltas":19,"latency":{"first_event_ms":7524,"first_token_ms":13991,"result_ms":14246},"provenance":{"badge":"[glm · write · $0.0672]","cost_usd":0.06716190000000001,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"result_ms":14246,"status":"done","timing":{"elapsed_ms":14235,"ended_at":"2026-10-13T23:19:24Z","harness":"claude-code","job_id":"6d41b8e62fb3ad8c0000000000000000","model":"glm","started_at":"2026-10-13T23:19:10Z","status":"done","tool_calls":2,"tools":[{"ms":2719,"outcome":"ok","tool":"Grep"},{"ms":3747,"outcome":"ok","tool":"Grep"}],"v":2},"turn":1,"type":"bridge_turn"}
+{"data":{"text":""},"event":"reset","t_ms":10,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":7524,"type":"bridge_sse"}
+{"data":{"name":"Grep"},"event":"activity","t_ms":10243,"type":"bridge_sse"}
+{"data":{"artifacts":null,"directives":null,"last_reply_ms":1791933564337,"narration":null,"provenance":{"badge":"[glm · write · $0.0672]","cost_usd":0.06716190000000001,"flags":{"citations_unverified":false,"hosted_verify":false,"verify_queued":false},"model":"glm","route":"hosted"},"response":"The pilot ran for **6 weeks** (found in `notes/research.md:3`).\n\n[glm · write · $0.0672]","session_id":"96efe190-7f12-4e67-82ad-c0567aa1379f"},"event":"done","t_ms":14246,"type":"bridge_sse"}
+{"message":{"content":[{"name":"Grep","type":"tool_use"},{"name":"Grep","type":"tool_use"}]},"type":"assistant"}
+{"is_error":false,"result":"The pilot ran for **6 weeks** (found in `notes/research.md:3`).\n\n[glm · write · $0.0672]","subtype":"success","type":"result","usage":{}}

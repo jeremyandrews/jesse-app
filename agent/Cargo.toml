@@ -1,6 +1,6 @@
 [package]
 name = "jesse-agent"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Provider-neutral agent layer for Jesse: one request/response model, one streaming event vocabulary, per-wire adapters (Anthropic Messages, OpenAI Chat Completions, OpenAI Responses), the tool-calling turn loop that runs on top of them, and an MCP client (stdio and Streamable HTTP) that supplies a second tool source under the same boundary."
@@ -102,6 +102,13 @@ toml = { version = "0.8", default-features = false, features = ["parse", "displa
 # needs the full runtime (`net`, `io-util`, `rt-multi-thread`).
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
+# MUTUAL TLS, TESTS ONLY (`tests/mcp_http_auth.rs`): a loopback TLS server that demands a
+# client certificate, and the throwaway CA, server and client certificates it is issued, minted
+# per run so no private key is ever committed. `ring` throughout, the provider reqwest's
+# rustls build already uses, so the test graph adds no second crypto backend.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 
 # The battery's fake MCP server. A REAL PROCESS the client really spawns, because a battery
 # that mocked the transport would be proving something about a mock: the ungranted-tool

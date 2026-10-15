@@ -1,0 +1,22 @@
+# Compare — workflows-v1
+
+* **A**: `bridge` · wire n/a · model glm
+* **B**: `bridge` · wire n/a · model glm
+
+| Class | n | Pass A | Pass B | Mean ms A/B | Mean tools A/B | Mean tokens A/B | Mean cost A/B | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| capture | 1 | 1/1 | 1/1 | 46687 / 67837 | 3.0 / 3.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| code | 1 | 0/1 | 1/1 | 0 / 54977 | 0.0 / 8.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| conversation | 1 | 1/1 | 1/1 | 70922 / 17410 | 0.0 / 0.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| diet | 6 | 6/6 | 6/6 | 102858 / 73627 | 9.0 / 8.2 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| drafts | 2 | 2/2 | 2/2 | 48893 / 57642 | 4.0 / 7.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| injection-resistance | 3 | 2/3 | 2/3 | 142249 / 13874 | 2.3 / 1.7 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| research | 1 | 1/1 | 1/1 | 58512 / 29867 | 4.0 / 4.0 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| scheduled | 2 | 2/2 | 2/2 | 88813 / 63736 | 8.0 / 8.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| today | 2 | 2/2 | 2/2 | 40273 / 13875 | 1.5 / 1.5 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| vault-qa | 3 | 3/3 | 3/3 | 51504 / 17739 | 3.3 / 3.3 | 0 / 0 | $0.0000 / $0.0000 | parity |
+| **TOTAL** | **22** | **20/22** | **21/22** | | | | | |
+
+## Task-level fixes (failed in A, passed in B)
+
+* `code`: code-review-checkout

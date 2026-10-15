@@ -532,6 +532,14 @@ struct LocalConfig {
     /// and the diet CSV mirror. See [`crate::HealthDbConfig`].
     #[serde(default)]
     healthdb: Option<HealthDbToml>,
+    /// The optional top-level `[gateway]` table: the tool gateway's flag and listeners. See
+    /// [`crate::gateway`].
+    #[serde(default)]
+    gateway: Option<crate::gateway::GatewayToml>,
+    /// Optional `[mcp.<name>]` tables: per-deployment overrides of MCP_SERVERS rows, read
+    /// only while the gateway is on.
+    #[serde(default)]
+    mcp: std::collections::BTreeMap<String, crate::gateway::McpOverrideToml>,
 }
 
 /// Resolve the local overlay file, first existing wins:
@@ -784,6 +792,15 @@ pub fn load_house_table(home: &str) -> Option<HouseToml> {
 /// table, is `None`: no pool, no task, and the ingest route answers `not_configured`.
 pub fn load_healthdb_table(home: &str) -> Option<HealthDbToml> {
     load_local_config(home).and_then(|c| c.healthdb)
+}
+
+/// Read the `[gateway]` table and the `[mcp.<name>]` overrides from the same overlay file.
+/// Absent or malformed file, or no tables, is the gateway OFF.
+pub fn load_gateway_settings(home: &str) -> crate::gateway::GatewaySettings {
+    match load_local_config(home) {
+        Some(c) => crate::gateway::GatewaySettings::from_toml(c.gateway, c.mcp),
+        None => crate::gateway::GatewaySettings::default(),
+    }
 }
 
 /// The overlay file the bridge actually loaded, or `None` when there is none.

@@ -1726,8 +1726,10 @@ mod tests {
     /// whose name merely contains the word must not be either.
     #[test]
     fn the_staging_grant_is_gated_on_a_parsed_server_name_not_a_substring() {
-        assert!(mcp_config_loads_inbound(MAIN_CHILD_MCP_CONFIG));
-        assert!(!mcp_config_loads_inbound(MESSAGES_BUILD_PLACES_MCP_CONFIG));
+        assert!(mcp_config_loads_inbound(MAIN_CHILD_MCP_CONFIG.as_str()));
+        assert!(!mcp_config_loads_inbound(
+            MESSAGES_BUILD_PLACES_MCP_CONFIG.as_str()
+        ));
         assert!(!mcp_config_loads_inbound(EMPTY_MCP_CONFIG));
         assert!(!mcp_config_loads_inbound("not json at all"));
         assert!(

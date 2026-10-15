@@ -14,6 +14,76 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.177.0, Agent 0.14.0] - 2026-10-14
+
+**The tool gateway: with `[gateway] enabled = true` the bridge brokers every MCP call, and no
+agent child holds an MCP credential.** Off by default; with it off every child is spawned exactly
+as in 0.176.0. Root cause of the change: every spawned child (and everything it runs) inherited
+the bridge's whole environment, so every vendor token was readable from a shell turn, and the
+grant was enforced only by the CLI's own allowlist. SECURITY.md has the posture and the
+per-server table; `bridge/src/gateway/` is the code.
+
+- **One server table.** `bridge/src/mcpservers.rs` `MCP_SERVERS` is a row per server: name,
+  transport (`bridge_stdio`, `http`, `in_process`), command or URL, HTTP auth (bearer, named
+  headers or a client certificate, all by variable NAME), the environment column, `harness_env`,
+  placement (`qmd` in the child, everything else in the gateway), result cap, and the write,
+  egress and read classes. The Claude Code `--mcp-config` consts and the Codex passthrough,
+  fixed, bearer and header tables are views over it, byte-identical to 0.176.0 (golden tests);
+  `*_MCP_CONFIG` are `LazyLock<String>` and the `mcp_*!` macros are gone.
+- **Per turn** the bridge mints an HMAC-SHA256 token (job, capability, granted servers, tier,
+  expiry), binds a `0700` directory of one unix socket per server, rewrites the child's MCP
+  config so each gateway server is the credential-free stub `jesse-gateway-mcp`, and clears the
+  child's environment to `PATH HOME TMPDIR LANG TZ USER LOGNAME SHELL` plus what the harness sets.
+  A Claude Code child also gets `MCP_SERVER_CONNECTION_BATCH_SIZE=64`, since every stub is a
+  local server to the CLI, which connects those three at a time and starts the turn without the
+  ones still queued.
+- **The gateway** serves `initialize`, `notifications/initialized`, `tools/list` (the granted
+  intersection only) and `tools/call` (refused by exact name unless granted); it starts each
+  upstream lazily, with `env_clear()` plus its row's names, in its own process group, relays the
+  child's `clientInfo`, caps results (8 MiB; 32 MiB for `browser` and `house`), and kills every
+  upstream by group at turn end. A startup sweep removes leftover turn directories.
+- **The stub** forwards only those four messages and answers any other request itself
+  (Claude Code 2.1.296 opens with `server/discover`).
+- **The TCP listener** (`[gateway] listen`, off unless set; the Studio does not set it) serves
+  `POST /mcp/<server>` with the turn token checked for signature, expiry, server and revocation.
+- **`jesse-mcp-http-adapter`** serves one stdio server over Streamable HTTP with a required
+  bearer and an allow-list, for the cluster.
+- **`direct`** gets the same granted set in-process through the same session code, filtered
+  again by `Level::permits` on each tool's class; its `house` and `healthdb` grants move into the
+  gateway set when the flag is on. Each upstream tool is vetted alone by the agent's builder
+  checks, so one it refuses is withheld and reported rather than failing the set: plex's
+  `user_get_watch_history` (a `user_id` argument) is withheld from `direct`, and nothing else in
+  the main set is. In the K03 eval (no MCP credentials passed) that is 247 tools over 17 servers
+  at `write`; with every credential present it is more.
+- **The activity ledger**, `<state_dir>/activity/YYYY-MM-DD.jsonl` (`0600`, 90 days): one line
+  per turn (origin `phone` or `schedule:<id>`) and per gateway call; never arguments, results or
+  token values.
+- **`[mcp.<name>]` overrides** (transport, url, placement, `bearer_env`, `header_env`,
+  `client_cert`) are read only while the gateway is on; `validate_gateway` makes a missing stub
+  or an unresolvable override fatal. `GET /health` reports `gateway` and `gateway_upstreams`.
+- **Containment.** Two hard-gate probes, `gateway-ungranted-tool` and `gateway-env-leak`, run
+  when the gateway is on, against a `containment-probe`-only upstream that logs its own calls and
+  environment. `containment.toml` and `containment-direct.toml` are re-recorded with the gateway
+  on; `capability_args`, `DEFAULT_ALLOWED_TOOLS` and `DEFAULT_DISALLOWED_TOOLS` do not move.
+- **Agent 0.14.0:** `mcp::HttpAuth` (static bearer, bearer and named headers read from named
+  variables per message, an extra CA, mutual TLS with a pinned CA), `connect_http_with`,
+  `ClientInfo` on connect, stdio servers in their own process group, the raw tool and result
+  JSON on `AdvertisedTool` and `CallOutcome`, and `tool_result_from_mcp` / `exposed_class` made
+  public. The probe server gains `--dump-env`. **Spawns are serialised** (`spawn_serialised`,
+  used by every stdio MCP server and by the bridge's Claude Code children and battery children):
+  on macOS a bare program name under an explicit `PATH` sends std's spawn down its fork path,
+  which reads an exec-status pipe until EOF, and a sibling forked by another thread before that
+  pipe was made close-on-exec held it open for good. With the gateway starting a turn's whole
+  server set at once this hung about one `direct` turn in twenty (the first K03 direct eval
+  cells); `agent/tests/mcp_concurrent_spawn.rs` reproduces it without the lock.
+- **Tests:** `agent/tests/mcp_http_auth.rs` (named bearer and header, unset variable, mTLS
+  accepted, refused without a certificate and against the wrong CA); `bridge/tests/gateway.rs`
+  (three upstreams in one turn, ungranted call refused, outside-subset handling, forged, expired,
+  misdirected and revoked tokens, the adapter, the sweep, a scratch bridge with a fake CLI, and an
+  ignored live test against the real CLI); unit tests for the table views, settings, overrides,
+  token and a scan that no gateway source names a model or harness; and that the batch variable
+  is set on a Claude Code child only with the gateway on.
+
 ## [App 1.0 (194)] - 2026-10-13
 
 **A file Jesse returned, opened on the phone, always has a way to close.** Root cause: a chip

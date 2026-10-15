@@ -491,12 +491,62 @@ pub fn direct_mcp_grants(grants: &[DirectMcpGrant]) -> Vec<ServerGrant> {
 /// Since 0.170.0 it always starts with `house`, the one grant this project ships for the
 /// harness, so the shipped label is `house` and a deployment with `[[direct.mcp]]` grants reads
 /// `house+<theirs>`. It never answers `none` any more.
+///
+/// SINCE 0.177.0 THE LABEL NAMES EVERY GATEWAY SERVER this harness may be granted
+/// ([`direct_gateway_servers`]) in the main set's order, `house` and `healthdb` among them, and
+/// then any operator grant not already named.
 pub fn direct_mcp_label(cfg: &Config) -> String {
-    direct_record_grants(cfg)
+    let mut names: Vec<String> = direct_gateway_servers(cfg);
+    for g in direct_record_grants(cfg) {
+        if !names.contains(&g.name) {
+            names.push(g.name);
+        }
+    }
+    names.join("+")
+}
+
+/// The gateway servers a `direct` turn may be granted on this deployment: the main set's
+/// gateway-placed servers that the write-level allowlist grants any tool on, in the set's
+/// order. (`qmd` is placed in the child and reached behind the store here, never as an MCP
+/// grant.)
+pub fn direct_gateway_servers(cfg: &Config) -> Vec<String> {
+    crate::mcpservers::MAIN_SET
         .iter()
-        .map(|g| g.name.as_str())
-        .collect::<Vec<_>>()
-        .join("+")
+        .filter_map(|n| crate::mcpservers::row(n))
+        .filter(|r| r.placement == crate::mcpservers::Placement::Gateway)
+        .filter(|r| !r.granted_tools(&cfg.allowed_tools).is_empty())
+        .map(|r| r.name.to_string())
+        .collect()
+}
+
+/// The `mcp__<server>__<tool>` names the GATEWAY gives a `direct` turn at `level`: the tools the
+/// allowlist grants a main turn at that level, on the main set's gateway servers, whose table
+/// class the level permits. Flag-independent, like the rest of the record: with the gateway off
+/// the live set is the narrower house-and-healthdb one, a subset of this.
+pub fn direct_gateway_mcp_names(cfg: &Config, level: Level) -> Vec<String> {
+    let capability = match level {
+        Level::Basic => return Vec::new(),
+        Level::Read => Capability::Read,
+        Level::Write => Capability::Write,
+    };
+    let main = main_mcp_config(cfg, &ClaudeCode);
+    let set = McpSet::from_config(main).unwrap_or(McpSet::None);
+    let allowed = row_allowed_tools(cfg, capability, set);
+    let mut out = Vec::new();
+    for name in crate::mcpservers::MAIN_SET {
+        let Some(r) = crate::mcpservers::row(name) else {
+            continue;
+        };
+        if r.placement != crate::mcpservers::Placement::Gateway {
+            continue;
+        }
+        for t in r.granted_tools(allowed) {
+            if level.permits(r.class_of(&t).agent_class()) {
+                out.push(mcp_tool_name(name, &t));
+            }
+        }
+    }
+    out
 }
 
 /// Every grant the `direct` record commits on this deployment: the shipped `house` and
@@ -518,6 +568,7 @@ pub fn direct_granted_mcp_names(cfg: &Config, level: Level) -> Vec<String> {
     let mut names: Vec<String> = direct_record_grants(cfg)
         .iter()
         .flat_map(|g| g.granted_names_at(level))
+        .chain(direct_gateway_mcp_names(cfg, level))
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -1160,9 +1211,37 @@ impl Direct {
         // The configured stdio grants, then `house` when this deployment has a ready `[house]`
         // table, then `healthdb` when `[healthdb]` has an `ro_url_file`. Without one the turn
         // runs the recorded posture minus that server.
+        //
+        // WITH THE GATEWAY ON, `house` and `healthdb` are two of the gateway's servers rather
+        // than grants of this harness's own, and every other granted table server comes with
+        // them (see `crate::gateway::direct`). An operator `[[direct.mcp]]` grant that names a
+        // gateway server is dropped in its favour, so one name never has two sources.
+        let gateway_tools = crate::gateway::direct::direct_tool_set(
+            cfg,
+            req.turn_id,
+            req.capability,
+            DIRECT_ID,
+            Duration::from_secs(cfg.timeout_secs),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "jesse-bridge: direct gateway tools unavailable ({e}); this turn runs without them"
+            );
+            None
+        });
+        if let Some(g) = &gateway_tools {
+            for line in g.report() {
+                eprintln!("jesse-bridge: direct gateway {line}");
+            }
+        }
         let mut grants = direct_mcp_grants(&rt.settings.mcp);
-        grants.extend(direct_house_grant(cfg));
-        grants.extend(direct_healthdb_grant(cfg));
+        if cfg.gateway.enabled {
+            grants.retain(|g| crate::mcpservers::row(&g.name).is_none());
+        } else {
+            grants.extend(direct_house_grant(cfg));
+            grants.extend(direct_healthdb_grant(cfg));
+        }
         let mcp = if grants.is_empty() {
             None
         } else {
@@ -1197,15 +1276,19 @@ impl Direct {
                 }
             }
         };
-        let tools: Arc<dyn ToolSet> = match &mcp {
-            None => Arc::new(vault_tools),
-            Some(set) => Arc::new(
-                CompositeToolSet::new(vec![Arc::new(vault_tools), set.clone()]).map_err(|e| {
-                    TurnFailure::Fatal {
-                        message: format!("tool set: {e}"),
-                    }
-                })?,
-            ),
+        let mut sets: Vec<Arc<dyn ToolSet>> = vec![Arc::new(vault_tools)];
+        if let Some(set) = &mcp {
+            sets.push(set.clone());
+        }
+        if let Some(g) = gateway_tools {
+            sets.push(Arc::new(g));
+        }
+        let tools: Arc<dyn ToolSet> = if sets.len() == 1 {
+            sets.remove(0)
+        } else {
+            Arc::new(CompositeToolSet::new(sets).map_err(|e| TurnFailure::Fatal {
+                message: format!("tool set: {e}"),
+            })?)
         };
 
         // ---- The thread ---------------------------------------------------
@@ -1966,18 +2049,22 @@ mod tests {
         assert!(write.contains("mcp__notes__write_note"));
     }
 
-    /// The record's second key follows the grant, and is `house+healthdb` on the shipped
-    /// posture.
+    /// The record's second key follows the grant: since 0.177.0 every gateway server the
+    /// write-level allowlist grants a tool on, in the main set's order (`house` and `healthdb`
+    /// among them, `qmd` never), then operator grants not already named.
     #[test]
     fn the_records_mcp_label_names_the_granted_servers() {
         let mut cfg = crate::testutil::test_config();
-        assert_eq!(direct_mcp_label(&cfg), "house+healthdb");
+        let shipped = "slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+\
+                       proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+\
+                       rybbit+tag1+plex+house+healthdb+clockify-rs";
+        assert_eq!(direct_mcp_label(&cfg), shipped);
         assert_eq!(
-            Direct.parse_record_mcp(&cfg, "house+healthdb"),
+            Direct.parse_record_mcp(&cfg, shipped),
             Some(McpSet::None),
             "the shipped label resolves on this deployment"
         );
-        for old in ["none", "house"] {
+        for old in ["none", "house", "house+healthdb"] {
             assert_eq!(
                 Direct.parse_record_mcp(&cfg, old),
                 None,
@@ -1988,7 +2075,7 @@ mod tests {
             grant("qmd", &["query"], ActionClass::Read),
             grant("notes", &["read_note"], ActionClass::Read),
         ];
-        assert_eq!(direct_mcp_label(&cfg), "house+healthdb+qmd+notes");
+        assert_eq!(direct_mcp_label(&cfg), format!("{shipped}+qmd+notes"));
     }
 
     /// **NO SECRET IS EVER HELD IN `Config`.** The grant carries the NAME of an environment

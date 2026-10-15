@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.176.0"
+version = "0.177.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -27,6 +27,16 @@ required-features = ["containment-probe"]
 
 [[test]]
 name = "containment"
+required-features = ["containment-probe"]
+
+# The gateway's fake upstream, and the tests that drive it. Same gate as the battery: a
+# release build contains no binary that pretends to be an MCP server.
+[[bin]]
+name = "jesse-gateway-probe-server"
+required-features = ["containment-probe"]
+
+[[test]]
+name = "gateway"
 required-features = ["containment-probe"]
 
 # THE SENTINEL. Declared so the artifact is `jesse-sentinel` — the name the launchd plist,

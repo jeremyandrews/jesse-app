@@ -288,7 +288,7 @@ fn every_known_macos_dependency_is_caught() {
         ),
         (
             "the iMCP server",
-            "bridge/src/harness/claude_code.rs",
+            "bridge/src/mcpservers.rs",
             "/Applications/",
         ),
     ];

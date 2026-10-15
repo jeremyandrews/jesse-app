@@ -74,6 +74,8 @@ pub(crate) use tokio_util::sync::CancellationToken;
 
 // ---- Modules --------------------------------------------------------------
 
+/// The activity ledger. Addressed through the module (`crate::activity::…`).
+pub mod activity;
 mod agentmap;
 mod apns;
 mod artifacts;
@@ -103,6 +105,8 @@ mod directives;
 mod emergency;
 mod failclass;
 mod flagstore;
+/// The tool gateway. Addressed through the module (`crate::gateway::…`).
+pub mod gateway;
 mod handlers;
 mod harness;
 mod health;
@@ -112,6 +116,9 @@ mod house;
 mod inbound;
 mod jobstore;
 mod levelgate;
+/// The MCP server table. NOT glob-exported: its item names (`row`, `MCP_SERVERS`) are
+/// addressed through the module, `crate::mcpservers::…`.
+pub mod mcpservers;
 mod mealqueue;
 mod metrics;
 mod modelstore;

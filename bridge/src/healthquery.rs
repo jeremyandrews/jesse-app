@@ -820,10 +820,10 @@ pub fn healthdb_mcp_ready(cfg: &Config) -> Option<&HealthDbSettings> {
 /// the shipped entry ([`HEALTHDB_MCP_ENTRY`]) is returned unchanged, byte for byte; one that
 /// does keeps it on a deployment that starts the server and loses it on any other.
 pub fn render_healthdb_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
-    if !config.contains(HEALTHDB_MCP_ENTRY) || healthdb_mcp_ready(cfg).is_some() {
+    if !config.contains(HEALTHDB_MCP_ENTRY.as_str()) || healthdb_mcp_ready(cfg).is_some() {
         return Cow::Borrowed(config);
     }
-    Cow::Owned(config.replacen(HEALTHDB_MCP_ENTRY, "", 1))
+    Cow::Owned(config.replacen(HEALTHDB_MCP_ENTRY.as_str(), "", 1))
 }
 
 /// Every conditional server, rendered: `house` ([`render_house_mcp`]) then `healthdb`. The one
@@ -854,7 +854,7 @@ pub fn healthdb_child_env(cfg: &Config) -> Option<Vec<(&'static str, String)>> {
 /// Put the server's variables on a child whose rendered set loads it, and on no other. Paths
 /// only: nothing here is a credential.
 pub fn apply_healthdb_env(cmd: &mut Command, cfg: &Config, config: &str) {
-    if !config.contains(HEALTHDB_MCP_ENTRY) {
+    if !config.contains(HEALTHDB_MCP_ENTRY.as_str()) {
         return;
     }
     if let Some(env) = healthdb_child_env(cfg) {
@@ -878,7 +878,7 @@ pub fn main_turn_loads_healthdb(cfg: &Config, harness: &dyn Harness) -> bool {
         return false;
     }
     match harness.runner() {
-        Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HEALTHDB_MCP_ENTRY),
+        Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HEALTHDB_MCP_ENTRY.as_str()),
         Runner::InProcess(_) => harness.id() == DIRECT_ID,
     }
 }
@@ -1354,21 +1354,26 @@ mod registration_tests {
 
     #[test]
     fn the_rendered_set_keeps_healthdb_exactly_when_ro_url_file_is_set() {
-        let with = render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG);
-        assert!(with.contains(HEALTHDB_MCP_ENTRY));
+        let with = render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG.as_str());
+        assert!(with.contains(HEALTHDB_MCP_ENTRY.as_str()));
         for cfg in unconfigured() {
-            let without = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG);
+            let without = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str());
             assert!(!without.contains("healthdb"), "{without}");
             // No house table in the fixture either, so both conditional servers are gone and
             // nothing else moved: the twenty-one-server set (no hosted `clockify` since 0.176.0)
             // plus the unconditional `clockify-rs`, byte for byte.
             assert_eq!(
                 without.replacen(
-                    r#","clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}"#,
+                    &format!(
+                        ",{}",
+                        crate::mcpservers::render_entry(
+                            crate::mcpservers::row("clockify-rs").unwrap()
+                        )
+                    ),
                     "",
                     1
                 ),
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG.as_str()
             );
         }
         // Every other set is untouched either way.
@@ -1404,7 +1409,7 @@ mod registration_tests {
     fn codex_registers_healthdb_with_its_paths_forwarded_when_configured_and_not_otherwise() {
         let args = codex_mcp_args(
             CODEX_ID,
-            &render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG),
+            &render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG.as_str()),
             DEFAULT_ALLOWED_TOOLS,
         )
         .expect("renders");
@@ -1434,7 +1439,7 @@ mod registration_tests {
         for cfg in unconfigured() {
             let args = codex_mcp_args(
                 CODEX_ID,
-                &render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG),
+                &render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str()),
                 DEFAULT_ALLOWED_TOOLS,
             )
             .expect("renders");
@@ -1503,7 +1508,7 @@ mod registration_tests {
                 .collect()
         };
         let mut cmd = Command::new("true");
-        apply_child_mcp_env(&mut cmd, &configured(), MAIN_CHILD_MCP_CONFIG);
+        apply_child_mcp_env(&mut cmd, &configured(), MAIN_CHILD_MCP_CONFIG.as_str());
         let env = env_of(&cmd);
         for n in names {
             assert!(env.iter().any(|(k, _)| k == n), "{n}: {env:?}");
@@ -1517,7 +1522,7 @@ mod registration_tests {
             .all(|(k, _)| !names.contains(&k.as_str())));
         for cfg in unconfigured() {
             let mut cmd = Command::new("true");
-            apply_child_mcp_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG);
+            apply_child_mcp_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG.as_str());
             assert!(env_of(&cmd)
                 .iter()
                 .all(|(k, _)| !names.contains(&k.as_str())));

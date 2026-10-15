@@ -255,7 +255,7 @@ pub fn harnesses_reaching(cfg: &Config, grant: &str) -> Vec<&'static str> {
         out.push(CLAUDE_CODE_ID);
     }
     if let Some((server, tool)) = mcp_parts(grant) {
-        let codex_servers = mcp_config_servers(MAIN_CHILD_MCP_CONFIG);
+        let codex_servers = mcp_config_servers(MAIN_CHILD_MCP_CONFIG.as_str());
         if codex_servers.iter().any(|s| s == server)
             && granted_mcp_tools(&cfg.allowed_tools, server)
                 .iter()

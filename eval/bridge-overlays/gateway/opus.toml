@@ -1,0 +1,9 @@
+# K03: the `opus` cell with the tool gateway ON. Generated from
+# the built-in registry (no model overlay) plus the [gateway] table.
+#
+# `socket_dir` is short and per cell: the scratch state dir is too deep for a unix socket
+# path, and each scratch bridge's startup sweep empties its own socket_dir.
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-eval-opus"

@@ -636,42 +636,42 @@ impl McpSet {
     pub fn config(&self) -> &'static str {
         match self {
             McpSet::None => EMPTY_MCP_CONFIG,
-            McpSet::Qmd => QMD_ONLY_MCP_CONFIG,
-            McpSet::QmdSlack => QMD_SLACK_MCP_CONFIG,
-            McpSet::QmdSlackBrowser => QMD_SLACK_BROWSER_MCP_CONFIG,
-            McpSet::House => HOUSE_MCP_CONFIG,
-            McpSet::Morning => MORNING_MCP_CONFIG,
-            McpSet::Messages => MESSAGES_MCP_CONFIG,
-            McpSet::MessagesBuild => MESSAGES_BUILD_MCP_CONFIG,
-            McpSet::MessagesBuildPlaces => MESSAGES_BUILD_PLACES_MCP_CONFIG,
-            McpSet::MessagesBuildPlacesInbound => MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-            McpSet::MessagesKubernetes => MESSAGES_KUBERNETES_MCP_CONFIG,
+            McpSet::Qmd => QMD_ONLY_MCP_CONFIG.as_str(),
+            McpSet::QmdSlack => QMD_SLACK_MCP_CONFIG.as_str(),
+            McpSet::QmdSlackBrowser => QMD_SLACK_BROWSER_MCP_CONFIG.as_str(),
+            McpSet::House => HOUSE_MCP_CONFIG.as_str(),
+            McpSet::Morning => MORNING_MCP_CONFIG.as_str(),
+            McpSet::Messages => MESSAGES_MCP_CONFIG.as_str(),
+            McpSet::MessagesBuild => MESSAGES_BUILD_MCP_CONFIG.as_str(),
+            McpSet::MessagesBuildPlaces => MESSAGES_BUILD_PLACES_MCP_CONFIG.as_str(),
+            McpSet::MessagesBuildPlacesInbound => MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG.as_str(),
+            McpSet::MessagesKubernetes => MESSAGES_KUBERNETES_MCP_CONFIG.as_str(),
             McpSet::MessagesBuildPlacesInboundKubernetes => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbit => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1 => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG.as_str()
             }
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs => {
-                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG.as_str()
             }
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs => MAIN_CHILD_MCP_CONFIG,
-            McpSet::Replies => REPLIES_MCP_CONFIG,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs => MAIN_CHILD_MCP_CONFIG.as_str(),
+            McpSet::Replies => REPLIES_MCP_CONFIG.as_str(),
         }
     }
 
@@ -1857,7 +1857,11 @@ pub fn hard_gate_requirement(
         | "message_send_imessage"
         | "message_send_mail_work"
         | "message_send_mail_personal"
-        | "message_send_fastmail" => ProbeVerdict::Denied,
+        | "message_send_fastmail"
+        // THE GATEWAY (0.177.0), denied at every row: no grant ever names `probe_hidden`, and
+        // no upstream may see a secret the bridge holds.
+        | "gateway-ungranted-tool"
+        | "gateway-env-leak" => ProbeVerdict::Denied,
         "read_vault_file" | "search_vault" => {
             if cap >= Capability::Read {
                 ProbeVerdict::Allowed

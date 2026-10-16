@@ -1,0 +1,161 @@
+#!/usr/bin/python3 -I
+"""One-time Google consent for the bridge's `google-sheets` server, and its check.
+
+    consent-google-sheets <work email>            # consent (once), then confirm
+    consent-google-sheets --verify <work email>   # confirm only; never starts consent
+
+Run it in a terminal on the bridge host, as the bridge's user, AFTER installing
+`workspace-mcp-sheets` on PATH. It is interactive: a headless turn cannot consent, which is
+why this exists. See bridge/README.md, "Google Sheets: the one-time setup".
+
+What it does:
+  1. Reads the work OAuth client (JESSE_GOOGLE_CLIENT_ID, JESSE_GOOGLE_SECRET) out of the
+     bridge's LaunchAgent plist, the same pair the bridge republishes for the `google` server.
+     Neither value is printed. Set JESSE_BRIDGE_PLIST to choose the plist explicitly.
+  2. Starts `workspace-mcp-sheets` with exactly the bridge's arguments, consent mode on (the
+     launcher then lets the consent page open in the browser), and calls `list_spreadsheets`.
+  3. With no token yet, that call returns the consent URL. Approve it in the browser; the
+     server's loopback callback writes the token to ~/.config/jesse-google-sheets/creds/.
+  4. Calls `list_spreadsheets` again and prints the result. Success is that call returning.
+
+It never touches ~/.config/jesse-google (the read-only instance's token) or the Perseido one.
+"""
+
+import glob
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+# The bridge's own arguments for the row, kept identical so the consent is for exactly the
+# scope set the bridge will run with. `tests::google_sheets_consent_helper_matches_the_row`
+# holds this line to the row in `bridge/src/mcpservers.rs`.
+SERVER_ARGS = ["--single-user", "--tools", "sheets", "--tool-tier", "complete"]
+CONSENT_WAIT_SECS = 300
+
+
+def die(msg, code=1):
+    print(f"consent-google-sheets: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def plist_path():
+    explicit = os.environ.get("JESSE_BRIDGE_PLIST")
+    if explicit:
+        return explicit
+    found = glob.glob(os.path.expanduser("~/Library/LaunchAgents/*.jesse-bridge.plist"))
+    if len(found) != 1:
+        die(f"expected one *.jesse-bridge.plist in ~/Library/LaunchAgents, found {found}; "
+            "set JESSE_BRIDGE_PLIST")
+    return found[0]
+
+
+def plist_env(path, key):
+    out = subprocess.run(
+        ["/usr/libexec/PlistBuddy", "-c", f"Print :EnvironmentVariables:{key}", path],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        die(f"{key} is not set in {path}")
+    return out.stdout.strip()
+
+
+class Server:
+    def __init__(self, env):
+        self.p = subprocess.Popen(
+            ["workspace-mcp-sheets", *SERVER_ARGS],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=env, text=True,
+        )
+        self.next_id = 0
+        self.request("initialize", {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "consent-google-sheets", "version": "1"},
+        })
+        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def send(self, msg):
+        self.p.stdin.write(json.dumps(msg) + "\n")
+        self.p.stdin.flush()
+
+    def request(self, method, params, timeout=60):
+        self.next_id += 1
+        self.send({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
+        end = time.time() + timeout
+        while time.time() < end:
+            ready, _, _ = select.select([self.p.stdout], [], [], end - time.time())
+            if not ready:
+                break
+            line = self.p.stdout.readline()
+            if not line:
+                die("workspace-mcp-sheets exited; is it installed, and is the client set?")
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("id") == self.next_id:
+                return msg
+        die(f"no answer to {method} in {timeout}s")
+
+    def list_spreadsheets(self, email):
+        res = self.request("tools/call", {
+            "name": "list_spreadsheets",
+            "arguments": {"user_google_email": email, "max_results": 5},
+        }).get("result", {})
+        text = "\n".join(c.get("text", "") for c in res.get("content", []))
+        return bool(res.get("isError")), text
+
+    def close(self):
+        self.p.stdin.close()
+        try:
+            self.p.wait(10)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+
+
+def main():
+    args = sys.argv[1:]
+    verify_only = "--verify" in args
+    args = [a for a in args if a != "--verify"]
+    if len(args) != 1 or "@" not in args[0]:
+        die(__doc__.strip().splitlines()[2].strip(), 64)
+    email = args[0]
+
+    plist = plist_path()
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "LANG", "TZ") if k in os.environ}
+    env["GOOGLE_OAUTH_CLIENT_ID"] = plist_env(plist, "JESSE_GOOGLE_CLIENT_ID")
+    env["GOOGLE_OAUTH_CLIENT_SECRET"] = plist_env(plist, "JESSE_GOOGLE_SECRET")
+    env["USER_GOOGLE_EMAIL"] = email
+    if not verify_only:
+        env["JESSE_GOOGLE_SHEETS_CONSENT"] = "1"
+    if "JESSE_GOOGLE_SHEETS_PORT" in os.environ:
+        env["JESSE_GOOGLE_SHEETS_PORT"] = os.environ["JESSE_GOOGLE_SHEETS_PORT"]
+
+    token = os.path.expanduser(f"~/.config/jesse-google-sheets/creds/{email}.json")
+    server = Server(env)
+    try:
+        failed, text = server.list_spreadsheets(email)
+        if failed and "ACTION REQUIRED" in text:
+            if verify_only:
+                print(text)
+                die("not authorized yet; run without --verify to consent", 2)
+            print(text)
+            print(f"\nWaiting up to {CONSENT_WAIT_SECS}s for the consent to land in {token} ...")
+            end = time.time() + CONSENT_WAIT_SECS
+            while not os.path.exists(token) and time.time() < end:
+                time.sleep(2)
+            if not os.path.exists(token):
+                die("no token arrived; nothing was changed", 3)
+            failed, text = server.list_spreadsheets(email)
+        print(text)
+        if failed:
+            die("list_spreadsheets failed (above)", 4)
+        print(f"\nOK: google-sheets is authorized for {email}; token at {token}")
+    finally:
+        server.close()
+
+
+if __name__ == "__main__":
+    main()

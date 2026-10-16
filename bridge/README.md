@@ -3761,6 +3761,57 @@ everything looks healthy until the next restart, and `KeepAlive` then makes the 
 permanent rather than transient. This is not hypothetical; see `../SECURITY.md`
 § "Re-running it".
 
+## Google Sheets: the one-time setup (`google-sheets`, 0.182.0)
+
+`google-sheets` is a third `workspace-mcp` instance for the work account: Sheets only, write
+capable, with its own token. `google` and `google-perseido` are untouched and stay read only.
+Why it is separate, and exactly what it can reach, is in `../SECURITY.md` § "Google Sheets: the
+one Google server that writes". Two host steps, both on the bridge host, as the bridge's user.
+
+**1. Install the launcher, BEFORE deploying 0.182.0.** The child config names the bare command
+`workspace-mcp-sheets`, and the deploy's restart phase rolls back when a server's command is
+not on the child's `PATH` (`mcp_servers_unresolved`).
+
+```bash
+install -m 755 bridge/launchers/workspace-mcp-sheets ~/.local/bin/workspace-mcp-sheets
+command -v workspace-mcp-sheets    # must print the path above
+```
+
+It needs `workspace-mcp` on the same `PATH` (1.23.1 here, where `google` already runs from).
+
+**2. Consent once, AFTER deploying.** A headless turn cannot consent, so until this is done
+every `google-sheets` call fails at once with "ACTION REQUIRED: Google Authentication Needed"
+and the consent URL, and nothing hangs. In a terminal on the host:
+
+```bash
+bridge/launchers/consent-google-sheets jeremy@tag1consulting.com
+```
+
+It reads `JESSE_GOOGLE_CLIENT_ID` and `JESSE_GOOGLE_SECRET` from the bridge's LaunchAgent plist
+(the single `~/Library/LaunchAgents/*.jesse-bridge.plist`, or `JESSE_BRIDGE_PLIST`) without
+printing them, starts the launcher with the bridge's exact arguments, and opens Google's consent
+page in the browser. Sign in as the work account and approve. The scopes asked for are
+`spreadsheets`, `spreadsheets.readonly`, `drive.readonly`, `openid`, `userinfo.email` and
+`userinfo.profile`; anything else on that page means something is wrong, so stop. If the browser
+does not open, the URL is printed; open it by hand.
+
+- **Where the token lands:** `~/.config/jesse-google-sheets/creds/jeremy@tag1consulting.com.json`
+  (directory mode `700`). Never `~/.config/jesse-google/creds`, which holds the read only token
+  `google` and `inbound` use, and which this step does not touch.
+- **How to confirm:** the same command ends with `OK: google-sheets is authorized …` after a
+  successful `list_spreadsheets` call. To check again later without ever starting consent:
+
+  ```bash
+  bridge/launchers/consent-google-sheets --verify jeremy@tag1consulting.com
+  ```
+
+  Exit `0` and a spreadsheet list mean authorized; exit `2` means not yet.
+- **Port:** the consent callback listens on `workspace-mcp`'s default loopback port, the one
+  `google`'s consent used. If it is busy, set `JESSE_GOOGLE_SHEETS_PORT` for the consent run
+  only, and only to a port the OAuth client accepts.
+- **Revoking:** delete the token file, and remove the grant in the Google account's third
+  party access page. The read only `google` token is a separate grant and survives both.
+
 ## Shutting down a scratch or eval bridge: BY PID, NEVER BY PATH
 
 A scratch bridge (a build under test on a spare port) and an eval bridge are ordinary child

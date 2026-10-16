@@ -14,6 +14,75 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.182.0] - 2026-10-16
+
+**A bridge turn can now create a Google Sheet in the work Drive, fill it, format it and return
+the link, while Gmail, Calendar and Drive stay exactly as read only as they were.** Turns could
+read Drive but not produce a spreadsheet, so every spreadsheet request ended as a CSV plus a
+script for Jeremy to run by hand. Sheets is now a separate, Sheets only, write capable
+`workspace-mcp` instance, `google-sheets`, so the two read only Google servers do not move.
+
+- **Why a third instance and not a flag.** `--read-only` is per server, not per service.
+  Lifting it on `google` to let Sheets write would also have registered Gmail send and draft,
+  Calendar event writes and Drive mutation there, and widened that token to match. `google` and
+  `google-perseido` are unchanged byte for byte: arguments, scopes, token caches and grants.
+- **`google-sheets`** is `workspace-mcp --single-user --tools sheets --tool-tier complete` (no
+  `--read-only`), started through a new host launcher, `workspace-mcp-sheets`
+  (`bridge/launchers/`), whose one job is to give it its own token cache,
+  `~/.config/jesse-google-sheets/creds`. The bridge's environment points
+  `WORKSPACE_MCP_CREDENTIALS_DIR` at `google`'s cache, so started bare it would have read that
+  token and, on consent, written over it. The row forwards only `GOOGLE_OAUTH_CLIENT_ID`,
+  `GOOGLE_OAUTH_CLIENT_SECRET` and `USER_GOOGLE_EMAIL` (`google`'s own client and account), never
+  a credentials directory. `inbound` still reads `google`'s token and nothing else.
+- **Scopes it requests:** `spreadsheets`, `spreadsheets.readonly`, `drive.readonly`, `openid`,
+  `userinfo.email`, `userinfo.profile`. No Gmail, Calendar or Drive write scope, so it can share,
+  move, trash or re-permission nothing.
+- **Thirteen of fourteen tools granted, on both harnesses through the one allowlist.** Reads:
+  `list_spreadsheets`, `get_spreadsheet_info`, `read_sheet_values`, `list_sheet_tables`,
+  `list_spreadsheet_comments`. Writes, classed `write` so they reach write turns only:
+  `create_spreadsheet`, `create_sheet`, `modify_sheet_values`, `append_table_rows`,
+  `format_sheet_range` (bold, italics, colours, number formats, wrapping, alignment),
+  `manage_conditional_formatting`, `resize_sheet_dimensions`, `move_sheet_rows`.
+  **Not granted:** `manage_spreadsheet_comment`, because a comment can @mention people and
+  Google mails them. `start_google_auth` does not register under `--tool-tier complete`, the
+  narrowest switch that still includes conditional formatting.
+- **An unconsented call fails at once, cleanly.** Until consent it returns "ACTION REQUIRED:
+  Google Authentication Needed" with the consent URL, in well under a second. The launcher
+  points `BROWSER` at `true` outside a consent run, because a stdio `workspace-mcp` with no
+  token otherwise opens the consent page in a browser on the host's screen from a headless
+  turn.
+- **One-time consent: `bridge/launchers/consent-google-sheets <work email>`**, run in a terminal
+  on the bridge host after installing the launcher. It reads the client pair from the bridge's
+  LaunchAgent plist without printing it, opens the consent page, waits for the token and confirms
+  with a real `list_spreadsheets` call; `--verify` confirms without ever starting consent. See
+  "Google Sheets: the one-time setup" in `bridge/README.md`.
+- **Install the launcher before deploying.** The restart phase's `mcp_servers_unresolved` gate
+  rolls a deploy back when a server's command is not on the child's `PATH`.
+- New `McpSet` variant and row label `…+clockify-rs+runn-rs+google-sheets` on both harnesses; the
+  0.180.0 set is kept as a retired label. The capability map gains thirteen rows (MCP grants 362
+  to 375, servers 25 to 26), the `capability_args` golden and the argv split fixture move for the
+  new server only.
+- **All three records re-recorded live on the Studio** from the bridge LaunchAgent's environment
+  and the deployed config with `[gateway] enabled = true` in a scratch copy, each battery run
+  alone, from a scratch target directory, with `bridge/launchers` on `PATH` for the run only.
+  Claude Code (2.1.301): gate pass, $13.90, 5 rows x 24 probes. Codex (codex-cli 0.153.4): the
+  file-level gate stays `fail` for the standing `basic/none` reason only (`read_vault_file`,
+  `search_vault`). `direct` (after the agent battery): gate pass. On all three, every probe on
+  every row kept its id, class, verdict and status; only the main row labels moved, both main
+  rows now load `google-sheets`, and the write roots gained exactly the thirteen
+  `mcp__google-sheets__*` tools (Claude Code 392 to 405, Codex 363 to 376, `direct` 366 to 379).
+  Every read row's root is unchanged. Codex's two main-row `[[accepted]]` blocks were re-pointed to
+  the new labels under Jeremy's authorization in this change, conditioned on that identical-probe
+  result. A first Claude Code run made with the gateway off ($20.46) skipped the two gateway probes
+  and was discarded, not committed.
+- **Tests:** `google-sheets` loads `sheets` alone, uses a launcher and credentials directory that
+  are not `google`'s, and its consent helper uses the row's exact arguments; its grant is the
+  thirteen tools by equality; no Gmail send, draft or reply, no Calendar write and no Drive
+  mutation is granted on any Google server in any shipped allowlist, on either harness; the
+  battery's mail send probes are unchanged; a read only model turn's allowlist holds no Sheets
+  write; `inbound` resolves only `google`'s credentials directory. The existing loop asserting
+  `--read-only` and `--tools` on `google` and `google-perseido` is untouched and passes.
+
 ## [Bridge 0.181.0] - 2026-10-16
 
 **Every bridge turn now says which build is answering it, and the schedule ledger records each

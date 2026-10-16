@@ -3571,6 +3571,79 @@ mod tests {
     /// neither of those travels from the bridge. Its grant is exactly the thirteen read tools
     /// Claude Code's turn gets.
     #[test]
+    fn the_shipped_google_sheets_server_reaches_codex_as_its_own_instance() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped main set renders for Codex");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.google-sheets.command="workspace-mcp-sheets""#),
+            "{args:?}"
+        );
+        assert!(
+            flat.contains(
+                r#"mcp_servers.google-sheets.args=["--single-user", "--tools", "sheets", "--tool-tier", "complete"]"#
+            ),
+            "{args:?}"
+        );
+        // The client pair and the account travel BY NAME; `google`'s credentials directory
+        // does not travel at all, because the launcher sets the instance's own.
+        assert!(
+            flat.contains(
+                r#"mcp_servers.google-sheets.env_vars=["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "USER_GOOGLE_EMAIL"]"#
+            ),
+            "{args:?}"
+        );
+        let sheets_env = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.google-sheets.env_vars="))
+            .expect("google-sheets env_vars");
+        assert!(!sheets_env.contains("CREDENTIALS_DIR"), "{sheets_env}");
+        assert!(!flat.contains("mcp_servers.google-sheets.env="), "{args:?}");
+        // The two read-only Google instances are untouched on Codex too.
+        for name in ["google", "google-perseido"] {
+            assert!(
+                flat.contains(&format!(
+                    r#"mcp_servers.{name}.args=["--single-user", "--read-only", "--tools", "calendar", "gmail", "drive"]"#
+                )),
+                "{name}: {args:?}"
+            );
+        }
+        // Exactly the thirteen decided tools, the eight writes included: the same grant Claude
+        // Code's write turn gets, from the same string.
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.google-sheets.enabled_tools="))
+            .expect("google-sheets carries an enabled_tools override");
+        for t in crate::mcpservers::GOOGLE_SHEETS_WRITE_TOOLS
+            .iter()
+            .chain(crate::mcpservers::GOOGLE_SHEETS_READ_TOOLS.iter())
+        {
+            assert!(enabled.contains(&format!("\"{t}\"")), "{t}: {enabled}");
+        }
+        assert!(!enabled.contains("manage_spreadsheet_comment"), "{enabled}");
+        assert!(!enabled.contains("start_google_auth"), "{enabled}");
+        // No Gmail send, draft or reply and no Calendar write is enabled on any Google server.
+        for a in args
+            .iter()
+            .filter(|a| a.starts_with("mcp_servers.google") && a.contains(".enabled_tools="))
+        {
+            for w in [
+                "send_",
+                "draft_",
+                "reply_",
+                "manage_event",
+                "create_calendar",
+            ] {
+                assert!(!a.contains(w), "{a}");
+            }
+        }
+    }
+
+    #[test]
     fn the_shipped_runn_rs_server_travels_with_its_token_named_not_valued() {
         let args = codex_mcp_args(
             CODEX_ID,

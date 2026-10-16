@@ -1,0 +1,78 @@
+#!/bin/sh
+# Third workspace-mcp instance: Google SHEETS for the work account, and nothing else.
+#
+# Installed on the host as `~/.local/bin/workspace-mcp-sheets` (see bridge/README.md,
+# "Google Sheets: the one-time setup"). The bridge names it as the `google-sheets` server's
+# bare command in `crate::mcpservers::MCP_SERVERS`.
+#
+# WHY A SEPARATE INSTANCE AT ALL
+# `--read-only` is per server, not per service. Dropping it from the `google` row to let
+# Sheets write would also register Gmail send and draft, Calendar event writes and Drive
+# mutation on that server, and widen its token to match. So the read-only `google` row is
+# left exactly as it was, and Sheets gets its own process, its own consent and its own
+# token, holding the Sheets scope set and nothing else.
+#
+# WHY A WRAPPER
+# workspace-mcp takes its credentials directory ONLY from the environment, and the bridge
+# sets one process-wide environment that every MCP child inherits, with
+# WORKSPACE_MCP_CREDENTIALS_DIR pointing at the read-only `google` instance's token cache.
+# Started bare, this instance would read that cache, find a token without the Sheets scopes,
+# and on consent write a new token for the same account INTO THAT DIRECTORY, over the
+# read-only one. This wrapper is the per-instance directory the bridge cannot express.
+#
+# The OAuth client is the SAME one `google` uses (GOOGLE_OAUTH_CLIENT_ID and
+# GOOGLE_OAUTH_CLIENT_SECRET, forwarded by name), which is fine: a Google token's scopes are
+# fixed by the consent that minted it, and workspace-mcp does not ask for
+# `include_granted_scopes`, so consenting here mints a separate refresh token and neither
+# widens nor revokes the read-only one.
+#
+# FLAGS COME FROM THE CALLER, NOT FROM HERE. `--single-user --tools sheets --tool-tier
+# complete` live in the bridge's server table, where the containment record commits them and
+# a test asserts this instance loads `sheets` alone. A flag hidden here would be invisible to
+# both.
+set -eu
+
+SHEETS_DIR="$HOME/.config/jesse-google-sheets"
+
+# LOAD-BEARING. Both names: the legacy GOOGLE_MCP_CREDENTIALS_DIR is still consulted, and
+# left inherited it would reintroduce the shared directory from the other side.
+WORKSPACE_MCP_CREDENTIALS_DIR="$SHEETS_DIR/creds"
+GOOGLE_MCP_CREDENTIALS_DIR="$WORKSPACE_MCP_CREDENTIALS_DIR"
+# Sheets downloads nothing, but the server still resolves this directory; keep it out of the
+# vault (a child's cwd) and out of the `google` instance's attachment directory.
+WORKSPACE_ATTACHMENT_DIR="$SHEETS_DIR/attachments"
+export WORKSPACE_MCP_CREDENTIALS_DIR GOOGLE_MCP_CREDENTIALS_DIR WORKSPACE_ATTACHMENT_DIR
+
+if [ -z "${GOOGLE_OAUTH_CLIENT_ID:-}" ] || [ -z "${GOOGLE_OAUTH_CLIENT_SECRET:-}" ]; then
+    echo "workspace-mcp-sheets: GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be set." >&2
+    echo "Refusing to start: without them workspace-mcp falls back to a client-secret file of" >&2
+    echo "its own choosing." >&2
+    exit 78  # EX_CONFIG
+fi
+# Never a client file: the client is the environment pair above, and a path inherited from
+# elsewhere must not override it.
+unset GOOGLE_CLIENT_SECRET_PATH GOOGLE_CLIENT_SECRETS
+
+mkdir -p "$WORKSPACE_MCP_CREDENTIALS_DIR" "$WORKSPACE_ATTACHMENT_DIR"
+chmod 700 "$SHEETS_DIR" "$WORKSPACE_MCP_CREDENTIALS_DIR"
+
+# NO BROWSER, EXCEPT WHEN CONSENTING. With no token, a stdio workspace-mcp calls
+# `webbrowser.open` on the consent URL. Under launchd that is a browser window raised on the
+# host's screen by a headless turn. Pointing BROWSER at `true` makes the open a no-op; the
+# call still fails at once with "ACTION REQUIRED: Google Authentication Needed" and the URL,
+# which is the clean result a turn should get. The consent script sets
+# JESSE_GOOGLE_SHEETS_CONSENT=1 so the one interactive run does open the page.
+if [ "${JESSE_GOOGLE_SHEETS_CONSENT:-}" != "1" ]; then
+    BROWSER=/usr/bin/true
+    export BROWSER
+fi
+
+# Consent only, as for workspace-mcp-perseido: every instance serves its OAuth callback on the
+# same default port, so pick another while consenting if one is busy. A consented stdio
+# instance reads its cache and never binds.
+if [ -n "${JESSE_GOOGLE_SHEETS_PORT:-}" ]; then
+    WORKSPACE_MCP_PORT="$JESSE_GOOGLE_SHEETS_PORT"
+    export WORKSPACE_MCP_PORT
+fi
+
+exec workspace-mcp "$@"

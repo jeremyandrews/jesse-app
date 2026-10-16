@@ -123,6 +123,48 @@ final class SendStampsAndResendTests: XCTestCase {
         XCTAssertNotNil(sent["sent_at"] as? String)
     }
 
+    /// The device kind rides every turn from the same stamp, and on the Mac the computer's
+    /// name with it, so the bridge's `SOURCE:` line can say which machine sent the turn.
+    func testEveryTurnCarriesTheDeviceKind() async throws {
+        let request = request()
+        XCTAssertNil(request.clientKind, "the value type carries neither until it is stamped")
+        XCTAssertNil(request.clientDevice)
+
+        _ = try? await client().sendPrepared(request)
+        let sent = try body(0)
+        #if os(macOS)
+        XCTAssertEqual(sent["client_kind"] as? String, "mac")
+        XCTAssertEqual(sent["client_device"] as? String, Host.current().localizedName)
+        #else
+        XCTAssertNotNil(sent["client_kind"] as? String)
+        XCTAssertNil(sent["client_device"], "iOS never sends a device name")
+        #endif
+    }
+
+    /// A nil kind or name omits its key rather than sending null or an empty string: the
+    /// bridge then reports the device as not reported, exactly as for an older build.
+    func testAbsentDeviceKindAndNameOmitTheirKeys() throws {
+        let unstamped = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request())) as? [String: Any]
+        XCTAssertNil(unstamped?["client_kind"])
+        XCTAssertNil(unstamped?["client_device"])
+
+        let blank = request().stamped(clientTz: "Europe/London", sentAt: "",
+                                      clientKind: "", clientDevice: nil)
+        let sent = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(blank)) as? [String: Any]
+        XCTAssertNil(sent?["client_kind"])
+        XCTAssertNil(sent?["client_device"])
+        XCTAssertEqual(sent?["client_tz"] as? String, "Europe/London")
+
+        let mac = request().stamped(clientTz: "", sentAt: "", clientKind: "mac",
+                                    clientDevice: "Studio")
+        let macSent = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(mac)) as? [String: Any]
+        XCTAssertEqual(macSent?["client_kind"] as? String, "mac")
+        XCTAssertEqual(macSent?["client_device"] as? String, "Studio")
+    }
+
     /// `sent_at` is RFC3339 with the DEVICE's offset, not UTC. The offset is the
     /// load-bearing half: the bridge derives a diet day from it minus four hours in the
     /// effective zone, and an offset-less instant makes no statement about which clock the

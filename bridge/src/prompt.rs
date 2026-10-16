@@ -942,10 +942,161 @@ pub fn bridge_build() -> String {
     format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("JESSE_GIT_SHA"))
 }
 
-/// THE WHOLE CLOCK HEADER: the date/time line, the profile line under it, the
-/// [`bridge_line`] under that, and — on an `[profile].on_return` fire only — the `RETURN:`
-/// line last. The `PROFILE:` line keeps its own line and its exact wording (see
-/// [`profile_line`]); the bridge line is added beside it, never into it.
+/// Which harness and model answer this turn, as the [`harness_line`] states them.
+///
+/// Every field is something the bridge was GIVEN: the harness id and registry id it resolved,
+/// the version the registry entry declares, the slug the turn's backend triple (or its pinned
+/// login) names, and the effort the turn asked for. `slug` is `None` when the harness runs its
+/// own default, and the line then says so rather than naming a model it was never told.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelFacts<'a> {
+    pub harness: &'a str,
+    pub model: &'a str,
+    pub version: Option<&'a str>,
+    pub slug: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
+/// The device kinds a client may report in `client_kind`, and the only ones the
+/// [`source_line`] will name. Anything else on the wire is treated as absent.
+pub const CLIENT_KINDS: &[&str] = &["phone", "ipad", "mac", "watch"];
+
+/// Where a turn came from, as the [`source_line`] states it.
+///
+/// A client turn carries only what [`JesseRequest`] validated: a kind from
+/// [`CLIENT_KINDS`] or nothing, and a sanitized device name or nothing. The other two arms are
+/// set only by the bridge's own senders, through a `serde(skip)` field, so no request can
+/// claim to be a schedule or a strand tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnSource<'a> {
+    Client {
+        kind: Option<&'a str>,
+        device: Option<&'a str>,
+    },
+    Schedule(&'a str),
+    StrandTick,
+}
+
+/// Everything the turn header states beyond the clock: the facts [`clock_header`] turns into
+/// its lines, named rather than positional for the reason [`DeviceContexts`] exists.
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderFacts<'a> {
+    pub profile: Option<&'a Profile>,
+    pub model: ModelFacts<'a>,
+    pub source: TurnSource<'a>,
+    /// A voice turn.
+    pub voice: bool,
+    /// The cleaned `sent_for` label, when the turn was composed rather than typed.
+    pub sent_for: Option<&'a str>,
+    /// Now, and when this conversation last replied, both on the bridge's clock. A
+    /// `last_reply_ms` of 0 (a new conversation, or one that never replied) adds no line.
+    pub now_ms: u64,
+    pub last_reply_ms: u64,
+    /// The scheduler's `RETURN:` line, on an `[profile].on_return` fire only.
+    pub return_line: Option<&'a str>,
+}
+
+/// Collapse anything that would break a header line (a newline, a tab, any control
+/// character) to a space, so a value can only ever extend the line it is on.
+fn one_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// THE HARNESS LINE, one per turn: which harness and model answer it.
+///
+/// `HARNESS: <harness>, model <registry id>`, then `, version <v>` when the registry entry
+/// declares one, then `, slug <slug>` when the bridge was given the backend's model slug or
+/// `, harness default` when it was not, then `, effort <value>` when the turn set one. For
+/// example `HARNESS: claude-code, model opus, harness default, effort high`. It never names a
+/// model the bridge was not given.
+///
+/// **The wording is a contract with the vault's prompts**, exactly as [`profile_line`]'s is:
+/// changing the spelling breaks text that lives in another repository. Pure, with its exact
+/// output asserted in a test.
+pub fn harness_line(m: &ModelFacts) -> String {
+    let mut line = format!("HARNESS: {}, model {}", m.harness, m.model);
+    if let Some(v) = m.version.map(str::trim).filter(|v| !v.is_empty()) {
+        line.push_str(&format!(", version {v}"));
+    }
+    match m.slug.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(slug) => line.push_str(&format!(", slug {slug}")),
+        None => line.push_str(", harness default"),
+    }
+    if let Some(e) = m.effort.map(str::trim).filter(|e| !e.is_empty()) {
+        line.push_str(&format!(", effort {e}"));
+    }
+    one_line(&line)
+}
+
+/// THE SOURCE LINE, one per turn: which device or bridge job sent it.
+///
+/// `SOURCE: phone`, `SOURCE: ipad`, `SOURCE: watch`, `SOURCE: mac (<device>)` (or
+/// `SOURCE: mac` with no name), `SOURCE: schedule <job id>`, `SOURCE: strand tick`, or
+/// `SOURCE: app, device not reported` for a client turn that sent no valid kind (every app
+/// build before this field). Then `, voice` for a voice turn, and `, composed: <sent_for>`
+/// when the turn was sent on the owner's behalf.
+///
+/// **The wording is a contract with the vault's prompts**, exactly as [`profile_line`]'s is.
+/// Client-supplied text reaches it only already sanitized, and is collapsed to one line here
+/// as well, so nothing on the wire can start a new header line. Pure, asserted exactly.
+pub fn source_line(source: TurnSource, voice: bool, sent_for: Option<&str>) -> String {
+    let mut line = match source {
+        TurnSource::Client {
+            kind: Some("mac"),
+            device: Some(d),
+        } => format!("SOURCE: mac ({d})"),
+        TurnSource::Client {
+            kind: Some(k),
+            device: _,
+        } if CLIENT_KINDS.contains(&k) => format!("SOURCE: {k}"),
+        TurnSource::Client { .. } => "SOURCE: app, device not reported".to_string(),
+        TurnSource::Schedule(id) => format!("SOURCE: schedule {id}"),
+        TurnSource::StrandTick => "SOURCE: strand tick".to_string(),
+    };
+    if voice {
+        line.push_str(", voice");
+    }
+    if let Some(label) = sent_for.map(str::trim).filter(|l| !l.is_empty()) {
+        line.push_str(&format!(", composed: {label}"));
+    }
+    one_line(&line)
+}
+
+/// THE LAST REPLY LINE: how long since this conversation last replied, so a quick follow-up
+/// can be told from a return after hours. `LAST REPLY: <gap> ago`, where the gap is
+/// `under a minute`, `<m>m` under an hour, `<h>h <m>m` under 48 hours and `<d>d <h>h`
+/// beyond. `None` when `last_reply_ms` is 0: a new conversation, or one that never replied.
+/// A reply stamped after `now_ms` reads as under a minute rather than a negative gap.
+///
+/// **The wording is a contract with the vault's prompts**, exactly as [`profile_line`]'s is.
+/// Pure, asserted exactly.
+pub fn last_reply_line(now_ms: u64, last_reply_ms: u64) -> Option<String> {
+    if last_reply_ms == 0 {
+        return None;
+    }
+    let mins = now_ms.saturating_sub(last_reply_ms) / 60_000;
+    let gap = if mins == 0 {
+        "under a minute".to_string()
+    } else if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 48 * 60 {
+        format!("{}h {}m", mins / 60, mins % 60)
+    } else {
+        format!("{}d {}h", mins / (24 * 60), (mins / 60) % 24)
+    };
+    Some(format!("LAST REPLY: {gap} ago"))
+}
+
+/// THE WHOLE CLOCK HEADER, in this order: the date/time line, the profile line, the
+/// [`bridge_line`], the [`harness_line`], the [`source_line`], the [`last_reply_line`] (only
+/// when the conversation has replied before), and — on an `[profile].on_return` fire only —
+/// the `RETURN:` line last. The `PROFILE:` line keeps its own line and its exact wording (see
+/// [`profile_line`]); every other line is added beside it, never into it.
+///
+/// It never carries location: the device's place reaches the prompt only through the framed
+/// `location_context` channel.
 ///
 /// Composed HERE rather than inside [`build_prompt_at`] because the header is one opaque
 /// string to everything downstream: [`prompt_lead`] emits it verbatim and
@@ -953,19 +1104,27 @@ pub fn bridge_build() -> String {
 /// same string. Adding lines inside `build_prompt_at` would leave the splice measuring a
 /// header the builder no longer produced, and the catch-up block would land mid-prompt.
 /// Composing first keeps the one-string invariant, and keeps both functions pure.
-pub fn clock_header(
-    zone: &SchedulerZone,
-    profile: Option<&Profile>,
-    return_line: Option<&str>,
-) -> String {
-    let mut header = clock_line_in(zone);
-    header.push('\n');
-    header.push_str(&profile_line(profile));
-    header.push('\n');
-    header.push_str(&bridge_line());
-    if let Some(line) = return_line.map(str::trim).filter(|l| !l.is_empty()) {
+pub fn clock_header(zone: &SchedulerZone, facts: &HeaderFacts) -> String {
+    clock_header_from(clock_line_in(zone), facts)
+}
+
+/// [`clock_header`] from an already-read date line, so the line order is testable on a fixed
+/// clock.
+fn clock_header_from(clock_line: String, facts: &HeaderFacts) -> String {
+    let mut header = clock_line;
+    let mut push = |line: &str| {
         header.push('\n');
         header.push_str(line);
+    };
+    push(&profile_line(facts.profile));
+    push(&bridge_line());
+    push(&harness_line(&facts.model));
+    push(&source_line(facts.source, facts.voice, facts.sent_for));
+    if let Some(line) = last_reply_line(facts.now_ms, facts.last_reply_ms) {
+        push(&line);
+    }
+    if let Some(line) = facts.return_line.map(str::trim).filter(|l| !l.is_empty()) {
+        push(line);
     }
     header
 }
@@ -3271,34 +3430,258 @@ mod profile_line_tests {
         );
     }
 
-    /// The header is the clock line, then the profile line, then the bridge line, then —
-    /// only on a return fire — the RETURN line. Nothing else, and in that order.
+    /// A phone follow-up on the ambient default: the facts most turns carry.
+    fn facts<'a>() -> HeaderFacts<'a> {
+        HeaderFacts {
+            profile: None,
+            model: ModelFacts {
+                harness: "claude-code",
+                model: "opus",
+                ..ModelFacts::default()
+            },
+            source: TurnSource::Client {
+                kind: Some("phone"),
+                device: None,
+            },
+            voice: false,
+            sent_for: None,
+            now_ms: 0,
+            last_reply_ms: 0,
+            return_line: None,
+        }
+    }
+
+    const HOUR_MS: u64 = 3_600_000;
+    const NOW_MS: u64 = 1_792_000_000_000;
+
+    /// The header is the clock line, then the profile, bridge, harness and source lines,
+    /// then the last-reply line only when the conversation has replied before, then — only
+    /// on a return fire — the RETURN line. Nothing else, and in that order.
     #[test]
-    fn the_header_stacks_clock_profile_bridge_and_return_in_that_order() {
+    fn the_header_stacks_every_line_in_its_contract_order() {
         let zone = SchedulerZone::Named(chrono_tz::Europe::London);
-        let header = clock_header(&zone, None, None);
+        let header = clock_header(&zone, &facts());
         let lines: Vec<&str> = header.lines().collect();
-        assert_eq!(lines.len(), 3, "{header:?}");
+        assert_eq!(lines.len(), 5, "{header:?}");
         assert!(lines[0].starts_with("Current date/time: "));
         assert_eq!(lines[1], "PROFILE: home");
         assert_eq!(lines[2], bridge_line());
-
-        let with_return = clock_header(
-            &zone,
-            Some(&away("Europe/London", Some(UNTIL), "Scotland")),
-            Some("RETURN: first day back after 13 days away"),
+        assert_eq!(
+            lines[3],
+            "HARNESS: claude-code, model opus, harness default"
         );
-        let lines: Vec<&str> = with_return.lines().collect();
-        assert_eq!(lines.len(), 4, "{with_return:?}");
+        assert_eq!(lines[4], "SOURCE: phone");
+
+        let profile = away("Europe/London", Some(UNTIL), "Scotland");
+        let full = clock_header(
+            &zone,
+            &HeaderFacts {
+                profile: Some(&profile),
+                now_ms: NOW_MS,
+                last_reply_ms: NOW_MS - 3 * HOUR_MS,
+                return_line: Some("RETURN: first day back after 13 days away"),
+                ..facts()
+            },
+        );
+        let lines: Vec<&str> = full.lines().collect();
+        assert_eq!(lines.len(), 7, "{full:?}");
         assert_eq!(
             lines[1],
             "PROFILE: away (Europe/London) until 2026-09-07, note: Scotland"
         );
         assert_eq!(lines[2], bridge_line());
-        assert_eq!(lines[3], "RETURN: first day back after 13 days away");
+        assert_eq!(
+            lines[3],
+            "HARNESS: claude-code, model opus, harness default"
+        );
+        assert_eq!(lines[4], "SOURCE: phone");
+        assert_eq!(lines[5], "LAST REPLY: 3h 0m ago");
+        assert_eq!(lines[6], "RETURN: first day back after 13 days away");
+
+        // RETURN without LAST REPLY, and LAST REPLY without RETURN.
+        let ret_only = clock_header(
+            &zone,
+            &HeaderFacts {
+                return_line: Some("RETURN: back"),
+                ..facts()
+            },
+        );
+        let lines: Vec<&str> = ret_only.lines().collect();
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[5], "RETURN: back");
+        let reply_only = clock_header(
+            &zone,
+            &HeaderFacts {
+                now_ms: NOW_MS,
+                last_reply_ms: NOW_MS - 5 * 60_000,
+                ..facts()
+            },
+        );
+        let lines: Vec<&str> = reply_only.lines().collect();
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[5], "LAST REPLY: 5m ago");
 
         // A blank return line adds nothing rather than a blank line.
-        assert_eq!(clock_header(&zone, None, Some("   ")).lines().count(), 3);
+        let blank = clock_header(
+            &zone,
+            &HeaderFacts {
+                return_line: Some("   "),
+                ..facts()
+            },
+        );
+        assert_eq!(blank.lines().count(), 5);
+    }
+
+    #[test]
+    fn the_harness_line_states_only_what_the_bridge_was_given() {
+        let m = ModelFacts {
+            harness: "claude-code",
+            model: "opus",
+            ..ModelFacts::default()
+        };
+        assert_eq!(
+            harness_line(&m),
+            "HARNESS: claude-code, model opus, harness default"
+        );
+        assert_eq!(
+            harness_line(&ModelFacts {
+                effort: Some("high"),
+                ..m
+            }),
+            "HARNESS: claude-code, model opus, harness default, effort high"
+        );
+        assert_eq!(
+            harness_line(&ModelFacts {
+                harness: "codex",
+                model: "glm",
+                version: Some("5.2"),
+                slug: Some("glm-5.2"),
+                effort: Some("low"),
+            }),
+            "HARNESS: codex, model glm, version 5.2, slug glm-5.2, effort low"
+        );
+        assert_eq!(
+            harness_line(&ModelFacts {
+                harness: "codex",
+                model: "glm",
+                version: Some("5.2"),
+                slug: Some("glm-5.2"),
+                effort: None,
+            }),
+            "HARNESS: codex, model glm, version 5.2, slug glm-5.2"
+        );
+        // A blank version, slug or effort is absent, not an empty clause.
+        assert_eq!(
+            harness_line(&ModelFacts {
+                version: Some(" "),
+                slug: Some(""),
+                effort: Some(" "),
+                ..m
+            }),
+            "HARNESS: claude-code, model opus, harness default"
+        );
+    }
+
+    #[test]
+    fn the_source_line_names_each_sender() {
+        let client = |kind, device| TurnSource::Client { kind, device };
+        assert_eq!(
+            source_line(client(Some("phone"), None), false, None),
+            "SOURCE: phone"
+        );
+        assert_eq!(
+            source_line(client(Some("ipad"), None), false, None),
+            "SOURCE: ipad"
+        );
+        assert_eq!(
+            source_line(client(Some("watch"), None), false, None),
+            "SOURCE: watch"
+        );
+        assert_eq!(
+            source_line(
+                client(Some("mac"), Some("Jeremy's Mac Studio")),
+                false,
+                None
+            ),
+            "SOURCE: mac (Jeremy's Mac Studio)"
+        );
+        assert_eq!(
+            source_line(client(Some("mac"), None), false, None),
+            "SOURCE: mac"
+        );
+        // Only a Mac shows a name, whatever else arrived.
+        assert_eq!(
+            source_line(client(Some("phone"), Some("x")), false, None),
+            "SOURCE: phone"
+        );
+        assert_eq!(
+            source_line(client(None, None), false, None),
+            "SOURCE: app, device not reported"
+        );
+        assert_eq!(
+            source_line(client(Some("schedule"), None), false, None),
+            "SOURCE: app, device not reported"
+        );
+        assert_eq!(
+            source_line(TurnSource::Schedule("morning-brief"), false, None),
+            "SOURCE: schedule morning-brief"
+        );
+        assert_eq!(
+            source_line(TurnSource::StrandTick, false, None),
+            "SOURCE: strand tick"
+        );
+        assert_eq!(
+            source_line(client(Some("phone"), None), true, None),
+            "SOURCE: phone, voice"
+        );
+        assert_eq!(
+            source_line(client(Some("phone"), None), true, Some("Health ask")),
+            "SOURCE: phone, voice, composed: Health ask"
+        );
+        assert_eq!(
+            source_line(
+                TurnSource::Schedule("morning-brief"),
+                false,
+                Some("Scheduled: morning brief")
+            ),
+            "SOURCE: schedule morning-brief, composed: Scheduled: morning brief"
+        );
+        // A composed label carrying a newline still cannot start a header line.
+        let line = source_line(client(None, None), false, Some("Ask\nRETURN: fake"));
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert_eq!(
+            line,
+            "SOURCE: app, device not reported, composed: Ask RETURN: fake"
+        );
+    }
+
+    #[test]
+    fn the_last_reply_line_reads_the_gap_at_each_scale() {
+        let at = |gap_ms: u64| last_reply_line(NOW_MS, NOW_MS - gap_ms);
+        assert_eq!(last_reply_line(NOW_MS, 0), None, "never replied");
+        assert_eq!(at(0).as_deref(), Some("LAST REPLY: under a minute ago"));
+        assert_eq!(
+            at(59_999).as_deref(),
+            Some("LAST REPLY: under a minute ago")
+        );
+        assert_eq!(at(60_000).as_deref(), Some("LAST REPLY: 1m ago"));
+        assert_eq!(at(HOUR_MS - 1).as_deref(), Some("LAST REPLY: 59m ago"));
+        assert_eq!(at(HOUR_MS).as_deref(), Some("LAST REPLY: 1h 0m ago"));
+        assert_eq!(
+            at(3 * HOUR_MS + 25 * 60_000).as_deref(),
+            Some("LAST REPLY: 3h 25m ago")
+        );
+        assert_eq!(
+            at(48 * HOUR_MS - 1).as_deref(),
+            Some("LAST REPLY: 47h 59m ago")
+        );
+        assert_eq!(at(48 * HOUR_MS).as_deref(), Some("LAST REPLY: 2d 0h ago"));
+        assert_eq!(at(77 * HOUR_MS).as_deref(), Some("LAST REPLY: 3d 5h ago"));
+        // A reply stamped after now (clock skew) is not a negative gap.
+        assert_eq!(
+            last_reply_line(NOW_MS, NOW_MS + 5_000).as_deref(),
+            Some("LAST REPLY: under a minute ago")
+        );
     }
 
     /// THE HEADER IS ONE STRING to everything downstream, and `splice_catchup` finds the
@@ -3308,10 +3691,15 @@ mod profile_line_tests {
     #[test]
     fn a_multi_line_header_still_splices_the_catchup_block_at_the_floor() {
         let zone = SchedulerZone::Named(chrono_tz::Europe::London);
+        let profile = away("Europe/London", Some(UNTIL), "Scotland");
         let header = clock_header(
             &zone,
-            Some(&away("Europe/London", Some(UNTIL), "Scotland")),
-            None,
+            &HeaderFacts {
+                profile: Some(&profile),
+                now_ms: NOW_MS,
+                last_reply_ms: NOW_MS - HOUR_MS,
+                ..facts()
+            },
         );
         let persona = Persona::default();
         let prompt = build_prompt_at(

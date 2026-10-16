@@ -711,6 +711,15 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
     // dated from whenever it happened to arrive. Omitted (nil) is the bridge's own clock,
     // which is byte-for-byte what every build before this one did.
     public private(set) var sentAt: String?
+    // WHAT KIND OF DEVICE sent this turn: `phone`, `ipad` or `mac` (the bridge also accepts
+    // `watch`). Stamped in the same one place as `clientTz`, so the bridge's `SOURCE:` header
+    // line can tell the agent a Mac turn from a phone one. Nil omits the key; the bridge then
+    // says the app did not report its device, which is what every older build produces.
+    public private(set) var clientKind: String?
+    // The device's own name, on the Mac only (`Host.current().localizedName`). iOS hides the
+    // user-assigned name behind an entitlement this app does not have, so it is never sent
+    // from there. The bridge sanitizes it before it reaches the header. Nil omits the key.
+    public private(set) var clientDevice: String?
     // Who sent this turn when the owner did NOT type it: the label his threads show on the
     // folded prompt ("Morning routine", "Health ask"). Nil for a typed turn, and omitted from
     // the body then. The bridge records it on the conversation this turn opens, so every
@@ -748,21 +757,27 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
         self.effort = effort
         self.clientTz = nil
         self.sentAt = nil
+        self.clientKind = nil
+        self.clientDevice = nil
         self.sentFor = nil
     }
 
-    /// The same request, carrying the two facts only the DEVICE knows: the zone it is
-    /// standing in and the instant it says it sent this turn.
+    /// The same request, carrying the facts only the DEVICE knows: the zone it is standing
+    /// in, the instant it says it sent this turn, and what kind of device it is (with its
+    /// name, on the Mac).
     ///
     /// The ONE place either is set. Every caller (the Mac's plain send, the iOS layer's
     /// health-laden one) goes through `JesseBridgeClient.sendPrepared`, and that stamps
     /// here, so there is no path that can build a turn body without them. A blank value
     /// omits its field rather than sending an empty string, which the bridge would have to
     /// parse and reject.
-    public func stamped(clientTz: String, sentAt: String) -> JesseRequest {
+    public func stamped(clientTz: String, sentAt: String,
+                        clientKind: String? = nil, clientDevice: String? = nil) -> JesseRequest {
         var copy = self
         copy.clientTz = clientTz.isEmpty ? nil : clientTz
         copy.sentAt = sentAt.isEmpty ? nil : sentAt
+        copy.clientKind = clientKind?.isEmpty == false ? clientKind : nil
+        copy.clientDevice = clientDevice?.isEmpty == false ? clientDevice : nil
         return copy
     }
 
@@ -800,6 +815,8 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
         case model, effort
         case clientTz = "client_tz"
         case sentAt = "sent_at"
+        case clientKind = "client_kind"
+        case clientDevice = "client_device"
         case sentFor = "sent_for"
     }
 }

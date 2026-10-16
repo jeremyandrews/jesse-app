@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.178.0"
+version = "0.179.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -51,6 +51,13 @@ required-features = ["containment-probe"]
 [[bin]]
 name = "jesse-sentinel"
 path = "src/bin/sentinel.rs"
+
+# The hourly per account Claude usage snapshot (`scripts/install-claude-usage.sh`). Declared for
+# the same reason as the sentinel: the artifact is `jesse-claude-usage`, the name the plist and
+# `~/.local/bin` use, not `claude-usage`. Not a part of the bridge and never deployed with it.
+[[bin]]
+name = "jesse-claude-usage"
+path = "src/bin/claude-usage.rs"
 
 [dependencies]
 axum = "0.7"

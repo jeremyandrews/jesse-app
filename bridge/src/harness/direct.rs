@@ -2057,7 +2057,7 @@ mod tests {
         let mut cfg = crate::testutil::test_config();
         let shipped = "slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+\
                        proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+\
-                       rybbit+tag1+plex+house+healthdb+clockify-rs";
+                       rybbit+tag1+plex+house+healthdb+clockify-rs+runn-rs";
         assert_eq!(direct_mcp_label(&cfg), shipped);
         assert_eq!(
             Direct.parse_record_mcp(&cfg, shipped),

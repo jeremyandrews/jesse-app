@@ -869,6 +869,28 @@ pub fn interpret_claude_output(
 // `clockify` server, the one that could write, is retired. Read SECURITY.md before changing
 // this.
 
+// ---- `mcp_runn_rs` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **Tag1's own Runn server, read only: `runn-rs`** (`tag1consulting/runn-rs`, crate `runn-mcp`
+// 0.1.2 at pinned commit `c50fa5f1f23b2a2ecf1cd329852610d0c25a8bb1`), a stdio server over Tag1's
+// Runn account that answers who is booked, who is free, who is off, who has worked on a project
+// and who has a skill. It is NOT built here: it is installed on the host with `cargo install` and
+// started through the `runn-rs-mcp` launcher on the bridge's `PATH`, like `clockify-rs-mcp`.
+//
+// The token arrives BY ENVIRONMENT: the launcher reads `JESSE_RUNN_API_TOKEN` (set in the
+// LaunchAgent plist), exports it as `RUNN_API_TOKEN` and `exec`s the binary. The launcher also
+// PINS the Runn host (`https://api.runn.io`; the binary refuses any other) and the caller email
+// (`RUNN_MCP_USER_EMAIL`), so neither can be chosen by a turn. Nothing secret is in this entry
+// or on an argv. Codex forwards the token by name through `CODEX_MCP_ENV_PASSTHROUGH`.
+//
+// **ALL THIRTEEN TOOLS ARE GRANTED, AND ALL THIRTEEN READ.** A bare environment `tools/list` on
+// 2026-10-16 returned `whoami`, `find_people`, `person`, `projects`, `project`, `assignments`,
+// `availability`, `time_off`, `actuals`, `scheduled_vs_actual`, `utilization`, `skills` and
+// `open_demand`, every one annotated `readOnlyHint`, and [`crate::DEFAULT_ALLOWED_TOOLS`] grants
+// all thirteen by name. The server sends GET requests only. The token sees the whole account,
+// so the SERVER decides what reaches a turn: money follows the owner's own Runn financial
+// permission (none, charge only, or charge and cost), and free text notes are never read. Read
+// SECURITY.md before changing this.
+
 // ---- `house_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
 // The five house servers, in order.
 // ---- `morning_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
@@ -1435,7 +1457,7 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HO
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "clockify", "house", "healthdb", "clockify-rs"])));
 
 /// The twenty-five-server set MINUS the hosted **`clockify`** server: every main turn on BOTH
-/// harnesses from bridge 0.176.0. Twenty-four servers.
+/// harnesses from bridge 0.176.0 until 0.180.0. Twenty-four servers.
 ///
 /// What it removes is Clockify's own hosted MCP server, the one Clockify server that could
 /// write: it could start and stop timers, log time and create projects with the key owner's
@@ -1448,6 +1470,25 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HO
 /// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
 /// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
 /// when `[healthdb]` has an `ro_url_file`. `clockify-rs` is unconditional.
+///
+/// **RETIRED AS THE MAIN SET IN 0.180.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs`]
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.176.0 until 0.180.0.
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs"])));
+
+/// The twenty-four-server set PLUS **`runn-rs`**: every main turn on BOTH harnesses from bridge
+/// 0.180.0. Twenty-five servers.
+///
+/// What it adds is Tag1's own read-only Runn server: who is booked, who is free, who is off,
+/// who has worked on a project and who has a skill, with money shown only as the owner's own Runn
+/// financial permission allows. One new credential (a Runn account token, read scope, held in the
+/// plist and by a local child process) and one new host (`api.runn.io`, GET only). See the
+/// `runn-rs` row in `crate::mcpservers` and SECURITY.md.
+///
+/// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
+/// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
+/// when `[healthdb]` has an `ro_url_file`. `clockify-rs` and `runn-rs` are unconditional.
 ///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
@@ -1775,7 +1816,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs => {
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs => {
             READ_ALLOWED_TOOLS
         }
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
@@ -3126,11 +3168,11 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                22,
+                23,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
-                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex and \
-                 clockify-rs and nothing else: {mcp:?}"
+                 google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex, \
+                 clockify-rs and runn-rs and nothing else: {mcp:?}"
             );
             // THE HOSTED CLOCKIFY SERVER IS RETIRED (0.176.0). `clockify-rs` is the one
             // Clockify server, and it is the bare launcher: the key reaches it by environment,
@@ -3143,6 +3185,13 @@ mod tests {
                 servers["clockify-rs"],
                 serde_json::json!({"type": "stdio", "command": "clockify-rs-mcp", "args": []}),
                 "{label}: clockify-rs is the bare launcher with no arguments: {mcp:?}"
+            );
+            // THE RUNN SERVER IS THE BARE LAUNCHER WITH NO ARGUMENTS (0.180.0). The token, the
+            // host and the caller email all live in the host launcher, never on this config.
+            assert_eq!(
+                servers["runn-rs"],
+                serde_json::json!({"type": "stdio", "command": "runn-rs-mcp", "args": []}),
+                "{label}: runn-rs is the bare launcher with no arguments: {mcp:?}"
             );
             // THE PLEX SERVER IS THE BARE LAUNCHER WITH NO ARGUMENTS. Its URL and token live in
             // the host launcher; an argument here would be a value on argv, in `ps` and in the
@@ -4119,8 +4168,8 @@ mod tests {
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
     /// The main set as a child renders it under the test fixture, which has no `[house]` table
     /// and no `[healthdb] ro_url_file`: the twenty-one-server set (no hosted `clockify` since
-    /// 0.176.0) plus `clockify-rs`, the one server after the two conditional ones that is always
-    /// kept.
+    /// 0.176.0) plus `clockify-rs` and `runn-rs`, the two servers after the two conditional ones
+    /// that are always kept.
     static RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS: LazyLock<String> = LazyLock::new(|| {
         mcp_config_json(&messages_plus(&[
             "build",
@@ -4131,6 +4180,7 @@ mod tests {
             "tag1",
             "plex",
             "clockify-rs",
+            "runn-rs",
         ]))
     });
 
@@ -4177,81 +4227,87 @@ mod tests {
         let retired_clockify = servers(&mcp_config_json(&["clockify"]));
         for (label, older, added, removed) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
+                vec!["runn-rs"],
+                vec![],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec![],
+                vec!["runn-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
-                vec!["clockify-rs"],
+                vec!["runn-rs", "clockify-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb"],
+                vec!["runn-rs", "clockify-rs", "healthdb"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 &MESSAGES_BUILD_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
                 vec![],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_KUBERNETES_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
                 vec![],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 &MESSAGES_MCP_CONFIG,
-                vec!["clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
+                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
                 vec![],
             ),
         ] {
@@ -4797,8 +4853,8 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-one-server one plus `clockify-rs`: `house` and `healthdb` are
-                    // declared in the const and dropped here.
+                    // twenty-one-server one plus `clockify-rs` and `runn-rs`: `house` and
+                    // `healthdb` are declared in the const and dropped here.
                     RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--allowedTools",
                     &allow,
@@ -4826,8 +4882,8 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-one-server one plus `clockify-rs`: `house` and `healthdb` are
-                    // declared in the const and dropped here.
+                    // twenty-one-server one plus `clockify-rs` and `runn-rs`: `house` and
+                    // `healthdb` are declared in the const and dropped here.
                     RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--tools",
                     "Read,Grep,Glob",

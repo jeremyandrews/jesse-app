@@ -14,6 +14,81 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.180.0] - 2026-10-16
+
+**Bridge turns can answer who is booked, who is free, who is off, who has worked on a project
+and who has a skill, from Tag1's Runn account, through Tag1's own read-only `runn-rs` server, on
+both harnesses.** Money appears only as the owner's own Runn financial permission allows, and
+free text notes are never read. `runn-rs` is the twenty-fifth server on every Claude Code and
+Codex main turn.
+
+- **Declared as a stdio launcher.** The server table (`mcpservers.rs`) gains the `runn-rs` row,
+  so `MAIN_CHILD_MCP_CONFIG` gains
+  `"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]}`: `tag1consulting/runn-rs`,
+  crate `runn-mcp` 0.1.2 at `c50fa5f`, installed on the host and started through the
+  `runn-rs-mcp` launcher, which renames `JESSE_RUNN_API_TOKEN` to `RUNN_API_TOKEN`, pins the
+  host (`https://api.runn.io`) and the caller email, and `exec`s the binary. The
+  `mcp_runn_rs` comment in `harness/claude_code.rs` says what it is, the pin, the token route,
+  the thirteen tools and the money rule. It is unconditional: no config table switches it off.
+- **Codex route: the token forwarded by name.** The Codex passthrough (now a view over the
+  row's environment column) carries `("runn-rs", &["JESSE_RUNN_API_TOKEN"])`; it is in no bearer
+  or header table, and the comment says the launcher renames it and sets the host and email
+  itself. A shipped-config test asserts the launcher command, the forwarded name in exactly one
+  argument, the approve mode, the thirteen `enabled_tools`, and that neither the token nor the
+  host or email variables appear as a value.
+- **All thirteen tools granted, by name.** From a bare environment `tools/list` on 2026-10-16,
+  every one annotated `readOnlyHint`: `whoami`, `find_people`, `person`, `projects`, `project`,
+  `assignments`, `availability`, `time_off`, `actuals`, `scheduled_vs_actual`, `utilization`,
+  `skills`, `open_demand`. Tests pin the thirteen by equality and refuse a wildcard; the
+  Codex/Claude Code parity test stays green with no exception.
+- **New row label on both harnesses,**
+  `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs`
+  (`…+house+healthdb+clockify-rs+runn-rs`); the 0.176.0 twenty-four-server set is kept as a
+  retired label and const. `capability-map.toml` gains the thirteen grants (`upstream-pod`;
+  MCP grants 349 to 362, servers 24 to 25) and `golden/capability-args.json` the moved main
+  rows. The `direct` record's label follows the main set and the grant, so it gains
+  `+runn-rs` and its write row the thirteen tools.
+- **All three records re-recorded live on the Studio** from the bridge LaunchAgent's environment
+  and the deployed config with `[gateway] enabled = true` added in a scratch copy (the 0.177.0
+  records were made gateway on), each battery run alone, from a scratch target directory.
+  Claude Code (now 2.1.301; the record held 2.1.296): gate pass, $12.49, 5 rows x 22 probes.
+  Codex (codex-cli 0.153.4): the file-level gate stays `fail` for the standing `basic/none`
+  reason only (`read_vault_file`, `search_vault`), and every hard gate on the main rows passes.
+  `direct` (after the agent battery, 13 passed): gate pass. On all three, every probe on every
+  row kept its id, class, verdict and status, and only the main row labels moved. The write
+  roots gained exactly the thirteen `mcp__runn-rs__*` tools (Claude Code 379 to 392, Codex 350
+  to 363, `direct` the same thirteen); the read rows still enable qmd alone, and no other
+  server's count changed. A first Codex run was discarded because `qmd` registered zero tools
+  on its read row; the kept run, made alone right after, has `qmd` at its usual four.
+- **Codex's two main-row `[[accepted]]` blocks re-pointed** to the new labels on a label move,
+  conditioned on the identical-probe result above, citing this change's launch prompt; earlier
+  rationale unchanged below the new paragraph.
+- **Version re-stamped after the batteries.** All three batteries ran on this branch as 0.179.0;
+  `main` then shipped its own 0.179.0 (`jesse-claude-usage`, #288), which touches no tool list,
+  MCP set or spawn argv, so this change moved onto it as 0.180.0 and the three records'
+  informational `bridge_version` was moved to match. No probe was re-run for that.
+- **The argv fixture** moved on both harnesses' three main sites only: Claude Code's
+  `--mcp-config` digest on all three and its `--allowedTools` digest on the two write sites;
+  Codex gained ten arguments per main site.
+- **SECURITY.md** has a new section after the `clockify-rs` one: the new credential (a Runn
+  account token, read scope, made by a Runn admin, held in the plist and by a local child
+  process), the one host (pinned by the launcher, any other refused by the binary), GET only,
+  why the server rather than the token decides what reaches a turn (money by the owner's Runn
+  financial permission, notes never read), staff schedules, leave and skills as a new class of
+  personal data in turns, and a Deployment subsection with the install command, the launcher
+  rules and a handshake that keeps the token off every argv. The gateway's per-server table
+  gains its row. **SD1 fixed:** `healthdb`, on every main turn since 0.173.0, is now in the main
+  turn server list (with `runn-rs`, 25 servers) and in the main turn server table.
+- **Proved against live Runn before any repo change**, through the launcher from a bare
+  environment: `whoami` answered access `full`, money tier `all` (it reports `token_name`, the
+  token's name, not an account name); `availability` for the largest team over the next two
+  weeks answered twice, the second from cache; `project` for a confirmed project showed charge
+  figures and no cost field, because Runn's project report needs the Advanced plan and answered
+  403 (the server says so in place of cost, profit and margin); `actuals` and
+  `scheduled_vs_actual` for that project in September 2026 both answered. No tool error, and no
+  output carried a Runn `note` field. Every output was deleted.
+- **Not deployed.**
+
 ## [Bridge 0.179.0] - 2026-10-16
 
 **`jesse-claude-usage`: each Mac writes its current Claude login's identity and 5 hour and
@@ -60,6 +135,7 @@ store behave exactly as in 0.178.0.
   `a_malformed_previous_file_is_moved_aside`, `the_profile_names_the_account_its_organization_and_plan`,
   `the_claude_json_fallback_reads_oauth_account` and `arguments_and_classes`, on fixtures shaped
   like the live bodies with every identifier replaced.
+
 
 ## [Bridge 0.178.0] - 2026-10-15
 

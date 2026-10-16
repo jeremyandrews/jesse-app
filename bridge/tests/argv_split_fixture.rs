@@ -186,6 +186,14 @@
 //! eight arguments each: the url, the `env_http_headers` key route, `enabled_tools` and the
 //! approve mode. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.180.0, for `runn-rs`, on both harnesses' three main sites only.**
+//! `runn-rs` is unconditional, so Claude Code's rendered `--mcp-config` digest moved on all
+//! three main sites and its two write sites' `--allowedTools` digest moved for the thirteen
+//! `mcp__runn-rs__*` grants. Codex's three main sites gained ten arguments each: the launcher
+//! command, empty args, `JESSE_RUNN_API_TOKEN` forwarded BY NAME in `env_vars`, `enabled_tools`
+//! (empty on the read site, the thirteen tools on the write sites) and the approve mode. No
+//! other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

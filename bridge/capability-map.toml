@@ -3511,3 +3511,120 @@ placement = "upstream-pod"
 dependency = "JESSE_CLOCKIFY_API_KEY, renamed to CLOCKIFY_API_KEY by the clockify-rs-mcp launcher (clockify-mcp 0.5.0, 7255f1d); public HTTPS api.clockify.me and reports.api.clockify.me, reads only"
 workflows = "Tag1 hours per person: client and internal, billable and not, by period or month; FTE reviews, billing checks, trends"
 reason = "Reads every person's hours over a period split four ways, most hours first."
+
+[grant."mcp__runn-rs__whoami"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads the caller's Runn identity, access level and money tier, and the token's name."
+
+[grant."mcp__runn-rs__find_people"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads people by name, email, team, role, skill, tag or manager, with team, roles and tags."
+
+[grant."mcp__runn-rs__person"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads one person: team, roles, skills, contract and current assignments."
+
+[grant."mcp__runn-rs__projects"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads projects with client, status, tags and dates; budget only as the money tier allows."
+
+[grant."mcp__runn-rs__project"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads one project: phases, milestones, people, open demand and hours; money only as the money tier allows."
+
+[grant."mcp__runn-rs__assignments"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads who is booked on what over a period, by person, project, role or team."
+
+[grant."mcp__runn-rs__availability"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads who is free over a period: capacity, confirmed and tentative hours, per day or week."
+
+[grant."mcp__runn-rs__time_off"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads leave, rostered days off and public holidays over a period, by person or team."
+
+[grant."mcp__runn-rs__actuals"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads actual hours per person per week, billable and not, by project, role, client or person."
+
+[grant."mcp__runn-rs__scheduled_vs_actual"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads scheduled hours against actual hours per person over a period."
+
+[grant."mcp__runn-rs__utilization"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads each person's utilization over a period, by team or a list of people."
+
+[grant."mcp__runn-rs__skills"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads who has a skill at a minimum level, optionally with their availability."
+
+[grant."mcp__runn-rs__open_demand"]
+kind = "mcp"
+server = "runn-rs"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "JESSE_RUNN_API_TOKEN, renamed to RUNN_API_TOKEN by the runn-rs-mcp launcher, which also pins the host and the caller email (runn-mcp 0.1.2, c50fa5f); public HTTPS api.runn.io, GET only"
+workflows = "Tag1 staffing from Runn: who is booked, free or off, who worked on a project, who has a skill; money only as the owner's Runn financial permission allows"
+reason = "Reads unfilled placeholder demand and person requests over a period, by project or role."

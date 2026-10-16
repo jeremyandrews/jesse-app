@@ -14,6 +14,37 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.181.0] - 2026-10-16
+
+**Every bridge turn now says which build is answering it, and the schedule ledger records each
+bridge start with its version.** An agent turn could not see the deployed bridge: the version is
+on the Bridge ops screen and on `GET /jesse/health`, which needs the bridge token a turn may not
+read, so unattended sweeps carried "is it deployed?" as an open question for days (0.178.0 was
+already running) and asked Jeremy instead.
+
+- **A `BRIDGE:` line in the turn header.** `prompt::bridge_line()` returns exactly
+  `BRIDGE: <version> (<sha>)`, for example `BRIDGE: 0.181.0 (b40db9b)`, and `clock_header()`
+  emits it on its own line directly after the `PROFILE:` line and before any `RETURN:` line.
+  The header is still one string, so the catch-up splice is unaffected, and both harnesses get
+  it because every turn (phone and scheduled, Claude Code and Codex) builds its header through
+  `clock_header()`. The `PROFILE:` line's wording is unchanged: the vault's prompts branch on
+  `PROFILE: away`.
+- **The commit, stamped at build time.** A new `bridge/build.rs` sets `JESSE_GIT_SHA` to
+  `git rev-parse --short=7 HEAD`, with `-dirty` when tracked files differ from HEAD and the
+  literal `unknown` outside a checkout, and reruns when `HEAD`, the ref it points at,
+  `packed-refs` or the index changes. Two builds at one version (a hotfix built off a branch)
+  are now told apart. The sha is never read from a checkout at runtime.
+- **A boot line in the schedule ledger.** At start, past every gate that can still refuse to
+  start and just before the scheduler, the bridge appends one event to
+  `scheduled-jobs-ledger.jsonl` through the existing `ledger_event` shape: job `"(bridge)"`,
+  outcome `"started"`, reason `"<version> (<sha>)"`. A failed write is logged and never stops
+  startup. Nothing counts `started`: the sentinel's silence rule reads only `fired` lines (a
+  test now pins that a boot line is not a fire), and the app's Ops screen shows an unknown
+  outcome grey.
+- **Tests:** `bridge_line()`'s exact output, the header's line order (date, profile, bridge,
+  return) with the existing header tests moved to the new line count, and the boot line's job,
+  outcome and reason against a temp ledger.
+
 ## [Bridge 0.180.0] - 2026-10-16
 
 **Bridge turns can answer who is booked, who is free, who is off, who has worked on a project

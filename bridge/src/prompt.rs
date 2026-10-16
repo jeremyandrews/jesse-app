@@ -924,8 +924,28 @@ pub fn profile_line(profile: Option<&Profile>) -> String {
     format!("PROFILE: away ({}) until {until}{note}", p.tz)
 }
 
-/// THE WHOLE CLOCK HEADER: the date/time line, the profile line under it, and — on an
-/// `[profile].on_return` fire only — the `RETURN:` line under that.
+/// The running build, as one header line: `BRIDGE: <version> (<sha>)`, for example
+/// `BRIDGE: 0.181.0 (b40db9b)`.
+///
+/// It exists because a turn cannot otherwise see what is deployed: the version is on
+/// `GET /jesse/health`, which needs the bridge token a turn may not read, so unattended
+/// sweeps used to carry "is it deployed?" as an open question for days. The sha is stamped
+/// by `build.rs` at BUILD time (`-dirty` for an uncommitted tree, `unknown` outside a
+/// checkout) and never read from a checkout at runtime. Pure, and asserted exactly in a test.
+pub fn bridge_line() -> String {
+    format!("BRIDGE: {}", bridge_build())
+}
+
+/// The running build as `<version> (<sha>)`: the [`bridge_line`]'s value, and the reason
+/// on the ledger's boot line, so the two can never spell it differently.
+pub fn bridge_build() -> String {
+    format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("JESSE_GIT_SHA"))
+}
+
+/// THE WHOLE CLOCK HEADER: the date/time line, the profile line under it, the
+/// [`bridge_line`] under that, and — on an `[profile].on_return` fire only — the `RETURN:`
+/// line last. The `PROFILE:` line keeps its own line and its exact wording (see
+/// [`profile_line`]); the bridge line is added beside it, never into it.
 ///
 /// Composed HERE rather than inside [`build_prompt_at`] because the header is one opaque
 /// string to everything downstream: [`prompt_lead`] emits it verbatim and
@@ -941,6 +961,8 @@ pub fn clock_header(
     let mut header = clock_line_in(zone);
     header.push('\n');
     header.push_str(&profile_line(profile));
+    header.push('\n');
+    header.push_str(&bridge_line());
     if let Some(line) = return_line.map(str::trim).filter(|l| !l.is_empty()) {
         header.push('\n');
         header.push_str(line);
@@ -3233,16 +3255,33 @@ mod profile_line_tests {
         );
     }
 
-    /// The header is the clock line, then the profile line, then — only on a return fire —
-    /// the RETURN line. Nothing else, and in that order.
+    /// The bridge line is exactly `BRIDGE: <crate version> (<build sha>)`, and the sha is
+    /// either `unknown` or seven hex digits with an optional `-dirty`.
     #[test]
-    fn the_header_stacks_clock_profile_and_return_in_that_order() {
+    fn the_bridge_line_names_the_version_and_the_build() {
+        let sha = env!("JESSE_GIT_SHA");
+        assert_eq!(
+            bridge_line(),
+            format!("BRIDGE: {} ({sha})", env!("CARGO_PKG_VERSION"))
+        );
+        let hex = sha.strip_suffix("-dirty").unwrap_or(sha);
+        assert!(
+            sha == "unknown" || (hex.len() == 7 && hex.bytes().all(|b| b.is_ascii_hexdigit())),
+            "{sha:?}"
+        );
+    }
+
+    /// The header is the clock line, then the profile line, then the bridge line, then —
+    /// only on a return fire — the RETURN line. Nothing else, and in that order.
+    #[test]
+    fn the_header_stacks_clock_profile_bridge_and_return_in_that_order() {
         let zone = SchedulerZone::Named(chrono_tz::Europe::London);
         let header = clock_header(&zone, None, None);
         let lines: Vec<&str> = header.lines().collect();
-        assert_eq!(lines.len(), 2, "{header:?}");
+        assert_eq!(lines.len(), 3, "{header:?}");
         assert!(lines[0].starts_with("Current date/time: "));
         assert_eq!(lines[1], "PROFILE: home");
+        assert_eq!(lines[2], bridge_line());
 
         let with_return = clock_header(
             &zone,
@@ -3250,15 +3289,16 @@ mod profile_line_tests {
             Some("RETURN: first day back after 13 days away"),
         );
         let lines: Vec<&str> = with_return.lines().collect();
-        assert_eq!(lines.len(), 3, "{with_return:?}");
+        assert_eq!(lines.len(), 4, "{with_return:?}");
         assert_eq!(
             lines[1],
             "PROFILE: away (Europe/London) until 2026-09-07, note: Scotland"
         );
-        assert_eq!(lines[2], "RETURN: first day back after 13 days away");
+        assert_eq!(lines[2], bridge_line());
+        assert_eq!(lines[3], "RETURN: first day back after 13 days away");
 
         // A blank return line adds nothing rather than a blank line.
-        assert_eq!(clock_header(&zone, None, Some("   ")).lines().count(), 2);
+        assert_eq!(clock_header(&zone, None, Some("   ")).lines().count(), 3);
     }
 
     /// THE HEADER IS ONE STRING to everything downstream, and `splice_catchup` finds the

@@ -687,6 +687,16 @@ async fn main() {
     // is up, because a scheduled turn runs through exactly the same path a phone request
     // takes. A deploy with no `[[schedule]]` entries starts no task at all; entries that
     // failed validation are logged here, by name, and their neighbours still run.
+    // THE BOOT LINE in the schedule ledger: which build started, and when. Written here,
+    // past every gate that can still refuse to start, so a `started` line means it served.
+    // Best effort: a failed write is logged and never stops the bridge.
+    if let Err(e) = state
+        .scheduler
+        .state
+        .bridge_started(jesse_bridge::activity::now_ms())
+    {
+        eprintln!("jesse-bridge: could not write the boot line to the schedule ledger: {e}");
+    }
     spawn_scheduler(state.clone());
     // THE NIGHTLY STRANDS AUDIT, beside the scheduler and on its clock: once a day at 03:20
     // in the scheduler's zone (an away profile moves it), and at startup when today's file

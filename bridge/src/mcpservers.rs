@@ -367,6 +367,11 @@ use crate::house::HOUSE_URL_PLACEHOLDER;
 // the bearer table. `JESSE_CLOCKIFY_API_KEY` is set in the plist; the `clockify-rs-mcp`
 // launcher renames it to the `CLOCKIFY_API_KEY` the server reads and `exec`s the binary.
 // Without it the launcher exits at once and registers nothing.
+// `runn-rs` (0.180.0) is a stdio server, so its token travels by NAME here and never in the
+// bearer table. `JESSE_RUNN_API_TOKEN` is set in the plist; the `runn-rs-mcp` launcher renames
+// it to the `RUNN_API_TOKEN` the server reads, and sets the Runn host and the caller email
+// itself, so neither travels from here. Without the token the launcher exits at once and
+// registers nothing.
 // Fixed, NON-SECRET environment values a stdio server is started with on Codex, set with
 // Codex's `env` key rather than forwarded from the bridge's environment.
 //
@@ -742,6 +747,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
         &[],
         &["JESSE_CLOCKIFY_API_KEY"],
     ),
+    stdio("runn-rs", "runn-rs-mcp", &[], &["JESSE_RUNN_API_TOKEN"]),
 ];
 
 /// The row for `name`, or `None`.
@@ -863,6 +869,7 @@ pub const MAIN_SET: &[&str] = &[
     "house",
     "healthdb",
     "clockify-rs",
+    "runn-rs",
 ];
 
 /// The today-brief child's opt-in set.
@@ -989,7 +996,7 @@ pub(crate) fn golden_main_config() -> String {
     [
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         HOME_ASSISTANT_MCP_URL,
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]}}}"#,
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]}}}"#,
     ]
     .concat()
 }
@@ -1190,6 +1197,7 @@ mod tests {
                 ],
             ),
             ("clockify-rs", &["JESSE_CLOCKIFY_API_KEY"]),
+            ("runn-rs", &["JESSE_RUNN_API_TOKEN"]),
         ];
         for (name, vars) in passthrough {
             assert_eq!(codex_env_passthrough(name), Some(*vars), "{name}");
@@ -1217,7 +1225,7 @@ mod tests {
         assert_eq!(codex_bearer_env("homeassistant"), Some("HA_MCP_TOKEN"));
         assert_eq!(codex_bearer_env("rybbit"), Some("RYBBIT_API_KEY"));
         assert_eq!(codex_bearer_env("house"), Some("JESSE_HOUSE_TOKEN"));
-        for absent in ["roon", "tag1", "clockify", "slack"] {
+        for absent in ["roon", "tag1", "clockify", "slack", "runn-rs"] {
             assert_eq!(codex_bearer_env(absent), None, "{absent}");
         }
         assert_eq!(

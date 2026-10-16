@@ -171,9 +171,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **23 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **25 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `house` (when the deployment configures it), `clockify-rs` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `house` (when the deployment configures it), `healthdb` (when the deployment configures it), `clockify-rs`, `runn-rs` — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -239,6 +239,7 @@ every server is a row of.
 | house | http | bearer from `[house] token_file` (`JESSE_HOUSE_TOKEN`), extra CA from `[house] ca_file` |
 | healthdb | bridge_stdio | `JESSE_HEALTHDB_RO_URL_FILE JESSE_HEALTHDB_CA_FILE JESSE_HEALTHDB_MCP_LEDGER` (paths) |
 | clockify-rs | bridge_stdio | `JESSE_CLOCKIFY_API_KEY` |
+| runn-rs | bridge_stdio | `JESSE_RUNN_API_TOKEN` (the launcher pins the host and the caller email) |
 | qmd | child | none |
 
 The sets were measured by starting each server with a stripped environment (2026-10-13): every
@@ -1005,6 +1006,8 @@ and read-only). Only the servers named in that config load:
 | `plex` | The owner's LAN Plex server, added 2026-10-04: forty of fifty-five `mcp__plex__*` tools: reads, search, and collection, playlist and metadata edits. Nothing that deletes media, runs maintenance, shares, plays back or touches the host's files. See [Plex](#plex-lan-media-server-reads-and-collection-edits-2026-10-04) |
 | `clockify-rs` | Tag1's own Clockify server, **read only**, added 2026-10-12 — all twelve `mcp__clockify-rs__*` tools, every one a read, no dollar figure in any output. The only Clockify server since 0.176.0, when the hosted `clockify` server was retired. See [Clockify, Tag1's own server](#clockify-tag1s-own-server-four-way-hours-read-only-2026-10-12) |
 | `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
+| `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
+| `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1634,6 +1637,131 @@ unset KEY
 `printf` is a shell builtin, so the key is on no process's argument list. If `launchctl getenv
 PATH` is empty, take `PATH` from the plist's `EnvironmentVariables`. The result must be the
 twelve tools above, each `true`.
+
+### Runn, Tag1's own server (staffing and schedules, read only, 2026-10-16)
+
+Bridge 0.180.0 adds `runn-rs`, Tag1's own Runn server, to every main turn on **both harnesses
+in the same change**, as the twenty-fifth server. It is the private `tag1consulting/runn-rs`
+repository's `runn-mcp` crate, version 0.1.2 at commit `c50fa5f`, stdio transport, declared with
+the bare command `runn-rs-mcp` and no arguments, resolved off the bridge `PATH` like
+`clockify-rs-mcp`. It answers who is booked, who is free, who is off, who has worked on a
+project and who has a skill, from Tag1's Runn account.
+
+#### A new credential
+
+A Runn account API token, read scope, made by a Runn admin. It is held in the bridge LaunchAgent
+plist as `JESSE_RUNN_API_TOKEN`, and on a bridge turn **only by the `runn-rs` child process**,
+which the launcher hands it to as `RUNN_API_TOKEN`. It is not in the repo, an argv, a record, a
+fixture or a log.
+
+- **Claude Code** children inherit the bridge's environment, so the launcher finds the variable.
+- **Codex** scrubs an MCP child's environment, so `CODEX_MCP_ENV_PASSTHROUGH` forwards
+  `JESSE_RUNN_API_TOKEN` to `runn-rs` **by name**. It is in no bearer or header table: this is a
+  stdio server. A test asserts the name appears on the Codex argv in exactly one argument, the
+  `runn-rs` `env_vars` one, never as a value, a `${…}` placeholder or a `NAME=` assignment.
+- **With the gateway on**, the row's environment column is that one name, beside the five every
+  upstream gets.
+
+#### One new host
+
+`https://api.runn.io`, where Tag1's account is. The launcher pins it as `RUNN_API_BASE`, and the
+binary refuses any base other than `https://api.runn.io` or `https://api.us.runn.io`, so a turn
+cannot point it anywhere else. The server sends **GET requests only**.
+
+#### The token sees the whole account, so the server decides what reaches a turn
+
+A Runn API token is not scoped to a person: it reads everything in the account. What a turn
+sees is therefore decided in the server, against the caller the launcher pins as
+`RUNN_MCP_USER_EMAIL` (`jeremy@tag1consulting.com`):
+
+- **Money follows the caller's own Runn financial permission.** `none` shows no money,
+  `restricted` shows charge figures (budget, revenue, budget remaining) and never cost, `all`
+  also shows cost, profit and margin. The owner's tier is `all`.
+- **Visibility follows the caller's Runn access level** (`full`, `planner`, `self_only`): which
+  people, tentative and archived projects, and open demand a call may return.
+- **Free text notes are never read.** No tool returns a Runn `note` field.
+
+#### Granted: all thirteen tools, and every one reads
+
+A bare environment `initialize` and `tools/list` against 0.1.2 on 2026-10-16 returned thirteen
+tools, **every one annotated `readOnlyHint: true`**: `whoami`, `find_people`, `person`,
+`projects`, `project`, `assignments`, `availability`, `time_off`, `actuals`,
+`scheduled_vs_actual`, `utilization`, `skills` and `open_demand`. All thirteen are in
+`DEFAULT_ALLOWED_TOOLS` by name, never `mcp__runn-rs__*`, and a test pins the thirteen by
+equality. Codex renders the same thirteen in `enabled_tools` with
+`default_tools_approval_mode = "approve"`. None writes: the server has no POST, PATCH, PUT or
+DELETE call at all.
+
+#### What it adds to the risk
+
+- **One new credential and one new host**, as above, reads only.
+- **A new class of personal data in turns: staff schedules, leave and skills.** A turn can read
+  who is booked on what, who is off and when (leave, public holidays and rostered days off, as
+  kind and dates), each person's contract hours, skills and levels, and actual hours worked. A
+  turn steered by injected text can read any of it and put it in a reply. This is the point of
+  the server and is accepted on the owner's decision; it adds no new egress on Claude Code and
+  Codex beyond what a main turn already holds.
+- **Money, at the owner's tier.** At `all`, project charge figures reach the turn, and cost,
+  profit and margin would too where Runn's project report answers (it needs Runn's Advanced
+  plan; on 2026-10-16 it answered 403 and the server said so in place of the figures).
+- **Untrusted text.** Project, client, role, skill and tag names are whatever anyone with Runn
+  access typed, and enter the turn at the same trust level as message bodies.
+
+#### Proved against live Runn before shipping
+
+On 2026-10-16, against Tag1's Runn account through the launcher: `whoami` answered access
+`full`, money tier `all`; `availability` for the largest team over the next two weeks answered
+twice, the second from cache; `projects`, then `project` for a confirmed project, showed charge
+figures and no cost field (the project report's 403, above); `actuals` and
+`scheduled_vs_actual` for that project in September 2026 both answered with no tool error. No
+output carried a Runn `note` field. Every output was deleted after the check.
+
+#### Deployment
+
+**Host setup, not repo content.** Install the pinned commit:
+
+```sh
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --locked --force \
+  --git ssh://git@github.com/tag1consulting/runn-rs.git \
+  --rev c50fa5f1f23b2a2ecf1cd329852610d0c25a8bb1 runn-mcp \
+  --root ~/.local/share/jesse-mcp/runn-rs
+```
+
+`runn-rs-mcp` must be on the bridge's `PATH`, in the launchers directory beside
+`clockify-rs-mcp`. It must be a mode `0755` `/bin/sh` script that does exactly this and nothing
+else:
+
+- fail with a message on stderr if `JESSE_RUNN_API_TOKEN` is unset or empty;
+- `export RUNN_API_TOKEN="$JESSE_RUNN_API_TOKEN"`;
+- `export RUNN_API_BASE=https://api.runn.io`;
+- `export RUNN_MCP_USER_EMAIL=jeremy@tag1consulting.com`;
+- `exec` the absolute path of the installed binary. **Never** a symlink to it (the Proxmox
+  rule), and never the token on an argument list: an argument is visible in `ps`.
+
+An upgrade is a deliberate edit: a new `--rev`, then a re-probe of `tools/list` against
+`DEFAULT_ALLOWED_TOOLS`. Handshake it from a bare environment before trusting it, because a
+server that starts and registers zero tools looks identical to one that works. The token goes in
+on **stdin**, read by the shell that `exec`s the launcher, so it is never a `NAME=value`
+argument to `env` (which `ps` would show), never echoed and never written to a file:
+
+```sh
+# PLIST is the bridge LaunchAgent plist.
+TOKEN="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:JESSE_RUNN_API_TOKEN' "$PLIST")"
+{ printf '%s\n' "$TOKEN"
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"handshake","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  sleep 3; } |
+  env -i PATH="$(launchctl getenv PATH)" HOME="$HOME" \
+    sh -c 'IFS= read -r JESSE_RUNN_API_TOKEN; export JESSE_RUNN_API_TOKEN; exec runn-rs-mcp' |
+  jq -r 'select(.id==2) | .result.tools[] | "\(.name) \(.annotations.readOnlyHint)"'
+unset TOKEN
+```
+
+`printf` is a shell builtin, so the token is on no process's argument list. If `launchctl getenv
+PATH` is empty, take `PATH` from the plist's `EnvironmentVariables`. The result must be the
+thirteen tools above, each `true`.
 
 ### House model (spatial reads and writes, 2026-10-10)
 

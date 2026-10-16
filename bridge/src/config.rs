@@ -916,6 +916,14 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `hours_by_user`, `monthly_hours`, `detailed_entries`, `resolve_user`, `check`, `trend`,
 // `audit`, `projects`, `daily` and `team_summary`. All twelve are granted by name. From 0.176.0
 // these are the only Clockify grants. Never a wildcard.
+//
+// RUNN-RS: ALL THIRTEEN TOOLS OF TAG1'S OWN RUNN SERVER, EVERY ONE A READ.
+//
+// A bare environment `tools/list` against `runn-mcp` 0.1.2 (commit `c50fa5f`) on 2026-10-16
+// returned thirteen tools, every one annotated `readOnlyHint`: `whoami`, `find_people`,
+// `person`, `projects`, `project`, `assignments`, `availability`, `time_off`, `actuals`,
+// `scheduled_vs_actual`, `utilization`, `skills` and `open_demand`. All thirteen are granted by
+// name. The server sends GET requests only. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1103,7 +1111,12 @@ mcp__clockify-rs__list_users,mcp__clockify-rs__list_user_groups,\
 mcp__clockify-rs__hours_by_user,mcp__clockify-rs__monthly_hours,\
 mcp__clockify-rs__detailed_entries,mcp__clockify-rs__resolve_user,mcp__clockify-rs__check,\
 mcp__clockify-rs__trend,mcp__clockify-rs__audit,mcp__clockify-rs__projects,\
-mcp__clockify-rs__daily,mcp__clockify-rs__team_summary";
+mcp__clockify-rs__daily,mcp__clockify-rs__team_summary,\
+mcp__runn-rs__whoami,mcp__runn-rs__find_people,mcp__runn-rs__person,\
+mcp__runn-rs__projects,mcp__runn-rs__project,mcp__runn-rs__assignments,\
+mcp__runn-rs__availability,mcp__runn-rs__time_off,mcp__runn-rs__actuals,\
+mcp__runn-rs__scheduled_vs_actual,mcp__runn-rs__utilization,mcp__runn-rs__skills,\
+mcp__runn-rs__open_demand";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5546,6 +5559,56 @@ mod tests {
                 .split(',')
                 .any(|e| e == "mcp__clockify-rs__*" || e == "mcp__clockify-rs"),
             "a wildcard grant on the clockify-rs server is never acceptable"
+        );
+    }
+
+    /// THE RUNN-RS GRANT IS EXACTLY THE THIRTEEN TOOLS THE PINNED SERVER REGISTERS.
+    ///
+    /// Taken from a bare environment `tools/list` against `runn-mcp` 0.1.2 (commit `c50fa5f`)
+    /// on 2026-10-16, every tool annotated `readOnlyHint`. Equality, so a missing grant and a
+    /// grant for a name the server does not register both fail, and a failure names the tool.
+    #[test]
+    fn the_runn_rs_grant_is_every_registered_tool_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__runn-rs__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "whoami",
+            "find_people",
+            "person",
+            "projects",
+            "project",
+            "assignments",
+            "availability",
+            "time_off",
+            "actuals",
+            "scheduled_vs_actual",
+            "utilization",
+            "skills",
+            "open_demand",
+        ]
+        .iter()
+        .map(|t| format!("mcp__runn-rs__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the runn-rs grant moved; re-probe the pinned server's tools/list and record the \
+             decision before changing this list; it moves `toolset_args`, which costs a live \
+             battery run"
+        );
+    }
+
+    /// NO WILDCARD ON THE RUNN-RS SERVER: a wildcard grants whatever the next release adds.
+    #[test]
+    fn no_runn_rs_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__runn-rs__*" || e == "mcp__runn-rs"),
+            "a wildcard grant on the runn-rs server is never acceptable"
         );
     }
 

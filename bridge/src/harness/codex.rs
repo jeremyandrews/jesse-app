@@ -3565,6 +3565,69 @@ mod tests {
         );
     }
 
+    /// THE RUNN-RS SERVER REACHES CODEX AS THE BARE LAUNCHER, with its token FORWARDED BY NAME
+    /// and never valued. It is stdio, so the token rides `env_vars` and no bearer or header
+    /// route; the launcher renames it and sets the Runn host and the caller email itself, so
+    /// neither of those travels from the bridge. Its grant is exactly the thirteen read tools
+    /// Claude Code's turn gets.
+    #[test]
+    fn the_shipped_runn_rs_server_travels_with_its_token_named_not_valued() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            MAIN_CHILD_MCP_CONFIG.as_str(),
+            crate::DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("the shipped main set renders for Codex");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.runn-rs.command="runn-rs-mcp""#),
+            "{args:?}"
+        );
+        assert!(flat.contains("mcp_servers.runn-rs.args=[]"), "{args:?}");
+        assert!(
+            flat.contains(r#"mcp_servers.runn-rs.env_vars=["JESSE_RUNN_API_TOKEN"]"#),
+            "{args:?}"
+        );
+        assert!(!flat.contains("mcp_servers.runn-rs.env="), "{args:?}");
+        assert!(
+            !flat.contains("mcp_servers.runn-rs.bearer_token_env_var"),
+            "{args:?}"
+        );
+        assert!(
+            !flat.contains("mcp_servers.runn-rs.env_http_headers"),
+            "{args:?}"
+        );
+        // THE NAME APPEARS ONLY AS A FORWARDED NAME, never as a value: no `${…}` expansion, no
+        // `NAME=` assignment, and exactly one argument carries it. The host and the caller
+        // email are the launcher's, so neither variable is on the argv either.
+        assert!(!flat.contains("${JESSE_RUNN_API_TOKEN}"), "{args:?}");
+        assert!(!flat.contains("JESSE_RUNN_API_TOKEN="), "{args:?}");
+        assert!(!flat.contains("RUNN_API_TOKEN="), "{args:?}");
+        assert!(!flat.contains("RUNN_API_BASE"), "{args:?}");
+        assert!(!flat.contains("RUNN_MCP_USER_EMAIL"), "{args:?}");
+        let carrying: Vec<&String> = args
+            .iter()
+            .filter(|a| a.contains("JESSE_RUNN_API_TOKEN"))
+            .collect();
+        assert_eq!(
+            carrying,
+            vec![r#"mcp_servers.runn-rs.env_vars=["JESSE_RUNN_API_TOKEN"]"#],
+            "the token's name must appear in exactly one argument, runn-rs's env_vars"
+        );
+        assert!(
+            flat.contains(r#"mcp_servers.runn-rs.default_tools_approval_mode="approve""#),
+            "{args:?}"
+        );
+        let enabled = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.runn-rs.enabled_tools="))
+            .expect("runn-rs carries an enabled_tools override");
+        assert_eq!(
+            enabled,
+            r#"mcp_servers.runn-rs.enabled_tools=["whoami", "find_people", "person", "projects", "project", "assignments", "availability", "time_off", "actuals", "scheduled_vs_actual", "utilization", "skills", "open_demand"]"#
+        );
+    }
+
     /// A transport neither harness can express is REFUSED, never silently dropped — a child
     /// spawned without a server it was told to load is the failure this whole path exists to
     /// prevent. `sse` stands in for "some future transport".

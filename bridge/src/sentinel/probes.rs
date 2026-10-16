@@ -1065,9 +1065,11 @@ mod tests {
             json!({"at_ms": 800, "outcome": "failed"}),
             json!({"at_ms": 950, "outcome": "fired-no-output"}),
             json!({"at_ms": 700, "outcome": "fired"}),
+            json!({"at_ms": 990, "job": "(bridge)", "outcome": "started"}),
         ];
         // The newest `fired` is 700 — a later skip or failure is not a fire, and neither is
-        // `fired-no-output`, which the bridge escalates on its own terms.
+        // `fired-no-output`, which the bridge escalates on its own terms, nor the bridge's
+        // boot line, which would otherwise hide a scheduler that stopped behind a restart.
         assert_eq!(last_fired_ms(&lines), Some(700));
         assert_eq!(last_fired_ms(&[]), None);
         assert_eq!(

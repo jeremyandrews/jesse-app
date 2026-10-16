@@ -184,6 +184,11 @@ impl JobRecord {
     }
 }
 
+/// The ledger `job` of a bridge-level event, beside the scheduler's `"(schedule)"`.
+pub const BRIDGE_LEDGER_JOB: &str = "(bridge)";
+/// The ledger `outcome` of the boot line. Not a fire, not a failure: nothing counts it.
+pub const BRIDGE_STARTED: &str = "started";
+
 /// The whole persisted schedule state, keyed by schedule id.
 pub struct ScheduleStateStore {
     path: Option<PathBuf>,
@@ -306,6 +311,18 @@ impl ScheduleStateStore {
     /// the single most useful line to have next to the fires that follow it, and putting it
     /// in a second file would mean interleaving two files by hand to get it.
     pub fn ledger_event(&self, job: &str, outcome: &str, reason: &str, at_ms: u64) {
+        let _ = self.try_ledger_event(job, outcome, reason, at_ms);
+    }
+
+    /// [`ledger_event`](Self::ledger_event), reporting a failed write instead of swallowing
+    /// it, for a caller that wants to log one. No ledger configured is `Ok`.
+    pub fn try_ledger_event(
+        &self,
+        job: &str,
+        outcome: &str,
+        reason: &str,
+        at_ms: u64,
+    ) -> std::io::Result<()> {
         self.write_ledger_line(json!({
             "at": Local::now().to_rfc3339_opts(SecondsFormat::Secs, false),
             "at_ms": at_ms,
@@ -315,7 +332,21 @@ impl ScheduleStateStore {
             "fired_at_ms": Value::Null,
             "duration_ms": Value::Null,
             "job_id": Value::Null,
-        }));
+        }))
+    }
+
+    /// THE BOOT LINE: one `"(bridge)"` / `"started"` event per process start, its reason
+    /// the running build (`0.181.0 (b40db9b)`, see [`crate::prompt::bridge_build`]). The
+    /// ledger is where "what happened, in order" is already answered, so this is what lets
+    /// an agent tell which build went live and when without asking. `started` is a label
+    /// no roll-up or sentinel rule counts: the silence rule reads only `fired`.
+    pub fn bridge_started(&self, at_ms: u64) -> std::io::Result<()> {
+        self.try_ledger_event(
+            BRIDGE_LEDGER_JOB,
+            BRIDGE_STARTED,
+            &crate::prompt::bridge_build(),
+            at_ms,
+        )
     }
 
     /// A turn started for this id.
@@ -409,26 +440,29 @@ impl ScheduleStateStore {
             "duration_ms": duration_ms,
             "job_id": rec.last_job_id,
         });
-        self.write_ledger_line(line);
+        let _ = self.write_ledger_line(line);
     }
 
     /// Append one already-built JSON object as a line. Shared by the per-occurrence append
     /// and the schedule-level events so both obey the same best-effort discipline: a ledger
     /// that could break the scheduler would be a worse bug than the blindness it fixes.
-    fn write_ledger_line(&self, line: Value) {
-        let Some(path) = &self.ledger else { return };
-        let Ok(mut text) = serde_json::to_string(&line) else {
-            return;
+    ///
+    /// The write's result is returned for the one caller that logs it (the boot line);
+    /// every other caller drops it.
+    fn write_ledger_line(&self, line: Value) -> std::io::Result<()> {
+        let Some(path) = &self.ledger else {
+            return Ok(());
         };
+        let mut text = serde_json::to_string(&line)?;
         text.push('\n');
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .and_then(|mut f| f.write_all(text.as_bytes()));
+            .and_then(|mut f| f.write_all(text.as_bytes()))
     }
 }
 
@@ -585,6 +619,34 @@ mod tests {
         assert_eq!(b["reason"], crate::scheduler::CALENDAR_SKIP);
         // A skip fired nothing, so it must not carry a stale fire stamp.
         assert!(b["fired_at_ms"].is_null(), "{b}");
+    }
+
+    /// THE BOOT LINE: job `(bridge)`, outcome `started`, reason the running build, in the
+    /// same JSON shape as every other schedule-level event.
+    #[test]
+    fn the_boot_line_names_the_running_build() {
+        let ledger = std::env::temp_dir().join(format!(
+            "jesse-ledger-{}/Inbox/scheduled-jobs-ledger.jsonl",
+            random_hex()
+        ));
+        let s = ScheduleStateStore::new(None).with_ledger(Some(ledger.clone()));
+        s.bridge_started(5_000).unwrap();
+
+        let text = std::fs::read_to_string(&ledger).unwrap();
+        println!("boot ledger line: {}", text.trim_end());
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v["job"], "(bridge)");
+        assert_eq!(v["outcome"], "started");
+        assert_eq!(
+            v["reason"],
+            format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("JESSE_GIT_SHA"))
+        );
+        assert_eq!(v["at_ms"], 5_000);
+        assert!(v["fired_at_ms"].is_null() && v["job_id"].is_null(), "{v}");
+        // No ledger configured is not an error either.
+        ScheduleStateStore::new(None).bridge_started(1).unwrap();
     }
 
     /// No ledger configured must stay silent rather than fail: the ledger is

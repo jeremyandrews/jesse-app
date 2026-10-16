@@ -660,6 +660,33 @@ against `$CODEX_HOME` or `~/.codex`. Fireworks has no balance API, so that scope
 never remaining credit; a billing bucket reported with no cost is estimated from its tokens and
 the model's price deck, and the spend is marked `estimated`.
 
+### Per account Claude usage in the vault (`jesse-claude-usage`, 0.179.0)
+
+`GET /jesse/usage` knows only the bridge's own login, and only in memory. Each Mac can be on a
+different Claude account (`/login` is per machine), so a separate binary records every Mac's
+current login in the vault, where a scheduled agent turn can read all of them. It is not part
+of the bridge, is never deployed with it, and calls no model.
+
+`jesse-claude-usage snap --vault <path> [--host <name>] [--dry-run]` reads the login exactly as
+the quota reader does, then asks `GET /api/oauth/profile` (who: email, organization, plan) and
+`GET /api/oauth/usage` (the 5 hour and 7 day windows, plus any model scoped 7 day window) once
+each, concurrently. If the profile does not answer, identity comes from `~/.claude.json`'s
+`oauthAccount`. It rewrites `<vault>/Knowledge/Reference/Claude-Usage/<host>.md` whole (temp file
+and rename): frontmatter naming the host and current account, a **Latest per account** table
+with one row per (account, organization), and a **History** table of the last 72 readings.
+`--host` defaults to the lowercased `LocalHostName`; `--dry-run` prints the file instead.
+
+It never stores, prints or refreshes a token. An expired login is recorded as `login expired`
+and makes no request; a 429 is recorded as `rate limited` and is not retried; every failure is
+recorded as a class, never a body. Exit 0 whenever the file was written, 1 when it was not, 2 on
+a usage error.
+
+`scripts/install-claude-usage.sh` builds it into `~/.local/bin`, renders
+`bridge/launchd/com.jesse.claude-usage.plist` into `~/Library/LaunchAgents/` with that user's
+paths, and bootstraps it: it runs at load and hourly, logging to
+`~/Library/Logs/jesse-claude-usage.log`. Run it on each Mac; it never touches the bridge's own
+plist or binary.
+
 ### The house model (`[house]`, 0.169.0)
 
 `house-mcp`, on the home k3s cluster, holds a spatial model of the house and grounds and answers

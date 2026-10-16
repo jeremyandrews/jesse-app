@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  jesse-claude-usage: hourly per account Claude usage snapshot into the vault.
+
+  A TEMPLATE. scripts/install-claude-usage.sh replaces @@HOME@@ with the installing user's
+  home directory and writes the result to ~/Library/LaunchAgents/. launchd expands neither
+  $HOME nor ~, so the installed copy carries absolute paths.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jesse.claude-usage</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@HOME@@/.local/bin/jesse-claude-usage</string>
+    <string>snap</string>
+    <string>--vault</string>
+    <string>@@HOME@@/jesse/vault</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/Library/Logs/jesse-claude-usage.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/Library/Logs/jesse-claude-usage.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TZ</key>
+    <string>Europe/Rome</string>
+  </dict>
+</dict>
+</plist>

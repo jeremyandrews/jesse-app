@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.179.0] - 2026-10-16
+
+**`jesse-claude-usage`: each Mac writes its current Claude login's identity and 5 hour and
+7 day usage into the vault, hourly.** A new binary, not part of the bridge and never deployed
+with it, run by a per user LaunchAgent. It rewrites
+`<vault>/Knowledge/Reference/Claude-Usage/<host>.md` with a Latest per account table (one row
+per account and organization ever seen on that host) and the last 72 readings, so a scheduled
+agent turn can see every account on every Mac. The bridge, `GET /jesse/usage` and the quota
+store behave exactly as in 0.178.0.
+
+- **`bridge/src/bin/claude-usage.rs`**, binary `jesse-claude-usage`:
+  `snap --vault <path> [--host <name>] [--dry-run]`. One profile and one usage request per run,
+  concurrently, no retry; an expired login is recorded as `login expired` with no request; a
+  429 as `rate limited`; every failure as a class, never a body. Exit 0 when the file was
+  written (even with a recorded failure), 1 when not, 2 on a usage error. A previous file that
+  does not parse is moved to `<host>.md.bad-<epoch>`.
+- **Identity, observed 2026-10-16.** `GET https://api.anthropic.com/api/oauth/profile` (same
+  four headers as usage) answered 200 with `account` {`uuid`, `full_name`, `display_name`,
+  `email`, `has_claude_max`, `has_claude_pro`, `created_at`}, `organization` {`uuid`, `name`,
+  `organization_type`, `billing_type`, `rate_limit_tier`, `seat_tier`,
+  `has_extra_usage_enabled`, `subscription_status`, `subscription_created_at`,
+  `cc_onboarding_flags`, three trial and invoice fields, two feedback flags}, `application`
+  {`uuid`, `name`, `slug`} and `enabled_plugins`. There is no plan field: the plan is
+  `organization_type` without `claude_` plus the rate limit tier's multiplier (`max 20x`). The
+  fallback is `~/.claude.json` `oauthAccount` (`emailAddress`, `accountUuid`,
+  `organizationUuid`, `organizationName`, `organizationType`, `organizationRateLimitTier`, among
+  twenty keys). Rows are keyed by email AND the organization uuid's first 8 characters, because
+  a personal plan and an organization seat can share an email.
+- **`bridge/src/quota.rs`**: `ClaudeCredential` is public with its token field still private
+  (`from_document`, `plan`, `check`); `read_claude_login(home)` and
+  `claude_cli_version_of(bin)` are the existing readers without a `Config`; the usage request
+  is now `claude_oauth_get`, which `fetch_claude` calls with unchanged headers, budget and
+  status mapping. No behaviour change.
+- **`bridge/launchd/com.jesse.claude-usage.plist`** (hourly, at load, `TZ=Europe/Rome`, log in
+  `~/Library/Logs/jesse-claude-usage.log`) and **`scripts/install-claude-usage.sh`**, which
+  builds with `cargo install --path bridge --bin jesse-claude-usage --root ~/.local --locked`,
+  renders the plist with absolute paths and bootstraps it. It never touches the bridge's plist
+  or binary.
+- **Tests** (in the binary): `the_table_writer_and_parser_round_trip`,
+  `merge_keeps_one_row_per_account_and_org_and_takes_the_newer`,
+  `history_is_newest_first_and_caps_at_72`, `an_expired_login_makes_no_request`,
+  `a_live_login_asks_profile_and_usage_once_each`,
+  `a_429_is_rate_limited_and_identity_falls_back_to_claude_json`,
+  `a_malformed_previous_file_is_moved_aside`, `the_profile_names_the_account_its_organization_and_plan`,
+  `the_claude_json_fallback_reads_oauth_account` and `arguments_and_classes`, on fixtures shaped
+  like the live bodies with every identifier replaced.
+
 ## [Bridge 0.178.0] - 2026-10-15
 
 **Muse Spark Open is selectable on Fireworks, as `muse`, once `JESSE_MODEL_MUSE_AUTH_TOKEN` is

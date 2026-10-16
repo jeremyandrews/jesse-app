@@ -809,11 +809,32 @@ impl QuotaFetcher for LiveQuotaFetcher {
 
 /// The parts of the Claude login this module uses. Deliberately NOT `Debug`: the token must
 /// not be one `{:?}` away from a log line.
-struct ClaudeCredential {
+///
+/// Public so `jesse-claude-usage` can read the same login the same way, but the token field
+/// stays private: outside this module the only thing that can be done with it is
+/// [`claude_oauth_get`], which spends it on one request and returns the parsed body.
+pub struct ClaudeCredential {
     token: String,
     expires_at_ms: Option<i64>,
     scopes: Vec<String>,
     plan: Option<String>,
+}
+
+impl ClaudeCredential {
+    /// `claudeAiOauth` out of a credential document; see [`parse_claude_credential`].
+    pub fn from_document(doc: &Value) -> Option<Self> {
+        parse_claude_credential(doc)
+    }
+
+    /// The login's `subscriptionType` (`max`, `pro`, ...), when it records one.
+    pub fn plan(&self) -> Option<&str> {
+        self.plan.as_deref()
+    }
+
+    /// The checks that need no request: expiry, then the `user:profile` scope.
+    pub fn check(&self, now_ms: i64) -> Result<(), QuotaError> {
+        check_claude_credential(self, now_ms)
+    }
 }
 
 /// `claudeAiOauth` out of a credential document, or `None` when it has none. A keychain item
@@ -857,15 +878,11 @@ fn check_claude_credential(c: &ClaudeCredential, now_ms: i64) -> Result<(), Quot
 }
 
 /// The account name the keychain item is filed under: the login user.
-fn login_user(cfg: &Config) -> Option<String> {
+fn login_user(home: &Path) -> Option<String> {
     ["USER", "LOGNAME"]
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|s| !s.trim().is_empty()))
-        .or_else(|| {
-            Path::new(&cfg.home)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        })
+        .or_else(|| home.file_name().map(|n| n.to_string_lossy().into_owned()))
 }
 
 /// Read the Claude login, READ ONLY, in the order Claude Code itself stores it.
@@ -881,7 +898,13 @@ fn login_user(cfg: &Config) -> Option<String> {
 /// A prompt, a denial, a timeout or a missing item all fall through, and the end of the road
 /// is `NotLoggedIn` — never a crash, never a hang.
 async fn read_claude_credential(cfg: &Config) -> Result<ClaudeCredential, QuotaError> {
-    if let Some(user) = login_user(cfg) {
+    read_claude_login(Path::new(&cfg.home)).await
+}
+
+/// [`read_claude_credential`] for a caller with no [`Config`]: the same two sources, with
+/// `home` standing in for `cfg.home`.
+pub async fn read_claude_login(home: &Path) -> Result<ClaudeCredential, QuotaError> {
+    if let Some(user) = login_user(home) {
         let mut cmd = Command::new("security");
         cmd.args([
             "find-generic-password",
@@ -908,9 +931,7 @@ async fn read_claude_credential(cfg: &Config) -> Result<ClaudeCredential, QuotaE
             }
         }
     }
-    let file = Path::new(&cfg.home)
-        .join(".claude")
-        .join(".credentials.json");
+    let file = home.join(".claude").join(".credentials.json");
     std::fs::read(file)
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
@@ -923,11 +944,16 @@ async fn read_claude_credential(cfg: &Config) -> Result<ClaudeCredential, QuotaE
 /// per process from `cfg.claude_bin --version` (first token of `2.1.268 (Claude Code)`); a
 /// failed read is not cached, so a later call can still succeed.
 async fn claude_cli_version(cfg: &Config) -> String {
+    claude_cli_version_of(&cfg.claude_bin).await
+}
+
+/// [`claude_cli_version`] for a caller with no [`Config`]: `bin --version`, cached the same way.
+pub async fn claude_cli_version_of(bin: &str) -> String {
     static VERSION: OnceLock<String> = OnceLock::new();
     if let Some(v) = VERSION.get() {
         return v.clone();
     }
-    let mut cmd = Command::new(&cfg.claude_bin);
+    let mut cmd = Command::new(bin);
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -969,8 +995,24 @@ pub async fn fetch_claude(
     let cred = read_claude_credential(cfg).await?;
     check_claude_credential(&cred, now)?;
     let version = claude_cli_version(cfg).await;
+    let v = claude_oauth_get(client, CLAUDE_USAGE_URL, &cred, &version).await?;
+    Ok(parse_claude_usage(&v, cred.plan, now))
+}
+
+/// One authenticated `GET` against an `api.anthropic.com/api/oauth/*` endpoint with the
+/// login's token, the OAuth beta header, `Accept: application/json` and the
+/// `claude-code/<version>` user agent, under the 10 second budget. The body comes back
+/// parsed; a failure comes back as a class (401 `NotLoggedIn`, 403 `ScopeMissing`, 429
+/// `RateLimited`, any other non 2xx `Http`, an unparseable body `Protocol`), never as text.
+/// No retry.
+pub async fn claude_oauth_get(
+    client: &reqwest::Client,
+    url: &str,
+    cred: &ClaudeCredential,
+    version: &str,
+) -> Result<Value, QuotaError> {
     let resp = client
-        .get(CLAUDE_USAGE_URL)
+        .get(url)
         .timeout(Duration::from_secs(CLAUDE_FETCH_TIMEOUT_SECS))
         .header("authorization", format!("Bearer {}", cred.token))
         .header("anthropic-beta", CLAUDE_OAUTH_BETA)
@@ -992,8 +1034,7 @@ pub async fn fetch_claude(
         code => return Err(QuotaError::Http(code)),
     }
     let body = resp.bytes().await.map_err(|e| transport_error(&e))?;
-    let v: Value = serde_json::from_slice(&body).map_err(|_| QuotaError::Protocol)?;
-    Ok(parse_claude_usage(&v, cred.plan, now))
+    serde_json::from_slice(&body).map_err(|_| QuotaError::Protocol)
 }
 
 /// Map a usage endpoint body onto the snapshot.

@@ -662,14 +662,14 @@ mod tests {
         assert_eq!(env_of(&cmd), None);
     }
 
-    /// CLAUDE CODE, THE WHOLE ARGV: with a ready table the main turn declares twenty-four
+    /// CLAUDE CODE, THE WHOLE ARGV: with a ready table the main turn declares twenty-five
     /// servers and `house` carries the configured URL and the token BY NAME; without one it
-    /// declares twenty-three (the hosted `clockify` server left in 0.176.0, `runn-rs` came in
-    /// 0.180.0). The placeholder and the token value are on no argv either way.
+    /// declares twenty-four (the hosted `clockify` server left in 0.176.0, `runn-rs` came in
+    /// 0.180.0, `google-sheets` in 0.182.0). The placeholder and the token value are on no argv either way.
     #[test]
     fn a_claude_code_main_turn_carries_house_exactly_when_the_table_is_ready() {
         let mut cfg = test_config();
-        for (house, count) in [(ready(), 24), (HouseConfig::Absent, 23)] {
+        for (house, count) in [(ready(), 25), (HouseConfig::Absent, 24)] {
             let loads = house.ready().is_some();
             cfg.house = house;
             let args = build_claude_args(
@@ -878,8 +878,10 @@ mod tests {
         let clockify_rs =
             crate::mcpservers::render_entry(crate::mcpservers::row("clockify-rs").unwrap());
         let runn_rs = crate::mcpservers::render_entry(crate::mcpservers::row("runn-rs").unwrap());
+        let sheets =
+            crate::mcpservers::render_entry(crate::mcpservers::row("google-sheets").unwrap());
         assert!(MAIN_CHILD_MCP_CONFIG.ends_with(&format!(
-            "{}{},{clockify_rs},{runn_rs}}}}}",
+            "{}{},{clockify_rs},{runn_rs},{sheets}}}}}",
             HOUSE_MCP_ENTRY.as_str(),
             HEALTHDB_MCP_ENTRY.as_str()
         )));

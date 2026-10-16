@@ -1490,6 +1490,29 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
 /// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
 /// when `[healthdb]` has an `ro_url_file`. `clockify-rs` and `runn-rs` are unconditional.
 ///
+/// **RETIRED AS THE MAIN SET IN 0.182.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs`]
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.180.0 until 0.182.0.
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs"])));
+
+/// The twenty-five-server set PLUS **`google-sheets`**: every main turn on BOTH harnesses from
+/// bridge 0.182.0. Twenty-six servers.
+///
+/// What it adds is the first Google server that WRITES, and it writes Sheets only: a third
+/// `workspace-mcp` instance for the work account, `--tools sheets --tool-tier complete` with no
+/// `--read-only`, started through the `workspace-mcp-sheets` launcher, which gives it its own
+/// token cache. A turn can create a spreadsheet, write and format it and return its link; its
+/// eight write tools are granted on write turns only. No new host and no new plist credential:
+/// the same OAuth client as `google`, a separate consent with the Sheets scopes and
+/// `drive.readonly`. `google` and `google-perseido` are unchanged and read only. See the
+/// `google-sheets` row in `crate::mcpservers` and SECURITY.md.
+///
+/// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
+/// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
+/// when `[healthdb]` has an `ro_url_file`. `clockify-rs`, `runn-rs` and `google-sheets` are
+/// unconditional.
+///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
 /// `codex_and_claude_code_main_turns_have_identical_servers_and_tools` fails the build if that
@@ -1817,7 +1840,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs => {
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets => {
             READ_ALLOWED_TOOLS
         }
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
@@ -3168,11 +3192,11 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                23,
+                24,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
                  google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex, \
-                 clockify-rs and runn-rs and nothing else: {mcp:?}"
+                 clockify-rs, runn-rs and google-sheets and nothing else: {mcp:?}"
             );
             // THE HOSTED CLOCKIFY SERVER IS RETIRED (0.176.0). `clockify-rs` is the one
             // Clockify server, and it is the bare launcher: the key reaches it by environment,
@@ -3320,6 +3344,23 @@ mod tests {
                     "{label}: the {name} server must scope --tools: {mcp:?}"
                 );
             }
+            // THE THIRD GOOGLE INSTANCE WRITES, AND ONLY SHEETS (0.182.0). It is the one entry
+            // without `--read-only`, so what bounds it at the server layer is `--tools sheets`
+            // alone: no `gmail`, `calendar` or `drive` may ever join it, and it must stay its
+            // own launcher (its own token cache), never the `google` command.
+            assert_eq!(
+                servers["google-sheets"],
+                serde_json::json!({
+                    "type": "stdio",
+                    "command": "workspace-mcp-sheets",
+                    "args": ["--single-user", "--tools", "sheets", "--tool-tier", "complete"]
+                }),
+                "{label}: google-sheets loads the sheets service alone: {mcp:?}"
+            );
+            assert_ne!(
+                servers["google-sheets"]["command"], servers["google"]["command"],
+                "{label}: google-sheets must not share google's launcher or token: {mcp:?}"
+            );
             // THE TWO MESSAGE SERVERS ARE PRESENT AND THEIR SEND TOOLS ARE NOT GRANTED.
             // Asserted together because the pair is the whole posture: loading a message
             // source is only acceptable while the sending half stays out of the allowlist,
@@ -4017,6 +4058,58 @@ mod tests {
         );
     }
 
+    /// A READ-ONLY MODEL TURN REACHES NO GOOGLE-SHEETS WRITE (0.182.0). The same shape as
+    /// `readonly_main_turn_allowlist_has_no_write_or_send_tools`: the eight Sheets writes are on
+    /// the writes-on allowlist and on no read-only one, and no Google send tool is on either.
+    #[test]
+    fn readonly_main_turn_allowlist_has_no_google_sheets_write() {
+        let cfg = test_config();
+        let allow_of = |active: &ActiveModel| -> Vec<String> {
+            let args = build_claude_args(
+                &cfg,
+                "make me a spreadsheet",
+                None,
+                turn_capability(active),
+                main_mcp_config(&cfg, &ClaudeCode),
+                None,
+                None,
+            );
+            arg_value(&args, "--allowedTools")
+                .expect("--allowedTools present")
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .collect()
+        };
+        let read_only = allow_of(&glm_active()); // writes_allowed = false
+        let mut writes_on = glm_active();
+        writes_on.level = Capability::Write;
+        let writes_on = allow_of(&writes_on);
+
+        for t in crate::mcpservers::GOOGLE_SHEETS_WRITE_TOOLS {
+            let grant = format!("mcp__google-sheets__{t}");
+            assert!(
+                !read_only.contains(&grant),
+                "a read-only turn must not reach {grant}: {read_only:?}"
+            );
+            assert!(writes_on.contains(&grant), "a write turn reaches {grant}");
+        }
+        for list in [&read_only, &writes_on] {
+            assert!(
+                !list.iter().any(|t| t.starts_with("mcp__google")
+                    && [
+                        "send_",
+                        "draft_",
+                        "reply_",
+                        "manage_event",
+                        "create_calendar"
+                    ]
+                    .iter()
+                    .any(|w| t.contains(w))),
+                "no Google send or Calendar write on any main turn: {list:?}"
+            );
+        }
+    }
+
     #[test]
     fn writes_on_non_ambient_model_uses_the_full_allowlist() {
         // Phase 2 shape: a non-ambient model WITH writes enabled uses the same full
@@ -4168,8 +4261,8 @@ mod tests {
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
     /// The main set as a child renders it under the test fixture, which has no `[house]` table
     /// and no `[healthdb] ro_url_file`: the twenty-one-server set (no hosted `clockify` since
-    /// 0.176.0) plus `clockify-rs` and `runn-rs`, the two servers after the two conditional ones
-    /// that are always kept.
+    /// 0.176.0) plus `clockify-rs`, `runn-rs` and `google-sheets`, the three servers after the two
+    /// conditional ones that are always kept.
     static RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS: LazyLock<String> = LazyLock::new(|| {
         mcp_config_json(&messages_plus(&[
             "build",
@@ -4181,6 +4274,7 @@ mod tests {
             "plex",
             "clockify-rs",
             "runn-rs",
+            "google-sheets",
         ]))
     });
 
@@ -4227,87 +4321,93 @@ mod tests {
         let retired_clockify = servers(&mcp_config_json(&["clockify"]));
         for (label, older, added, removed) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG",
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG,
+                vec!["google-sheets"],
+                vec![],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec!["runn-rs"],
+                vec!["google-sheets", "runn-rs"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec!["runn-rs"],
+                vec!["google-sheets", "runn-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs"],
+                vec!["google-sheets", "runn-rs", "clockify-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 &MESSAGES_BUILD_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
                 vec![],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_KUBERNETES_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
                 vec![],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 &MESSAGES_MCP_CONFIG,
-                vec!["runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
+                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
                 vec![],
             ),
         ] {
@@ -4853,8 +4953,8 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-one-server one plus `clockify-rs` and `runn-rs`: `house` and
-                    // `healthdb` are declared in the const and dropped here.
+                    // twenty-one-server one plus `clockify-rs`, `runn-rs` and `google-sheets`:
+                    // `house` and `healthdb` are declared in the const and dropped here.
                     RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--allowedTools",
                     &allow,
@@ -4882,8 +4982,8 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-one-server one plus `clockify-rs` and `runn-rs`: `house` and
-                    // `healthdb` are declared in the const and dropped here.
+                    // twenty-one-server one plus `clockify-rs`, `runn-rs` and `google-sheets`:
+                    // `house` and `healthdb` are declared in the const and dropped here.
                     RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--tools",
                     "Read,Grep,Glob",

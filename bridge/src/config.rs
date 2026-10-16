@@ -615,6 +615,18 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // same as tag1: the OAuth scopes are `calendar.readonly` / `gmail.readonly` /
 // `drive.readonly`, and this list names read tools only.
 //
+// THOSE TWO STAY READ-ONLY WHEN SHEETS WRITES (0.182.0). `google` and
+// `google-perseido` are unchanged at both layers: same scopes, same `--read-only`
+// and `--tools calendar gmail drive`, same token caches, same grants. Sheets
+// writing is a THIRD instance, `google-sheets`, for the work account only, because
+// `--read-only` is per server and not per service: lifting it on `google` would
+// also register Gmail send and draft, Calendar event writes and Drive mutation,
+// and widen that token to match. `google-sheets` loads `sheets` alone, holds its
+// own token in its own directory (`~/.config/jesse-google-sheets/creds`, never
+// `google`'s), and requests `spreadsheets`, `spreadsheets.readonly`,
+// `drive.readonly` and the three identity scopes. Its grant is under GOOGLE-SHEETS
+// below.
+//
 // THE SERVER NAME CARRIES A HYPHEN, which no server before it did, and both
 // harnesses were checked rather than assumed: Claude Code matched
 // `mcp__google-perseido__list_calendars` from this allowlist and called it, and
@@ -924,6 +936,24 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `person`, `projects`, `project`, `assignments`, `availability`, `time_off`, `actuals`,
 // `scheduled_vs_actual`, `utilization`, `skills` and `open_demand`. All thirteen are granted by
 // name. The server sends GET requests only. Never a wildcard.
+//
+// GOOGLE-SHEETS: THIRTEEN OF FOURTEEN, THE ONE GOOGLE INSTANCE THAT WRITES, AND ONLY SHEETS.
+//
+// `workspace-mcp` 1.23.1 started `--single-user --tools sheets --tool-tier complete` (no
+// `--read-only`) in a throwaway credentials directory on 2026-10-16 registered fourteen tools.
+// Granted reads: `list_spreadsheets`, `get_spreadsheet_info`, `read_sheet_values`,
+// `list_sheet_tables`, `list_spreadsheet_comments`. Granted writes, classed `write` in the row so
+// they reach write turns only: `create_spreadsheet`, `create_sheet`, `modify_sheet_values`,
+// `append_table_rows`, `format_sheet_range` (bold, colours, number formats, alignment),
+// `manage_conditional_formatting`, `resize_sheet_dimensions` and `move_sheet_rows` (rows between
+// tabs of one spreadsheet, not a Drive move). DELIBERATELY UNGRANTED: `manage_spreadsheet_comment`,
+// because a comment or reply can @mention people and Google mails them, which is a send path.
+// `start_google_auth` does not register under `--tool-tier complete`. The service registers no
+// tool that shares, moves, trashes or changes permissions on a Drive file, and the token could
+// not: its Drive scope is `drive.readonly`. The scopes it requests are `spreadsheets`,
+// `spreadsheets.readonly`, `drive.readonly`, `openid`, `userinfo.email` and `userinfo.profile`.
+// Why it is a third instance and not a flag on `google` is under GOOGLE-PERSEIDO above and on
+// the row in `crate::mcpservers`. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1116,7 +1146,14 @@ mcp__runn-rs__whoami,mcp__runn-rs__find_people,mcp__runn-rs__person,\
 mcp__runn-rs__projects,mcp__runn-rs__project,mcp__runn-rs__assignments,\
 mcp__runn-rs__availability,mcp__runn-rs__time_off,mcp__runn-rs__actuals,\
 mcp__runn-rs__scheduled_vs_actual,mcp__runn-rs__utilization,mcp__runn-rs__skills,\
-mcp__runn-rs__open_demand";
+mcp__runn-rs__open_demand,\
+mcp__google-sheets__list_spreadsheets,mcp__google-sheets__get_spreadsheet_info,\
+mcp__google-sheets__read_sheet_values,mcp__google-sheets__list_sheet_tables,\
+mcp__google-sheets__list_spreadsheet_comments,mcp__google-sheets__create_spreadsheet,\
+mcp__google-sheets__create_sheet,mcp__google-sheets__modify_sheet_values,\
+mcp__google-sheets__append_table_rows,mcp__google-sheets__format_sheet_range,\
+mcp__google-sheets__manage_conditional_formatting,\
+mcp__google-sheets__resize_sheet_dimensions,mcp__google-sheets__move_sheet_rows";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -5610,6 +5647,127 @@ mod tests {
                 .any(|e| e == "mcp__runn-rs__*" || e == "mcp__runn-rs"),
             "a wildcard grant on the runn-rs server is never acceptable"
         );
+    }
+
+    /// THE GOOGLE-SHEETS GRANT IS EXACTLY THE THIRTEEN DECIDED TOOLS, by equality, with no
+    /// wildcard and without the one registered tool left out on purpose.
+    ///
+    /// From `workspace-mcp` 1.23.1, `--single-user --tools sheets --tool-tier complete`, on
+    /// 2026-10-16: fourteen registered, thirteen granted, `manage_spreadsheet_comment` not
+    /// (a comment can @mention people, and Google mails them).
+    #[test]
+    fn the_google_sheets_grant_is_the_thirteen_decided_tools() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__google-sheets"))
+            .collect();
+        let mut expected: Vec<String> = crate::mcpservers::GOOGLE_SHEETS_WRITE_TOOLS
+            .iter()
+            .chain(crate::mcpservers::GOOGLE_SHEETS_READ_TOOLS.iter())
+            .map(|t| format!("mcp__google-sheets__{t}"))
+            .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the google-sheets grant moved; re-enumerate the server and record the decision \
+             first; it moves `toolset_args`, which costs a live battery run"
+        );
+        for never in [
+            "mcp__google-sheets__*",
+            "mcp__google-sheets",
+            "mcp__google-sheets__manage_spreadsheet_comment",
+            "mcp__google-sheets__start_google_auth",
+        ] {
+            assert!(
+                !DEFAULT_ALLOWED_TOOLS.split(',').any(|e| e == never),
+                "{never} must never be granted"
+            );
+        }
+    }
+
+    /// NO GMAIL SEND, DRAFT OR REPLY TOOL, NO CALENDAR WRITE AND NO DRIVE MUTATION IS GRANTED
+    /// ON ANY GOOGLE SERVER, IN ANY SHIPPED ALLOWLIST (0.182.0). Codex's `enabled_tools` are
+    /// derived from these same strings by `granted_mcp_tools`, so this covers both harnesses.
+    ///
+    /// The names are what `workspace-mcp` 1.23.1 registers for `--tools gmail calendar drive`
+    /// WITHOUT `--read-only` and deregisters with it (enumerated 2026-10-16), plus the send
+    /// spellings the `message_send_mail_*` probes watch for.
+    #[test]
+    fn no_google_send_or_calendar_write_is_granted_anywhere() {
+        const WRITE_ONLY: [&str; 20] = [
+            "batch_modify_gmail_message_labels",
+            "copy_drive_file",
+            "create_calendar",
+            "create_drive_file",
+            "create_drive_folder",
+            "draft_gmail_message",
+            "import_to_google_doc",
+            "import_to_google_sheets",
+            "import_to_google_slides",
+            "list_gmail_filters",
+            "manage_drive_access",
+            "manage_event",
+            "manage_focus_time",
+            "manage_gmail_filter",
+            "manage_gmail_label",
+            "manage_out_of_office",
+            "modify_gmail_message_labels",
+            "send_gmail_message",
+            "set_drive_file_permissions",
+            "update_drive_file",
+        ];
+        let probe_spellings = ["create_gmail_draft", "reply_to_gmail_message"];
+        for list in [
+            DEFAULT_ALLOWED_TOOLS,
+            crate::READ_ALLOWED_TOOLS,
+            crate::REPLIES_ALLOWED_TOOLS,
+        ] {
+            for server in ["google", "google-perseido", "google-sheets"] {
+                let granted = crate::granted_mcp_tools(list, server);
+                for t in WRITE_ONLY.iter().chain(probe_spellings.iter()) {
+                    assert!(!granted.iter().any(|g| g == t), "{server}::{t} is granted");
+                }
+                for g in &granted {
+                    for word in ["send", "draft", "reply", "forward", "permission", "share"] {
+                        if *g == "get_drive_file_permissions" || *g == "get_drive_shareable_link" {
+                            continue; // the two existing reads of a file's sharing state
+                        }
+                        assert!(!g.contains(word), "{server}::{g} looks like a {word} tool");
+                    }
+                }
+            }
+        }
+    }
+
+    /// THE PROBE BATTERY'S FORBIDDEN MAIL TOOLS ARE UNCHANGED BY THE SHEETS INSTANCE: the same
+    /// four spellings per account, on `google` and `google-perseido` only.
+    #[cfg(feature = "containment-probe")]
+    #[test]
+    fn the_mail_send_probes_are_unchanged() {
+        let tools = |id: &str| -> Vec<&str> {
+            crate::probe::PROBES
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap_or_else(|| panic!("probe {id}"))
+                .tools
+                .to_vec()
+        };
+        for (id, server) in [
+            ("message_send_mail_work", "google"),
+            ("message_send_mail_personal", "google-perseido"),
+        ] {
+            assert_eq!(
+                tools(id),
+                [
+                    "send_gmail_message",
+                    "draft_gmail_message",
+                    "create_gmail_draft",
+                    "reply_to_gmail_message"
+                ]
+                .map(|t| format!("mcp__{server}__{t}"))
+            );
+        }
     }
 
     /// THE HOUSE GRANT IS EXACTLY THE TWENTY-FOUR TOOLS THE SERVER ADVERTISED ON 2026-10-10.

@@ -1609,6 +1609,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// THE WORK GMAIL TOKEN IS `WORKSPACE_MCP_CREDENTIALS_DIR`'s AND ONLY ITS (0.182.0). The
+    /// `google-sheets` instance keeps its token in `~/.config/jesse-google-sheets/creds`, set
+    /// inside its own launcher; nothing it could put in the bridge's environment moves where
+    /// this server looks, and the legacy name the Python server also reads is ignored here.
+    #[test]
+    fn the_gmail_token_directory_comes_from_the_google_variable_alone() {
+        use crate::util::MutexExt;
+        let _g = crate::testutil::ENV_LOCK.lock_ok();
+        let saved: Vec<(&str, Option<String>)> = [
+            "WORKSPACE_MCP_CREDENTIALS_DIR",
+            "GOOGLE_MCP_CREDENTIALS_DIR",
+            "HOME",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+
+        std::env::set_var("HOME", "/home/u");
+        std::env::set_var(
+            "WORKSPACE_MCP_CREDENTIALS_DIR",
+            "~/.config/jesse-google/creds",
+        );
+        std::env::set_var(
+            "GOOGLE_MCP_CREDENTIALS_DIR",
+            "/home/u/.config/jesse-google-sheets/creds",
+        );
+        let cfg = InboundConfig::from_env();
+
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        assert_eq!(
+            cfg.gmail_credentials_dir.as_deref(),
+            Some(std::path::Path::new("/home/u/.config/jesse-google/creds"))
+        );
+    }
+
     /// Retention: expired goes, fresh stays.
     ///
     /// This is the ONLY thing bounding the directory — there is no `Drop` guard here, because

@@ -2160,7 +2160,9 @@ republishes them under each server's own variable name at startup
 loads its own `.env` relative to its install directory, so neither takes a plist secret.
 The Google OAuth token cache lives at `~/.config/jesse-google/creds` and **must not** be on
 `/tmp`: a reboot would wipe it and force an interactive re-consent that a headless bridge
-turn cannot perform.
+turn cannot perform. From 0.182.0 the write capable Sheets instance keeps a SEPARATE token at
+`~/.config/jesse-google-sheets/creds`, under the same rule; see "Google Sheets: the one Google
+server that writes" below. Its one-time consent is in `bridge/README.md`.
 
 ### On Codex, the currency step must use the browser, not `WebFetch`
 
@@ -2435,6 +2437,85 @@ flags for BOTH Google instances live in the bridge's own const, where a test ass
   FDA.~~ **DONE in 0.76.0, by a different route than this line proposed**: iMCP reads the live
   database through a grant held by the app, so no copy is needed and no FDA is involved. The
   copy route would also have read stale (the newest message lives in the WAL).
+
+## Google Sheets: the one Google server that writes (`google-sheets`, 0.182.0)
+
+Bridge 0.182.0 adds a third Google Workspace instance to every main turn on both harnesses. It
+is the first Google server that can change anything, and what it can change is Sheets in the
+work account (`jeremy@tag1consulting.com`) and nothing else. The other two are not touched:
+`google` and `google-perseido` are still read only at both layers, with the same arguments,
+scopes, token caches and grants as before.
+
+### Why it is a separate instance
+
+`workspace-mcp`'s `--read-only` is per server, not per service. Lifting it on `google` so Sheets
+could write would also have registered Gmail send and draft, Calendar event writes and Drive
+mutation on that server, and the next consent would have widened its token to match. A
+separate process for `sheets` alone keeps every one of those absent at the root, not merely
+ungranted.
+
+### What it can do
+
+| | |
+|---|---|
+| Server | `workspace-mcp` 1.23.1, `--single-user --tools sheets --tool-tier complete`, no `--read-only` |
+| Command | `workspace-mcp-sheets` (`bridge/launchers/`), a host launcher whose job is the token cache |
+| Token | its own, at `~/.config/jesse-google-sheets/creds`, from its own consent; never `google`'s |
+| Client | `google`'s OAuth client (`GOOGLE_OAUTH_CLIENT_ID`/`_SECRET`, forwarded by name) |
+| Scopes | `spreadsheets`, `spreadsheets.readonly`, `drive.readonly`, `openid`, `userinfo.email`, `userinfo.profile` |
+| Granted | 13 of 14 registered tools; the 8 writes on write turns only |
+| Enforced by | the scopes, the server's `--tools`, and the allowlist |
+
+Reads: `list_spreadsheets`, `get_spreadsheet_info`, `read_sheet_values`, `list_sheet_tables`,
+`list_spreadsheet_comments`. Writes: `create_spreadsheet`, `create_sheet`,
+`modify_sheet_values`, `append_table_rows`, `format_sheet_range`,
+`manage_conditional_formatting`, `resize_sheet_dimensions`, `move_sheet_rows`.
+`modify_sheet_values`, `resize_sheet_dimensions` (which can delete rows and columns),
+`manage_conditional_formatting` and `move_sheet_rows` are annotated `destructiveHint`: a write
+turn can overwrite or clear any spreadsheet the work account can edit, not only ones it made.
+
+**Never granted: `manage_spreadsheet_comment`.** A comment or a reply can @mention people, and
+Google mails each one. That is a send path, and sending stays off on every Google server.
+`start_google_auth` does not register under `--tool-tier complete`.
+
+### What it cannot do, at the credential
+
+The token's only Drive scope is `drive.readonly`, so even a tool outside the grant could not
+share a file, change its permissions, move it, trash it or create anything that is not a
+spreadsheet. It holds no Gmail and no Calendar scope at all. Consenting mints a separate refresh
+token for the same client (`workspace-mcp` does not request `include_granted_scopes`), so it
+neither widens nor revokes the read only token `google` and `inbound` use.
+
+### Why the credentials directory is in a launcher
+
+`workspace-mcp` takes its credentials directory only from the environment, and the bridge's
+environment points `WORKSPACE_MCP_CREDENTIALS_DIR` at `google`'s cache. Started bare, this
+instance would read the read only token and, on consent, write its own over it. The launcher
+overrides that variable and the legacy `GOOGLE_MCP_CREDENTIALS_DIR` with its own directory, and
+the row never forwards either. Its flags stay in the bridge's own table, where a test asserts
+`--tools` names `sheets` alone, rather than in the launcher, where no test or record could see
+them. The launcher is committed (`bridge/launchers/workspace-mcp-sheets`) so its directory is
+reviewable; a test holds it to `~/.config/jesse-google-sheets`.
+
+### Before consent
+
+Until consent, every call fails at once with "ACTION REQUIRED: Google Authentication Needed" and
+the consent URL; nothing hangs. The launcher points `BROWSER` at `true` outside the consent
+helper, because a stdio `workspace-mcp` with no token otherwise opens that URL in a browser on
+the host's screen from a headless turn, and starts a loopback listener for the callback. The
+listener still starts; it is loopback only and serves only Google's redirect for that one flow.
+
+### Residual risks, accepted
+
+- **Overwrite.** A write turn can clear or rewrite any sheet the work account can edit, shared
+  ones included. Google's version history is the only undo.
+- **A new place for text to go.** A spreadsheet is a document other people may read. Sheets
+  creates it private to the account, and nothing granted can share it, but a turn can write into
+  a sheet that is already shared.
+- **Prompt injection reaching a writer.** The same child reads mail and messages written by
+  strangers. Before 0.182.0 the Google half of that context could only be read; now a turn
+  holding it can also write Sheets. The boundary is still the write level of the turn, not the
+  content.
 
 ## The cluster (`kubernetes`, FULL control, 2026-09-22)
 

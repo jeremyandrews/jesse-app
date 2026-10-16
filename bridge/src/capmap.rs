@@ -495,8 +495,8 @@ mod tests {
             ),
             (4, 29, 6)
         );
-        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 362));
-        assert_eq!(servers.len(), 25);
+        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 375));
+        assert_eq!(servers.len(), 26);
     }
 
     /// **`capability_args` STAYS BYTE-IDENTICAL.** A committed golden of every harness's

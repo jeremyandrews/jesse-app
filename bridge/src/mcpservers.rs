@@ -748,6 +748,63 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
         &["JESSE_CLOCKIFY_API_KEY"],
     ),
     stdio("runn-rs", "runn-rs-mcp", &[], &["JESSE_RUNN_API_TOKEN"]),
+    // The work account's SHEETS, write capable, as a third `workspace-mcp` instance (0.182.0).
+    // A separate row because `--read-only` is per server: dropping it from `google` would
+    // register Gmail send and draft, Calendar writes and Drive mutation there too. This one
+    // loads `sheets` alone, so its token carries `spreadsheets`, `spreadsheets.readonly` and
+    // `drive.readonly` (with the three identity scopes) and nothing that sends or shares.
+    //
+    // `--tool-tier complete` is the narrowest switch that still registers conditional
+    // formatting (`extended` stops at `format_sheet_range`), and it drops `start_google_auth`
+    // at the root. `manage_spreadsheet_comment` registers and is DELIBERATELY UNGRANTED: a
+    // comment can @mention people, which mails them, and that is a send path.
+    //
+    // The command is the `workspace-mcp-sheets` launcher (`bridge/launchers/`), which points
+    // the server at its OWN credentials directory, `~/.config/jesse-google-sheets/creds`. The
+    // bridge's environment carries `google`'s directory, so `WORKSPACE_MCP_CREDENTIALS_DIR` is
+    // deliberately NOT forwarded here; the launcher sets it. The client pair and the account
+    // are `google`'s own.
+    writes(
+        stdio(
+            "google-sheets",
+            "workspace-mcp-sheets",
+            &[
+                "--single-user",
+                "--tools",
+                "sheets",
+                "--tool-tier",
+                "complete",
+            ],
+            &[
+                "GOOGLE_OAUTH_CLIENT_ID",
+                "GOOGLE_OAUTH_CLIENT_SECRET",
+                "USER_GOOGLE_EMAIL",
+            ],
+        ),
+        &GOOGLE_SHEETS_WRITE_TOOLS,
+    ),
+];
+
+/// The `google-sheets` tools that change a spreadsheet: granted on write turns only, and
+/// classed `write` so the `direct` harness exposes them at the same level.
+pub const GOOGLE_SHEETS_WRITE_TOOLS: [&str; 8] = [
+    "create_spreadsheet",
+    "create_sheet",
+    "modify_sheet_values",
+    "append_table_rows",
+    "format_sheet_range",
+    "manage_conditional_formatting",
+    "resize_sheet_dimensions",
+    "move_sheet_rows",
+];
+
+/// The `google-sheets` tools that only read, granted beside the writes.
+pub const GOOGLE_SHEETS_READ_TOOLS: [&str; 5] = [
+    "list_spreadsheets",
+    "get_spreadsheet_info",
+    "read_sheet_values",
+    "list_sheet_tables",
+    "list_spreadsheet_comments",
 ];
 
 /// The row for `name`, or `None`.
@@ -870,6 +927,7 @@ pub const MAIN_SET: &[&str] = &[
     "healthdb",
     "clockify-rs",
     "runn-rs",
+    "google-sheets",
 ];
 
 /// The today-brief child's opt-in set.
@@ -996,7 +1054,7 @@ pub(crate) fn golden_main_config() -> String {
     [
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         HOME_ASSISTANT_MCP_URL,
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]}}}"#,
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","--tool-tier","complete"]}}}"#,
     ]
     .concat()
 }
@@ -1198,6 +1256,14 @@ mod tests {
             ),
             ("clockify-rs", &["JESSE_CLOCKIFY_API_KEY"]),
             ("runn-rs", &["JESSE_RUNN_API_TOKEN"]),
+            (
+                "google-sheets",
+                &[
+                    "GOOGLE_OAUTH_CLIENT_ID",
+                    "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "USER_GOOGLE_EMAIL",
+                ],
+            ),
         ];
         for (name, vars) in passthrough {
             assert_eq!(codex_env_passthrough(name), Some(*vars), "{name}");
@@ -1232,5 +1298,139 @@ mod tests {
             codex_header_env("clockify"),
             Some(&[("x-api-key", "JESSE_CLOCKIFY_API_KEY")][..])
         );
+    }
+
+    /// The host launcher and the consent helper for `google-sheets`, as committed.
+    const SHEETS_LAUNCHER: &str = include_str!("../launchers/workspace-mcp-sheets");
+    const SHEETS_CONSENT: &str = include_str!("../launchers/consent-google-sheets");
+
+    /// `google-sheets` LOADS THE SHEETS SERVICE AND NOTHING ELSE. `--tools` names `sheets`
+    /// alone, so no Gmail, Calendar or Drive tool registers on the one Google instance that can
+    /// write, and `--read-only` is absent because writing Sheets is the row's whole purpose.
+    #[test]
+    fn google_sheets_loads_only_the_sheets_service() {
+        let r = row("google-sheets").expect("the google-sheets row");
+        assert_eq!(r.transport, Transport::BridgeStdio);
+        assert_eq!(r.command, "workspace-mcp-sheets");
+        assert_eq!(
+            r.args,
+            [
+                "--single-user",
+                "--tools",
+                "sheets",
+                "--tool-tier",
+                "complete"
+            ]
+        );
+        let tools_at = r.args.iter().position(|a| *a == "--tools").unwrap();
+        let services: Vec<&str> = r.args[tools_at + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .copied()
+            .collect();
+        assert_eq!(services, ["sheets"]);
+        for other in [
+            "gmail", "calendar", "drive", "docs", "slides", "forms", "chat",
+        ] {
+            assert!(!r.args.contains(&other), "google-sheets loads {other}");
+        }
+        assert!(!r.args.contains(&"--read-only"));
+        assert!(!r.args.contains(&"--permissions"));
+    }
+
+    /// `google-sheets` NEVER SHARES A TOKEN CACHE. The bridge's environment carries the
+    /// read-only `google` instance's `WORKSPACE_MCP_CREDENTIALS_DIR`
+    /// (`~/.config/jesse-google/creds`, set by `export_mcp_server_env`); this row does not
+    /// forward it, and its launcher overrides both names the server reads with its own
+    /// directory, which is neither `google`'s nor `google-perseido`'s.
+    #[test]
+    fn google_sheets_uses_its_own_credentials_directory() {
+        let r = row("google-sheets").unwrap();
+        assert!(!r.env.contains(&"WORKSPACE_MCP_CREDENTIALS_DIR"));
+        assert!(!r.env.contains(&"GOOGLE_MCP_CREDENTIALS_DIR"));
+        assert!(!r.env.contains(&"WORKSPACE_ATTACHMENT_DIR"));
+        // The client pair and the account are `google`'s own.
+        let google = row("google").unwrap();
+        for n in r.env {
+            assert!(google.env.contains(n), "{n} is not one of google's names");
+        }
+
+        let assigned = |var: &str| -> String {
+            SHEETS_LAUNCHER
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{var}=")))
+                .unwrap_or_else(|| panic!("the launcher does not set {var}"))
+                .trim_matches('"')
+                .to_string()
+        };
+        assert_eq!(assigned("SHEETS_DIR"), "$HOME/.config/jesse-google-sheets");
+        assert_eq!(
+            assigned("WORKSPACE_MCP_CREDENTIALS_DIR"),
+            "$SHEETS_DIR/creds"
+        );
+        assert_eq!(
+            assigned("GOOGLE_MCP_CREDENTIALS_DIR"),
+            "$WORKSPACE_MCP_CREDENTIALS_DIR"
+        );
+        assert!(SHEETS_LAUNCHER.contains(
+            "export WORKSPACE_MCP_CREDENTIALS_DIR GOOGLE_MCP_CREDENTIALS_DIR WORKSPACE_ATTACHMENT_DIR"
+        ));
+        assert!(SHEETS_LAUNCHER.contains("\nexec workspace-mcp \"$@\"\n"));
+        for other in [".config/jesse-google/", ".config/jesse-google-perseido"] {
+            assert!(
+                !SHEETS_LAUNCHER.contains(other),
+                "the sheets launcher names {other}"
+            );
+        }
+    }
+
+    /// THE CONSENT HELPER CONSENTS FOR EXACTLY THE ROW'S ARGUMENTS, so the scopes Jeremy
+    /// approves are the scopes the bridge runs with, and it starts the same launcher.
+    #[test]
+    fn google_sheets_consent_helper_matches_the_row() {
+        let r = row("google-sheets").unwrap();
+        let quoted: Vec<String> = r.args.iter().map(|a| format!("\"{a}\"")).collect();
+        let line = format!("SERVER_ARGS = [{}]", quoted.join(", "));
+        assert!(SHEETS_CONSENT.contains(&line), "expected `{line}`");
+        assert!(SHEETS_CONSENT.contains(&format!("[\"{}\", *SERVER_ARGS]", r.command)));
+        assert!(SHEETS_CONSENT.contains("~/.config/jesse-google-sheets/creds/"));
+    }
+
+    /// EVERY `google-sheets` TOOL IS DECIDED: the eight writes are classed `write`, the five
+    /// reads are not, and the grant is exactly those thirteen.
+    #[test]
+    fn google_sheets_classes_every_granted_tool() {
+        let r = row("google-sheets").unwrap();
+        for t in GOOGLE_SHEETS_WRITE_TOOLS {
+            assert_eq!(r.class_of(t), ToolClass::Write, "{t}");
+        }
+        for t in GOOGLE_SHEETS_READ_TOOLS {
+            assert_eq!(r.class_of(t), ToolClass::Read, "{t}");
+        }
+        let mut granted = r.granted_tools(DEFAULT_ALLOWED_TOOLS);
+        granted.sort_unstable();
+        let mut expected: Vec<String> = GOOGLE_SHEETS_WRITE_TOOLS
+            .iter()
+            .chain(GOOGLE_SHEETS_READ_TOOLS.iter())
+            .map(|t| t.to_string())
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(granted, expected);
+    }
+
+    /// `inbound` FETCHES GMAIL ATTACHMENTS WITH `google`'s TOKEN AND NO OTHER. It reads
+    /// `WORKSPACE_MCP_CREDENTIALS_DIR` from the bridge's environment, whose default is the
+    /// read-only `google` cache; `google-sheets` adds no variable it could read instead, and
+    /// sets its own directory only inside its own launcher process.
+    #[test]
+    fn inbound_still_reads_only_the_google_token() {
+        let inbound = row("inbound").unwrap();
+        assert!(inbound.env.contains(&"WORKSPACE_MCP_CREDENTIALS_DIR"));
+        assert!(
+            !inbound.env.iter().any(|n| n.contains("SHEETS")),
+            "{:?}",
+            inbound.env
+        );
+        assert!(!inbound.env.contains(&"GOOGLE_MCP_CREDENTIALS_DIR"));
     }
 }

@@ -92,7 +92,7 @@ pub struct TurnLine {
     pub harness: Token,
     pub model: Token,
     pub capability: Token,
-    /// `phone` or `schedule:<id>`.
+    /// `phone`, `schedule:<id>` or `strand-tick`.
     pub origin: Token,
     /// Unix milliseconds.
     pub start_ms: u64,

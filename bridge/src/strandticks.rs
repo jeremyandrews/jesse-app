@@ -432,16 +432,24 @@ pub async fn run_pass(st: &AppState, ledger: &TickLedger, now_ms: u64) -> Option
     fire(st, ledger, &key, now_ms).await
 }
 
+/// The turn a settled tick submits: a `tell` of the tick's sentence, folded away by the apps
+/// as a strand tick and marked as the bridge's own sender for the ledger and its `SOURCE:`
+/// header line.
+pub fn tick_request(key: &TickKey) -> JesseRequest {
+    let mut req = JesseRequest::scheduled("tell", key.sentence(), None);
+    // Composed by the bridge, not typed: the apps fold it away as a strand tick.
+    req.set_sent_for("Strand tick");
+    req.set_origin(STRAND_TICK_ORIGIN);
+    req
+}
+
 /// Start the turn for one settled tick, as a `tell` from Jeremy, and ask for the
 /// completion push so the reply arrives on the phone as a conversation he can
 /// answer. A turn the bridge refuses (rate limit, bad model) stays pending and
 /// is tried again on the next pass; a turn that starts is recorded as fired
 /// before this returns.
 async fn fire(st: &AppState, ledger: &TickLedger, key: &TickKey, now_ms: u64) -> Option<String> {
-    let mut req = JesseRequest::scheduled("tell", key.sentence(), None);
-    // Composed by the bridge, not typed: the apps fold it away as a strand tick.
-    req.set_sent_for("Strand tick");
-    match start_turn(st, req, None).await {
+    match start_turn(st, tick_request(key), None).await {
         Ok(TurnStart::Accepted {
             job_id,
             conversation_id,

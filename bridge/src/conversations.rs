@@ -48,7 +48,8 @@ pub struct ConversationRecord {
     pub created_ms: u64,
     #[serde(default)]
     pub registered_ms: u64,
-    /// Which client registered it (`phone` / `mac` / `watch` / `cli`). Advisory only:
+    /// Which client registered it: the validated `client_kind` of the turn that created it
+    /// (`phone` / `ipad` / `mac` / `watch`), or absent. Advisory only:
     /// nothing branches on it, it exists so an operator reading the file can tell.
     #[serde(default)]
     pub origin: Option<String>,

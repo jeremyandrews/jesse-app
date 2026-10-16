@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Bridge 0.183.0, App 1.0 (195)] - 2026-10-16
+
+**Every turn's header now says which harness and model answer it, which device or bridge job
+sent it, and how long ago the conversation last replied.** The agent could not see which model
+was answering, treated every turn as a phone turn (a Mac turn was recorded as one), and could not
+tell a quick follow up from a return after hours, so it guessed at all three.
+
+- **`HARNESS:`** (`prompt::harness_line()`): `HARNESS: <harness>, model <registry id>`, then
+  `, version <v>` when the registry entry declares one, `, slug <model>` when the bridge was
+  given the backend's slug (the turn's `ANTHROPIC_*` triple, else its pinned login model) or
+  `, harness default` when it was not, then `, effort <value>` when the turn set one. For
+  example `HARNESS: claude-code, model opus, harness default, effort high`. It never names a
+  model the bridge was not given.
+- **`SOURCE:`** (`prompt::source_line()`): `phone`, `ipad`, `watch`, `mac (<device>)` (or `mac`),
+  `schedule <job id>`, `strand tick`, or `app, device not reported` for a client turn with no
+  valid kind, then `, voice` for a voice turn and `, composed: <sent_for>` for a composed one.
+  `POST /jesse` takes two new optional fields: `client_kind`, checked against `phone`, `ipad`,
+  `mac`, `watch` (anything else is absent), and `client_device`, cut to letters, digits, spaces
+  and `' . _ -`, 48 characters at most, so nothing on the wire can start a header line. A client
+  can never claim to be a schedule or a strand tick: those come from the request's `origin`,
+  which is `serde(skip)`. Strand ticks now set `origin` to `strand-tick` (the activity ledger
+  records that in place of `phone`; nothing reads the value). The scheduler keeps
+  `schedule:<id>`; there is no other bridge sender. The validated kind is recorded on a
+  conversation the turn creates (`ConversationRecord.origin`); nothing branches on it.
+- **`LAST REPLY:`** (`prompt::last_reply_line()`): `LAST REPLY: <gap> ago` from the
+  conversation's `last_reply_ms`, as `under a minute`, `<m>m`, `<h>h <m>m` under 48 hours or
+  `<d>d <h>h` beyond, and no line at all for a conversation that has never replied.
+- **Order and shape.** `clock_header()` takes a `HeaderFacts` struct and emits the date line,
+  `PROFILE:`, `BRIDGE:`, `HARNESS:`, `SOURCE:`, `LAST REPLY:` (when present), then `RETURN:`
+  (when given), still as one string, so the catch up splice is unaffected. The date, `PROFILE:`,
+  `BRIDGE:` and `RETURN:` wording is unchanged. Both harnesses get the header through that one
+  call. The vault QA and diet local children never carried it and still do not. The header
+  never carries location. `PHONE_FORMAT` and `VOICE_SUFFIX` are unchanged.
+- **App:** `JesseBridgeClient.sendPrepared`, the one place `client_tz` and `sent_at` are
+  stamped, now also stamps `client_kind` (`mac`, `ipad` or `phone`) and, on the Mac only,
+  `client_device` (`Host.current().localizedName`). iOS sends no device name: the user assigned
+  one needs an entitlement the app does not have. A turn the phone relays from the Watch reaches
+  the stamp through the ordinary send path with nothing that marks it, so it is stamped `phone`.
+  An app build that sends neither field still gets a working turn, with
+  `SOURCE: app, device not reported`.
+- **Tests:** each line function's exact output across every case; the full header's line order
+  with and without `LAST REPLY:` and `RETURN:`; a `client_device` carrying a newline and a
+  `RETURN:` lookalike staying on the `SOURCE:` line; a request with no client fields and one
+  claiming `client_kind: "schedule"` both producing `SOURCE: app, device not reported`; the
+  scheduled and strand tick requests naming their sender; and, in `SendStampsAndResendTests`,
+  the two keys stamped on macOS and omitted when nil.
+
 ## [Bridge 0.182.0] - 2026-10-16
 
 **A bridge turn can now create a Google Sheet in the work Drive, fill it, format it and return

@@ -1,5 +1,8 @@
 import Foundation
 import JesseCore
+#if os(iOS)
+import UIKit
+#endif
 
 // The one bridge client both apps use. It owns the HTTP contract: endpoint/URL
 // construction, the bearer-auth request builder, ETag handling, the SSE stream, and
@@ -288,7 +291,8 @@ public struct JesseBridgeClient: BridgeClientProtocol {
     ///
     /// # The device stamps
     ///
-    /// THE ONE PLACE a turn's `client_tz` and `sent_at` are set. Stamped here rather than
+    /// THE ONE PLACE a turn's `client_tz`, `sent_at`, `client_kind` and `client_device` are
+    /// set. Stamped here rather than
     /// by each caller: the iOS layer builds its own health-laden `JesseRequest` and calls
     /// straight into this method, so a per-caller stamp would be one build away from a
     /// turn whose dates are derived in the wrong zone — or from the wrong instant.
@@ -313,7 +317,9 @@ public struct JesseBridgeClient: BridgeClientProtocol {
     public func sendPrepared(_ request: JesseRequest) async throws -> JesseSendResult {
         guard var req = authorized("/jesse", method: "POST") else { throw JesseError.notConfigured }
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let stamped = request.stamped(clientTz: Self.clientTimeZone, sentAt: Self.sentAtStamp())
+        let device = await Self.clientDeviceStamp()
+        let stamped = request.stamped(clientTz: Self.clientTimeZone, sentAt: Self.sentAtStamp(),
+                                      clientKind: device.kind, clientDevice: device.name)
         req.httpBody = try Self.encodeBody(stamped)
         do {
             let (data, resp) = try await perform(req, on: sendSession)
@@ -355,6 +361,30 @@ public struct JesseBridgeClient: BridgeClientProtocol {
         f.formatOptions = [.withInternetDateTime]
         return f.string(from: date)
     }
+
+    /// What kind of device this is, and its name where the platform gives one freely:
+    /// `("mac", <computer name>)` on macOS, `("ipad", nil)` or `("phone", nil)` on iOS.
+    ///
+    /// iOS sends no name: since iOS 16 the user-assigned one needs an entitlement this app
+    /// does not have, and `UIDevice.name` returns only the model. A turn the phone relays
+    /// from the Watch reaches this point through the ordinary send path, so it is stamped as
+    /// the phone's.
+    static func clientDeviceStamp() async -> (kind: String, name: String?) {
+        #if os(macOS)
+        return ("mac", macComputerName)
+        #elseif os(iOS)
+        let pad = await MainActor.run { UIDevice.current.userInterfaceIdiom == .pad }
+        return (pad ? "ipad" : "phone", nil)
+        #else
+        return ("phone", nil)
+        #endif
+    }
+
+    #if os(macOS)
+    /// Read once: `Host.current()` can be slow to resolve, and the name does not change
+    /// between turns often enough to matter.
+    private static let macComputerName: String? = Host.current().localizedName
+    #endif
 
     // MARK: - Poll
 

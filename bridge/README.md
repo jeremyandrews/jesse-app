@@ -2309,8 +2309,35 @@ PROFILE: home
 
 Both lines render in the **effective** zone, `until` included — telling someone in
 the UK their trip ends on the 8th because the host is in Italy is exactly the
-off-by-one this removes. On an `[profile].on_return` fire a third line follows:
+off-by-one this removes. On an `[profile].on_return` fire a `RETURN:` line comes last:
 `RETURN: first day back after 13 days away`.
+
+The full header, in order (each line's wording is a contract with the vault's prompts):
+
+```
+Current date/time: Friday, 2026-10-16 21:10 BST (UTC+01:00).
+PROFILE: home
+BRIDGE: 0.183.0 (1a2b3c4)
+HARNESS: claude-code, model opus, harness default, effort high
+SOURCE: mac (Jeremy's Mac Studio), voice
+LAST REPLY: 3h 25m ago
+RETURN: first day back after 13 days away
+```
+
+- `HARNESS:` names the harness and the registry id, then `version <v>` when the entry
+  declares one, `slug <model>` when the bridge was given the backend's slug (or
+  `harness default` when it was not), and `effort <value>` when the turn set one.
+- `SOURCE:` is `phone`, `ipad`, `watch`, `mac (<device>)`, `schedule <job id>`,
+  `strand tick`, or `app, device not reported` for a client that sent no valid
+  `client_kind`; then `, voice` and `, composed: <sent_for>` when they apply. The app
+  stamps `client_kind` (and, on the Mac only, `client_device`) on every turn; an
+  off-list kind is ignored and the name is cut to letters, digits, spaces and
+  `' . _ -` (48 characters), so nothing on the wire can start a header line. A client
+  can never claim a schedule or a strand tick: those come from a field no request sets.
+- `LAST REPLY:` is the gap since this conversation last replied (`under a minute`,
+  `<m>m`, `<h>h <m>m` under 48 hours, `<d>d <h>h` beyond), and is absent for a
+  conversation that has never replied.
+- The header never carries location.
 
 ### `client_tz`
 

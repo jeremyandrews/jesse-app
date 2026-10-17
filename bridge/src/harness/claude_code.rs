@@ -3859,6 +3859,7 @@ mod tests {
             "JESSE_CONFIG",
             "JESSE_STATE_DIR",
             "JESSE_MODEL_FABLE_MODEL",
+            "JESSE_MODEL_SONNET_MODEL",
             "JESSE_MODEL_OPUS_MODEL",
         ];
         let saved: Vec<(&str, Option<String>)> =
@@ -3868,6 +3869,7 @@ mod tests {
         }
         std::env::set_var("JESSE_CONFIG", "/nonexistent/jesse.local.toml");
         std::env::set_var("JESSE_MODEL_FABLE_MODEL", "claude-fable-5-1");
+        std::env::set_var("JESSE_MODEL_SONNET_MODEL", "claude-sonnet-5-5");
 
         let cfg = test_config();
         let Runner::Spawned(harness) = cfg.harnesses.fallback_harness().runner() else {
@@ -3912,6 +3914,22 @@ mod tests {
                 !env.contains_key(k),
                 "a subscription turn must not carry {k}"
             );
+        }
+
+        // Sonnet, the third entry on the same login: the same delivery, its own slug.
+        let sonnet = ActiveModel::from_registry(registry.get("sonnet").expect("registered"));
+        let env = env_of(&sonnet);
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_SUBAGENT_MODEL").map(String::as_str),
+            Some("claude-sonnet-5-5")
+        );
+        assert!(!env.contains_key("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"));
+        for k in METERED {
+            assert!(!env.contains_key(k), "a Sonnet turn must not carry {k}");
         }
 
         // The unpinned default beside it: byte-for-byte nothing.

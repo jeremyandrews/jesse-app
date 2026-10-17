@@ -419,7 +419,7 @@ Answer the question I asked, not the one you wish I had asked.
 # health = { path = "/v1/messages", timeout_secs = 15 }   # it thinks; 3s is a coin toss
 # effort = { kind = "scale", values = ["low", "medium", "high"], default = "high" }
 #
-# THE SUBSCRIPTION LOGIN CAN RUN MORE THAN ONE CLAUDE MODEL, WITH NO API KEY. Two built-in
+# THE SUBSCRIPTION LOGIN CAN RUN MORE THAN ONE CLAUDE MODEL, WITH NO API KEY. Three built-in
 # entries sit on the bridge's OWN login — no base_url, no token, nothing metered, no second
 # billing relationship:
 #
@@ -438,8 +438,18 @@ Answer the question I asked, not the one you wish I had asked.
 #               configured=false). Verified on the
 #               subscription login 2026-09-10: a real turn ran `claude-fable-5-1` with
 #               apiKeySource "none". Level `write`, like opus: same harness, same record.
+#   * `sonnet` — Claude Sonnet on the same login (kind "subscription"), armed by its slug
+#               exactly as fable is:
+#                   JESSE_MODEL_SONNET_MODEL=claude-sonnet-5-5
+#                   JESSE_MODEL_SONNET_VERSION=5.5             # picker reads "Claude Sonnet 5.5"
+#               Unset, the apps hide it (GET /jesse/models still reports it, with
+#               configured=false). Verified on the subscription login 2026-10-17: a real
+#               turn ran `claude-sonnet-5-5` with apiKeySource "none" and a 1M window; the
+#               `[1m]` form serves the same model, so pin the plain slug. Level `write`.
+#               Deck (Sonnet 5.5: 2.00 / 0.10 / 10.00 — cache reads 0.05x input); override
+#               with JESSE_MODEL_SONNET_PRICE_*.
 #
-# Pin opus when you arm fable, so "Claude Opus" in the picker stays Opus if the CLI's own
+# Pin opus when you arm fable or sonnet, so "Claude Opus" in the picker stays Opus if the CLI's own
 # default ever moves. A subscription entry is NOT health-probed (the login has no endpoint
 # to probe), so a slug the login does not serve shows up as a failed turn, not a red row.
 # Its deck (Fable 5.1: 10.00 / 0.25 / 50.00) is what the turn WOULD cost on the metered API,
@@ -616,7 +626,8 @@ Answer the question I asked, not the one you wish I had asked.
 #                  answer is a control that silently does nothing, which is the one thing the
 #                  picker is not allowed to offer. The built-ins' scales were set from live
 #                  turns, not vendor tables (see `effort_from_env` in bridge/src/config.rs):
-#                    glm, qwen ... low, high, max     opus, fable ... high, max
+#                    glm, qwen ... low, high, max     fable ......... high, max
+#                    opus, sonnet  medium, high, max (their CLI default is `medium`)
 #                    muse ........ low, medium, high
 #                    kimi ........ none — `low` and `max` did not differ measurably on
 #                                  Fireworks, whatever its vendor documents

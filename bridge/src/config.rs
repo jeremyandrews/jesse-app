@@ -2576,6 +2576,7 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 /// | Opus 5.5 (09-24)         | 3,547 / 2,728 | 4,418 / 4,327* | 6,514 / 5,312  | 8,220 / 6,647  | 34,436 / 33,839  | medium, high, max   |
 /// | Opus 5 (09-10, superseded)| 976 / 1,164  | —              | 682 / 1,774*   | —              | 4,974 / 4,095    | (was high, max)     |
 /// | Fable 5.1 (09-10)        | 973 / 3,470   | —              | 3,949 / 2,087* | —              | 5,635 / 5,547    | high, max           |
+/// | Sonnet 5.5 (10-17)       | 1,011 / 947   | 962 / 933*     | 1,169 / 1,162  | 1,256 / 1,306  | 2,211 / 3,353    | medium, high, max   |
 /// | Kimi K3 (09-10)          | 6,039 / 3,035 | —              | —              | —              | 3,575 / 10,694   | none                |
 /// | Muse Spark Open (10-15)  | 1,759 / 1,131 | 2,053 / 2,001  | 4,128 / 3,877* | 4,279 / 3,921  | 3,129 / 3,181    | low, medium, high   |
 ///
@@ -2609,10 +2610,21 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 /// touched `high` in it (6,647 against 6,514), so neither cleared the bar; both are
 /// re-declarable from the environment if a workload shows otherwise.
 ///
+/// **Sonnet 5.5 was measured on 2026-10-17**, on the pinned CLI (2.1.302) with
+/// `ANTHROPIC_MODEL=claude-sonnet-5-5`, no API-key variables and no tools, on two prompts. The
+/// row above is the second (a digit-sum count); the first (a divisibility count) read `low`
+/// 845 / 861, `medium` 824 / 844, `high` 1,148 / 895, `xhigh` 1,091 / 1,071, `max` 2,313 /
+/// 3,618. The login accepted all five values. `low` was indistinguishable from `medium` on
+/// both prompts; `high` sat above both `medium` samples on both; `max` ran two to four times
+/// `medium`. `xhigh` fell inside `high`'s range on the first prompt and only just above it on
+/// the second, so it did not clear the bar. The declared scale is Opus 5.5's, and so is the
+/// default.
+///
 /// **The default is the model's CLI default, captured on the wire, and it is per model**: with
 /// no `--effort` the CLI sends `output_config.effort = "medium"` for `claude-opus-5-5` (pinned
 /// or as the unpinned default) and `"high"` for `claude-fable-5-1` (captured 2026-09-24 against a
-/// local listener, nothing sent to a provider); `high` for the rest, captured 2026-09-10. An
+/// local listener, nothing sent to a provider), `"medium"` for `claude-sonnet-5-5` (captured
+/// the same way on 2.1.302, 2026-10-17); `high` for the rest, captured 2026-09-10. An
 /// override that leaves out the built-in's default is refused with a warning and the built-in
 /// scale stands. A picker that did not list the value a turn actually runs at would be
 /// describing a model that is not the one answering. The values themselves are held to what the
@@ -3102,9 +3114,10 @@ impl ModelRegistry {
     pub fn from_env(home: &str) -> Self {
         // Source 1: the built-in ambient default, first (the app presents default-first).
         // `opus_env_entry` rather than `opus_entry`: identical unless `JESSE_MODEL_OPUS_MODEL`
-        // pins a slug. Then the other model on the same login, right beside it.
+        // pins a slug. Then the other models on the same login, right beside it.
         let mut models: Vec<RegistryModel> = vec![opus_env_entry()];
         upsert_model(&mut models, fable_env_entry());
+        upsert_model(&mut models, sonnet_env_entry());
 
         // The global default probe-interval override (`JESSE_HEALTH_INTERVAL_SECS`), resolved
         // ONCE here so a bad value warns a single time. An explicit per-model interval still
@@ -4243,6 +4256,70 @@ fn fable_env_entry() -> RegistryModel {
         // Unused: a subscription entry is never probed.
         health: HealthConfig::default(),
         // Fable sees images itself through the CLI's `Read` tool, like ambient Opus.
+        vision: Vec::new(),
+        vision_complementary: false,
+        transcription: None,
+    }
+}
+
+/// The `sonnet` entry: Claude Sonnet on the bridge's OWN subscription login, beside `opus` and
+/// `fable` — no API key and no second billing relationship.
+///
+/// **Verified on the login, not inferred from documentation.** On 2026-10-17 a real `-p` turn
+/// on the pinned CLI (2.1.302) with `ANTHROPIC_MODEL=claude-sonnet-5-5` and every API-key
+/// variable removed reported `apiKeySource: "none"` and `model: "claude-sonnet-5-5"`, answered,
+/// and billed its usage to `claude-sonnet-5-5` with a 1,000,000-token context window. Asked for
+/// `claude-sonnet-5-5[1m]`, the login accepted the suffix and served the same
+/// `claude-sonnet-5-5` with the same window: 1M is Sonnet 5.5's standard window, and there is
+/// no separate 1M variant to pin.
+///
+/// ARMED BY ONE VARIABLE, `JESSE_MODEL_SONNET_MODEL`, the slug itself, exactly as `fable` is.
+/// Unset, the entry is present and unconfigured; there is deliberately no compiled-in slug
+/// that arms itself, for the reason [`fable_env_entry`] gives.
+///
+/// `Write`, like `opus` and `fable`: the same harness, the same containment record, the same
+/// login.
+fn sonnet_env_entry() -> RegistryModel {
+    let login_model = env_string("JESSE_MODEL_SONNET_MODEL");
+    let version = model_version_from_env("JESSE_MODEL_SONNET", None);
+    RegistryModel {
+        family: Some("Claude".to_string()),
+        // Sonnet 5.5's measured scale and its CLI default (see [`effort_from_env`]).
+        effort: effort_from_env(
+            "JESSE_MODEL_SONNET",
+            "sonnet",
+            Some(EffortScale::scale(&["medium", "high", "max"], "medium")),
+        ),
+        codex: CodexTuning::default(),
+        id: "sonnet".to_string(),
+        label: derive_model_label("Claude Sonnet", version.as_deref(), None),
+        version,
+        aliases: Vec::new(),
+        kind: ModelKind::Subscription,
+        wire: Wire::Messages,
+        // No triple: the login supplies the endpoint and the credential.
+        backend: None,
+        subagent_model: login_model.clone(),
+        configured: login_model.is_some(),
+        login_model,
+        level: Capability::Write,
+        harness: CLAUDE_CODE_ID.to_string(),
+        auth_scheme: None,
+        quirks: DirectQuirks::default(),
+        thinking: None,
+        // Sonnet 5.5's metered deck: what the turn would have cost, not what it did.
+        price: model_price_from_env(
+            "JESSE_MODEL_SONNET",
+            PriceDeck {
+                in_per_m: SONNET_5_5_IN_PER_M,
+                cached_per_m: SONNET_5_5_CACHED_PER_M,
+                cache_write_per_m: None,
+                out_per_m: SONNET_5_5_OUT_PER_M,
+            },
+        ),
+        // Unused: a subscription entry is never probed.
+        health: HealthConfig::default(),
+        // Sonnet sees images itself through the CLI's `Read` tool, like ambient Opus.
         vision: Vec::new(),
         vision_complementary: false,
         transcription: None,
@@ -6211,6 +6288,36 @@ mod tests {
     /// environment says. That is what keeping the pin in `opus_env_entry` rather than in
     /// `opus_entry` buys: a stray `JESSE_MODEL_OPUS_MODEL` in a test process cannot move the
     /// registry every other test builds on.
+    /// A stray `JESSE_MODEL_SONNET_MODEL` cannot move `opus_only()` either: it arms `sonnet` in
+    /// the running bridge's registry, and the fixture every other test builds on neither grows a
+    /// row nor pins its one.
+    #[test]
+    fn a_stray_sonnet_slug_cannot_move_the_opus_only_registry() {
+        let _g = ENV_LOCK.lock_ok();
+        let saved = std::env::var("JESSE_MODEL_SONNET_MODEL").ok();
+        std::env::set_var("JESSE_MODEL_SONNET_MODEL", "claude-sonnet-5-5");
+        let live = ModelRegistry::from_env("/nonexistent");
+        assert!(
+            live.is_configured("sonnet"),
+            "the slug does arm the running bridge's entry"
+        );
+        let fixture = ModelRegistry::opus_only();
+        assert_eq!(
+            fixture
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["opus"]
+        );
+        assert_eq!(fixture.default_model().login_model, None);
+        assert_eq!(fixture.default_model().subagent_model, None);
+        match saved {
+            Some(v) => std::env::set_var("JESSE_MODEL_SONNET_MODEL", v),
+            None => std::env::remove_var("JESSE_MODEL_SONNET_MODEL"),
+        }
+    }
+
     #[test]
     fn the_opus_only_registry_pins_nothing_whatever_the_environment_says() {
         let _g = ENV_LOCK.lock_ok();
@@ -6374,6 +6481,7 @@ mod tests {
             "JESSE_MODEL_QWEN_EFFORT",
             "JESSE_MODEL_LOCAL_EFFORT",
             "JESSE_MODEL_FABLE_EFFORT",
+            "JESSE_MODEL_SONNET_EFFORT",
             "JESSE_MODEL_OPUS_EFFORT",
         ];
         let saved: Vec<(&str, Option<String>)> =
@@ -6401,6 +6509,8 @@ mod tests {
             "medium".to_string(),
         ));
         assert_eq!(scale(fable_env_entry()), hm);
+        // Sonnet 5.5 (2026-10-17): Opus 5.5's scale, and its CLI default is `medium` too.
+        assert_eq!(scale(sonnet_env_entry()), mhm);
         assert_eq!(scale(opus_env_entry()), mhm);
         assert_eq!(
             scale(opus_entry()),
@@ -6420,6 +6530,7 @@ mod tests {
             glm_env_entry(DEFAULT_HEALTH_INTERVAL_SECS, None),
             qwen_env_entry(DEFAULT_HEALTH_INTERVAL_SECS, None),
             fable_env_entry(),
+            sonnet_env_entry(),
             opus_entry(),
         ] {
             for v in &m.effort.expect("declared").values {
@@ -6611,6 +6722,103 @@ mod tests {
             ),
             (10.0, 0.25, 50.0),
             "Fable 5.1's deck — its cache reads are 0.025x input, not a tenth"
+        );
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// SONNET IS ARMED BY ITS SLUG ALONE, exactly as `fable` is: unset it is registered and
+    /// unconfigured (the app's picker offers only configured rows, so it stays hidden), and set
+    /// it is a selectable entry on the login with no backend triple.
+    #[test]
+    fn sonnet_is_armed_by_its_slug_alone_on_the_subscription_login() {
+        let _g = ENV_LOCK.lock_ok();
+        let vars = [
+            "JESSE_MODEL_SONNET_MODEL",
+            "JESSE_MODEL_SONNET_VERSION",
+            "JESSE_MODEL_SONNET_PRICE_IN",
+            "JESSE_MODEL_SONNET_PRICE_CACHED",
+            "JESSE_MODEL_SONNET_PRICE_OUT",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            vars.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in vars {
+            std::env::remove_var(k);
+        }
+
+        let unarmed = sonnet_env_entry();
+        assert_eq!(unarmed.id, "sonnet");
+        assert!(matches!(unarmed.kind, ModelKind::Subscription));
+        assert!(
+            !unarmed.configured,
+            "no slug: registered but not configured"
+        );
+        assert_eq!(unarmed.login_model, None);
+        assert_eq!(unarmed.subagent_model, None);
+        assert_eq!(unarmed.label, "Claude Sonnet");
+        let registry = ModelRegistry::from_env("/nonexistent");
+        assert!(registry.get("sonnet").is_some(), "present unset");
+        assert!(!registry.is_configured("sonnet"), "and not offered");
+
+        std::env::set_var("JESSE_MODEL_SONNET_MODEL", "claude-sonnet-5-5");
+        std::env::set_var("JESSE_MODEL_SONNET_VERSION", "5.5");
+        let armed = sonnet_env_entry();
+        assert!(
+            armed.configured,
+            "the slug is the whole of its configuration"
+        );
+        assert_eq!(armed.login_model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(armed.subagent_model.as_deref(), Some("claude-sonnet-5-5"));
+        assert!(
+            armed.backend.is_none(),
+            "no base url and no token: the login is the credential"
+        );
+        assert_eq!(armed.family.as_deref(), Some("Claude"));
+        assert_eq!(armed.harness, CLAUDE_CODE_ID);
+        assert_eq!(armed.wire, Wire::Messages);
+        assert_eq!(
+            armed.level,
+            Capability::Write,
+            "the same posture as opus and fable: same harness, same record, same login"
+        );
+        assert_eq!(armed.label, "Claude Sonnet 5.5");
+        assert_eq!(
+            (
+                armed.price.in_per_m,
+                armed.price.cached_per_m,
+                armed.price.out_per_m
+            ),
+            (
+                SONNET_5_5_IN_PER_M,
+                SONNET_5_5_CACHED_PER_M,
+                SONNET_5_5_OUT_PER_M
+            ),
+        );
+        assert_eq!(
+            (
+                armed.price.in_per_m,
+                armed.price.cached_per_m,
+                armed.price.out_per_m
+            ),
+            (2.0, 0.10, 10.0),
+            "Sonnet 5.5's deck — its cache reads are 0.05x input, not a tenth"
+        );
+        let registry = ModelRegistry::from_env("/nonexistent");
+        assert!(registry.is_configured("sonnet"));
+        assert_eq!(
+            registry
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .take(3)
+                .collect::<Vec<_>>(),
+            ["opus", "fable", "sonnet"],
+            "registered right after fable"
         );
 
         for (k, v) in saved {
@@ -7189,9 +7397,10 @@ mod tests {
     }
 
     /// The `JESSE_MODEL_*` env-triple vars, cleared so a test's registry is deterministic.
-    const MODEL_ENV_VARS: [&str; 26] = [
-        // The two subscription-login slugs: one arms `fable`, the other pins `opus`.
+    const MODEL_ENV_VARS: [&str; 27] = [
+        // The subscription-login slugs: two arm `fable` and `sonnet`, the third pins `opus`.
         "JESSE_MODEL_FABLE_MODEL",
+        "JESSE_MODEL_SONNET_MODEL",
         "JESSE_MODEL_OPUS_MODEL",
         "JESSE_MODEL_GLM_BASE_URL",
         "JESSE_MODEL_GLM_AUTH_TOKEN",
@@ -7857,6 +8066,7 @@ mod tests {
             // the property the whole stage keeps: no model configuration means opus alone is
             // selectable.
             "fable",
+            "sonnet",
             "local",
         ] {
             let m = r
@@ -7873,6 +8083,7 @@ mod tests {
             [
                 "opus",
                 "fable",
+                "sonnet",
                 "glm",
                 "kimi",
                 "qwen",

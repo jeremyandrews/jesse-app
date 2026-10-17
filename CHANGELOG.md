@@ -14,6 +14,54 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.184.0] - 2026-10-17
+
+**Claude Sonnet is selectable on the subscription login, beside Opus and Fable — no API key.**
+A third built-in entry, `sonnet` (kind `subscription`), armed by `JESSE_MODEL_SONNET_MODEL`
+exactly as `fable` is by its slug. Set it to `claude-sonnet-5-5` (and
+`JESSE_MODEL_SONNET_VERSION=5.5` for the label "Claude Sonnet 5.5") and the app's picker offers
+it; a turn on it runs with `ANTHROPIC_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` set to the slug,
+no base URL and no token. Unset, it is listed with `configured: false` and the apps hide it, so
+a bridge with no model configuration is still opus-only selectable.
+
+**Verified on the login, not inferred from documentation.** All on 2026-10-17, on the pinned
+CLI (2.1.302), with every API-key variable removed:
+
+- `ANTHROPIC_MODEL=claude-sonnet-5-5`: `apiKeySource: "none"`, init model `claude-sonnet-5-5`,
+  a successful turn, usage billed to `claude-sonnet-5-5`, context window 1,000,000.
+- `ANTHROPIC_MODEL=claude-sonnet-5-5[1m]`: accepted, and served the same `claude-sonnet-5-5`
+  with the same 1,000,000 window. There is no separate 1M variant; pin the plain slug.
+- Effort: the login accepted all five CLI values. Measured on two prompts, two samples each,
+  `low` was indistinguishable from `medium`, `high` sat above `medium`, `max` ran two to four
+  times `medium`, and `xhigh` did not separate from `high`. Declared: `medium, high, max`.
+  With no `--effort` the CLI sends `medium` for this slug (captured against a local listener,
+  nothing sent to a provider). The full table is above `effort_from_env`.
+
+**Its deck is Sonnet 5.5's published one, 2.00 / 0.10 / 10.00**, read 2026-10-17 from
+<https://platform.claude.com/docs/en/about-claude/pricing>. The page prices
+cache hits on Sonnet 5.5 at 0.05x input, as it does for Opus 5.5, so a deck derived by the old
+tenth rule would over-report every cache read two-fold. On the subscription the badge reports
+what the turn would have cost on the metered API, as it does for `opus` and `fable`.
+
+**Containment: nothing moves.** `sonnet` is `write`, like `opus` and `fable`: the same harness,
+the same record, the same login. It is never health-probed. Routing, health, quota scope and
+the badge already key on the `subscription` kind rather than on `fable`'s id, so none of them
+needed a change.
+
+### Added
+- The `sonnet` built-in (`JESSE_MODEL_SONNET_MODEL`, `_VERSION`, `_EFFORT`, `_PRICE_*`).
+- `SONNET_5_5_*` price constants.
+- Tests:
+  - `sonnet_is_armed_by_its_slug_alone_on_the_subscription_login`
+  - `a_stray_sonnet_slug_cannot_move_the_opus_only_registry`
+  - `a_subscription_entrys_slug_reaches_the_child_with_no_base_url_or_token` now covers a
+    Sonnet turn
+  - the no-config and effort-scale tests list `sonnet`
+
+### Changed
+- `jesse.example.toml` documents the `sonnet` entry, and its effort note now gives Opus 5.5's
+  measured scale (`medium, high, max`) rather than the superseded `high, max`.
+
 ## [Bridge 0.183.0, App 1.0 (195)] - 2026-10-16
 
 **Every turn's header now says which harness and model answer it, which device or bridge job

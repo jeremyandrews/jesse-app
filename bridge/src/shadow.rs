@@ -152,6 +152,21 @@ pub const FABLE_5_1_IN_PER_M: f64 = 10.00;
 pub const FABLE_5_1_CACHED_PER_M: f64 = 0.25;
 pub const FABLE_5_1_OUT_PER_M: f64 = 50.00;
 
+/// Claude Sonnet 5.5 prices: $2 in / $0.10 cached / $10 out (Anthropic pricing page,
+/// <https://platform.claude.com/docs/en/about-claude/pricing>, read 2026-10-17). The DEFAULT
+/// deck for the `sonnet` registry entry, overridable via
+/// `JESSE_MODEL_SONNET_PRICE_{IN,CACHED,OUT}`.
+///
+/// **The cached rate is NOT a tenth of input**: the page prices cache hits on Sonnet 5.5 at
+/// 0.05x input (its footnote 2, shared with Opus 5.5), and lists $0.10 in that column. A deck
+/// derived by the old tenth rule would read $0.20 and over-report every cache read two-fold.
+/// One flat rate across the whole 1M window: the page lists no long-context tier for it. On the
+/// subscription login none of this is billed per token; the badge reports what the turn would
+/// have cost on the metered API, as it does for `opus` and `fable`.
+pub const SONNET_5_5_IN_PER_M: f64 = 2.00;
+pub const SONNET_5_5_CACHED_PER_M: f64 = 0.10;
+pub const SONNET_5_5_OUT_PER_M: f64 = 10.00;
+
 /// Tripwire ceiling: Fireworks spend above this many dollars in a day fires a
 /// disarm tripwire in the daily audit note.
 pub const SHADOW_SPEND_CAP_USD: f64 = 5.0;

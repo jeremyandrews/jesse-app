@@ -116,4 +116,28 @@ final class MarkdownTextTests: XCTestCase {
             .numbered(number: 2, text: "two"),
         ])
     }
+
+    // MARK: - Fences, by the CommonMark rule both parsers share (`MarkdownFence`)
+
+    /// An info string line inside a block is content: the old three backtick toggle closed the
+    /// block there and swallowed the word.
+    func testAnInfoStringLineInsideAFenceDoesNotCloseIt() {
+        XCTAssertEqual(parseMarkdownBlocks("```\none\n```swift\ntwo\n```"),
+                       [.code("one\n```swift\ntwo")])
+    }
+
+    func testATildeFenceKeepsABacktickLineAsCode() {
+        XCTAssertEqual(parseMarkdownBlocks("~~~\ncargo test\n```\n~~~\nAfter"),
+                       [.code("cargo test\n```"), .paragraph("After")])
+    }
+
+    func testAFourBacktickFenceQuotesAThreeBacktickFence() {
+        XCTAssertEqual(parseMarkdownBlocks("````markdown\n```swift\nlet q = true\n```\n````\nAfter"),
+                       [.code("```swift\nlet q = true\n```"), .paragraph("After")])
+    }
+
+    func testAnUnclosedFenceRunsToTheEnd() {
+        XCTAssertEqual(parseMarkdownBlocks("Intro\n\n```\ntail -f log\n\n# not a heading"),
+                       [.paragraph("Intro"), .code("tail -f log\n\n# not a heading")])
+    }
 }

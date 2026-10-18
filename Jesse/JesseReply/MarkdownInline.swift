@@ -1,13 +1,18 @@
+#if os(iOS)
 import UIKit
+#else
+import AppKit
+#endif
 import JesseVault
 
-// Inline markdown → `NSAttributedString` with *concrete* UIKit fonts and colors.
+// Inline markdown → `NSAttributedString` with *concrete* platform fonts and colors (`UIFont`
+// on the phone, `NSFont` on the Mac; see `MarkdownPlatform`).
 //
 // `AttributedString(markdown:)` records bold / italic / code only as SEMANTIC
-// `inlinePresentationIntent` runs — it does not set a bold `UIFont`. SwiftUI's
-// `Text` resolves those intents itself, but a `UITextView` (which we use for
+// `inlinePresentationIntent` runs; it does not set a bold font. SwiftUI's
+// `Text` resolves those intents itself, but a text view (which we use for
 // native, granular text selection) needs real font attributes. This resolves the
-// intents to actual `UIFont` traits + link attributes so a text view renders the
+// intents to actual font traits + link attributes so a text view renders the
 // same bold/italic/`code`/links a `Text` would.
 //
 // Pure and side-effect-free (the font/color resolution is the testable core).
@@ -16,7 +21,7 @@ enum MarkdownInline {
     /// (the base body/heading font) and `color`. Bold/italic/`code`/links are
     /// resolved to concrete attributes; on a parse failure the raw string is
     /// returned with the base attributes so text is never lost.
-    static func attributed(_ s: String, font: UIFont, color: UIColor) -> NSAttributedString {
+    static func attributed(_ s: String, font: PlatformFont, color: PlatformColor) -> NSAttributedString {
         // `[[WIKI LINKS]]` FIRST, and as a rewrite rather than a case in the loop below.
         // Foundation's parser knows `[text](url)` and knows nothing about double
         // brackets, so a reply naming `[[todo-list/Strands/Strands-System]]` used to
@@ -55,8 +60,8 @@ enum MarkdownInline {
     /// A list item (`•` / `1.`) as an `NSAttributedString` with a hanging indent,
     /// so wrapped lines align under the text rather than under the marker —
     /// matching the SwiftUI bullet/number column layout.
-    static func listItem(marker: String, text: String, font: UIFont,
-                         color: UIColor, indent: CGFloat = 20) -> NSAttributedString {
+    static func listItem(marker: String, text: String, font: PlatformFont,
+                         color: PlatformColor, indent: CGFloat = 20) -> NSAttributedString {
         let style = NSMutableParagraphStyle()
         style.headIndent = indent
         style.firstLineHeadIndent = 0
@@ -75,25 +80,15 @@ enum MarkdownInline {
     /// `code` switches to a monospaced face at the same point size (carrying any
     /// bold/italic that is also set); otherwise bold/italic are layered onto the
     /// base descriptor's existing traits.
-    static func resolvedFont(base: UIFont, intent: InlinePresentationIntent) -> UIFont {
-        var traits: UIFontDescriptor.SymbolicTraits = []
-        if intent.contains(.stronglyEmphasized) { traits.insert(.traitBold) }
-        if intent.contains(.emphasized) { traits.insert(.traitItalic) }
-
+    static func resolvedFont(base: PlatformFont, intent: InlinePresentationIntent) -> PlatformFont {
+        let bold = intent.contains(.stronglyEmphasized)
+        let italic = intent.contains(.emphasized)
         if intent.contains(.code) {
-            var mono = UIFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
-            if !traits.isEmpty,
-               let descriptor = mono.fontDescriptor.withSymbolicTraits(traits) {
-                mono = UIFont(descriptor: descriptor, size: base.pointSize)
-            }
-            return mono
+            // A code span replaces the base face's traits with its own, rather than merging
+            // into them: it is a different face, carrying only the emphasis also set.
+            return PlatformFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
+                .markdownAdding(bold: bold, italic: italic, merging: false)
         }
-
-        guard !traits.isEmpty else { return base }
-        let merged = base.fontDescriptor.symbolicTraits.union(traits)
-        if let descriptor = base.fontDescriptor.withSymbolicTraits(merged) {
-            return UIFont(descriptor: descriptor, size: base.pointSize)
-        }
-        return base
+        return base.markdownAdding(bold: bold, italic: italic)
     }
 }

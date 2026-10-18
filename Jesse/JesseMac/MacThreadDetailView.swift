@@ -23,7 +23,17 @@ struct MacThreadDetailView: View {
     // lasts while this conversation is open and is gone when it is reopened. Mirrors iOS.
     @State private var openFolds: Set<UUID> = []
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var draft: String = ""
+    /// The composer's text. An object, not a `String` in `@State`: typing changes the object
+    /// and only the views that READ it (the text view, the send and capture buttons, the
+    /// starters) re-evaluate. As view state, every keystroke and every paste re-evaluated this
+    /// whole view, the transcript included.
+    @State private var composerDraft = MacComposerDraft()
+    /// Read and written by the actions below. Never read in `body` outside a
+    /// `MacDraftReader`, or the whole view depends on the draft again.
+    private var draft: String {
+        get { composerDraft.text }
+        nonmutating set { composerDraft.text = newValue }
+    }
     @State private var mode: JesseMode = .ask
 
     /// Attaching a RECORDING, which means transcribing it: audio is never a file attachment
@@ -57,7 +67,7 @@ struct MacThreadDetailView: View {
 
     // ── The DURABLE half of the composer ────────────────────────────────────────────
     //
-    // `draft` above is view state, and this view carries `.id(thread.id)` in the split
+    // `composerDraft` above is view state, and this view carries `.id(thread.id)` in the split
     // view's detail column — so selecting another conversation destroys it, and quitting
     // takes it regardless.
     //
@@ -226,8 +236,13 @@ struct MacThreadDetailView: View {
         thread.registeredAt == nil && (thread.sessionId ?? "").isEmpty ? "Not yet started" : ""
     }
 
+    /// Instrumentation: how many times the transcript has been evaluated. A test reads it to
+    /// prove a keystroke in the composer does not re-evaluate the transcript.
+    static var transcriptEvaluations = 0
+
     private var transcript: some View {
-        ScrollViewReader { proxy in
+        let _ = Self.transcriptEvaluations += 1
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     // The transcript as it renders, grouped by JesseKit's `TranscriptItem` exactly as
@@ -369,14 +384,18 @@ struct MacThreadDetailView: View {
             // typed, one is clicked, or the conversation has a turn. Clicking one sends it
             // through the same `send` path as anything typed.
             if let starters = attachment?.starters, !starters.isEmpty,
-               thread.orderedTurns.isEmpty, draft.isEmpty, !running {
-                HStack(spacing: 8) {
-                    ForEach(starters, id: \.self) { starter in
-                        Button(starter) { draft = starter; send() }
-                            .font(.caption)
-                            .buttonStyle(.bordered)
+               thread.orderedTurns.isEmpty, !running {
+                MacDraftReader(draft: composerDraft) { typed in
+                    if typed.isEmpty {
+                        HStack(spacing: 8) {
+                            ForEach(starters, id: \.self) { starter in
+                                Button(starter) { draft = starter; send() }
+                                    .font(.caption)
+                                    .buttonStyle(.bordered)
+                            }
+                            Spacer(minLength: 0)
+                        }
                     }
-                    Spacer(minLength: 0)
                 }
             }
             // WHAT THE SECOND CONTROL IS FOR. The Mac has no send outbox, so this row is
@@ -413,8 +432,7 @@ struct MacThreadDetailView: View {
                 // all. `ComposerTextView` decides in `keyDown(with:)`, where the modifiers
                 // still exist. Send remains gated by `send()` below, the same guard the send
                 // button's `disabled` state mirrors.
-                ComposerTextView(text: $draft, placeholder: "Message Jesse…", onSend: send,
-                                 onMedia: stageMedia)
+                MacComposerField(draft: composerDraft, onSend: send, onMedia: stageMedia)
                     .frame(maxWidth: .infinity)
                     .padding(8)
                     .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
@@ -422,26 +440,30 @@ struct MacThreadDetailView: View {
                 // On the Mac there IS room for the wording, so the button says what it
                 // does rather than relying on a glyph and a caption.
                 if captureOffer.isOffered {
-                    Button {
-                        captureToInbox()
-                    } label: {
-                        if capturing {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Label("Capture to Inbox", systemImage: "tray.and.arrow.down")
+                    MacDraftReader(draft: composerDraft) { typed in
+                        Button {
+                            captureToInbox()
+                        } label: {
+                            if capturing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Label("Capture to Inbox", systemImage: "tray.and.arrow.down")
+                            }
                         }
+                        .buttonStyle(.bordered)
+                        .help("Writes this straight into the vault's Inbox on this Mac, without the Studio")
+                        .disabled(capturing || running
+                                  || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    .buttonStyle(.bordered)
-                    .help("Writes this straight into the vault's Inbox on this Mac, without the Studio")
-                    .disabled(capturing || running
-                              || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
 
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                MacDraftReader(draft: composerDraft) { _ in
+                    Button(action: send) {
+                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
                 }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
                 // No `.keyboardShortcut(.return, modifiers: .command)` here any more: Command
                 // plus Return is one of the newline combinations now, and a button shortcut
                 // would win the key before the focused composer ever saw it.
@@ -491,9 +513,9 @@ struct MacThreadDetailView: View {
             guard phase == .active else { return }
             captureOffer = coordinator.captureOffer()
         }
-        // NO `onChange(of: draft)` and none for the recording stage. Typing changes this
-        // view's own state and nothing else; what the composer holds is read off that
-        // state at the next departure.
+        // NO `onChange(of: draft)` and none for the recording stage. Typing changes the
+        // draft object, read only by the `MacDraftReader`s above, and nothing else; what the
+        // composer holds is read off it at the next departure.
     }
 
     // MARK: - Attachments
@@ -660,6 +682,36 @@ struct MacThreadDetailView: View {
         attachError = nil
         draftNotice = nil
     }
+}
+
+/// The composer's text, observed by the few views that read it. See
+/// `MacThreadDetailView.composerDraft`.
+@Observable
+final class MacComposerDraft {
+    var text = ""
+}
+
+/// The composer's text view, in a view of its own: the representable reads the draft when it
+/// updates, and that read is observed for the view whose body made the representable. Made in
+/// the detail view's body, a keystroke re-evaluated the detail view, transcript included.
+struct MacComposerField: View {
+    let draft: MacComposerDraft
+    let onSend: () -> Void
+    let onMedia: ([MacMediaItem]) -> Void
+
+    var body: some View {
+        ComposerTextView(text: Binding(get: { draft.text }, set: { draft.text = $0 }),
+                         placeholder: "Message Jesse…", onSend: onSend, onMedia: onMedia)
+    }
+}
+
+/// Reads the composer's text in its OWN body and hands it to `content`, so a keystroke
+/// re-evaluates this view and not the detail view around it.
+struct MacDraftReader<Content: View>: View {
+    let draft: MacComposerDraft
+    @ViewBuilder let content: (String) -> Content
+
+    var body: some View { content(draft.text) }
 }
 
 /// What the composer's one file panel is choosing.
@@ -856,7 +908,12 @@ private struct MacModelPickerMenu: View {
 struct MacTurnBubble: View {
     let turn: Turn
 
+    /// Instrumentation: how many times a transcript row's body has run. A test reads it to
+    /// prove a keystroke in the composer does not re-evaluate the transcript.
+    static var bodies = 0
+
     var body: some View {
+        let _ = Self.bodies += 1
         if turn.isUser {
             HStack {
                 Spacer(minLength: 60)
@@ -874,10 +931,10 @@ struct MacTurnBubble: View {
                         MacTurnAttachmentsView(attachments: turn.orderedAttachments)
                     }
                     // An ask sent on an empty composer has no typed half to draw — the
-                    // caption above is the whole turn.
+                    // caption above is the whole turn. One document view, so a pasted fence
+                    // is a code card and a long paste folds (see `MacUserTurnText`).
                     if !turn.visibleText.isEmpty {
-                        Text(turn.visibleText)
-                            .textSelection(.enabled)
+                        MacUserTurnText(text: turn.visibleText)
                             .padding(10)
                             .background(.tint.opacity(0.85), in: .rect(cornerRadius: 12))
                             .foregroundStyle(.white)
@@ -888,7 +945,8 @@ struct MacTurnBubble: View {
             HStack(alignment: .top, spacing: 10) {
                 jesseGlyph
                 VStack(alignment: .leading, spacing: 4) {
-                    MacMarkdownView(text: turn.text)
+                    // One text view for the whole reply, so a selection crosses its blocks.
+                    MacDocumentText(text: turn.text)
                     // Files JESSE returned on this turn. Nothing renders for the
                     // overwhelming majority of turns. Mirrors iOS.
                     if !turn.artifacts.isEmpty {
@@ -950,8 +1008,7 @@ struct MacPromptFold: View {
                 .accessibilityAddTraits(.isButton)
                 if isExpanded {
                     // The WHOLE prompt, context included.
-                    Text(turn.text)
-                        .textSelection(.enabled)
+                    MacUserTurnText(text: turn.text)
                         .padding(10)
                         .background(.tint.opacity(0.85), in: .rect(cornerRadius: 12))
                         .foregroundStyle(.white)
@@ -1052,7 +1109,7 @@ struct MacStreamingBubble: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } else {
-                    MacMarkdownView(text: text)
+                    MacStreamingMarkdown(text: text)
                     if !activity.isEmpty {
                         Text(activity).font(.caption2).foregroundStyle(.secondary)
                     }

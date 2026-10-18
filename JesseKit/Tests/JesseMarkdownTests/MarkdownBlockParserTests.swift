@@ -426,3 +426,26 @@ struct SplitMix64: RandomNumberGenerator {
         return z ^ (z >> 31)
     }
 }
+
+/// The shared fence rule on its own: the one the vault parser above and the app's reply parser
+/// both call.
+final class MarkdownFenceTests: XCTestCase {
+    func testOpeningReadsTheCharacterTheRunAndTheInfoString() {
+        XCTAssertEqual(MarkdownFence.opening("```swift"),
+                       MarkdownFence(character: "`", length: 3, info: "swift"))
+        XCTAssertEqual(MarkdownFence.opening("  ~~~~ text "),
+                       MarkdownFence(character: "~", length: 4, info: "text"))
+        XCTAssertNil(MarkdownFence.opening("``two"))
+        XCTAssertNil(MarkdownFence.opening("plain"))
+    }
+
+    func testOnlyARunAsLongOfTheSameCharacterWithNothingAfterItCloses() {
+        let backticks = MarkdownFence(character: "`", length: 4, info: "")
+        XCTAssertFalse(backticks.isClosed(by: "```"), "a shorter run is content")
+        XCTAssertTrue(backticks.isClosed(by: "````"))
+        XCTAssertTrue(backticks.isClosed(by: "  `````  "))
+        XCTAssertFalse(backticks.isClosed(by: "~~~~"), "the other character never closes")
+        let three = MarkdownFence(character: "`", length: 3, info: "")
+        XCTAssertFalse(three.isClosed(by: "```swift"), "an info string line opens, never closes")
+    }
+}

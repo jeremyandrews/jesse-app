@@ -114,17 +114,27 @@ struct ComposerTextView: NSViewRepresentable {
 
     /// Report the composer's height: the laid-out text, clamped to the line floor and ceiling.
     /// Width is passed straight through so the field stays horizontally flexible in its HStack.
+    ///
+    /// The height is read from the text view's OWN layout, and only as far as the ceiling: past
+    /// `maxLines` the answer is the ceiling whatever the rest of the text holds, so nothing below
+    /// it is laid out to find out. This used to measure the whole string with `boundingRect` on
+    /// every call, and SwiftUI asks several times per layout pass: a single measurement of a
+    /// 1 MB paste took 66 s, so the app never came back.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         guard let textView = nsView.documentView as? ComposerNSTextView else { return nil }
+        textView.sizeQueries += 1
         let width: CGFloat
         if let proposed = proposal.width, proposed > 0, proposed < .infinity {
             width = proposed
         } else {
             width = Self.idealWidth
         }
+        let lineHeight = ComposerNSTextView.lineHeight
+        let ceiling = lineHeight * CGFloat(max(maxLines, max(minLines, 1)))
         let height = ComposerHeight.clamped(
-            textHeight: textView.measuredTextHeight(forWidth: width),
-            lineHeight: ComposerNSTextView.lineHeight,
+            textHeight: textView.measuredTextHeight(forWidth: width, upTo: ceiling,
+                                                    scroller: nsView),
+            lineHeight: lineHeight,
             minLines: minLines,
             maxLines: maxLines,
             verticalInset: textView.textContainerInset.height * 2)
@@ -162,17 +172,33 @@ struct ComposerTextView: NSViewRepresentable {
 
         func undoManager(for view: NSTextView) -> UndoManager? { composerUndoManager }
 
+        /// The value this coordinator last read off the text view and wrote into the binding.
+        ///
+        /// It is what makes the echo check cheap. Comparing the binding with `textView.string`
+        /// compares a Swift string with a bridged `NSString` character by character, with
+        /// Unicode normalization, and that ran twice per keystroke: after a 1 MB paste each
+        /// key cost about 140 ms. The value that comes back through SwiftUI is this same
+        /// string, and two strings sharing storage compare equal without reading it.
+        private var echoed: String?
+
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            if text.wrappedValue != textView.string { text.wrappedValue = textView.string }
+            // Native and contiguous once, here, rather than a lazily bridged copy of the text
+            // storage that every later read of the draft would pay for again.
+            var current = textView.string
+            current.makeContiguousUTF8()
+            echoed = current
+            text.wrappedValue = current
         }
 
         /// Push a SwiftUI-side value into the text view. Does nothing when the text view already
         /// holds it (the echo of its own edit), which is what keeps the selection intact.
         func apply(_ newValue: String, to textView: NSTextView) {
+            if let echoed, newValue == echoed { return }
             guard textView.string != newValue else { return }
             let previous = textView.selectedRange()
             textView.string = newValue
+            echoed = newValue
             // An external change (a send clearing the draft, a restored value): keep the caret
             // where it was if that is still inside the new text, else put it at the end.
             let length = (newValue as NSString).length
@@ -207,6 +233,45 @@ final class ComposerNSTextView: NSTextView {
     var onSend: (() -> Void)?
     /// Invoked with the media read off a pasteboard (see `ComposerTextView.onMedia`).
     var onMedia: (([MacMediaItem]) -> Void)?
+
+    // MARK: Layout: TextKit 1, non contiguous
+
+    /// Instrumentation: how many times SwiftUI has asked this composer for its size. A test
+    /// reads it to prove a paste settles in a bounded number of layout passes.
+    var sizeQueries = 0
+    /// Instrumentation: how many characters the last height measurement had laid out. A test
+    /// reads it to prove a measurement stops at the ceiling instead of typesetting the paste.
+    var lastMeasuredCharacters = 0
+
+    /// The text storage at the root of this view's TextKit 1 stack. AppKit's text storage owns
+    /// the layout manager and the container, and nothing in that stack owns the storage, so
+    /// the view keeps it.
+    private var ownedStorage: NSTextStorage?
+
+    /// An explicit TextKit 1 stack with non contiguous layout, so a large paste lays out only
+    /// what is on screen and what the height measurement asks for, never the whole text up
+    /// front. Explicit rather than the implicit fallback reading `layoutManager` triggers on a
+    /// TextKit 2 view, because that fallback is not something to build on deliberately.
+    override init(frame frameRect: NSRect) {
+        let storage = NSTextStorage()
+        let manager = NSLayoutManager()
+        manager.allowsNonContiguousLayout = true
+        storage.addLayoutManager(manager)
+        let container = NSTextContainer(
+            size: NSSize(width: frameRect.width, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        manager.addTextContainer(container)
+        super.init(frame: frameRect, textContainer: container)
+        ownedStorage = storage
+    }
+
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: container)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
 
     // MARK: Media: Paste, drop, Continuity Camera
 
@@ -321,18 +386,54 @@ final class ComposerNSTextView: NSTextView {
         (placeholder as NSString).draw(at: origin, withAttributes: attributes)
     }
 
-    /// How tall the current text lays out at `width`, before clamping.
-    func measuredTextHeight(forWidth width: CGFloat) -> CGFloat {
-        let padding = (textContainer?.lineFragmentPadding ?? 0) * 2
-        let usable = max(width - textContainerInset.width * 2 - padding, 1)
-        // A trailing newline opens a line that `boundingRect` does not measure, so the composer
-        // would not grow until the next character. Measure a sentinel on that line instead.
-        let measured = string.hasSuffix("\n") ? string + " " : string
-        guard !measured.isEmpty else { return Self.lineHeight }
-        let rect = (measured as NSString).boundingRect(
-            with: CGSize(width: usable, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font ?? Self.composerFont])
-        return ceil(rect.height)
+    /// How tall the current text lays out at `width`, before clamping, read from this view's
+    /// own layout manager and laid out no further than `ceiling`: once the text is taller than
+    /// that, the answer is "at least the ceiling" and the rest is never typeset for it.
+    ///
+    /// `scroller`, when given, is the enclosing scroll view. A text taller than the ceiling
+    /// shows a vertical scroller, and a legacy (not overlay) scroller takes its width from the
+    /// text, so the width is decided once, here, from which side of the ceiling the text is on.
+    /// Narrower text is never shorter, so the decision cannot flip back and forth between
+    /// layout passes.
+    func measuredTextHeight(forWidth width: CGFloat, upTo ceiling: CGFloat = .greatestFiniteMagnitude,
+                            scroller: NSScrollView? = nil) -> CGFloat {
+        guard !string.isEmpty, let manager = layoutManager, let container = textContainer else {
+            return Self.lineHeight
+        }
+        let usable = max(width - textContainerInset.width * 2, 1)
+        var height = laidOutHeight(manager, container, width: usable, ceiling: ceiling)
+        if height >= ceiling, let scroller, scroller.scrollerStyle == .legacy {
+            let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+            height = laidOutHeight(manager, container, width: max(usable - scrollerWidth, 1),
+                                   ceiling: ceiling)
+        }
+        // The container tracks this view's width only when the frame CHANGES, so a probe at
+        // another width (SwiftUI asks at zero, at infinity and with no proposal at all) would
+        // otherwise leave the text wrapped for a width it is not drawn at.
+        let drawn = frame.width - textContainerInset.width * 2
+        if drawn > 0, container.size.width != drawn {
+            container.size = NSSize(width: drawn, height: CGFloat.greatestFiniteMagnitude)
+        }
+        return height
+    }
+
+    /// The used height of the text at `width`, laid out only down to `ceiling`. The extra line
+    /// fragment a trailing newline opens is part of the used rect, so the composer grows on the
+    /// newline rather than on the next character.
+    private func laidOutHeight(_ manager: NSLayoutManager, _ container: NSTextContainer,
+                               width: CGFloat, ceiling: CGFloat) -> CGFloat {
+        if container.size.width != width {
+            container.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        }
+        let bounded = ceiling.isFinite ? ceiling + Self.lineHeight : CGFloat.greatestFiniteMagnitude
+        manager.ensureLayout(forBoundingRect: NSRect(x: 0, y: 0, width: width, height: bounded),
+                             in: container)
+        let firstUnlaid = manager.firstUnlaidCharacterIndex()
+        lastMeasuredCharacters = firstUnlaid
+        let laidOut = firstUnlaid >= (string as NSString).length
+        let used = ceil(manager.usedRect(for: container).height)
+        // Text that is not all laid out yet extends below the rect just laid out, which is
+        // already past the ceiling.
+        return laidOut ? used : max(used, ceiling)
     }
 }

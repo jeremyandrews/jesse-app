@@ -1,6 +1,14 @@
+#if os(iOS)
 import UIKit
+#else
+import AppKit
+#endif
 
 // One completed reply, composed into ONE attributed-text document.
+//
+// Shared by the iPhone (`SelectableDocumentText`) and the Mac (`MacDocumentText`), which had
+// the same selection islands until it compiled this file too. `MarkdownPlatform` holds the
+// only platform difference.
 //
 // ── THE BUG THIS EXISTS TO FIX ────────────────────────────────────────────────
 //
@@ -159,12 +167,14 @@ struct MarkdownDocument: Equatable {
 
     /// Compose `blocks` into one document.
     ///
-    /// `traits` selects the Dynamic Type size the fonts are resolved at, so the
-    /// caller can rebuild the document when the content size category changes
-    /// (the fonts are baked into the storage; they cannot re-resolve themselves).
+    /// `traits` selects the size the fonts are resolved at (the Dynamic Type size on
+    /// the phone), so the caller can rebuild the document when it changes (the fonts
+    /// are baked into the storage; they cannot re-resolve themselves). `color` is the
+    /// text colour: the label colour for a reply, white for the Mac's user bubble.
     static func build(blocks: [MarkdownBlock],
-                      traits: UITraitCollection? = nil) -> MarkdownDocument {
-        var builder = Builder(traits: traits)
+                      traits: MarkdownFontTraits? = nil,
+                      color: PlatformColor = .markdownLabel) -> MarkdownDocument {
+        var builder = Builder(traits: traits, color: color)
         for (index, block) in blocks.enumerated() {
             builder.append(block, isLast: index == blocks.count - 1)
         }
@@ -172,8 +182,9 @@ struct MarkdownDocument: Equatable {
     }
 
     /// Convenience for a raw reply.
-    static func build(_ raw: String, traits: UITraitCollection? = nil) -> MarkdownDocument {
-        build(blocks: parseMarkdownBlocks(raw), traits: traits)
+    static func build(_ raw: String, traits: MarkdownFontTraits? = nil,
+                      color: PlatformColor = .markdownLabel) -> MarkdownDocument {
+        build(blocks: parseMarkdownBlocks(raw), traits: traits, color: color)
     }
 }
 
@@ -186,35 +197,34 @@ struct MarkdownDocument: Equatable {
 /// whether we want them to be or not, so the block's trailing spacing has to be
 /// attached to its last line specifically.
 private struct Builder {
-    private let traits: UITraitCollection?
+    private let traits: MarkdownFontTraits?
+    private let color: PlatformColor
     private let result = NSMutableAttributedString()
     private var blocks: [MarkdownDocumentBlock] = []
     private var decorations: [MarkdownDecoration] = []
 
-    init(traits: UITraitCollection?) {
+    init(traits: MarkdownFontTraits?, color: PlatformColor) {
         self.traits = traits
+        self.color = color
     }
 
-    // Concrete UIKit fonts, resolved once at the caller's Dynamic Type size.
-    // These mirror `MarkdownText`'s SwiftUI text styles one for one.
-    private func font(_ style: UIFont.TextStyle) -> UIFont {
-        if let traits { return UIFont.preferredFont(forTextStyle: style, compatibleWith: traits) }
-        return UIFont.preferredFont(forTextStyle: style)
+    // Concrete platform fonts, resolved once at the caller's size. These mirror
+    // `MarkdownText`'s SwiftUI text styles one for one.
+    private func font(_ style: PlatformFont.TextStyle) -> PlatformFont {
+        PlatformFont.markdownFont(style, traits: traits)
     }
 
-    private var bodyFont: UIFont { font(.body) }
+    private var bodyFont: PlatformFont { font(.body) }
 
-    private var monospacedBodyFont: UIFont {
-        UIFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: .regular)
+    private var monospacedBodyFont: PlatformFont {
+        PlatformFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: .regular)
     }
 
-    private func bold(_ base: UIFont) -> UIFont {
-        let merged = base.fontDescriptor.symbolicTraits.union(.traitBold)
-        guard let descriptor = base.fontDescriptor.withSymbolicTraits(merged) else { return base }
-        return UIFont(descriptor: descriptor, size: base.pointSize)
+    private func bold(_ base: PlatformFont) -> PlatformFont {
+        base.markdownAdding(bold: true, italic: false)
     }
 
-    private func headingFont(_ level: Int) -> UIFont {
+    private func headingFont(_ level: Int) -> PlatformFont {
         switch level {
         case 1:  return bold(font(.title3))
         case 2:  return font(.headline)      // already semibold
@@ -227,11 +237,11 @@ private struct Builder {
     mutating func append(_ block: MarkdownBlock, isLast: Bool) {
         switch block {
         case let .heading(level, text):
-            appendSimple(MarkdownInline.attributed(text, font: headingFont(level), color: .label),
+            appendSimple(MarkdownInline.attributed(text, font: headingFont(level), color: color),
                          kind: .heading, baseFont: headingFont(level), isLast: isLast)
 
         case let .paragraph(text):
-            appendSimple(MarkdownInline.attributed(text, font: bodyFont, color: .label),
+            appendSimple(MarkdownInline.attributed(text, font: bodyFont, color: color),
                          kind: .paragraph, baseFont: bodyFont, isLast: isLast)
 
         case let .bullet(text):
@@ -252,7 +262,7 @@ private struct Builder {
     /// lines with `\n`), no indent, no card.
     private mutating func appendSimple(_ text: NSAttributedString,
                                        kind: MarkdownDocumentBlock.Kind,
-                                       baseFont: UIFont,
+                                       baseFont: PlatformFont,
                                        isLast: Bool) {
         let lines = split(text)
         let styled = lines.enumerated().map { index, line -> Line in
@@ -269,7 +279,7 @@ private struct Builder {
     /// the marker now copies with the item.
     private mutating func appendListItem(marker: String, text: String, isLast: Bool) {
         let item = MarkdownInline.listItem(
-            marker: marker, text: text, font: bodyFont, color: .label,
+            marker: marker, text: text, font: bodyFont, color: color,
             indent: MarkdownDocument.Metrics.listIndent)
         let lines = split(item)
         let styled = lines.enumerated().map { index, line -> Line in
@@ -291,7 +301,7 @@ private struct Builder {
     private mutating func appendCode(_ code: String, isLast: Bool) {
         let pad = MarkdownDocument.Metrics.cardPadding
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: monospacedBodyFont, .foregroundColor: UIColor.label,
+            .font: monospacedBodyFont, .foregroundColor: color,
         ]
         let lines = code.components(separatedBy: "\n")
         let styled = lines.enumerated().map { index, line -> Line in
@@ -344,12 +354,12 @@ private struct Builder {
         // attributed strings that get rendered, so the measurement cannot drift
         // from what is drawn.
         let headerCells = headers.map {
-            MarkdownInline.attributed($0, font: headerFont, color: .label)
+            MarkdownInline.attributed($0, font: headerFont, color: color)
         }
         let bodyCells: [[NSAttributedString]] = rows.map { row in
             (0..<columns).map { col in
                 MarkdownInline.attributed(col < row.count ? row[col] : "",
-                                          font: bodyFont, color: .label)
+                                          font: bodyFont, color: color)
             }
         }
 
@@ -376,12 +386,12 @@ private struct Builder {
             }
         }.sorted { $0.location < $1.location }
 
-        func rowLine(_ cells: [NSAttributedString], font: UIFont, isFirst: Bool, isFinal: Bool) -> Line {
+        func rowLine(_ cells: [NSAttributedString], font: PlatformFont, isFirst: Bool, isFinal: Bool) -> Line {
             let line = NSMutableAttributedString()
             for cell in cells {
                 line.append(NSAttributedString(string: "\t",
                                                attributes: [.font: font,
-                                                            .foregroundColor: UIColor.label]))
+                                                            .foregroundColor: color]))
                 line.append(cell)
             }
             let style = NSMutableParagraphStyle()
@@ -414,7 +424,7 @@ private struct Builder {
         let text: NSAttributedString
         let style: NSParagraphStyle
         /// Font for the paragraph terminator, so an empty line still has a height.
-        let font: UIFont
+        let font: PlatformFont
     }
 
     /// Append one block's lines, record its range, and let the caller build a
@@ -438,7 +448,7 @@ private struct Builder {
             if needsTerminator {
                 result.append(NSAttributedString(
                     string: "\n",
-                    attributes: [.font: line.font, .foregroundColor: UIColor.label]))
+                    attributes: [.font: line.font, .foregroundColor: color]))
             }
             result.addAttribute(.paragraphStyle, value: line.style,
                                 range: NSRange(location: lineStart,

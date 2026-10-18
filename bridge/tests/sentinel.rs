@@ -859,8 +859,9 @@ async fn each_restart_verb_targets_its_own_label() {
 //     rollback's restart it does not come back at all".
 
 use jesse_bridge::sentinel::{
-    check_ci, embedded_deploy_bins, is_full_sha, prune_builds, resolve_bin, signing_identifier,
-    DeployRecord, Previous, DEPLOY_BINS_MANIFEST, KEEP_BUILDS,
+    check_ci, embedded_deploy_bins, embedded_deploy_manifest, is_full_sha, prune_builds,
+    resolve_bin, signing_identifier, DeployRecord, Previous, DEPLOY_BINS_MANIFEST, KEEP_BUILDS,
+    LAUNCHERS_DIR,
 };
 
 /// The version the `cargo` shim's binaries print, and the version the fake bridge reports
@@ -915,6 +916,25 @@ fn write_manifest(work: &Path, version: &str, bins: &[String]) {
         format!("bins = [\n{list}]\n"),
     )
     .unwrap();
+    // Every world carries THIS build's launchers, as the real tree does, each a script that
+    // prints the version of the commit it came from, so a link can be told apart from a hand
+    // install. Written mode 644, so the stage phase's chmod is what makes it runnable.
+    let launchers = &embedded_deploy_manifest().launchers;
+    std::fs::create_dir_all(dir.join(LAUNCHERS_DIR)).unwrap();
+    for name in launchers {
+        std::fs::write(
+            dir.join(LAUNCHERS_DIR).join(name),
+            format!("#!/bin/sh\necho launcher {version}\n"),
+        )
+        .unwrap();
+    }
+    let list = launchers
+        .iter()
+        .map(|l| format!("  \"{l}\",\n"))
+        .collect::<String>();
+    let mut text = std::fs::read_to_string(dir.join(DEPLOY_BINS_MANIFEST)).unwrap();
+    text.push_str(&format!("launchers = [\n{list}]\n"));
+    std::fs::write(dir.join(DEPLOY_BINS_MANIFEST), text).unwrap();
 }
 
 /// A bare origin with `main` (two commits) and an unmerged `side` branch, plus a clone of it.
@@ -1760,6 +1780,88 @@ async fn a_binary_the_commit_adds_is_built_staged_and_linked() {
     // A name with no previous install is recorded as ABSENT, which is what would make a
     // rollback remove it rather than leave a binary the operator never had.
     assert_eq!(previous_map(&sen).get("jesse-newcomer-mcp"), None);
+}
+
+/// THE 0.182.0 ROLLBACK, at the layer it lives in: a launcher the deployed commit lists is
+/// staged from the commit's `bridge/launchers/`, linked into `~/.local/bin`, and runnable —
+/// with no hand-run install step — and a rollback takes it back to what was there before,
+/// including a copy an operator had installed by hand.
+#[tokio::test]
+async fn a_launcher_the_commit_lists_is_staged_linked_and_rolled_back() {
+    let launcher = embedded_deploy_manifest()
+        .launchers
+        .first()
+        .expect("the committed manifest lists a launcher")
+        .clone();
+
+    // A deploy that succeeds: the launcher is linked into this commit's build directory.
+    let sc = Scratch::new("deploy-launcher-ok");
+    let (w, sen) = deploy_world(
+        &sc,
+        vec![Health::up(OLD_VERSION), Health::up(NEW_VERSION)],
+        json!({ "jobs": [] }),
+        Ci::Green,
+    )
+    .await;
+    seed_installed(&w.bin_dir, OLD_VERSION);
+    let (status, _) = post_deploy(&sen, json!({ "ref": "main" })).await;
+    assert_eq!(status, 202);
+    let rec = await_deploy(&sen).await;
+    assert_eq!(rec.result.as_deref(), Some("ok"), "{:?}", rec.reason);
+    let built = sen.cfg.build_store().join(&w.head);
+    assert_eq!(
+        std::fs::read_link(w.bin_dir.join(&launcher)).unwrap(),
+        built.join(&launcher)
+    );
+    assert_eq!(
+        run_link(&w.bin_dir, &launcher),
+        format!("launcher {NEW_VERSION}")
+    );
+    // It is not handed to cargo: a script is not a `--bin`.
+    let asked = std::fs::read_to_string(&w.cargo_record).unwrap();
+    assert!(!asked.contains(&format!("--bin {launcher}")), "{asked}");
+    assert_eq!(
+        previous_map(&sen).get(&launcher),
+        None,
+        "it was absent before"
+    );
+
+    // A deploy that rolls back, over a launcher installed BY HAND as a real file: the file's
+    // content comes back, and the failed build's link does not stay.
+    let sc = Scratch::new("deploy-launcher-rollback");
+    let (w, sen) = deploy_world(
+        &sc,
+        vec![
+            Health::up(OLD_VERSION),
+            Health::missing_mcp_binary(NEW_VERSION, "google", "workspace-mcp"),
+        ],
+        json!({ "jobs": [] }),
+        Ci::Green,
+    )
+    .await;
+    seed_installed(&w.bin_dir, OLD_VERSION);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = w.bin_dir.join(&launcher);
+        std::fs::write(&p, "#!/bin/sh\necho by hand\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (status, _) = post_deploy(&sen, json!({ "ref": "main" })).await;
+    assert_eq!(status, 202);
+    let rec = await_deploy(&sen).await;
+    assert_eq!(
+        rec.result.as_deref(),
+        Some("rolled_back"),
+        "{:?}",
+        rec.reason
+    );
+    // The host program's branch of the message, not "add it to deploy-bins.toml".
+    let reason = rec.reason.unwrap_or_default();
+    assert!(
+        reason.contains("install `workspace-mcp` on the host"),
+        "{reason}"
+    );
+    assert_eq!(run_link(&w.bin_dir, &launcher), "by hand");
 }
 
 /// THE SILENT FAILURE, at the layer it lives in: a deployment whose child MCP config names a

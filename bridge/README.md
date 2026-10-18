@@ -3793,18 +3793,24 @@ permanent rather than transient. This is not hypothetical; see `../SECURITY.md`
 `google-sheets` is a third `workspace-mcp` instance for the work account: Sheets only, write
 capable, with its own token. `google` and `google-perseido` are untouched and stay read only.
 Why it is separate, and exactly what it can reach, is in `../SECURITY.md` § "Google Sheets: the
-one Google server that writes". Two host steps, both on the bridge host, as the bridge's user.
+one Google server that writes". One host check before deploying and one host step after, both
+on the bridge host, as the bridge's user.
 
-**1. Install the launcher, BEFORE deploying 0.182.0.** The child config names the bare command
-`workspace-mcp-sheets`, and the deploy's restart phase rolls back when a server's command is
-not on the child's `PATH` (`mcp_servers_unresolved`).
+**1. The deploy installs the launcher; the host provides `workspace-mcp`.** The child config
+names the bare command `workspace-mcp-sheets`, the in-tree script
+`bridge/launchers/workspace-mcp-sheets`. Since 0.185.0 it is listed under `launchers` in
+`bridge/deploy-bins.toml`, so the deploy stages it beside the binaries, links
+`~/.local/bin/workspace-mcp-sheets` to it, and rolls it back with them. There is no install
+step. What the deploy cannot install is the program the launcher `exec`s, so check it is on
+the bridge's `PATH` (1.23.1 here, where `google` already runs from):
 
 ```bash
-install -m 755 bridge/launchers/workspace-mcp-sheets ~/.local/bin/workspace-mcp-sheets
-command -v workspace-mcp-sheets    # must print the path above
+command -v workspace-mcp           # must print a path
 ```
 
-It needs `workspace-mcp` on the same `PATH` (1.23.1 here, where `google` already runs from).
+That needs a sentinel built from 0.185.0 or later: an older sentinel reads `bins` and ignores
+`launchers`, so a deploy it runs still rolls back with `google-sheets (workspace-mcp-sheets)`
+unresolved. Reinstall it first (`scripts/install-sentinel.sh`) if it predates 0.185.0.
 
 **2. Consent once, AFTER deploying.** A headless turn cannot consent, so until this is done
 every `google-sheets` call fails at once with "ACTION REQUIRED: Google Authentication Needed"

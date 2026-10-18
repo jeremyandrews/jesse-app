@@ -14,6 +14,52 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.185.0] - 2026-10-18
+
+**The deploy installs the bridge's own launcher scripts, and its rollback message names a fix
+that works.** The 2026-10-17 deploy of `0f780bf` (0.183.0, which carries the 0.182.0
+`google-sheets` server) rolled back with `google-sheets (workspace-mcp-sheets)` unresolved,
+listed twice, and the advice "Add the binary to deploy-bins.toml".
+
+**Root cause: an in-tree launcher the child config names was outside the deploy manifest.**
+`google-sheets` runs the bare command `workspace-mcp-sheets`, which is the script
+`bridge/launchers/workspace-mcp-sheets`. `deploy-bins.toml` listed only cargo targets, so
+nothing in a deploy installed it; the README asked a person to `install -m 755` it before
+deploying. That is the frozen-list bug from 0.100.0 in a different shape, and a skipped manual
+step produced a rollback whose message named a fix that cannot work: every `bins` name is a
+`cargo build --bin`, so adding a shell script there fails the build.
+
+- **`launchers = [...]` in `bridge/deploy-bins.toml`.** Each name is a regular file under
+  `bridge/launchers/` in the deployed tree. The deploy copies it into the same per-deploy store
+  directory as the binaries (mode 755), records the live `~/.local/bin/<name>` for rollback (a
+  hand-installed real file is copied aside to `pre-deploy/`, the way a real `jesse-bridge` is),
+  links it, and rolls it back with the binaries. A listed name with no such file fails the
+  deploy at the manifest, before anything is built or staged. The key is optional, so an older
+  tree still deploys, and a tree with no manifest gets no launchers: none is compiled into the
+  sentinel. Launchers are not code signed; a `#!/bin/sh` script holds no privacy grant.
+  `workspace-mcp-sheets` is listed. `consent-google-sheets` is not: it is run by hand from the
+  checkout, and no MCP config names it.
+- **The unresolved-command message.** The rows are deduplicated by `server (command)`, so a
+  server both harnesses load counts once. Each command's fix is classified against the deployed
+  tree: a cargo target of the crate not in `bins` ("add it to `bins`"), a file under
+  `bridge/launchers/` not in `launchers` ("add it to `launchers`"), a name the deploy did
+  install (the bridge's `PATH` does not reach it), or anything else ("not shipped by the
+  bridge; install `<command>` on the host so it is on the bridge's PATH"). It stays fatal.
+- **A test at the layer the defect lives in.** Every bare command any shipped child MCP config
+  names (every `McpSet` row, so both harnesses) must be in `bins`, in `launchers`, or on an
+  explicit, commented `HOST_PROVIDED` list (`qmd`, `npx`, `workspace-mcp`,
+  `workspace-mcp-perseido`, `github-mcp-server`, `unifi-network-mcp`, `routeros-mcp`,
+  `mcp-proxmox`, `whatsapp-mcp`, `jesse-k8s-mcp`, `plex-mcp`, `clockify-rs-mcp`,
+  `runn-rs-mcp`). It replaces the old `jesse-*`-only check, which never looked at
+  `workspace-mcp-sheets`. It fails with the `launchers` entry removed.
+- **README:** "Google Sheets: the one-time setup" step 1 is now "the deploy installs the
+  launcher", keeping the `command -v workspace-mcp` check for the program it runs.
+
+**The sentinel is not redeployed by a deploy**, so this takes effect once the sentinel is
+reinstalled from 0.185.0 (`scripts/install-sentinel.sh`). An older sentinel parses `bins`,
+ignores `launchers`, and a deploy it runs still rolls back on `workspace-mcp-sheets` unless the
+launcher is on the host already.
+
 ## [bridge 0.184.0] - 2026-10-17
 
 **Claude Sonnet is selectable on the subscription login, beside Opus and Fable — no API key.**

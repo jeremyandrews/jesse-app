@@ -4,7 +4,7 @@
     consent-google-sheets <work email>            # consent (once), then confirm
     consent-google-sheets --verify <work email>   # confirm only; never starts consent
 
-Run it in a terminal on the bridge host, as the bridge's user, AFTER installing
+Run it in a terminal on the bridge host, as the bridge's user, AFTER a deploy has installed
 `workspace-mcp-sheets` on PATH. It is interactive: a headless turn cannot consent, which is
 why this exists. See bridge/README.md, "Google Sheets: the one-time setup".
 

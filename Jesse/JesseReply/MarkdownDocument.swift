@@ -63,6 +63,14 @@ struct MarkdownDecoration: Equatable {
         /// A table card. `headerRange` is the header row, under which a rule is
         /// drawn — the `Divider()` the old `Grid` had.
         case table(headerRange: NSRange)
+        /// An inline code span: a small rounded chip behind its glyphs, one per line
+        /// fragment the span occupies. Inline code used to be marked only by a font swap,
+        /// and on a short span (`TEST`) the monospaced face is indistinguishable from the
+        /// system face, so nothing a reader could see said "code".
+        case inlineCode
+
+        /// A card spans the text view's width; a chip sits behind its own glyphs.
+        var isCard: Bool { self != .inlineCode }
     }
 
     let range: NSRange
@@ -163,6 +171,10 @@ struct MarkdownDocument: Equatable {
         static let rowSpacing: CGFloat = 4
         /// Hanging indent for `•` / `1.` list items — matches `MarkdownInline`.
         static let listIndent: CGFloat = 20
+        /// An inline code chip: its corner radius, and how far it reaches past the glyphs
+        /// on each side. The reach is drawing only; no character is added for it.
+        static let chipCornerRadius: CGFloat = 4
+        static let chipPadding: CGFloat = 2
     }
 
     /// Compose `blocks` into one document.
@@ -460,6 +472,11 @@ private struct Builder {
         let blockRange = NSRange(location: blockStart, length: blockEnd - blockStart)
         blocks.append(MarkdownDocumentBlock(range: blockRange, kind: kind))
         if let decoration { decorations.append(decoration(blockRange, lineRanges)) }
+        // One chip decoration per inline code run, after the block's card so it draws on it.
+        result.enumerateAttribute(.markdownInlineCode, in: blockRange) { value, range, _ in
+            guard value != nil else { return }
+            decorations.append(MarkdownDecoration(range: range, kind: .inlineCode))
+        }
     }
 
     /// Split an attributed string at `\n`, keeping attributes, dropping the

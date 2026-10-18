@@ -11,17 +11,21 @@ import JesseCore
 ///
 /// A new file because none of the others renders images. Skipped unless the run asks for it
 /// (`TEST_RUNNER_MT1_SCREENSHOTS=1` on the `xcodebuild` command line), so the gate writes no
-/// files; the PNGs land in `build/screenshots/mt1/` at the top of the checkout.
+/// files; the PNGs land in `build/screenshots/mt1/` at the top of the checkout. The MT3 shots
+/// (inline code chips and the styled composer) are asked for the same way, with
+/// `TEST_RUNNER_MT3_SCREENSHOTS=1`, and land in `build/screenshots/mt3/`.
 @MainActor
 final class MacTranscriptScreenshotTests: XCTestCase {
 
     private var windows: [NSWindow] = []
     private var previousDrafts: ComposerDraftStore?
+    private var mt3Boards: [NSPasteboard] = []
 
     override func setUp() async throws {
         try await super.setUp()
-        guard ProcessInfo.processInfo.environment["MT1_SCREENSHOTS"] == "1" else {
-            throw XCTSkip("screenshots are taken only when MT1_SCREENSHOTS=1")
+        let series = name.contains("MT3") ? "MT3" : "MT1"
+        guard ProcessInfo.processInfo.environment["\(series)_SCREENSHOTS"] == "1" else {
+            throw XCTSkip("screenshots are taken only when \(series)_SCREENSHOTS=1")
         }
     }
 
@@ -33,6 +37,8 @@ final class MacTranscriptScreenshotTests: XCTestCase {
             }
             windows = []
             if let previousDrafts { ComposerDraftStore.shared = previousDrafts }
+            for board in mt3Boards { board.releaseGlobally() }
+            mt3Boards = []
         }
         try await super.tearDown()
     }
@@ -193,5 +199,156 @@ final class MacTranscriptScreenshotTests: XCTestCase {
             .modelContext(context)
             .frame(width: Self.width, height: 900), height: 900)
         try write(host, "5-detail-view.png")
+    }
+
+    // MARK: - MT3: inline code chips and the styled composer
+
+    private var mt3Directory: URL { MT3Fixture.directory }
+
+    private func writeMT3(_ view: NSView, _ name: String) throws {
+        view.window?.appearance = NSAppearance(named: .aqua)
+        try FileManager.default.createDirectory(at: mt3Directory, withIntermediateDirectories: true)
+        view.layoutSubtreeIfNeeded()
+        view.display()
+        let bounds = view.bounds
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: bounds))
+        view.cacheDisplay(in: bounds, to: rep)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        let url = mt3Directory.appendingPathComponent(name)
+        try png.write(to: url)
+        print("MT3-SHOT \(url.path) \(Int(bounds.width))x\(Int(bounds.height))")
+    }
+
+    /// The composer alone, bound to an observed draft as the detail view binds it.
+    @Observable
+    final class MT3Draft { var text = "" }
+
+    private struct MT3Composer: View {
+        let draft: MT3Draft
+        var body: some View {
+            ComposerTextView(text: Binding(get: { draft.text }, set: { draft.text = $0 }),
+                             placeholder: "Message Jesse…", onSend: {})
+                .frame(maxWidth: .infinity)
+                .padding(8)
+                .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+                .padding(12)
+        }
+    }
+
+    /// Type `text` through the composer's real key path: each character a key press, each
+    /// line break Shift plus Return.
+    private func type(_ text: String, into view: ComposerNSTextView, host: NSView) {
+        for character in text {
+            let isReturn = character == "\n"
+            let characters = isReturn ? "\r" : String(character)
+            view.keyDown(with: NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: isReturn ? .shift : [],
+                timestamp: 0, windowNumber: 0, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false,
+                keyCode: isReturn ? ComposerKeyCode.return : 0)!)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.001))
+            host.layoutSubtreeIfNeeded()
+        }
+        for _ in 0..<5 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            host.layoutSubtreeIfNeeded()
+        }
+    }
+
+    // 1. The reply to the fixture message, and the changelog paragraph whose long span wraps.
+    func testMT3Shot1Reply() throws {
+        let reply = try MT3Fixture.reply()
+        let prose = try MT3Fixture.changelogParagraph()
+        let host = hosted(page(VStack(alignment: .leading, spacing: 14) {
+            MacTurnBubble(turn: Turn(role: .jesse, text: reply))
+            MacTurnBubble(turn: Turn(role: .jesse, text: prose))
+        }))
+        try writeMT3(host, "1-reply-chips.png")
+    }
+
+    // 2. The user bubble holding the fixture message.
+    func testMT3Shot2Bubble() throws {
+        let host = hosted(page(MacTurnBubble(turn: Turn(role: .user, text: try MT3Fixture.message()))))
+        try writeMT3(host, "2-bubble-chips.png")
+    }
+
+    // 3. The composer holding the fixture text, mid typing.
+    func testMT3Shot3ComposerTyping() throws {
+        let draft = MT3Draft()
+        let host = hosted(MT3Composer(draft: draft)
+            .frame(width: Self.width).background(Color(nsColor: .windowBackgroundColor)), height: 200)
+        let composer = try XCTUnwrap(MacLargePasteTests.composerTextView(in: host))
+        host.window?.makeFirstResponder(composer)
+        let message = try MT3Fixture.message()
+        let cut = message.range(of: "Nothing to do, just")!.upperBound
+        type(String(message[..<cut]) + " **really** _just_", into: composer, host: host)
+        try writeMT3(host, "3-composer-typing.png")
+    }
+
+    // 4. The composer at its ceiling: ten lines and a staged image, the caret on the last.
+    func testMT3Shot4ComposerCeiling() throws {
+        let (host, composer, _) = try mt3Detail(turns: [])
+        XCTAssertTrue(composer.readSelection(from: try mt3ImageBoard()), "the image was not staged")
+        let lines = (1...10).map { "Line \($0) of the message, with `code` in it and **bold** too" }
+            .joined(separator: "\n")
+        type(lines, into: composer, host: host)
+        try writeMT3(host, "4-composer-ceiling-attachment.png")
+    }
+
+    // 5. The whole detail view: the fixture turn and its reply, the composer holding styled text.
+    func testMT3Shot5DetailView() throws {
+        let (host, composer, _) = try mt3Detail(turns: [
+            (.user, try MT3Fixture.message()),
+            (.jesse, try MT3Fixture.reply()),
+        ])
+        type("Next: does `ComposerMarkdown` style **bold** while I type?\n```swift\nlet ok = true\n```",
+             into: composer, host: host)
+        try writeMT3(host, "5-detail-view.png")
+    }
+
+    private func mt3Detail(turns: [(TurnRole, String)]) throws
+        -> (NSHostingView<some View>, ComposerNSTextView, ModelContext) {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MacTranscriptScreenshotTests.\(UUID().uuidString)")
+        if previousDrafts == nil { previousDrafts = ComposerDraftStore.shared }
+        ComposerDraftStore.shared = ComposerDraftStore(writer: ComposerDraftFileWriter(root: scratch))
+        let context = try MacTestFixtures.context()
+        let thread = JesseThread(mode: .ask)
+        context.insert(thread)
+        for (index, (role, text)) in turns.enumerated() {
+            let turn = Turn(role: role, text: text,
+                            createdAt: Date(timeIntervalSince1970: 1_800_000_000 + Double(index)))
+            turn.thread = thread
+        }
+        try context.save()
+        let coordinator = MacCoordinator(configStore: MacTestFixtures.configured(),
+                                         makeClient: { _ in MacFakeBridgeClient() },
+                                         sessionDeletionStore: MacTestFixtures.deletionStore())
+        let host = hosted(MacThreadDetailView(thread: thread)
+            .environment(coordinator)
+            .modelContext(context)
+            .frame(width: Self.width, height: 700), height: 700, key: false)
+        host.window?.appearance = NSAppearance(named: .aqua)
+        let composer = try XCTUnwrap(MacLargePasteTests.composerTextView(in: host))
+        host.window?.makeFirstResponder(composer)
+        return (host, composer, context)
+    }
+
+    private func mt3ImageBoard() throws -> NSPasteboard {
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 640, pixelsHigh: 480,
+                                                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                                 isPlanar: false, colorSpaceName: .deviceRGB,
+                                                 bytesPerRow: 0, bitsPerPixel: 0))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.systemTeal.setFill()
+        NSRect(x: 0, y: 0, width: 640, height: 480).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        let board = NSPasteboard(name: NSPasteboard.Name("JesseMacTests.shot.\(UUID().uuidString)"))
+        board.clearContents()
+        board.setData(png, forType: .png)
+        mt3Boards.append(board)
+        return board
     }
 }

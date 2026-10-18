@@ -27,7 +27,8 @@ final class MarkdownInlineTests: XCTestCase {
     func testCodeIntentIsMonospaced() {
         let font = MarkdownInline.resolvedFont(base: base, intent: .code)
         XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace))
-        XCTAssertEqual(font.pointSize, base.pointSize)
+        // A monospaced face reads larger at the same size, so code is set a little smaller.
+        XCTAssertEqual(font.pointSize, base.pointSize * MarkdownInline.codeScale, accuracy: 0.01)
     }
 
     func testBoldItalicCombinesBothTraits() {

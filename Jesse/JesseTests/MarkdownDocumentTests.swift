@@ -256,4 +256,72 @@ final class MarkdownDocumentTests: XCTestCase {
         XCTAssertGreaterThan(secondColumnStop(accessible), secondColumnStop(normal),
                              "table columns must be measured at the size they are drawn at")
     }
+
+    // MARK: - Inline code chips (MT3)
+
+    /// The MT3 report's fixtures, read from the Mac test bundle's source folder (the simulator
+    /// reads the checkout directly). The files end in a newline; the text sent did not.
+    private func mt3(_ name: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("JesseMacTests/Fixtures/\(name).md")
+        var text = try String(contentsOf: url, encoding: .utf8)
+        if text.hasSuffix("\n") { text.removeLast() }
+        return text
+    }
+
+    /// Every inline code run gets exactly one `.inlineCode` decoration covering exactly its
+    /// text, in the label colour and in white; the fenced block's card is unchanged.
+    func testEveryInlineCodeRunHasOneChipDecoration() throws {
+        let message = try mt3("MT3-Message")
+        let reply = try mt3("MT3-Reply")
+        let prose = try mt3("MT3-Changelog-Paragraph")
+        for color in [UIColor.label, UIColor.white] {
+            for (text, spans) in [(message, ["TEST"]), (reply, ["TEST"]),
+                                  (prose, ["McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs",
+                                           "…+house+healthdb+clockify-rs+runn-rs", "capability-map.toml",
+                                           "upstream-pod", "golden/capability-args.json", "direct", "+runn-rs"])] {
+                let doc = MarkdownDocument.build(text, color: color)
+                let ns = doc.attributed.string as NSString
+                let chips = doc.decorations.filter { $0.kind == .inlineCode }
+                XCTAssertEqual(chips.map { ns.substring(with: $0.range) }, spans)
+            }
+        }
+        let doc = MarkdownDocument.build(message)
+        let cards = doc.decorations.filter { $0.kind.isCard }
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first.map { (doc.attributed.string as NSString).substring(with: $0.range) },
+                       "Test test test")
+        XCTAssertFalse(doc.attributed.string.contains("`"), "a backtick reached the rendered text")
+    }
+
+    /// At the real text view, a span draws one chip per line fragment it occupies: the long
+    /// span in the changelog paragraph wraps at 400 points and gets one chip per line.
+    func testAChipIsDrawnPerLineFragment() throws {
+        let view = MarkdownDocumentTextView()
+        view.frame = CGRect(x: 0, y: 0, width: 400, height: 2000)
+        view.apply(MarkdownDocument.build(try mt3("MT3-Changelog-Paragraph")))
+        view.layoutManager.ensureLayout(for: view.textContainer)
+        var wrapped = false
+        for chip in view.document.decorations where chip.kind == .inlineCode {
+            let glyphs = view.layoutManager.glyphRange(forCharacterRange: chip.range,
+                                                       actualCharacterRange: nil)
+            var fragments = 0
+            view.layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, _, _ in
+                fragments += 1
+            }
+            XCTAssertEqual(view.chipRects(for: chip.range).count, fragments)
+            if fragments > 1 { wrapped = true }
+        }
+        XCTAssertTrue(wrapped, "no span wrapped at 400 points, so the per line case is untested")
+    }
+
+    /// A chip is drawing, never text: copy across a paragraph holding inline code is the
+    /// source text with its backticks gone, exactly as before chips existed.
+    func testCopyAcrossInlineCodeIsUnchanged() throws {
+        let doc = MarkdownDocument.build(try mt3("MT3-Reply"))
+        let all = NSRange(location: 0, length: (doc.attributed.string as NSString).length)
+        XCTAssertEqual(doc.plainText(for: all),
+                       "Your formatting came through as Markdown:\n\n•\tTEST arrived as inline code.\n•\t\"Test test test\" arrived as a fenced code block.")
+    }
 }

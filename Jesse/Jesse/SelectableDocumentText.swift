@@ -92,7 +92,7 @@ final class MarkdownDocumentTextView: UITextView {
             .resolvedColor(with: traitCollection)
         let rule = UIColor.separator.resolvedColor(with: traitCollection)
 
-        for decoration in document.decorations {
+        for decoration in document.decorations where decoration.kind.isCard {
             guard let body = usedRect(for: decoration.range) else { continue }
             let card = CGRect(x: 0,
                               y: body.minY - pad,
@@ -112,6 +112,41 @@ final class MarkdownDocumentTextView: UITextView {
                                     height: thickness))
             }
         }
+
+        // Inline code chips, after the cards so a span in a table cell sits on its card. The
+        // card's colour at the card's strength.
+        let chipRadius = MarkdownDocument.Metrics.chipCornerRadius
+        context.setFillColor(fill.cgColor)
+        for decoration in document.decorations where decoration.kind == .inlineCode {
+            for chip in chipRects(for: decoration.range) {
+                UIBezierPath(roundedRect: chip, cornerRadius: chipRadius).fill()
+            }
+        }
+    }
+
+    /// The chips behind an inline code range, in view coordinates: one per line fragment
+    /// the span occupies, as wide as its glyphs on that line plus `chipPadding` each side
+    /// (kept inside the view), as tall as the line's used rect.
+    func chipRects(for range: NSRange) -> [CGRect] {
+        guard range.length > 0 else { return [] }
+        let manager = layoutManager
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return [] }
+        let pad = MarkdownDocument.Metrics.chipPadding
+        let width = textContainer.size.width
+        var chips: [CGRect] = []
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, lineGlyphs, _ in
+            let piece = NSIntersectionRange(lineGlyphs, glyphs)
+            guard piece.length > 0 else { return }
+            let ink = manager.boundingRect(forGlyphRange: piece, in: self.textContainer)
+            let minX = max(ink.minX - pad, 0)
+            let maxX = min(ink.maxX + pad, width)
+            guard maxX > minX else { return }
+            chips.append(CGRect(x: minX + self.textContainerInset.left,
+                                y: used.minY + self.textContainerInset.top,
+                                width: maxX - minX, height: used.height))
+        }
+        return chips
     }
 
     /// The union of the *used* line-fragment rects for a character range, in view

@@ -14,6 +14,40 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (196)] - 2026-10-18
+
+**The automatic morning refresh waits for the phone to unlock, so it always carries the
+weigh in.** Root cause: the automatic morning refresh did not check for a locked phone. A new
+weigh in fired it after a network round trip, and nothing asked whether Apple Health could
+still be read, so a turn sent or retried while the phone was locked carried only the locked
+line and no weigh in, and still recorded the day as done in `healthNewDayLastFiredDay`. After
+that no later weigh in fired anything that day, and unlike the workout log there was no
+pending record for an unlock to retry. The workout log had the same exposure and was fixed in
+1.0 (186); the morning refresh was left out of that change.
+
+- **Held on a locked phone, before and after the fetch.** `HealthAutoTrigger` checks
+  `isProtectedDataAvailable` before the dashboard fetch and again before staging the send.
+  Locked, it sends nothing, leaves the day unrecorded, and stores the diet day in
+  `healthNewDayHeldDay` beside the last fired day.
+- **Settled on unlock, on foreground and in the background refresh.** One `settle()` entry
+  point now covers the held morning refresh and the settled workouts, and it is what the
+  unlock observer, `RootTabView`'s foreground and `PushManager`'s background refresh call. A
+  hold for today's diet day fires once through the same path and is cleared when the turn is
+  sent, queued or already ran. A hold from a day that has since rolled is dropped and sends
+  nothing, because a stale morning would audit the wrong day.
+- **Held at send time too.** `HealthContextLockHold` now matches the morning refresh prompt
+  as well as the workout log, so an outbox retry or a capture queue replay that runs while the
+  phone is locked fails with `HealthContextLockedError` and stays for the next unlocked try.
+  A held replay comes back deferred, not refused, and a later replay after the day rolled is
+  still refused.
+- **Unchanged:** a turn sent from an unlocked phone, the Start new day button, the prompt
+  text (its constant is now declared `nonisolated`, like the workout log's, so the send path
+  can read it), and the workout ledger.
+- **Tests:** `HealthTurnTests` (a locked weigh in sends nothing and records no day; unlocking
+  and settling sends one refresh and records the day; yesterday's hold is dropped; a locked
+  replay through the real client defers, and a rolled day still refuses) and
+  `HealthContextTests.testOnlyTheLockedWorkoutLogAndMorningRefreshAreHeld`.
+
 ## [bridge 0.185.0] - 2026-10-18
 
 **The deploy installs the bridge's own launcher scripts, and its rollback message names a fix

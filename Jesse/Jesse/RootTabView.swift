@@ -263,11 +263,12 @@ struct RootTabView: View {
             todayModel.refreshPending()
             healthModel.refreshPending()
         }
-        // A workout burst whose settle window ran out while the app was suspended fires
-        // the moment the app is back, rather than waiting for a background wake.
+        // A morning refresh held by a locked phone, or a workout burst whose settle window
+        // ran out while the app was suspended, fires the moment the app is back, rather than
+        // waiting for a background wake.
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
-            Task { await HealthAutoTrigger.shared.settleWorkouts() }
+            Task { await HealthAutoTrigger.shared.settle() }
             // Feed the Studio's daily vitals ledger (sleep, resting HR, HRV and the rest) for
             // the Patterns engine: the backfill once per bridge, then the last few days.
             Task { await VitalsSync.shared.sync() }

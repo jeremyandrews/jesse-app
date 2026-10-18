@@ -318,9 +318,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// and re-armed after every run.
     @MainActor private lazy var refresh = BackgroundRefreshCoordinator(
         work: {
-            // A workout burst that was still settling when its HealthKit wake ended fires
-            // here if nothing sooner has fired it.
-            await HealthAutoTrigger.shared.settleWorkouts()
+            // A morning refresh held by a locked phone, or a workout burst that was still
+            // settling when its HealthKit wake ended, fires here if nothing sooner has fired it.
+            await HealthAutoTrigger.shared.settle()
             return await AppDelegate.delivery.periodicRefresh()
         })
 

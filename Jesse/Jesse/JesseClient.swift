@@ -287,8 +287,9 @@ struct JesseClient: JesseClientProtocol {
         // revoked permission can never surface a system prompt mid-turn.
         async let locationBlock = resolveLocationContext(text)
         let resolved = await health
-        // The automatic workout log gathered on a locked phone would log nothing. Refuse it
-        // before it leaves, so the outbox keeps it and retries it once the phone is unlocked.
+        // The automatic workout log or morning refresh gathered on a locked phone would log
+        // nothing. Refuse it before it leaves, so the outbox keeps it and retries it once the
+        // phone is unlocked.
         if HealthContextLockHold.shouldHold(text: text, locked: resolved.locked) {
             throw HealthContextLockedError()
         }
@@ -801,32 +802,32 @@ enum BridgeVersionStore {
     }
 }
 
-// MARK: - Holding a locked workout log
+// MARK: - Holding a locked Health turn
 
 /// Whether a turn must not be sent because the phone was locked when its health block
-/// was gathered. Only the automatic workout log: its whole job is to log the workouts that
-/// block carries, so sent without them it logs nothing, and the trigger has already marked
-/// them logged. Every other turn goes out with the locked line and the agent answers
-/// without Health.
+/// was gathered. Only the two Health turns whose whole job is to log what that block
+/// carries: the automatic workout log (its workouts) and the morning refresh (this
+/// morning's weigh-in). Sent without it, either one logs nothing while the day or the
+/// workouts are recorded as done. Every other turn goes out with the locked line and the
+/// agent answers without Health.
 ///
-/// A workout log can be staged unlocked and sent later (an outbox retry, the capture queue
+/// Either can be staged unlocked and sent later (an outbox retry, the capture queue
 /// replay), which is why this is asked at send time. It is recognized by its prompt text,
-/// because the replayed one is labeled `Automatic` rather than the workout log's own label.
-/// A turn staged by an older build carries that build's wording, so the earlier wordings in
-/// `HealthWorkoutLog.previousPrompts` are recognized too.
+/// because the replayed one is labeled `Automatic` rather than the turn's own label.
+/// A workout log staged by an older build carries that build's wording, so the earlier
+/// wordings in `HealthWorkoutLog.previousPrompts` are recognized too.
 nonisolated enum HealthContextLockHold {
     static func shouldHold(text: String, locked: Bool) -> Bool {
         guard locked else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return ([HealthWorkoutLog.prompt] + HealthWorkoutLog.previousPrompts).contains {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed
-        }
+        return ([HealthWorkoutLog.prompt, HealthNewDay.prompt] + HealthWorkoutLog.previousPrompts)
+            .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed }
     }
 }
 
-/// The pre-send failure a held workout log takes. It goes through the outbox like any
+/// The pre-send failure a held Health turn takes. It goes through the outbox like any
 /// other one, so the message is kept and retried, and the next retry on an unlocked phone
-/// (every foreground runs one) sends it with the workouts.
+/// (every foreground runs one) sends it with its health block.
 nonisolated struct HealthContextLockedError: LocalizedError, Equatable {
     var errorDescription: String? {
         "Held until the phone is unlocked: Apple Health can't be read while it is locked."

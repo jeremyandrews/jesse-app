@@ -16,7 +16,7 @@ import Foundation
 /// carries `ThreadOrigin.automatic` instead of a prefix, so the text stays byte-identical,
 /// and both write `lastFiredDayKey`.
 public enum HealthNewDay {
-    public static let prompt = "Start my new health day. This is the daily health and diet new-day refresh, and only that. Audit yesterday's diet logging and fix any errors, write yesterday's diet journal, roll the diet dashboard over to today, log this morning's weigh-in from my health data, then regenerate the fancy dashboard. Do only this. Do not run start of day, the inbox or message scanners, currency, cheatsheets, or any other routine."
+    public nonisolated static let prompt = "Start my new health day. This is the daily health and diet new-day refresh, and only that. Audit yesterday's diet logging and fix any errors, write yesterday's diet journal, roll the diet dashboard over to today, log this morning's weigh-in from my health data, then regenerate the fancy dashboard. Do only this. Do not run start of day, the inbox or message scanners, currency, cheatsheets, or any other routine."
 
     /// `UserDefaults` key holding the last DIET day (`DietDay.stamp`) this device ran the
     /// refresh for, by the button, by a new weigh-in, or folded into the morning routine.

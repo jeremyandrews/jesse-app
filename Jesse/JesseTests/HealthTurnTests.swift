@@ -4,6 +4,7 @@ import SwiftData
 import JesseCore
 import JesseNetworking
 import JesseDietDisplay
+import JesseTodayDisplay
 
 /// **Start-new-day through the real `HealthTurn`**, from the button and from the weigh-in.
 ///
@@ -197,6 +198,124 @@ final class HealthTurnTests: XCTestCase {
         XCTAssertNotNil(ledger.fired["walk-1343"], "marked fired once sent")
         withExtendedLifetime(coordinator) {}
     }
+
+    // MARK: - The automatic morning refresh on a locked phone
+
+    /// A first weigh-in of today's diet day, as the body-mass observer hands it over.
+    private static func weighIn(at date: Date) -> HealthArrivals<Date> {
+        HealthArrivals(items: [date], isBaseline: false, anchor: nil, deletedCount: 0)
+    }
+
+    /// A weigh-in that lands on a locked phone sends nothing, because the turn would carry no
+    /// weight, and leaves the day unrecorded so a later fire is still allowed.
+    func testALockedPhoneSendsNoMorningRefreshAndLeavesTheDayUnrecorded() async throws {
+        let defaults = freshDefaults()
+        let now = Date()
+        let client = PromptCountingClient()
+        let (trigger, coordinator) = await trigger(defaults: defaults,
+                                                   context: try Self.makeContext(),
+                                                   now: now, locked: { true }, client: client)
+
+        trigger.receiveBodyMass(Self.weighIn(at: now))
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthNewDay.prompt), 0, "no send while locked")
+        XCTAssertNil(defaults.string(forKey: HealthNewDay.lastFiredDayKey), "day not recorded")
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// Unlocked, the next settle sends the held refresh exactly once and records the day.
+    func testUnlockingThenSettlingSendsOneMorningRefreshAndRecordsTheDay() async throws {
+        let defaults = freshDefaults()
+        let now = Date()
+        let client = PromptCountingClient()
+        var locked = true
+        let (trigger, coordinator) = await trigger(defaults: defaults,
+                                                   context: try Self.makeContext(),
+                                                   now: now, locked: { locked }, client: client)
+
+        trigger.receiveBodyMass(Self.weighIn(at: now))
+        await Self.settle()
+        XCTAssertEqual(client.count(of: HealthNewDay.prompt), 0, "held while locked")
+
+        locked = false
+        await trigger.settle()
+        await trigger.settle()
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthNewDay.prompt), 1, "exactly one refresh")
+        XCTAssertEqual(defaults.string(forKey: HealthNewDay.lastFiredDayKey),
+                       DietDay.stamp(for: now))
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.heldMorningRefreshKey),
+                     "the hold is cleared once sent")
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// A refresh held for a morning that has since rolled is dropped, never sent: it would
+    /// audit the wrong day.
+    func testARefreshHeldFromYesterdayIsClearedAndSendsNothing() async throws {
+        let defaults = freshDefaults()
+        let now = Date()
+        defaults.set(DietDay.stamp(for: now.addingTimeInterval(-24 * 3600)),
+                     forKey: HealthAutoTrigger.heldMorningRefreshKey)
+        let client = PromptCountingClient()
+        let (trigger, coordinator) = await trigger(defaults: defaults,
+                                                   context: try Self.makeContext(),
+                                                   now: now, locked: { false }, client: client)
+
+        await trigger.settle()
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthNewDay.prompt), 0)
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.heldMorningRefreshKey))
+        XCTAssertNil(defaults.string(forKey: HealthNewDay.lastFiredDayKey))
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// A morning refresh held in the capture queue and replayed while the phone is locked
+    /// goes through the real client, which refuses it before it leaves: the replay defers
+    /// rather than refusing, and the outbox row says why. A later replay after the day rolled
+    /// is still refused for that reason, so a stale morning never runs.
+    func testALockedReplayOfTheMorningRefreshDefersAndARolledDayStillRefuses() async throws {
+        let context = try Self.makeContext()
+        let config = JesseConfig(host: "127.0.0.1", port: 1, token: "tok")
+        let client = JesseClient(config: config,
+                                 healthProvider: LockedHealth(),
+                                 isHealthContextEnabled: { true },
+                                 healthClassifier: HealthKeywordClassifier(),
+                                 isLocationContextEnabled: { false },
+                                 mealCorrectionsAck: { nil },
+                                 readableSnapshotCache: nil)
+        let coordinator = RunCoordinator(config: { config }, makeClient: { _ in client })
+        let sender = CoordinatorTellSender(coordinator: coordinator,
+                                           context: FixedContext(context))
+        let store = HeldRuns()
+        store.append(PendingIntentRecord(
+            kind: .startNewDay, dayDate: Self.day,
+            payload: PendingIntentPayload(origin: ThreadOrigin.automatic.rawValue)))
+        let dietDay = LiveDietDay(Self.day)
+        let replayer = IntentReplayer(store: store,
+                                      day: TodayDashboardModel(makeClient: { NoToday() }),
+                                      makeClient: { NoToday() }, tell: sender,
+                                      dietDay: { dietDay.value })
+
+        let locked = await replayer.replayAll()
+        XCTAssertEqual(locked, [.deferred])
+        XCTAssertEqual(store.all().first?.state, .queued, "still held for the next replay")
+        let row = try XCTUnwrap(context.fetch(FetchDescriptor<OutboxItem>()).first)
+        XCTAssertEqual(row.lastError, HealthContextLockedError().errorDescription,
+                       "held for the lock, not failed on the network")
+
+        dietDay.value = "2026-08-23"
+        let rolled = await replayer.replayAll()
+        XCTAssertEqual(rolled.count, 1)
+        guard case .refused = rolled.first else {
+            return XCTFail("a rolled day refuses the held morning, got \(rolled)")
+        }
+        XCTAssertEqual(try context.fetch(FetchDescriptor<OutboxItem>()).count, 1,
+                       "the refused replay staged nothing")
+        withExtendedLifetime(coordinator) {}
+    }
 }
 
 // MARK: - Doubles
@@ -248,4 +367,46 @@ private final class HeldRuns: PendingIntentStoring {
         records[i] = record
     }
     func delete(id: UUID) { records.removeAll { $0.id == id } }
+}
+
+/// The diet day the replayer reads, so a test can roll it between two replays.
+@MainActor
+private final class LiveDietDay {
+    nonisolated deinit {}
+    var value: String
+    init(_ value: String) { self.value = value }
+}
+
+/// Apple Health on a locked phone: nothing readable, and it says so.
+private struct LockedHealth: HealthContextProviding {
+    func snapshot() async -> HealthSnapshot { .locked }
+}
+
+/// The replayer's one store, handed over as the app's provider would.
+@MainActor
+private final class FixedContext: ModelContextProviding {
+    nonisolated deinit {}
+    let modelContext: ModelContext?
+    init(_ context: ModelContext) { modelContext = context }
+}
+
+/// A Today endpoint that is never reached: a Start-new-day replay does not read the day file.
+private struct NoToday: TodayProviding {
+    struct Unused: Error {}
+    func getToday(ifNoneMatch: String?) async throws -> TodayFetchResult { throw Unused() }
+    func checkItem(id: String, checked: Bool, evidence: String?, at: Date,
+                   day: String?, ifMatch: String) async throws -> TodayMutationResult {
+        throw Unused()
+    }
+    func moveItem(id: String, op: TodayMoveOp, at: Date,
+                  day: String?, ifMatch: String) async throws -> TodayMutationResult {
+        throw Unused()
+    }
+    func postpone(id: String, deferred: Bool, at: Date,
+                  day: String?, ifMatch: String) async throws -> TodayMutationResult {
+        throw Unused()
+    }
+    func glance(id: String, at: Date, ifMatch: String) async throws -> TodayMutationResult {
+        throw Unused()
+    }
 }

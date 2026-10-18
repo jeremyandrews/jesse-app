@@ -384,4 +384,191 @@ final class MacReplySelectionTests: XCTestCase {
         _ = host(MacTurnBubble(turn: Turn(role: .user, text: megabyte)).frame(width: 800))
         print("MT1-TIMING first render 1 MB user turn: \(String(format: "%.3f", Date().timeIntervalSince(start))) s")
     }
+
+    // MARK: - Inline code is visibly code (MT3)
+
+    /// Every inline code run is one `.inlineCode` decoration, and the view draws one chip per
+    /// line fragment it occupies, in both styles; the long span in the changelog paragraph
+    /// wraps at 400 points. The fence's card is unchanged in count and range.
+    func testEveryInlineCodeRunHasOneChipPerLineFragment() throws {
+        let texts = [try MT3Fixture.message(), try MT3Fixture.reply(), try MT3Fixture.changelogParagraph()]
+        var wrapped = false
+        for style in [MacDocumentStyle.reply, .bubble] {
+            for text in texts {
+                let host = host(MacDocumentText(text: text, style: style).frame(width: 400), width: 400)
+                let view = try XCTUnwrap(Self.documentViews(in: host).first)
+                let ns = view.string as NSString
+                let chips = view.document.decorations.filter { $0.kind == .inlineCode }
+                var marked: [NSRange] = []
+                view.textStorage?.enumerateAttribute(.markdownInlineCode,
+                                                     in: NSRange(location: 0, length: ns.length)) { value, range, _ in
+                    if value != nil { marked.append(range) }
+                }
+                XCTAssertFalse(chips.isEmpty)
+                XCTAssertEqual(chips.map(\.range), marked, "a run without exactly one chip decoration")
+                for chip in chips {
+                    let manager = try XCTUnwrap(view.layoutManager)
+                    let glyphs = manager.glyphRange(forCharacterRange: chip.range, actualCharacterRange: nil)
+                    var fragments = 0
+                    manager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, _, _ in fragments += 1 }
+                    XCTAssertEqual(view.chipRects(for: chip.range).count, fragments,
+                                   "\(style) \(ns.substring(with: chip.range))")
+                    if fragments > 1 { wrapped = true }
+                }
+                if text == texts[0] {
+                    let cards = view.document.decorations.filter { $0.kind.isCard }
+                    XCTAssertEqual(cards.map(\.kind), [.code])
+                    XCTAssertEqual(cards.first.map { ns.substring(with: $0.range) }, "Test test test")
+                }
+            }
+        }
+        XCTAssertTrue(wrapped, "no span wrapped at 400 points, so the per line case is untested")
+    }
+
+    /// A chip is drawing, never text: a selection across the reply's paragraph and the list
+    /// copies exactly what it did before chips existed.
+    func testCopyAcrossInlineCodeIsUnchanged() throws {
+        let view = try XCTUnwrap(Self.documentViews(in: host(reply(try MT3Fixture.reply()))).first)
+        let ns = view.string as NSString
+        let start = ns.range(of: "Markdown:")
+        let end = ns.range(of: "inline code.")
+        view.setSelectedRange(NSRange(location: start.location,
+                                      length: end.location + end.length - start.location))
+        XCTAssertEqual(copied(from: view), "Markdown:\n\n•\tTEST arrived as inline code.")
+        view.selectAll(nil)
+        XCTAssertEqual(copied(from: view),
+                       "Your formatting came through as Markdown:\n\n•\tTEST arrived as inline code.\n•\t\"Test test test\" arrived as a fenced code block.")
+    }
+
+
+    /// The real message from the report: an inline span (`TEST`) beside a fence. Built and
+    /// rendered in both styles, the span carries the monospaced face, and the background
+    /// behind it differs from the background beside it on the same line by a fixed threshold.
+    /// A font check alone passed on App 1.0 (197), where nothing a reader could see marked
+    /// the span; this reads the pixels.
+    func testInlineCodeIsVisiblyDistinctInAReplyAndInABubble() throws {
+        let cases: [(TurnRole, String, String)] = [
+            (.user, try MT3Fixture.message(), "bubble"),
+            (.jesse, try MT3Fixture.reply(), "reply"),
+        ]
+        for (role, text, name) in cases {
+            let host = host(MT3Fixture.page(MacTurnBubble(turn: Turn(role: role, text: text))))
+            let view = try XCTUnwrap(Self.documentViews(in: host).first, name)
+            let ns = view.string as NSString
+            let span = ns.range(of: "TEST")
+            XCTAssertNotEqual(span.location, NSNotFound, name)
+            let font = try XCTUnwrap(view.textStorage?.attribute(.font, at: span.location,
+                                                                  effectiveRange: nil) as? NSFont)
+            XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.monoSpace),
+                          "\(name): the TEST run lost its monospaced face on the way to the view")
+            let rendered = try MT3Fixture.render(host, name: "inline-\(name).png")
+            let glyphs = try XCTUnwrap(MT3Fixture.glyphRect(of: span, in: view, relativeTo: host))
+            let inside = try XCTUnwrap(rendered.background(in: glyphs))
+            let beside = try XCTUnwrap(rendered.background(in: NSRect(
+                x: glyphs.maxX + 6, y: glyphs.minY, width: 40, height: glyphs.height)))
+            let difference = MT3Fixture.difference(inside, beside)
+            print("MT3-PIXELS \(name): inside \(inside) beside \(beside) difference \(difference) font \(font.fontName) \(font.pointSize)")
+            XCTAssertGreaterThanOrEqual(difference, MT3Fixture.visibleDifference,
+                                        "\(name): the TEST span's background is the line's background")
+        }
+    }
+}
+
+/// The MT3 report's real message and reply, and the offscreen pixel reading the inline code
+/// tests share. The files end in a newline, as files do; the text sent did not.
+@MainActor
+enum MT3Fixture {
+    static func text(_ name: String) throws -> String {
+        let bundle = Bundle(for: MacReplySelectionTests.self)
+        guard let url = bundle.url(forResource: name, withExtension: "md") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        var text = try String(contentsOf: url, encoding: .utf8)
+        if text.hasSuffix("\n") { text.removeLast() }
+        return text
+    }
+
+    static func message() throws -> String { try text("MT3-Message") }
+    static func reply() throws -> String { try text("MT3-Reply") }
+    static func changelogParagraph() throws -> String { try text("MT3-Changelog-Paragraph") }
+
+    /// The smallest per channel difference, out of 255, that counts as a visible background.
+    static let visibleDifference = 8
+
+    /// Where the MT3 PNGs land: `build/screenshots/mt3/` at the top of the checkout.
+    static var directory: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/screenshots/mt3", isDirectory: true)
+    }
+
+    /// A transcript row on the window's background, light appearance, as wide as the shots.
+    static func page<V: View>(_ content: V) -> some View {
+        content
+            .padding(20)
+            .frame(width: 1200, alignment: .topLeading)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light)
+    }
+
+    struct Rendered {
+        let rep: NSBitmapImageRep
+        let size: NSSize
+        let flipped: Bool
+
+        /// The most common colour in `rect` (host coordinates), quantized: the background,
+        /// since glyphs cover well under half of a run of text.
+        func background(in rect: NSRect) -> [Int]? {
+            let scale = CGFloat(rep.pixelsWide) / size.width
+            let top = flipped ? rect.minY : size.height - rect.maxY
+            let x0 = Int((rect.minX * scale).rounded()), x1 = Int((rect.maxX * scale).rounded())
+            let y0 = Int((top * scale).rounded()), y1 = Int(((top + rect.height) * scale).rounded())
+            guard x0 >= 0, y0 >= 0, x1 <= rep.pixelsWide, y1 <= rep.pixelsHigh,
+                  x1 > x0, y1 > y0 else { return nil }
+            var counts: [[Int]: Int] = [:]
+            for y in y0..<y1 {
+                for x in x0..<x1 {
+                    guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                    let key = [color.redComponent, color.greenComponent, color.blueComponent]
+                        .map { Int(($0 * 255).rounded()) / 2 * 2 }
+                    counts[key, default: 0] += 1
+                }
+            }
+            return counts.max { $0.value < $1.value }?.key
+        }
+    }
+
+    /// Draw `host` into a bitmap the way the screenshot tests do. The PNG is kept only when
+    /// the run asks for screenshots (`TEST_RUNNER_MT3_SCREENSHOTS=1`), so the gate writes no files.
+    static func render(_ host: NSView, name: String,
+                       appearance: NSAppearance.Name = .aqua) throws -> Rendered {
+        host.layoutSubtreeIfNeeded()
+        host.window?.appearance = NSAppearance(named: appearance)
+        host.display()
+        let bounds = host.bounds
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: bounds) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        host.cacheDisplay(in: bounds, to: rep)
+        if ProcessInfo.processInfo.environment["MT3_SCREENSHOTS"] == "1",
+           let png = rep.representation(using: .png, properties: [:]) {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try png.write(to: directory.appendingPathComponent(name))
+        }
+        return Rendered(rep: rep, size: bounds.size, flipped: host.isFlipped)
+    }
+
+    /// The glyphs of `range` in `view`, in `host` coordinates.
+    static func glyphRect(of range: NSRange, in view: NSTextView, relativeTo host: NSView) -> NSRect? {
+        guard let manager = view.layoutManager, let container = view.textContainer else { return nil }
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        rect.origin.x += view.textContainerOrigin.x
+        rect.origin.y += view.textContainerOrigin.y
+        return view.convert(rect, to: host)
+    }
+
+    static func difference(_ a: [Int], _ b: [Int]) -> Int {
+        zip(a, b).map { abs($0 - $1) }.max() ?? 0
+    }
 }

@@ -36,7 +36,9 @@ struct JesseMacApp: App {
         // legitimately in flight at launch. Same rule, same reasoning, as the phone's.
         RecordingWorkingCopy.standard().purge()
 
-        let cfg = MacConfigStore()
+        let cfg = Self.isUnitTestHost
+            ? MacConfigStore(config: JesseConfig(host: "", port: JesseConfig.defaultPort, token: ""))
+            : MacConfigStore()
         _configStore = State(initialValue: cfg)
         _coordinator = State(initialValue: MacCoordinator(configStore: cfg))
         store = MacModelContainer.open()
@@ -44,6 +46,21 @@ struct JesseMacApp: App {
         // Notes open from the Studio first and every write to one is sent there, the
         // phone's rule and the phone's reason; see `VaultNoteOpener` and `VaultWriteOutbox`.
         VaultBridgeWiring.install { JesseBridgeClient(config: cfg.config) }
+    }
+
+    /// Whether this launch is the host of a unit test bundle (`xcodebuild test`), which loads
+    /// its tests into this app. Such a launch never reads the login Keychain: a locally built,
+    /// unsigned test host is a different code identity from the app that stored the pairing,
+    /// so the read raised a Keychain access prompt on the screen of whoever was using the Mac
+    /// and the run hung until the runner gave up. The tests build their own stores. Release
+    /// builds never answer yes.
+    private static var isUnitTestHost: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+        #else
+        false
+        #endif
     }
 
     var body: some Scene {

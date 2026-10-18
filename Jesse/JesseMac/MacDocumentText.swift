@@ -37,6 +37,15 @@ enum MacDocumentStyle: Equatable {
         }
     }
 
+    /// The chip behind an inline code span: the card's colour family at the card's strength,
+    /// a little stronger on the tint so it reads against it.
+    var chipFill: NSColor {
+        switch self {
+        case .reply: return NSColor.secondaryLabelColor.withAlphaComponent(0.12)
+        case .bubble: return NSColor.white.withAlphaComponent(0.22)
+        }
+    }
+
     var rule: NSColor {
         switch self {
         case .reply: return .separatorColor
@@ -140,7 +149,11 @@ final class MacDocumentTextView: NSTextView {
                 let bounds = manager.boundingRect(forGlyphRange: lineGlyphs, in: container)
                 widest = max(widest, bounds.maxX)
             }
-            if !document.decorations.isEmpty { widest = width }
+            if document.decorations.contains(where: { $0.kind == .inlineCode }) {
+                // Room for a chip that ends a line to reach past its last glyph.
+                widest += MarkdownDocument.Metrics.chipPadding
+            }
+            if document.decorations.contains(where: { $0.kind.isCard }) { widest = width }
             used.size.width = min(widest, width)
         }
         // The container tracks the frame's width only when the frame CHANGES, so a probe at
@@ -164,7 +177,7 @@ final class MacDocumentTextView: NSTextView {
         guard !document.decorations.isEmpty else { return }
         let pad = MarkdownDocument.Metrics.cardPadding
         let radius = MarkdownDocument.Metrics.cardCornerRadius
-        for decoration in document.decorations {
+        for decoration in document.decorations where decoration.kind.isCard {
             guard let body = usedRect(for: decoration.range) else { continue }
             let card = NSRect(x: 0, y: body.minY - pad, width: bounds.width,
                               height: body.height + pad * 2)
@@ -180,6 +193,40 @@ final class MacDocumentTextView: NSTextView {
                 NSRect(x: pad, y: y, width: max(bounds.width - pad * 2, 0), height: thickness).fill()
             }
         }
+
+        // Chips after cards, so a span in a table cell sits on its card.
+        let chipRadius = MarkdownDocument.Metrics.chipCornerRadius
+        style.chipFill.setFill()
+        for decoration in document.decorations where decoration.kind == .inlineCode {
+            for chip in chipRects(for: decoration.range) {
+                NSBezierPath(roundedRect: chip, xRadius: chipRadius, yRadius: chipRadius).fill()
+            }
+        }
+    }
+
+    /// The chips behind an inline code range, in view coordinates: one per line fragment the
+    /// span occupies, as wide as its glyphs on that line plus `chipPadding` each side (kept
+    /// inside the view), as tall as the line's used rect.
+    func chipRects(for range: NSRange) -> [NSRect] {
+        guard range.length > 0, let manager = layoutManager, let container = textContainer else {
+            return []
+        }
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return [] }
+        let pad = MarkdownDocument.Metrics.chipPadding
+        var chips: [NSRect] = []
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, lineGlyphs, _ in
+            let piece = NSIntersectionRange(lineGlyphs, glyphs)
+            guard piece.length > 0 else { return }
+            let ink = manager.boundingRect(forGlyphRange: piece, in: container)
+            let minX = max(ink.minX - pad, 0)
+            let maxX = min(ink.maxX + pad, container.size.width)
+            guard maxX > minX else { return }
+            chips.append(NSRect(x: minX + self.textContainerOrigin.x,
+                                y: used.minY + self.textContainerOrigin.y,
+                                width: maxX - minX, height: used.height))
+        }
+        return chips
     }
 
     /// The union of the USED line fragment rects for a character range, in view coordinates:

@@ -47,6 +47,10 @@ enum MarkdownInline {
                 .font: resolvedFont(base: font, intent: intent),
                 .foregroundColor: color,
             ]
+            if intent.contains(.code) {
+                // What lets a document view find the span again and draw its chip.
+                attrs[.markdownInlineCode] = true
+            }
             if let link = run.link {
                 // The text view colors links via its `tintColor`; the attribute
                 // just makes the run a tappable link.
@@ -76,8 +80,12 @@ enum MarkdownInline {
         return result
     }
 
+    /// A monospaced face reads larger than the system face at the same point size, so an
+    /// inline code span is set at this fraction of the text around it.
+    static let codeScale: CGFloat = 0.92
+
     /// The base `font` with the bold/italic/monospaced traits implied by `intent`.
-    /// `code` switches to a monospaced face at the same point size (carrying any
+    /// `code` switches to a monospaced face at `codeScale` of the point size (carrying any
     /// bold/italic that is also set); otherwise bold/italic are layered onto the
     /// base descriptor's existing traits.
     static func resolvedFont(base: PlatformFont, intent: InlinePresentationIntent) -> PlatformFont {
@@ -86,9 +94,15 @@ enum MarkdownInline {
         if intent.contains(.code) {
             // A code span replaces the base face's traits with its own, rather than merging
             // into them: it is a different face, carrying only the emphasis also set.
-            return PlatformFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
+            return PlatformFont.monospacedSystemFont(ofSize: base.pointSize * codeScale, weight: .regular)
                 .markdownAdding(bold: bold, italic: italic, merging: false)
         }
         return base.markdownAdding(bold: bold, italic: italic)
     }
+}
+
+extension NSAttributedString.Key {
+    /// Marks the characters of an inline code span. The text is unchanged; the document
+    /// turns each marked run into a `.inlineCode` decoration, which the view draws as a chip.
+    static let markdownInlineCode = NSAttributedString.Key("JesseMarkdownInlineCode")
 }

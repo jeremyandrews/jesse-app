@@ -64,6 +64,12 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        // Room to grow taller than the scroll view. Unset, AppKit kept the maximum at the
+        // frame the clip view gave the text view, so past `maxLines` the text view stopped at
+        // the scroll view's height, there was nothing to scroll, and the caret's line sat
+        // below the visible rect: a composer that grew but hid the line being typed.
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
 
         // Match a SwiftUI TextField: spell check and autocorrect on. Smart quote and smart dash
         // substitution stay OFF: a composer whose text goes to a coding agent must deliver what
@@ -79,6 +85,8 @@ struct ComposerTextView: NSViewRepresentable {
         // takes, so a Photos item or a screenshot thumbnail reaches `performDragOperation`.
         textView.registerForDraggedTypes(
             Array(Set(textView.registeredDraggedTypes + MacPasteboardMedia.pasteboardTypes + [.fileURL])))
+        // After the font, which `font =` sets across the whole storage.
+        textView.markdownStyler.restyle()
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -207,6 +215,7 @@ struct ComposerTextView: NSViewRepresentable {
             // This replacement is not undoable, so nothing recorded before it can be undone
             // safely (see `composerUndoManager`). Start the composer's history fresh.
             composerUndoManager.removeAllActions()
+            (textView as? ComposerNSTextView)?.markdownStyler.restyle()
             textView.needsDisplay = true
         }
     }
@@ -248,6 +257,9 @@ final class ComposerNSTextView: NSTextView {
     /// the view keeps it.
     private var ownedStorage: NSTextStorage?
 
+    /// Styles the Markdown being typed, display only (see `ComposerMarkdown`).
+    let markdownStyler = ComposerMarkdownStyler()
+
     /// An explicit TextKit 1 stack with non contiguous layout, so a large paste lays out only
     /// what is on screen and what the height measurement asks for, never the whole text up
     /// front. Explicit rather than the implicit fallback reading `layoutManager` triggers on a
@@ -263,14 +275,35 @@ final class ComposerNSTextView: NSTextView {
         manager.addTextContainer(container)
         super.init(frame: frameRect, textContainer: container)
         ownedStorage = storage
+        attachStyler()
     }
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
+        attachStyler()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        attachStyler()
+    }
+
+    private func attachStyler() {
+        markdownStyler.textView = self
+        textStorage?.delegate = markdownStyler
+    }
+
+    /// Text typed next is always plain body text. AppKit takes the typing attributes from the
+    /// character before the caret, which may be a styled one; styling is the styler's to
+    /// apply, and a big paste must arrive unstyled so dropping styling past the limit is free.
+    override var typingAttributes: [NSAttributedString.Key: Any] {
+        get { super.typingAttributes }
+        set {
+            var plain = newValue
+            plain[.font] = Self.composerFont
+            plain[.foregroundColor] = NSColor.labelColor
+            super.typingAttributes = plain
+        }
     }
 
     // MARK: Media: Paste, drop, Continuity Camera
@@ -370,8 +403,16 @@ final class ComposerNSTextView: NSTextView {
 
     override func didChangeText() {
         super.didChangeText()
+        markdownStyler.restyle()
         // The placeholder appears and disappears with emptiness.
         needsDisplay = true
+    }
+
+    /// The fence tints and code chips go down with the background, under the text and the
+    /// selection.
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        markdownStyler.drawBackground(in: rect)
     }
 
     override func draw(_ dirtyRect: NSRect) {

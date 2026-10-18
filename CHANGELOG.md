@@ -14,6 +14,13 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (198)] - 2026-10-18
+
+**Inline code sits on a chip in replies and bubbles, and the Mac composer styles Markdown as you
+type.** Root cause: inline code was marked only by a font swap, which is invisible on a short span
+such as `TEST`. The composer also hid the caret's line past eight lines, because its text view
+could never grow taller than the scroll view.
+
 ## [App 1.0 (197)] - 2026-10-18
 
 **Mac: a large paste no longer hangs the app, code renders as code, and one selection covers a

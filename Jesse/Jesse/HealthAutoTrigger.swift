@@ -134,6 +134,12 @@ final class HealthAutoTrigger {
     /// of dates and identifiers, beside `HealthNewDay.lastFiredDayKey` in the same store.
     static let ledgerKey = "healthWorkoutLedger"
 
+    /// `UserDefaults` key for the diet day (`DietDay.stamp`) whose morning refresh is held
+    /// because the phone was locked when its weigh-in arrived. Beside
+    /// `HealthNewDay.lastFiredDayKey` in the same store; cleared once the refresh goes out
+    /// or its day has passed.
+    static let heldMorningRefreshKey = "healthNewDayHeldDay"
+
     private weak var coordinator: RunCoordinator?
     private var model: HealthDashboardModel?
     private var observer: HealthDataObserver?
@@ -141,7 +147,8 @@ final class HealthAutoTrigger {
     private let now: () -> Date
     /// Whether HealthKit's store can be read. It is encrypted while the phone is locked, so
     /// every query fails and the per-turn gather degrades to an empty block; a workout log
-    /// sent then carries no workouts. Injected so a test can lock the phone.
+    /// sent then carries no workouts, and a morning refresh no weigh-in. Injected so a test
+    /// can lock the phone.
     private let protectedDataAvailable: @MainActor () -> Bool
     /// Whether the app is paired with a bridge. Injected for the same reason.
     private let isPaired: @MainActor () -> Bool
@@ -207,12 +214,13 @@ final class HealthAutoTrigger {
             onWorkouts: { [weak self] in self?.receiveWorkouts($0) })
         self.observer = observer
         observer.start()
-        // A workout log held because the phone was locked goes out on unlock, while the
-        // process is alive. A suspended process catches up on the next foreground instead.
+        // A morning refresh or workout log held because the phone was locked goes out on
+        // unlock, while the process is alive. A suspended process catches up on the next
+        // foreground instead.
         unlockObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil,
             queue: .main) { [weak self] _ in
-                Task { await self?.settleWorkouts() }
+                Task { await self?.settle() }
             }
     }
 
@@ -250,16 +258,56 @@ final class HealthAutoTrigger {
 
     private func fireMorningRefresh(day: String) async {
         guard let (coordinator, model) = ready() else { return }
+        // A locked phone cannot read HealthKit, so the turn would carry no weigh-in and the
+        // Studio would log none, while this recorded the day as done. Hold it instead: the
+        // unlock observer, the foreground and the background refresh all settle it.
+        guard holdIfLocked(day) else { return }
         // One live fetch first, for what it proves: whether the bridge can be reached (so a
         // held run goes to the capture queue, where a rolled day refuses it, rather than to
         // the chat outbox, where nothing would), and a fresh dashboard for the tab.
         await model.load()
+        // The fetch is a round trip, and the phone can lock during it.
+        guard holdIfLocked(day) else { return }
         let outcome = HealthTurn.startNewDay(
             model: model, coordinator: coordinator,
             context: context(),
             origin: .automatic, dietDay: day, oncePerDay: true, capturedDay: day,
             defaults: defaults)
         Log.health.notice("automatic new-day refresh for \(day): \(String(describing: outcome))")
+        // A refused one stays held, if it was, for the next settle to try again.
+        if outcome != .refused { defaults.removeObject(forKey: Self.heldMorningRefreshKey) }
+    }
+
+    /// True when HealthKit can be read. Otherwise records `day`'s refresh as held and
+    /// returns false, so nothing is sent and the day is not recorded as done.
+    private func holdIfLocked(_ day: String) -> Bool {
+        guard !protectedDataAvailable() else { return true }
+        defaults.set(day, forKey: Self.heldMorningRefreshKey)
+        Log.health.notice("automatic new-day refresh for \(day) held until the phone is unlocked")
+        return false
+    }
+
+    /// Fire a morning refresh held by a locked phone, once, if it is still for today's diet
+    /// day and nothing has run for that day since. A hold from a day that has rolled is
+    /// dropped and fires nothing: that morning has passed, and running it now would audit
+    /// the wrong day (the capture queue refuses a stale Start-new-day for the same reason).
+    private func settleMorningRefresh() async {
+        guard let held = defaults.string(forKey: Self.heldMorningRefreshKey) else { return }
+        let day = DietDay.stamp(for: now())
+        guard held == day else {
+            defaults.removeObject(forKey: Self.heldMorningRefreshKey)
+            Log.health.notice("held new-day refresh for \(held) dropped: today is \(day)")
+            return
+        }
+        // Something else ran today's refresh since (a tap, or a later weigh-in).
+        guard defaults.string(forKey: HealthNewDay.lastFiredDayKey) != day else {
+            defaults.removeObject(forKey: Self.heldMorningRefreshKey)
+            return
+        }
+        guard firingDay != day else { return }
+        firingDay = day
+        defer { firingDay = nil }
+        await fireMorningRefresh(day: day)
     }
 
     // MARK: Workouts → the workout log
@@ -275,9 +323,17 @@ final class HealthAutoTrigger {
         Task { await fireWorkoutLog(decision.due) }
     }
 
-    /// Fire for any burst that has settled since it was noticed — from the foreground, the
-    /// background refresh task, and the in-process settle timer. Waits for the fire, so the
-    /// refresh task does not report completion while it is still running.
+    /// Fire whatever is due and was held or left waiting: a morning refresh held by a locked
+    /// phone, then any workout burst that has settled. The one entry point for the unlock
+    /// observer, the foreground and the background refresh task. Waits for both fires, so
+    /// the refresh task does not report completion while either is still running.
+    func settle() async {
+        await settleMorningRefresh()
+        await settleWorkouts()
+    }
+
+    /// Fire for any burst that has settled since it was noticed, from `settle()` and the
+    /// in-process settle timer.
     func settleWorkouts() async {
         let decision = evaluate(adding: [])
         guard !decision.due.isEmpty else { return }

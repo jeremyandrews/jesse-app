@@ -797,12 +797,14 @@ final class HealthContextTests: XCTestCase {
         XCTAssertFalse(unlocked.locked)
     }
 
-    /// Only the workout log is held on a locked phone; any other turn goes out.
-    func testOnlyALockedWorkoutLogIsHeld() {
+    /// The two automatic Health turns, the workout log and the morning refresh, are held on a
+    /// locked phone; any other turn goes out.
+    func testOnlyTheLockedWorkoutLogAndMorningRefreshAreHeld() {
         XCTAssertTrue(HealthContextLockHold.shouldHold(text: HealthWorkoutLog.prompt, locked: true))
         XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthWorkoutLog.prompt, locked: false))
+        XCTAssertTrue(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: true))
+        XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: false))
         XCTAssertFalse(HealthContextLockHold.shouldHold(text: "How did I sleep?", locked: true))
-        XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: true))
     }
 
     /// A workout log staged by an older build and replayed after an upgrade carries the old

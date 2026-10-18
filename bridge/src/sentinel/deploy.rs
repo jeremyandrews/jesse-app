@@ -51,8 +51,36 @@ pub const DEPLOY_BINS_MANIFEST: &str = "deploy-bins.toml";
 const EMBEDDED_DEPLOY_BINS: &str = include_str!("../../deploy-bins.toml");
 
 #[derive(Debug, Deserialize)]
-struct DeployBinsManifest {
+struct DeployBinsManifestFile {
     bins: Vec<String>,
+    /// Optional, so a tree from before 0.185.0 (which has no launchers) still deploys.
+    #[serde(default)]
+    launchers: Vec<String>,
+}
+
+/// The directory, relative to the crate directory, that the manifest's `launchers` are read
+/// from: `bridge/launchers/`.
+pub const LAUNCHERS_DIR: &str = "launchers";
+
+/// What a deployment is made of, as one commit's `deploy-bins.toml` declares it.
+///
+/// Two kinds of thing land in `~/.local/bin`, and they arrive by different roads: `bins` are
+/// `cargo` targets, built and then copied out of `target/release`; `launchers` are in-tree
+/// scripts, copied out of `bridge/launchers/` as they are. From the stage phase on they are
+/// the same — one store directory, one symlink each, one `previous` map, one rollback — which
+/// is what [`DeployManifest::names`] is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployManifest {
+    pub bins: Vec<String>,
+    pub launchers: Vec<String>,
+}
+
+impl DeployManifest {
+    /// Every name the deploy places in `~/.local/bin`: the bins, then the launchers. The list
+    /// capture, repoint, rollback and prune all range over.
+    pub fn names(&self) -> Vec<String> {
+        self.bins.iter().chain(&self.launchers).cloned().collect()
+    }
 }
 
 /// Parse a `deploy-bins.toml`, rejecting anything that would make the stage phase write
@@ -62,14 +90,15 @@ struct DeployBinsManifest {
 /// path AND onto `~/.local/bin`, so a `/` or a `..` in one would repoint something that is
 /// not a deploy binary. The manifest comes out of a commit that reached `main`, so this is
 /// not the boundary — the ancestry gate is — but a typo must fail here rather than in the
-/// filesystem.
-pub fn parse_deploy_bins(text: &str) -> Result<Vec<String>, String> {
-    let manifest: DeployBinsManifest =
+/// filesystem. Launchers are held to the same rules, and a name may not be both: the two
+/// would be staged to the same path.
+pub fn parse_deploy_manifest(text: &str) -> Result<DeployManifest, String> {
+    let manifest: DeployBinsManifestFile =
         toml::from_str(text).map_err(|e| format!("{DEPLOY_BINS_MANIFEST} is not readable: {e}"))?;
     if manifest.bins.is_empty() {
         return Err(format!("{DEPLOY_BINS_MANIFEST} names no binaries"));
     }
-    for name in &manifest.bins {
+    for name in manifest.bins.iter().chain(&manifest.launchers) {
         if name.is_empty()
             || name.contains('/')
             || name.starts_with('.')
@@ -86,41 +115,239 @@ pub fn parse_deploy_bins(text: &str) -> Result<Vec<String>, String> {
     if seen.len() != manifest.bins.len() {
         return Err(format!("{DEPLOY_BINS_MANIFEST} names a binary twice"));
     }
+    let mut seen_launchers = manifest.launchers.clone();
+    seen_launchers.sort();
+    seen_launchers.dedup();
+    if seen_launchers.len() != manifest.launchers.len() {
+        return Err(format!("{DEPLOY_BINS_MANIFEST} names a launcher twice"));
+    }
+    if let Some(both) = manifest
+        .launchers
+        .iter()
+        .find(|l| manifest.bins.contains(l))
+    {
+        return Err(format!(
+            "{DEPLOY_BINS_MANIFEST} names {both:?} as both a binary and a launcher"
+        ));
+    }
     // Without it there is nothing to kickstart and nothing whose `/health` version could
     // decide whether to keep the deploy — a manifest that omits it is not a deployment.
     if !manifest.bins.iter().any(|b| b == BRIDGE_BIN) {
         return Err(format!("{DEPLOY_BINS_MANIFEST} does not name {BRIDGE_BIN}"));
     }
-    Ok(manifest.bins)
+    Ok(DeployManifest {
+        bins: manifest.bins,
+        launchers: manifest.launchers,
+    })
+}
+
+/// The `bins` half of [`parse_deploy_manifest`].
+pub fn parse_deploy_bins(text: &str) -> Result<Vec<String>, String> {
+    parse_deploy_manifest(text).map(|m| m.bins)
 }
 
 /// The service binary itself — the one the restart phase kickstarts.
 pub const BRIDGE_BIN: &str = "jesse-bridge";
 
-/// The binary set THIS build knows about, from the manifest committed beside it. The
-/// fallback for a tree that predates the manifest, and what the tests mean by "the deploy
-/// set".
-pub fn embedded_deploy_bins() -> &'static [String] {
-    static PARSED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+/// The manifest THIS build knows about, committed beside it. What the tests mean by "the
+/// deploy set"; only its `bins` are ever used as a fallback (see [`deploy_manifest_at`]).
+pub fn embedded_deploy_manifest() -> &'static DeployManifest {
+    static PARSED: std::sync::OnceLock<DeployManifest> = std::sync::OnceLock::new();
     PARSED.get_or_init(|| {
-        parse_deploy_bins(EMBEDDED_DEPLOY_BINS)
+        parse_deploy_manifest(EMBEDDED_DEPLOY_BINS)
             .expect("the committed deploy-bins.toml must parse — a test asserts it")
     })
 }
 
-/// The binary set the COMMIT BEING DEPLOYED is made of, read from `<crate dir>/deploy-bins.toml`.
+/// The binary set THIS build knows about, from the manifest committed beside it. The
+/// fallback for a tree that predates the manifest, and what the tests mean by "the deploy
+/// set".
+pub fn embedded_deploy_bins() -> &'static [String] {
+    &embedded_deploy_manifest().bins
+}
+
+/// What the COMMIT BEING DEPLOYED is made of, read from `<crate dir>/deploy-bins.toml`.
 ///
 /// A tree with no manifest is a commit older than this mechanism, and it is deployable —
-/// rolling back to one is a real operation. There the compiled-in set is the only list there
-/// is, so it is used and the caller says so in the log rather than the deploy failing.
-pub fn deploy_bins_at(crate_dir: &Path) -> Result<(Vec<String>, bool), String> {
+/// rolling back to one is a real operation. There the compiled-in BINARY set is the only list
+/// there is, so it is used and the caller says so in the log rather than the deploy failing.
+/// Its launchers are NOT: a commit that old has no `launchers/` the list could refer to, and
+/// a launcher list compiled into the sentinel is the frozen-list bug this file exists to end.
+///
+/// Every launcher the manifest names must be a regular file under `<crate dir>/launchers/`,
+/// checked here, before anything is built or staged: a manifest that names a script the
+/// commit does not carry would otherwise fail halfway through the stage phase.
+pub fn deploy_manifest_at(crate_dir: &Path) -> Result<(DeployManifest, bool), String> {
     let path = crate_dir.join(DEPLOY_BINS_MANIFEST);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok((parse_deploy_bins(&text)?, true)),
+    let manifest = match std::fs::read_to_string(&path) {
+        Ok(text) => parse_deploy_manifest(&text)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok((embedded_deploy_bins().to_vec(), false))
+            return Ok((
+                DeployManifest {
+                    bins: embedded_deploy_bins().to_vec(),
+                    launchers: Vec::new(),
+                },
+                false,
+            ))
         }
-        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    for name in &manifest.launchers {
+        let file = crate_dir.join(LAUNCHERS_DIR).join(name);
+        // `symlink_metadata`, so an in-tree symlink is refused rather than followed: what is
+        // staged must be the file the commit carries, not whatever it points at on this host.
+        let regular = std::fs::symlink_metadata(&file)
+            .map(|md| md.file_type().is_file())
+            .unwrap_or(false);
+        if !regular {
+            return Err(format!(
+                "{DEPLOY_BINS_MANIFEST} names the launcher {name:?}, but there is no regular \
+                 file at bridge/{LAUNCHERS_DIR}/{name} in this commit"
+            ));
+        }
+    }
+    Ok((manifest, true))
+}
+
+/// The binary set the COMMIT BEING DEPLOYED is made of: the `bins` half of
+/// [`deploy_manifest_at`].
+pub fn deploy_bins_at(crate_dir: &Path) -> Result<(Vec<String>, bool), String> {
+    deploy_manifest_at(crate_dir).map(|(m, from_tree)| (m.bins, from_tree))
+}
+
+/// Every `cargo` binary target of the crate at `crate_dir`, read from that tree: the
+/// package's own name (`src/main.rs`), every `[[bin]]` name, and every auto-discovered
+/// `src/bin/<name>.rs` or `src/bin/<name>/main.rs` that a `[[bin]] path` has not claimed.
+///
+/// Used for one thing: telling an operator whether a command the deployed bridge cannot
+/// resolve is a binary this crate could build. It is read from the DEPLOYED tree rather than
+/// compiled in, for the reason the manifest is.
+pub fn cargo_bin_targets_at(crate_dir: &Path) -> Vec<String> {
+    #[derive(Deserialize, Default)]
+    struct Package {
+        #[serde(default)]
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Bin {
+        name: String,
+        path: Option<String>,
+    }
+    #[derive(Deserialize, Default)]
+    struct CargoToml {
+        #[serde(default)]
+        package: Package,
+        #[serde(default)]
+        bin: Vec<Bin>,
+    }
+    let cargo: CargoToml = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default();
+    let claimed: Vec<PathBuf> = cargo
+        .bin
+        .iter()
+        .filter_map(|b| b.path.as_deref().map(PathBuf::from))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    if !cargo.package.name.is_empty() && crate_dir.join("src/main.rs").is_file() {
+        out.push(cargo.package.name.clone());
+    }
+    out.extend(cargo.bin.iter().map(|b| b.name.clone()));
+    if let Ok(entries) = std::fs::read_dir(crate_dir.join("src/bin")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = Path::new("src/bin").join(entry.file_name());
+            let (stem, rel) = if path.is_dir() {
+                (entry.file_name(), rel.join("main.rs"))
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                match path.file_stem() {
+                    Some(s) => (s.to_os_string(), rel),
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+            if !crate_dir.join(&rel).is_file() || claimed.contains(&rel) {
+                continue;
+            }
+            out.push(stem.to_string_lossy().to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every regular file under `<crate dir>/launchers/`, by name.
+pub fn launcher_files_at(crate_dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(crate_dir.join(LAUNCHERS_DIR))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// What the deployed tree says about where a command could come from — the input the
+/// unresolved-command message is classified against. Read once from the checked-out commit
+/// in the build phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeployedTree {
+    pub manifest: Option<DeployManifest>,
+    pub cargo_bins: Vec<String>,
+    pub launcher_files: Vec<String>,
+}
+
+impl DeployedTree {
+    pub fn read(crate_dir: &Path, manifest: &DeployManifest) -> DeployedTree {
+        DeployedTree {
+            manifest: Some(manifest.clone()),
+            cargo_bins: cargo_bin_targets_at(crate_dir),
+            launcher_files: launcher_files_at(crate_dir),
+        }
+    }
+
+    /// The fix for one command the deployed bridge cannot resolve, said as what to do.
+    ///
+    /// The first two branches are the deploy's own omissions and name the manifest key that
+    /// fixes them; the third is everything the bridge does not ship. A name the manifest
+    /// ALREADY lists was staged into `~/.local/bin` by this deploy, so its absence on the
+    /// child's `PATH` is the `PATH`, and saying "add it" there would be the same kind of
+    /// advice that cannot work which this function replaced.
+    pub fn remedy(&self, command: &str) -> String {
+        let (bins, launchers): (&[String], &[String]) = match &self.manifest {
+            Some(m) => (&m.bins, &m.launchers),
+            None => (&[], &[]),
+        };
+        let listed = bins.iter().chain(launchers).any(|n| n == command);
+        if listed {
+            format!(
+                "`{command}` is in {DEPLOY_BINS_MANIFEST} and was installed by this deploy, so \
+                 the bridge's PATH does not reach the directory it was installed in: put that \
+                 directory on the bridge's PATH"
+            )
+        } else if self.cargo_bins.iter().any(|n| n == command) {
+            format!(
+                "`{command}` is a cargo binary of this crate that {DEPLOY_BINS_MANIFEST} does \
+                 not list: add it to `bins`"
+            )
+        } else if self.launcher_files.iter().any(|n| n == command) {
+            format!(
+                "`{command}` is a launcher under bridge/{LAUNCHERS_DIR}/ that \
+                 {DEPLOY_BINS_MANIFEST} does not list: add it to `launchers`"
+            )
+        } else {
+            format!(
+                "`{command}` is not shipped by the bridge; install `{command}` on the host so \
+                 it is on the bridge's PATH"
+            )
+        }
     }
 }
 
@@ -979,7 +1206,8 @@ fn capture_one(bin_dir: &Path, store: &Path, name: &str) -> Result<Option<String
 
 /// Capture every deployed name, as one `previous` map.
 ///
-/// `bins` is the set the COMMIT BEING DEPLOYED declares (see [`deploy_bins_at`]), so a name
+/// `bins` is every name the COMMIT BEING DEPLOYED places in the bin directory, binaries and
+/// launchers alike (see [`DeployManifest::names`]), so a name
 /// this deploy introduces is captured too — as absent, which is what tells
 /// [`restore_previous`] to remove rather than repoint it if the deploy is rolled back.
 pub fn capture_previous(bin_dir: &Path, store: &Path, bins: &[String]) -> Result<Previous, String> {
@@ -1232,12 +1460,13 @@ async fn poll_until_deployed(
     log: &DeployLog,
     want_version: &str,
     baseline: Option<&[String]>,
+    tree: &DeployedTree,
 ) -> Result<String, String> {
     let deadline = Instant::now() + sen.cfg.deploy_health_timeout;
     loop {
         let step = match sen.bridge_get("/health", Duration::from_secs(3)).await {
             Ok((status, body)) if (200..300).contains(&status) => {
-                read_health(&body, want_version, baseline)
+                read_health(&body, want_version, baseline, tree)
             }
             Ok((status, _)) => Step::Retry(format!("the bridge answered /health with {status}")),
             Err(e) => Step::Retry(format!("the bridge did not answer /health: {e}")),
@@ -1259,7 +1488,12 @@ async fn poll_until_deployed(
 }
 
 /// Judge one `/health` body. Split out so the three conditions can be tested without a socket.
-fn read_health(body: &Value, want_version: &str, baseline: Option<&[String]>) -> Step {
+fn read_health(
+    body: &Value,
+    want_version: &str,
+    baseline: Option<&[String]>,
+    tree: &DeployedTree,
+) -> Step {
     if body.get("ok").and_then(Value::as_bool) != Some(true) {
         return Step::Retry("the bridge answered /health with ok:false".to_string());
     }
@@ -1285,28 +1519,45 @@ fn read_health(body: &Value, want_version: &str, baseline: Option<&[String]>) ->
     // that shipped in 0.100.0 — so it is FATAL rather than a retry: waiting cannot install a
     // binary. A bridge too old to report the field says nothing here, which reads as "not
     // checked" rather than "checked and clean".
-    let unresolved: Vec<String> = body
+    //
+    // The bridge reports one row PER HARNESS, so a server both harnesses load arrives twice;
+    // it is one broken server, and it is counted and listed once. The fix is classified
+    // against the DEPLOYED tree (see [`DeployedTree::remedy`]): "add it to deploy-bins.toml"
+    // is only advice that can work for a cargo target of this crate, and saying it about a
+    // shell script or a host program sent the operator to a change that fails the build.
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for r in body
         .get("mcp_servers_unresolved")
         .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .map(|r| {
-                    let server = r.get("server").and_then(Value::as_str).unwrap_or("?");
-                    let command = r.get("command").and_then(Value::as_str).unwrap_or("?");
-                    format!("{server} ({command})")
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if !unresolved.is_empty() {
+        .into_iter()
+        .flatten()
+    {
+        let server = r.get("server").and_then(Value::as_str).unwrap_or("?");
+        let command = r.get("command").and_then(Value::as_str).unwrap_or("?");
+        let pair = (server.to_string(), command.to_string());
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    if !pairs.is_empty() {
+        let mut commands: Vec<&str> = Vec::new();
+        for (_, command) in &pairs {
+            if !commands.contains(&command.as_str()) {
+                commands.push(command);
+            }
+        }
+        let remedies: Vec<String> = commands.iter().map(|c| tree.remedy(c)).collect();
         return Step::Fatal(format!(
-            "the deployed bridge cannot resolve the binary for {} of its MCP server(s): {} — \
-             the child would register no tools for {} on every turn. Add the binary to {} and \
-             deploy again.",
-            unresolved.len(),
-            unresolved.join(", "),
-            if unresolved.len() == 1 { "it" } else { "them" },
-            DEPLOY_BINS_MANIFEST,
+            "the deployed bridge cannot resolve the command for {} of its MCP server(s): {} — \
+             the child would register no tools for {} on every turn. {}, then deploy again.",
+            pairs.len(),
+            pairs
+                .iter()
+                .map(|(s, c)| format!("{s} ({c})"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if pairs.len() == 1 { "it" } else { "them" },
+            remedies.join("; "),
         ));
     }
     let Some(before) = baseline else {
@@ -1445,10 +1696,15 @@ pub fn build_args(bins: &[String]) -> Vec<String> {
 
 /// PHASE 3 — check the commit out, read what it says it is made of, and build exactly that.
 ///
-/// Returns the binary set, which every later phase (stage, repoint, rollback, prune) ranges
-/// over. It comes from the CHECKED-OUT TREE, so a commit that adds a binary is deployed
-/// complete by a sentinel built before that binary existed.
-async fn phase_build(sen: &Sentinel, log: &DeployLog, sha: &str) -> Result<Vec<String>, String> {
+/// Returns the manifest, whose names every later phase (stage, repoint, rollback, prune)
+/// ranges over, and what the tree says about where a command comes from (for the health
+/// gate's message). Both come from the CHECKED-OUT TREE, so a commit that adds a binary or a
+/// launcher is deployed complete by a sentinel built before it existed.
+async fn phase_build(
+    sen: &Sentinel,
+    log: &DeployLog,
+    sha: &str,
+) -> Result<(DeployManifest, DeployedTree), String> {
     let checkout = dgit(sen, log, &["checkout", "--detach", sha]).await;
     if !checkout.ok() {
         return Err(format!(
@@ -1460,7 +1716,8 @@ async fn phase_build(sen: &Sentinel, log: &DeployLog, sha: &str) -> Result<Vec<S
     // from there. `--locked` because a deploy that silently resolved a different dependency
     // graph than CI did is a deploy CI did not vouch for.
     let crate_dir = sen.cfg.deploy_clone.join("bridge");
-    let (bins, from_tree) = deploy_bins_at(&crate_dir)?;
+    let (manifest, from_tree) = deploy_manifest_at(&crate_dir)?;
+    let bins = &manifest.bins;
     if from_tree {
         log.line(&format!(
             "{} names {} binaries: {}",
@@ -1468,6 +1725,14 @@ async fn phase_build(sen: &Sentinel, log: &DeployLog, sha: &str) -> Result<Vec<S
             bins.len(),
             bins.join(", ")
         ));
+        if !manifest.launchers.is_empty() {
+            log.line(&format!(
+                "{} names {} launcher(s) from bridge/{LAUNCHERS_DIR}/: {}",
+                DEPLOY_BINS_MANIFEST,
+                manifest.launchers.len(),
+                manifest.launchers.join(", ")
+            ));
+        }
     } else {
         // Never silent: the operator is being told that the set staged here is this
         // SENTINEL's idea of the set, which is exactly the situation the manifest exists to
@@ -1478,7 +1743,7 @@ async fn phase_build(sen: &Sentinel, log: &DeployLog, sha: &str) -> Result<Vec<S
             bins.join(", ")
         ));
     }
-    let args = build_args(&bins);
+    let args = build_args(bins);
     log.line(&format!(
         "cargo build --release --locked (in {}, up to {} min)",
         crate_dir.display(),
@@ -1502,7 +1767,8 @@ async fn phase_build(sen: &Sentinel, log: &DeployLog, sha: &str) -> Result<Vec<S
     if !out.ok() {
         return Err(format!("cargo build failed: {}", out.summary()));
     }
-    Ok(bins)
+    let tree = DeployedTree::read(&crate_dir, &manifest);
+    Ok((manifest, tree))
 }
 
 /// The code signing identifier a deployed binary is signed with.
@@ -1570,31 +1836,63 @@ async fn sign_staged(
     Ok(())
 }
 
-/// PHASE 4 — copy the deploy binaries into the store and repoint their symlinks.
+/// Copy each of `names` from `src_dir` into the build directory `dest`, mode 755.
 ///
-/// Returns the `previous` map, which is what a rollback is written in terms of.
-async fn phase_stage(
-    sen: &Sentinel,
+/// The one copy loop for both kinds of deployed file: a binary from `target/release` and a
+/// launcher from `bridge/launchers/` are staged identically, so neither can be the one a
+/// rollback forgets.
+pub fn stage_files(
+    src_dir: &Path,
+    dest: &Path,
+    names: &[String],
     log: &DeployLog,
-    sha: &str,
-    bins: &[String],
-) -> Result<Previous, String> {
-    let store = sen.cfg.build_store();
-    let dest = store.join(sha);
-    std::fs::create_dir_all(&dest)
-        .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
-    let built = sen.cfg.deploy_clone.join("bridge/target/release");
-    for name in bins {
-        let src = built.join(name);
+) -> Result<(), String> {
+    for name in names {
+        let src = src_dir.join(name);
         let dst = dest.join(name);
         std::fs::copy(&src, &dst)
             .map_err(|e| format!("could not copy {} to {}: {e}", src.display(), dst.display()))?;
         set_executable(&dst)?;
         log.line(&format!("staged {}", dst.display()));
     }
+    Ok(())
+}
+
+/// PHASE 4 — copy the deploy binaries and launchers into the store and repoint their
+/// symlinks.
+///
+/// Returns the `previous` map, which is what a rollback is written in terms of.
+async fn phase_stage(
+    sen: &Sentinel,
+    log: &DeployLog,
+    sha: &str,
+    manifest: &DeployManifest,
+) -> Result<Previous, String> {
+    let bins = &manifest.bins;
+    let names = manifest.names();
+    let store = sen.cfg.build_store();
+    let dest = store.join(sha);
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
+    let crate_dir = sen.cfg.deploy_clone.join("bridge");
+    stage_files(&crate_dir.join("target/release"), &dest, bins, log)?;
+    // LAUNCHERS ARE STAGED LIKE BINARIES, from the checked-out tree, so the script a child
+    // config names moves with the bridge that names it — and goes back with it on a rollback.
+    // Before 0.185.0 this was a hand-run `install` step, and a deploy whose operator skipped
+    // it rolled back.
+    stage_files(
+        &crate_dir.join(LAUNCHERS_DIR),
+        &dest,
+        &manifest.launchers,
+        log,
+    )?;
 
     // Signed BEFORE the previous record and the swap: a signing failure leaves every symlink
     // on the old build, so the bridge that was running goes on running.
+    //
+    // BINARIES ONLY. A launcher is a `#!/bin/sh` script: the process macOS keys a privacy
+    // grant to is the interpreter and then the program it `exec`s, never the script file, so
+    // a signature on it would protect no grant and would only add a codesign failure mode.
     match sen.cfg.codesign_identity.as_deref() {
         Some(identity) => {
             let label = sen.cfg.label(ServiceSlot::Bridge);
@@ -1619,20 +1917,20 @@ async fn phase_stage(
 
     // BEFORE anything is repointed, and persisted before anything is repointed: a sentinel
     // killed between the swap and this write would have no way back.
-    let prev = capture_previous(&sen.cfg.bin_dir, &store, bins)?;
+    let prev = capture_previous(&sen.cfg.bin_dir, &store, &names)?;
     write_previous(&sen.cfg.previous_file(), &prev)?;
     log.line(&format!(
         "previous: {}",
         serde_json::to_string(&prev).unwrap_or_default()
     ));
 
-    for name in bins {
+    for name in &names {
         if let Err(e) = repoint(&sen.cfg.bin_dir, name, &dest.join(name)) {
             // A half-swapped `~/.local/bin` is neither the old deployment nor the new one,
             // which is the worst state available here — so undo what did land before
             // reporting. Nothing has been restarted yet, so this is a plain failure rather
             // than a rollback.
-            let undo = restore_previous(&sen.cfg.bin_dir, &prev, bins);
+            let undo = restore_previous(&sen.cfg.bin_dir, &prev, &names);
             for u in &undo {
                 log.line(&format!("undo: {u}"));
             }
@@ -1647,17 +1945,17 @@ async fn phase_stage(
     Ok(prev)
 }
 
-/// PHASE 6 — put the old binaries back and bring the bridge up on them.
+/// PHASE 6 — put the old binaries and launchers back and bring the bridge up on them.
 async fn phase_rollback(
     sen: &Arc<Sentinel>,
     log: &DeployLog,
     prev: &Previous,
-    bins: &[String],
+    names: &[String],
     why: &str,
 ) {
     enter_phase(sen, log, "rollback");
     log.line(&format!("rolling back because: {why}"));
-    let errors = restore_previous(&sen.cfg.bin_dir, prev, bins);
+    let errors = restore_previous(&sen.cfg.bin_dir, prev, names);
     for e in &errors {
         log.line(&format!("rollback: {e}"));
     }
@@ -1775,13 +2073,13 @@ pub async fn run_deploy(
     }
 
     enter_phase(&sen, &log, "build");
-    let bins = match phase_build(&sen, &log, &sha).await {
+    let (manifest, tree) = match phase_build(&sen, &log, &sha).await {
         Ok(b) => b,
         Err(e) => return finish_deploy(&sen, &log, "failed", &e).await,
     };
 
     enter_phase(&sen, &log, "stage");
-    let prev = match phase_stage(&sen, &log, &sha, &bins).await {
+    let prev = match phase_stage(&sen, &log, &sha, &manifest).await {
         Ok(p) => p,
         Err(e) => return finish_deploy(&sen, &log, "failed", &e).await,
     };
@@ -1791,7 +2089,7 @@ pub async fn run_deploy(
     let trouble = if !kick.ok() {
         Some(format!("launchctl kickstart failed: {}", kick.summary()))
     } else {
-        match poll_until_deployed(&sen, &log, &want_version, baseline.as_deref()).await {
+        match poll_until_deployed(&sen, &log, &want_version, baseline.as_deref(), &tree).await {
             Ok(v) => {
                 log.line(&format!("the bridge is up on {v}"));
                 None
@@ -1800,7 +2098,7 @@ pub async fn run_deploy(
         }
     };
     if let Some(why) = trouble {
-        return phase_rollback(&sen, &log, &prev, &bins, &why).await;
+        return phase_rollback(&sen, &log, &prev, &manifest.names(), &why).await;
     }
 
     enter_phase(&sen, &log, "finish");
@@ -1809,7 +2107,7 @@ pub async fn run_deploy(
         &sen.cfg.build_store(),
         &prev,
         KEEP_BUILDS,
-        &bins,
+        &manifest.names(),
     );
     if !pruned.is_empty() {
         log.line(&format!(
@@ -3256,8 +3554,12 @@ serde = { version = "1", features = ["derive"] }
     #[test]
     fn health_is_judged_on_ok_version_and_new_containment_staleness() {
         let want = "0.94.0";
-        let matches = |v: &Value, baseline: Option<&[String]>| match read_health(v, want, baseline)
-        {
+        let matches = |v: &Value, baseline: Option<&[String]>| match read_health(
+            v,
+            want,
+            baseline,
+            &DeployedTree::default(),
+        ) {
             Step::Done(x) => format!("done:{x}"),
             Step::Fatal(e) => format!("fatal:{e}"),
             Step::Retry(e) => format!("retry:{e}"),
@@ -3318,74 +3620,142 @@ serde = { version = "1", features = ["derive"] }
         }
     }
 
-    /// THE STATIC HALF OF THE FIX: every MCP server this repository SHIPS ITS OWN BINARY for
-    /// is named in the deploy manifest.
+    /// THE PROGRAMS A CHILD MCP CONFIG RUNS THAT THE BRIDGE DOES NOT SHIP — host setup, each
+    /// installed on the host by hand and on the bridge's `PATH`, and each named here
+    /// deliberately. Derived from the shipped configs (`MCP_SERVERS` rows across every
+    /// [`crate::McpSet`]), not guessed; a command with a `/` in it (iMCP's app bundle) is a
+    /// path the config pins and is not a `PATH` lookup, so it is not here.
     ///
-    /// This is the assertion that would have failed in 0.100.0. `places` was added to the
-    /// child MCP config as a bare `jesse-places-mcp` and not to the binary set, so every
-    /// deploy afterwards installed a config naming a binary it did not build. Nothing
-    /// compared the two lists — one lived in a harness const and the other in this file —
-    /// and the failure they produced was invisible.
-    ///
-    /// Only `jesse-*` commands are in scope: they are the ones a deploy is responsible for
-    /// installing. `qmd`, `npx` and the rest are host setup, and their absence is caught at
-    /// startup and by the deploy's health gate rather than here.
-    ///
-    /// # The prefix stopped being sufficient in 0.146.0, and the exception is EXPLICIT
-    ///
-    /// `jesse-k8s-mcp` is a `jesse-` command this repository does NOT build: it is a host
-    /// launcher that pins a third-party binary's version and supplies its `KUBECONFIG`, on
-    /// the same terms as `whatsapp-mcp` and `workspace-mcp-perseido`. It carries the prefix
-    /// because it is this deployment's wrapper, not because it is this crate's target.
-    ///
-    /// It is listed here BY NAME rather than handled by weakening the rule (say, skipping any
-    /// command with no matching `src/bin/*.rs`). Weakening it would restore exactly the
-    /// 0.100.0 failure this test exists to catch — `places` was added as a bare
-    /// `jesse-places-mcp` and to no binary list, and every deploy afterwards installed a
-    /// config naming a binary it did not build, invisibly. With the exception enumerated, a
-    /// new `jesse-*` server still fails this test until someone states which of the two it is.
-    const HOST_LAUNCHERS: [&str; 1] = ["jesse-k8s-mcp"];
+    /// The list is the point of the test below. Before 0.146.0 the rule was "every `jesse-*`
+    /// command is a binary", and `jesse-k8s-mcp` broke the prefix; before 0.185.0 nothing
+    /// covered a command WITHOUT the prefix at all, which is how `workspace-mcp-sheets` — an
+    /// in-tree launcher that no deploy installed — shipped in 0.182.0 and rolled back every
+    /// deploy of it. Enumerating the host programs means a new command fails until someone
+    /// states which of the three it is: a `bins` entry, a `launchers` entry, or one of these.
+    const HOST_PROVIDED: [&str; 13] = [
+        // The vault index (`qmd mcp`).
+        "qmd",
+        // Node's package runner: `slack`, `browser` (Playwright) and `fastmail` start
+        // through it.
+        "npx",
+        // The `google` server; also what the `workspace-mcp-sheets` launcher `exec`s.
+        "workspace-mcp",
+        // A host launcher for the Perseido Google account (its own token directory).
+        "workspace-mcp-perseido",
+        "github-mcp-server",
+        "unifi-network-mcp",
+        "routeros-mcp",
+        "mcp-proxmox",
+        "whatsapp-mcp",
+        // A host launcher that pins a third-party Kubernetes server and supplies its
+        // `KUBECONFIG`. `jesse-` because it is this deployment's wrapper, not this crate's
+        // target.
+        "jesse-k8s-mcp",
+        "plex-mcp",
+        "clockify-rs-mcp",
+        "runn-rs-mcp",
+    ];
 
-    #[test]
-    fn every_mcp_server_this_repo_builds_is_in_the_deploy_manifest() {
-        let bins = embedded_deploy_bins();
-        // BOTH harnesses' main set: one const from 0.165.0, when Codex moved onto it.
-        for config in [crate::MAIN_CHILD_MCP_CONFIG.as_str()] {
-            for (server, command) in crate::stdio_commands(config) {
-                if !command.starts_with("jesse-") || HOST_LAUNCHERS.contains(&command.as_str()) {
+    /// Every bare command any shipped child MCP config can name, as `(set, server, command)`:
+    /// every [`crate::McpSet`] row, which covers both harnesses' main set
+    /// ([`crate::MAIN_CHILD_MCP_CONFIG`], which Claude Code passes as JSON and Codex renders
+    /// as `-c mcp_servers.*` flags from the same string) and every other spawn site's set.
+    fn every_child_command() -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for set in crate::McpSet::ALL {
+            for (server, command) in crate::stdio_commands(set.config()) {
+                if command.contains('/') {
                     continue;
                 }
-                assert!(
-                    bins.contains(&command),
-                    "the `{server}` server runs `{command}`, which no deploy installs — add it \
-                     to bridge/{DEPLOY_BINS_MANIFEST} in the same change"
-                );
+                out.push((set.label().to_string(), server, command));
             }
+        }
+        out
+    }
+
+    /// THE STATIC HALF OF THE FIX, at the layer the defect lives in: every bare command a
+    /// child MCP config can name is something the deploy installs (`bins` or `launchers` in
+    /// the committed manifest) or a program the host is declared to provide.
+    ///
+    /// This is the assertion that would have failed in 0.100.0 (`jesse-places-mcp` in a
+    /// config and in no binary list) and in 0.182.0 (`workspace-mcp-sheets`, an in-tree
+    /// launcher, in a config and in no deploy list: the host step that installed it was a
+    /// line in the README, and the deploy that skipped it rolled back).
+    #[test]
+    fn every_command_a_child_config_names_is_deployed_or_host_provided() {
+        let manifest = embedded_deploy_manifest();
+        for (set, server, command) in every_child_command() {
+            assert!(
+                manifest.bins.contains(&command)
+                    || manifest.launchers.contains(&command)
+                    || HOST_PROVIDED.contains(&command.as_str()),
+                "the `{server}` server ({set}) runs `{command}`, which no deploy installs and \
+                 which is not declared host provided — add it to `bins` or `launchers` in \
+                 bridge/{DEPLOY_BINS_MANIFEST} (or, for a program the host installs, to \
+                 HOST_PROVIDED) in the same change"
+            );
+        }
+        // The gateway stub is the one program a child runs that no config row names: with
+        // `[gateway] enabled` the configs are rewritten to start it. It moves with the bridge.
+        assert!(
+            manifest.bins.iter().any(|b| b == crate::gateway::STUB_BIN),
+            "{} must be deployed",
+            crate::gateway::STUB_BIN
+        );
+        // And the committed manifest is deployable from the committed tree: each launcher it
+        // names is a regular file under bridge/launchers/.
+        deploy_manifest_at(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .expect("the committed manifest must be deployable from this tree");
+    }
+
+    /// The allowlist is the one place a command escapes the deploy, so it is where a typo
+    /// would silently disarm the check: a host-provided name may not also be shipped by the
+    /// bridge, and every one must still be spawned by some shipped set, so a name that stops
+    /// being used is caught rather than sitting as a permanent hole.
+    #[test]
+    fn every_host_provided_program_is_spawned_and_none_is_shipped() {
+        let manifest = embedded_deploy_manifest();
+        let commands = every_child_command();
+        for program in HOST_PROVIDED {
+            assert!(
+                !manifest.names().iter().any(|n| n == program),
+                "`{program}` is listed as host provided AND deployed by this repo — it cannot \
+                 be both"
+            );
+            assert!(
+                commands.iter().any(|(_, _, c)| c == program),
+                "`{program}` is listed as host provided but no shipped set spawns it"
+            );
         }
     }
 
-    /// A HOST LAUNCHER MUST NOT SHADOW A BINARY THIS REPO BUILDS, and vice versa. The
-    /// exception list above is the one place a `jesse-*` command escapes the deploy manifest,
-    /// so it is exactly where a typo would silently disarm the check for a real server.
+    /// Verification's dry run of the manifest reader, against this tree: it is what a deploy
+    /// of this commit would build and stage. `cargo test committed_tree -- --nocapture`.
     #[test]
-    fn no_host_launcher_names_a_binary_this_repo_builds() {
-        let bins = embedded_deploy_bins();
-        for launcher in HOST_LAUNCHERS {
-            assert!(
-                !bins.iter().any(|b| b == launcher),
-                "`{launcher}` is listed as host setup AND built by this repo — it cannot be both"
-            );
-            // It must also actually be a server this deployment spawns, so a name that stops
-            // being used is caught here rather than sitting as a permanent hole.
-            let spawned = [crate::MAIN_CHILD_MCP_CONFIG.as_str()]
-                .iter()
-                .flat_map(|c| crate::stdio_commands(c))
-                .any(|(_, command)| command == launcher);
-            assert!(
-                spawned,
-                "`{launcher}` is excepted from the deploy manifest but no shipped set spawns it"
-            );
+    fn the_committed_tree_deploys_the_sheets_launcher() {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (manifest, from_tree) = deploy_manifest_at(crate_dir).unwrap();
+        assert!(from_tree);
+        println!("bins:      {}", manifest.bins.join(", "));
+        println!("launchers: {}", manifest.launchers.join(", "));
+        assert_eq!(manifest.launchers, ["workspace-mcp-sheets"]);
+        // The consent helper is run by hand from the checkout, never by a child, so it is not
+        // deployed.
+        assert!(!manifest
+            .launchers
+            .iter()
+            .any(|l| l == "consent-google-sheets"));
+        // The tree classifies its own targets, which is what the health message reads.
+        let tree = DeployedTree::read(crate_dir, &manifest);
+        for bin in &manifest.bins {
+            assert!(tree.cargo_bins.contains(bin), "{bin} is not a cargo target");
         }
+        assert!(tree.cargo_bins.iter().any(|b| b == "jesse-sentinel"));
+        assert!(!tree.cargo_bins.iter().any(|b| b == "sentinel"));
+        assert!(tree
+            .launcher_files
+            .iter()
+            .any(|l| l == "workspace-mcp-sheets"));
     }
 
     /// A manifest is read from the TREE, and a tree without one falls back to this build's
@@ -3444,7 +3814,7 @@ serde = { version = "1", features = ["derive"] }
     #[test]
     fn a_reported_unresolvable_mcp_binary_is_fatal_to_the_deploy() {
         let want = "0.94.0";
-        let verdict = |v: &Value| match read_health(v, want, None) {
+        let verdict = |v: &Value| match read_health(v, want, None, &DeployedTree::default()) {
             Step::Done(x) => format!("done:{x}"),
             Step::Fatal(e) => format!("fatal:{e}"),
             Step::Retry(e) => format!("retry:{e}"),
@@ -3475,6 +3845,232 @@ serde = { version = "1", features = ["derive"] }
         assert!(verdict(&json!({"ok": true, "version": "0.93.0",
             "mcp_servers_unresolved": [{"server": "places", "command": "jesse-places-mcp"}]}))
         .starts_with("retry:"));
+    }
+
+    /// A launcher is staged, captured, linked and rolled back EXACTLY as a binary is, from
+    /// both states it can be found in: absent (the deploy introduces it) and a REAL FILE (an
+    /// operator ran the README's old `install -m 755` step by hand).
+    #[test]
+    fn a_launcher_is_staged_and_rolled_back_like_a_binary() {
+        for prior in ["absent", "real file"] {
+            let dir = scratch("launcher-stage");
+            let bin = dir.join("bin");
+            let store = dir.join("store");
+            let crate_dir = dir.join("bridge");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(crate_dir.join(LAUNCHERS_DIR)).unwrap();
+            std::fs::write(
+                crate_dir.join(LAUNCHERS_DIR).join("sheets-launcher"),
+                b"#!/bin/sh\necho deployed\n",
+            )
+            .unwrap();
+            let manifest = DeployManifest {
+                bins: vec![BRIDGE_BIN.to_string()],
+                launchers: vec!["sheets-launcher".to_string()],
+            };
+            touch_exec(&crate_dir.join("target/release").join(BRIDGE_BIN));
+            let hand_installed = b"#!/bin/sh\necho by hand\n";
+            if prior == "real file" {
+                std::fs::write(bin.join("sheets-launcher"), hand_installed).unwrap();
+            }
+
+            let dest = store.join("a".repeat(40));
+            std::fs::create_dir_all(&dest).unwrap();
+            let log = DeployLog::new(dir.join("deploy.log"));
+            stage_files(
+                &crate_dir.join("target/release"),
+                &dest,
+                &manifest.bins,
+                &log,
+            )
+            .unwrap();
+            stage_files(
+                &crate_dir.join(LAUNCHERS_DIR),
+                &dest,
+                &manifest.launchers,
+                &log,
+            )
+            .unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(dest.join("sheets-launcher"))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o755, "{prior}: staged mode");
+            }
+
+            let names = manifest.names();
+            let prev = capture_previous(&bin, &store, &names).unwrap();
+            match prior {
+                "absent" => assert_eq!(prev.get("sheets-launcher"), None, "{prior}"),
+                _ => {
+                    let kept = store.join(PRE_DEPLOY_DIR).join("sheets-launcher");
+                    assert_eq!(
+                        prev.get("sheets-launcher").map(String::as_str),
+                        Some(kept.to_string_lossy().as_ref()),
+                        "a hand-installed launcher is preserved aside, like a real jesse-bridge"
+                    );
+                    assert_eq!(std::fs::read(&kept).unwrap(), hand_installed);
+                }
+            }
+            for name in &names {
+                repoint(&bin, name, &dest.join(name)).unwrap();
+            }
+            assert_eq!(
+                std::fs::read_link(bin.join("sheets-launcher")).unwrap(),
+                dest.join("sheets-launcher")
+            );
+
+            // The rollback restores the launcher along with the binaries.
+            assert!(restore_previous(&bin, &prev, &names).is_empty());
+            match prior {
+                "absent" => assert!(
+                    std::fs::symlink_metadata(bin.join("sheets-launcher")).is_err(),
+                    "a launcher the deploy introduced is removed on rollback"
+                ),
+                _ => assert_eq!(
+                    std::fs::read(bin.join("sheets-launcher")).unwrap(),
+                    hand_installed,
+                    "the rollback puts the hand-installed launcher's content back"
+                ),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A launcher the manifest names must be a regular file in the commit, or the deploy
+    /// fails at the manifest, before anything is built or staged — with the name in it.
+    #[test]
+    fn a_manifest_naming_a_launcher_the_tree_lacks_is_refused() {
+        let dir = scratch("launcher-missing");
+        std::fs::write(
+            dir.join(DEPLOY_BINS_MANIFEST),
+            "bins = [\"jesse-bridge\"]\nlaunchers = [\"not-in-tree\"]\n",
+        )
+        .unwrap();
+        let err = deploy_manifest_at(&dir).unwrap_err();
+        assert!(err.contains("not-in-tree"), "{err}");
+
+        // A symlink is not a regular file: what is staged must be what the commit carries.
+        std::fs::create_dir_all(dir.join(LAUNCHERS_DIR)).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", dir.join(LAUNCHERS_DIR).join("not-in-tree")).unwrap();
+        assert!(deploy_manifest_at(&dir).is_err(), "a symlink is refused");
+
+        std::fs::remove_file(dir.join(LAUNCHERS_DIR).join("not-in-tree")).unwrap();
+        std::fs::write(dir.join(LAUNCHERS_DIR).join("not-in-tree"), b"#!/bin/sh\n").unwrap();
+        let (m, from_tree) = deploy_manifest_at(&dir).unwrap();
+        assert!(from_tree);
+        assert_eq!(m.launchers, ["not-in-tree"]);
+        assert_eq!(m.names(), ["jesse-bridge", "not-in-tree"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `launchers` is optional: every tree before 0.185.0 has only `bins`, and deploying (or
+    /// rolling back to) one must keep working. A tree with no manifest at all gets this
+    /// build's bins and NO launchers — a compiled-in launcher list is the frozen-list bug.
+    /// Launcher names obey the binary-name rules, and no name may be both.
+    #[test]
+    fn launchers_are_optional_and_held_to_the_name_rules() {
+        let m = parse_deploy_manifest("bins = [\"jesse-bridge\"]").unwrap();
+        assert!(m.launchers.is_empty());
+        assert_eq!(m.names(), ["jesse-bridge"]);
+
+        let dir = scratch("launcher-no-manifest");
+        let (m, from_tree) = deploy_manifest_at(&dir).unwrap();
+        assert!(!from_tree);
+        assert_eq!(m.bins, embedded_deploy_bins());
+        assert!(m.launchers.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for bad in ["../x", "a/b", ".hidden", "two words", ""] {
+            let text = format!("bins = [\"jesse-bridge\"]\nlaunchers = [\"{bad}\"]");
+            assert!(parse_deploy_manifest(&text).is_err(), "{bad:?}");
+        }
+        assert!(
+            parse_deploy_manifest("bins = [\"jesse-bridge\"]\nlaunchers = [\"jesse-bridge\"]")
+                .is_err()
+        );
+        assert!(
+            parse_deploy_manifest("bins = [\"jesse-bridge\"]\nlaunchers = [\"x\", \"x\"]").is_err()
+        );
+    }
+
+    /// The fatal message: one entry per distinct `server (command)` pair however many
+    /// harnesses reported it, and for each command the fix that can actually work.
+    #[test]
+    fn the_unresolved_message_is_deduplicated_and_names_the_real_fix() {
+        let want = "0.185.0";
+        let tree = DeployedTree {
+            manifest: Some(DeployManifest {
+                bins: vec!["jesse-bridge".to_string(), "jesse-listed".to_string()],
+                launchers: vec![],
+            }),
+            cargo_bins: vec![
+                "jesse-bridge".to_string(),
+                "jesse-listed".to_string(),
+                "jesse-unlisted-mcp".to_string(),
+            ],
+            launcher_files: vec!["some-launcher".to_string()],
+        };
+        let fatal = |rows: Value| match read_health(
+            &json!({"ok": true, "version": want, "mcp_servers_unresolved": rows}),
+            want,
+            None,
+            &tree,
+        ) {
+            Step::Fatal(e) => e,
+            Step::Done(v) => panic!("done:{v}"),
+            Step::Retry(e) => panic!("retry:{e}"),
+        };
+
+        // The 2026-10-17 rollback: one server, reported by both harnesses.
+        let said = fatal(json!([
+            {"harness": "claude-code", "server": "google-sheets", "command": "some-launcher"},
+            {"harness": "codex", "server": "google-sheets", "command": "some-launcher"},
+        ]));
+        assert!(said.contains("for 1 of its MCP server(s)"), "{said}");
+        assert_eq!(
+            said.matches("google-sheets (some-launcher)").count(),
+            1,
+            "{said}"
+        );
+        assert!(said.contains("no tools for it "), "{said}");
+
+        // Branch: a launcher in the tree that the manifest does not list.
+        assert!(said.contains("add it to `launchers`"), "{said}");
+        assert!(!said.contains("`bins`"), "{said}");
+
+        // Branch: a cargo target of the crate that `bins` does not list.
+        let said = fatal(json!([{"server": "x", "command": "jesse-unlisted-mcp"}]));
+        assert!(said.contains("add it to `bins`"), "{said}");
+        assert!(said.contains("cargo binary"), "{said}");
+
+        // Branch: anything else is the host's to install.
+        let said = fatal(json!([{"server": "google", "command": "workspace-mcp"}]));
+        assert!(
+            said.contains(
+                "not shipped by the bridge; install `workspace-mcp` on the host so it is on \
+                 the bridge's PATH"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("add it to"), "{said}");
+
+        // A name the deploy DID install is a PATH problem, never "add it".
+        let said = fatal(json!([{"server": "y", "command": "jesse-listed"}]));
+        assert!(said.contains("PATH"), "{said}");
+        assert!(!said.contains("add it to"), "{said}");
+
+        // Two distinct servers on one host program: counted as two, advised once.
+        let said = fatal(json!([
+            {"harness": "claude-code", "server": "slack", "command": "npx"},
+            {"harness": "claude-code", "server": "browser", "command": "npx"},
+            {"harness": "codex", "server": "slack", "command": "npx"},
+        ]));
+        assert!(said.contains("for 2 of its MCP server(s)"), "{said}");
+        assert!(said.contains("no tools for them "), "{said}");
+        assert_eq!(said.matches("install `npx`").count(), 1, "{said}");
     }
 
     /// The gate matches a job by the name GitHub actually reports, which is the workflow's

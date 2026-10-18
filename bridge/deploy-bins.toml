@@ -46,3 +46,25 @@ bins = [
     # run the same build.
     "jesse-mcp-http-adapter",
 ]
+
+# THE LAUNCHERS: in-tree scripts a child MCP config names by bare command, installed by the
+# deploy beside the binaries. Since 0.185.0.
+#
+# Each name is a FILE UNDER `bridge/launchers/` IN THE TREE BEING DEPLOYED. It is not built:
+# the deploy copies it into the same per-deploy store directory as the binaries, mode 755,
+# and points `~/.local/bin/<name>` at it, so it is staged, recorded for rollback and rolled
+# back exactly as a binary is. A name with no such file fails the deploy before anything is
+# built or staged. Launchers are not code signed: a script holds no privacy grant.
+#
+# ADDING A LAUNCHER TO A CHILD MCP CONFIG MEANS ADDING IT HERE, IN THE SAME CHANGE. Before
+# this list the Sheets launcher was a hand-run `install` step in the README, which is the
+# frozen-list bug above in a different shape: the deploy of bridge 0.182.0 shipped a config
+# naming `workspace-mcp-sheets`, the host did not have it, and the deploy rolled back — with
+# a message advising a change to `bins` that could only have failed the build.
+#
+# Only what a CHILD runs belongs here. `consent-google-sheets` is run by hand, once, from the
+# checkout, and no MCP config names it, so it is not deployed.
+launchers = [
+    # The `google-sheets` server's command: workspace-mcp with its own token directory.
+    "workspace-mcp-sheets",
+]

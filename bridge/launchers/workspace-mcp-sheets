@@ -1,9 +1,9 @@
 #!/bin/sh
 # Third workspace-mcp instance: Google SHEETS for the work account, and nothing else.
 #
-# Installed on the host as `~/.local/bin/workspace-mcp-sheets` (see bridge/README.md,
-# "Google Sheets: the one-time setup"). The bridge names it as the `google-sheets` server's
-# bare command in `crate::mcpservers::MCP_SERVERS`.
+# Installed on the host as `~/.local/bin/workspace-mcp-sheets` BY THE DEPLOY, which stages it
+# with the bridge from `launchers` in bridge/deploy-bins.toml. The bridge names it as the
+# `google-sheets` server's bare command in `crate::mcpservers::MCP_SERVERS`.
 #
 # WHY A SEPARATE INSTANCE AT ALL
 # `--read-only` is per server, not per service. Dropping it from the `google` row to let

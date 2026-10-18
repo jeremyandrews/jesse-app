@@ -1,55 +1,53 @@
 import XCTest
 @testable import Jesse_Mac
 
-// Mac-app-specific unit coverage: the Markdown block parser, the pairing-link parser, and
-// the notification snippet formatter. The SSE framing and host-sanitizing tests that used
+// Mac-app-specific unit coverage: the reply parser as the Mac uses it, the pairing-link
+// parser, and the notification snippet formatter. The SSE framing and host-sanitizing tests that used
 // to live here moved into the JesseNetworking package (SSEParserTests, JesseConfigTests)
 // when those duplicated implementations were unified into the shared client.
 
-final class MacMarkdownTests: XCTestCase {
-    func testHeadingLevel() {
-        XCTAssertEqual(MacMarkdownBlock.headingLevel("## Title"), 2)
-        XCTAssertNil(MacMarkdownBlock.headingLevel("###nospace"))
-        XCTAssertNil(MacMarkdownBlock.headingLevel("####### too many"))
-        XCTAssertNil(MacMarkdownBlock.headingLevel("no hash"))
+/// The reply parser as the Mac uses it: the shared `parseMarkdownBlocks`, whose fences follow
+/// the CommonMark rule in `MarkdownFence`. The Mac used to have a parser of its own that
+/// toggled a code block on any line starting with three backticks.
+@MainActor
+final class MacReplyParserTests: XCTestCase {
+    func testAFenceWithALanguageTagIsOneCodeBlockWithoutItsFences() {
+        let blocks = parseMarkdownBlocks("Before\n\n```swift\nlet x = 1\n```\n\nAfter")
+        XCTAssertEqual(blocks, [.paragraph("Before"), .code("let x = 1"), .paragraph("After")])
     }
 
-    func testBulletAndOrdered() {
-        XCTAssertEqual(MacMarkdownBlock.bulletContent("- item"), "item")
-        XCTAssertEqual(MacMarkdownBlock.bulletContent("* item"), "item")
-        XCTAssertNil(MacMarkdownBlock.bulletContent("-nospace"))
-        XCTAssertEqual(MacMarkdownBlock.orderedContent("1. first"), "first")
-        XCTAssertEqual(MacMarkdownBlock.orderedContent("42) x"), "x")
-        XCTAssertNil(MacMarkdownBlock.orderedContent("1.nospace"))
-        XCTAssertNil(MacMarkdownBlock.orderedContent("word. x"))
+    func testATildeFenceKeepsABacktickLineAsCode() {
+        let blocks = parseMarkdownBlocks("~~~\ncargo test\n```\n~~~\nAfter")
+        XCTAssertEqual(blocks, [.code("cargo test\n```"), .paragraph("After")])
     }
 
-    func testParseMixedBlocks() {
-        let md = """
-        # Heading
-
-        A paragraph.
-
-        - one
-        - two
-
-        ```
-        code line
-        ```
-        """
-        let blocks = MacMarkdownBlock.parse(md)
-        guard case .heading(level: 1, _) = blocks[0] else { return XCTFail("expected heading") }
-        guard case .paragraph = blocks[1] else { return XCTFail("expected paragraph") }
-        guard case let .bullet(items) = blocks[2] else { return XCTFail("expected bullet") }
-        XCTAssertEqual(items.count, 2)
-        guard case let .code(src) = blocks[3] else { return XCTFail("expected code") }
-        XCTAssertEqual(src, "code line")
+    func testAFourBacktickFenceQuotesAThreeBacktickFence() {
+        let blocks = parseMarkdownBlocks("````markdown\n```swift\nlet q = true\n```\n````\nAfter")
+        XCTAssertEqual(blocks, [.code("```swift\nlet q = true\n```"), .paragraph("After")])
     }
 
-    func testOrderedRun() {
-        let blocks = MacMarkdownBlock.parse("1. a\n2. b\n3. c")
-        guard case let .ordered(items) = blocks[0] else { return XCTFail("expected ordered") }
-        XCTAssertEqual(items.count, 3)
+    func testAnInfoStringLineInsideABlockIsContentNotAClose() {
+        let blocks = parseMarkdownBlocks("```\none\n```swift\ntwo\n```")
+        XCTAssertEqual(blocks, [.code("one\n```swift\ntwo")])
+    }
+
+    func testAnUnclosedFenceRunsToTheEndAndLosesNothing() {
+        let blocks = parseMarkdownBlocks("Intro\n\n```\ntail -f log\n\n# not a heading")
+        XCTAssertEqual(blocks, [.paragraph("Intro"), .code("tail -f log\n\n# not a heading")])
+    }
+
+    func testTheFixtureParsesEveryFenceShapeItCarries() throws {
+        let blocks = parseMarkdownBlocks(try MacReplyFixture.text())
+        let code = blocks.compactMap { block -> String? in
+            if case let .code(text) = block { return text }
+            return nil
+        }
+        XCTAssertTrue(code.contains("let blocks = parseMarkdownBlocks(reply)\nprint(blocks.count)"))
+        XCTAssertTrue(code.contains("cargo test --workspace\n```"))
+        XCTAssertTrue(code.contains("```swift\nlet quoted = true\n```"))
+        // Unclosed, it runs to the end of the reply, the file's final newline included.
+        XCTAssertEqual(code.last, "tail -f ~/Library/Logs/jesse-bridge.log\n")
+        XCTAssertTrue(blocks.contains { if case .table = $0 { return true } else { return false } })
     }
 }
 

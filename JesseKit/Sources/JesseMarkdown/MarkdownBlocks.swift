@@ -80,16 +80,13 @@ public enum MarkdownBlockParser {
 
             // 1. A FENCE WINS OVER EVERYTHING, a blank line included: what is inside one
             //    is not markdown and must not be read as any.
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+            if let fence = MarkdownFence.opening(raw) {
                 flush()
-                let fence = Character(trimmed.hasPrefix("```") ? "`" : "~")
-                let opening = trimmed.prefix { $0 == fence }.count
-                let language = String(trimmed.drop { $0 == fence })
-                    .trimmingCharacters(in: .whitespaces)
+                let language = fence.info
                 var body: [String] = []
                 index += 1
                 while index < lines.count {
-                    if isClosingFence(lines[index], fence: fence, opening: opening) {
+                    if fence.isClosed(by: lines[index]) {
                         index += 1
                         break
                     }
@@ -283,19 +280,6 @@ public enum MarkdownBlockParser {
             return nil
         }
         return hashes
-    }
-
-    /// CommonMark's closing-fence rule: at least as many of the SAME fence character as
-    /// opened the block, and nothing after them but spaces.
-    ///
-    /// "Nothing after them" is load-bearing rather than pedantry. A line reading
-    /// ```` ```swift ```` is an OPENING fence's info string, so it cannot close one — and
-    /// a parser that let it would silently swallow the word `swift`, which is exactly the
-    /// kind of disappearance the fuzz test exists to catch, and did.
-    static func isClosingFence(_ raw: String, fence: Character, opening: Int) -> Bool {
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        let run = trimmed.prefix { $0 == fence }.count
-        return run >= opening && run == trimmed.count
     }
 
     static func isQuote(_ trimmed: String) -> Bool { trimmed.first == ">" }

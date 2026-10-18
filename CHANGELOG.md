@@ -14,6 +14,13 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (197)] - 2026-10-18
+
+**Mac: a large paste no longer hangs the app, code renders as code, and one selection covers a
+whole reply.** Root causes: the composer measured its whole text with `boundingRect` on every
+layout pass (66 s per call at 1 MB), the reply parser closed a code block on any line starting
+with three backticks, and the Mac drew each block of a reply as its own selectable `Text`.
+
 ## [App 1.0 (196)] - 2026-10-18
 
 **The automatic morning refresh waits for the phone to unlock, so it always carries the

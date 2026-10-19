@@ -34,7 +34,7 @@ const fs = require('fs');
 const path = require('path');
 
 const VAULT_REL = 'vault/Projects/Research/Currency-Tracking';
-const TARGETS = ['USD-EUR-Summary.md', 'USD-BTC-Summary.md'];
+const TARGETS = ['USD-EUR-Summary.md', 'USD-BTC-Summary.md', 'XAU-USD-Summary.md'];
 const WIKI_PREFIX = 'todo-list/Projects/Research/Currency-Tracking';
 
 // The pointer line the live file carries, and the pattern that recognises a previous one so
@@ -94,7 +94,7 @@ function archiveFor(dir, base, year, sourceStem, header, sep, span) {
   const file = path.join(dir, `${base}-archive-${year}.md`);
   if (fs.existsSync(file)) return { file, existing: parse(fs.readFileSync(file, 'utf8')) };
   // First rotation into this year: build the same shape the hand run left behind.
-  const title = /USD-EUR/.test(base) ? 'USD/EUR' : 'USD/BTC';
+  const title = /USD-EUR/.test(base) ? 'USD/EUR' : /XAU-USD/.test(base) ? 'XAU/USD' : 'USD/BTC';
   return {
     file,
     existing: {

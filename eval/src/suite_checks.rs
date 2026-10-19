@@ -368,21 +368,37 @@ fn a_rotation_done_right_passes_and_an_unrotated_summary_fails() {
     }
     let (root, t) = workspace("currency-summary-rotation");
     let ws = root.path().join("ws");
-    let live = ws.join("vault/Projects/Research/Currency-Tracking/USD-EUR-Summary.md");
-    let row = "| 2026-10-07 | 0.88739 | -0.58% | +0.76% | +3.13% | The euro bounced as French bond yields eased. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-07]]. |";
-    let body = std::fs::read_to_string(&live).unwrap();
-    let sep = "|------|------|-------|--------|---------|------------|\n";
-    std::fs::write(&live, body.replacen(sep, &format!("{sep}{row}\n"), 1)).unwrap();
+    let dir = ws.join("vault/Projects/Research/Currency-Tracking");
+    let add = |file: &str, row: &str| {
+        let live = dir.join(file);
+        let body = std::fs::read_to_string(&live).unwrap();
+        let sep = "|------|------|-------|--------|---------|------------|\n";
+        std::fs::write(&live, body.replacen(sep, &format!("{sep}{row}\n"), 1)).unwrap();
+    };
+    let rotate = || {
+        let ok = Command::new("node")
+            .arg("vault/rotate-currency-summary.js")
+            .current_dir(&ws)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    };
+    let eur = "| 2026-10-07 | 0.88739 | -0.58% | +0.76% | +3.13% | The euro bounced as French bond yields eased. Full report: [[todo-list/Projects/Research/Currency-Tracking/USD-EUR-2026-10-07]]. |";
+    let gold = "| 2026-10-07 | 4112.40 | +0.31% | +1.20% | +2.05% | Gold edged up as real yields slipped. Full report: [[todo-list/Projects/Research/Currency-Tracking/XAU-USD-2026-10-07]]. |";
+    add("USD-EUR-Summary.md", eur);
     let (ok, _) = grade(&t, &ws, "Added.");
     assert!(!ok, "added but not rotated");
-    let ok = Command::new("node")
-        .arg("vault/rotate-currency-summary.js")
-        .current_dir(&ws)
-        .stdout(Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok);
+    // USD/EUR done right, but the gold row is still missing: not yet a pass.
+    rotate();
+    let (ok, _) = grade(&t, &ws, "Added and rotated.");
+    assert!(!ok, "no gold row");
+    // The gold row added after the rotation leaves XAU-USD unrotated: still a fail.
+    add("XAU-USD-Summary.md", gold);
+    let (ok, _) = grade(&t, &ws, "Added.");
+    assert!(!ok, "gold added but not rotated");
+    rotate();
     let (ok, why) = grade(&t, &ws, "Added and rotated.");
     assert!(ok, "{why:?}");
 }

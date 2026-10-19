@@ -14,6 +14,21 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [eval 0.7.1] - 2026-10-19
+
+**The currency rotation task covers the gold summary.** Root cause: the live vault gained a
+third running summary, `XAU-USD-Summary.md`, and its rotation script rotates it, but the
+`workflows-v1` fixture and the `currency-summary-rotation` task knew only USD/EUR and USD/BTC,
+so a turn that added a gold row and never rotated it could not fail the grade.
+
+- The fixture vault carries `XAU-USD-Summary.md` (60 rows, so one more forces a rotation) and
+  the live `rotate-currency-summary.js`, which lists it in `TARGETS`.
+- The task asks for a gold row too and grades its placement, its length, the rotation note
+  and the new `XAU-USD-Summary-archive-2026.md`.
+- `a_rotation_done_right_passes_and_an_unrotated_summary_fails` now also requires a FAIL for
+  a gold row added without rotation, and a PASS once it is rotated.
+- The fixture `AGENTS.md` and `CLAUDE.md` name all three summaries.
+
 ## [App 1.0 (198)] - 2026-10-18
 
 **Inline code sits on a chip in replies and bubbles, and the Mac composer styles Markdown as you

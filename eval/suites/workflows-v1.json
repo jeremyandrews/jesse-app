@@ -721,7 +721,7 @@
       "workspace": "fixture",
       "fixture_base": "workflows-v1/base",
       "git_init": true,
-      "prompt": "Add today's USD/EUR row to the running summary, newest first, in the same format as the rows already there: date 2026-10-07, rate 0.88739, day -0.58%, week +0.76%, month +3.13%, key driver: The euro bounced as French bond yields eased. Link it to the report USD-EUR-2026-10-07 the way the other rows do. Keep the row under 400 characters. Then rotate the summaries.",
+      "prompt": "Add today's USD/EUR row to the running summary, newest first, in the same format as the rows already there: date 2026-10-07, rate 0.88739, day -0.58%, week +0.76%, month +3.13%, key driver: The euro bounced as French bond yields eased. Link it to the report USD-EUR-2026-10-07 the way the other rows do. Also add today's gold row to the XAU/USD summary the same way: date 2026-10-07, price 4112.40, day +0.31%, week +1.20%, month +2.05%, key driver: Gold edged up as real yields slipped. Link it to the report XAU-USD-2026-10-07. Keep each row under 400 characters. Then rotate the summaries.",
       "assertions": [
         {
           "type": "file_matches",
@@ -742,6 +742,26 @@
           "type": "file_matches",
           "path": "vault/Projects/Research/Currency-Tracking/USD-EUR-Summary-archive-2026.md",
           "pattern": "(?m)^\\|[-| ]+\\|\\n\\| 2026-08-08 \\|[^\\n]*\\n\\| 2026-08-06 \\|"
+        },
+        {
+          "type": "file_matches",
+          "path": "vault/Projects/Research/Currency-Tracking/XAU-USD-Summary.md",
+          "pattern": "(?m)^\\|[-| ]+\\|\\n\\| 2026-10-07 \\| 4112\\.40 \\|"
+        },
+        {
+          "type": "file_matches",
+          "path": "vault/Projects/Research/Currency-Tracking/XAU-USD-Summary.md",
+          "pattern": "(?m)^\\| 2026-10-07 \\|.{0,385}XAU-USD-2026-10-07\\]\\]\\. \\|$"
+        },
+        {
+          "type": "file_matches",
+          "path": "vault/Projects/Research/Currency-Tracking/XAU-USD-Summary.md",
+          "pattern": "Entries before 2026-08-09 \\(2026-08-08 through 2026-08-08\\) were rotated out on \\d{4}-\\d{2}-\\d{2}"
+        },
+        {
+          "type": "file_matches",
+          "path": "vault/Projects/Research/Currency-Tracking/XAU-USD-Summary-archive-2026.md",
+          "pattern": "(?m)^\\|[-| ]+\\|\\n\\| 2026-08-08 \\|"
         },
         {
           "type": "file_matches",

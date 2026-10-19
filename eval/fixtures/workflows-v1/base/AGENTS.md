@@ -54,6 +54,6 @@ Follow the `diet-logging` skill (`.claude/skills/diet-logging/SKILL.md`).
 
 ## Currency
 
-The running summaries are `vault/Projects/Research/Currency-Tracking/USD-EUR-Summary.md` and
-`USD-BTC-Summary.md`, newest row first. After adding a row, rotate them by running exactly
+The running summaries are `vault/Projects/Research/Currency-Tracking/USD-EUR-Summary.md`,
+`USD-BTC-Summary.md` and `XAU-USD-Summary.md` (gold), newest row first. After adding a row, rotate them by running exactly
 `node vault/rotate-currency-summary.js` from the repository root.

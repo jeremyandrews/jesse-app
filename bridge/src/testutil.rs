@@ -119,6 +119,7 @@ pub(crate) fn test_config() -> Config {
         // registered. The house tests set it explicitly.
         house: HouseConfig::Absent,
         gateway: crate::gateway::GatewaySettings::default(),
+        devjob: crate::devjob::DevJobSettings::default(),
         // No `[healthdb]` table: the shipped default. No pool, no task, `not_configured`.
         healthdb: HealthDbConfig::Absent,
         // Speech transcription OFF in the fixture: no intake or models directory is ever

@@ -240,6 +240,7 @@ every server is a row of.
 | healthdb | bridge_stdio | `JESSE_HEALTHDB_RO_URL_FILE JESSE_HEALTHDB_CA_FILE JESSE_HEALTHDB_MCP_LEDGER` (paths) |
 | clockify-rs | bridge_stdio | `JESSE_CLOCKIFY_API_KEY` |
 | runn-rs | bridge_stdio | `JESSE_RUNN_API_TOKEN` (the launcher pins the host and the caller email) |
+| devjob | in_process (0.186.0) | none: no process is started. The bridge itself holds the `[devjob] kubeconfig` and calls the cluster from its own process; see "Coding agents on the cluster" |
 | qmd | child | none |
 
 The sets were measured by starting each server with a stripped environment (2026-10-13): every
@@ -2654,6 +2655,74 @@ env -i PATH="$(launchctl getenv PATH)" HOME="$HOME" jesse-k8s-mcp --toolsets cor
 If the launcher is absent the server simply fails to start, the twenty tools are missing from
 every turn, and nothing else degrades — but the containment record will then describe a row
 that loaded nothing, which is worth less than no row at all.
+
+## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
+
+`[devjob] enabled = true` (off by default) adds the `devjob` server to the main set: three tools,
+`devjob_start`, `devjob_status` and `devjob_list`, served **inside the bridge process**
+(`Transport::InProcess`, `bridge/src/devjob.rs`). A main turn hands it a repository, a prompt and
+an agent; the bridge creates one ConfigMap and one Job in the cluster's `jesse-dev` namespace from
+a copy of `apps/jesse-dev/job-template.yaml` in the k3s repository, watches the run to its end
+from a background task no turn owns, writes the report to `Inbox/<date>-dev-job-<slug>.md` and
+pushes a notification. A `kind = "devjob"` schedule entry does the same unattended.
+
+### What the server can do
+
+| | |
+|---|---|
+| Starts | a container on the k3s cluster (`ghcr.io/jeremyandrews/jesse-dev-agent`, pinned by digest) running Claude Code, Codex or Gemini CLI on the prompt |
+| The container holds | the Secret `jesse-dev-agent-keys`: the three agents' API keys and **a GitHub credential (`GH_TOKEN`) that can push branches and open pull requests on any repository that credential reaches** |
+| The container does | clone the repository, run the agent and the test command, push `jesse/<slug>`, open a pull request against `main`. It never merges and never pushes to `main`; that is the entrypoint's rule, on the cluster side |
+| The bridge does | create the ConfigMap and the Job (both labelled `jesse.dev/devjob=true`), resume queued Jobs, read the pod's log, annotate the Job, delete the ConfigMap, write one vault note under the write lock |
+| Classes | `devjob_start` is `write` (write turns only); `devjob_status` and `devjob_list` are reads |
+
+**The tool cannot choose a file path, a namespace, an image or a credential.** Its arguments are
+`repo`, `prompt`, `agent`, `model`, `branch_slug`, `test_command` and `timeout_minutes`, and any
+other key is refused. The namespace and the image come from `[devjob]`; the report's name and
+place are fixed (`Inbox/<date>-dev-job-<slug>.md`, `-2`, `-3` for a repeat the same day); the
+slug is lowercase letters, digits and hyphens.
+
+### There is no repository allowlist, by decision
+
+**Deliberately none (Jeremy, 2026-10-24).** `repo` is checked by pattern only (`owner/name`). A
+prompt injected into a main turn (a WhatsApp or iMessage body, a web page, a mail) could
+therefore aim a run at **any repository the cluster's GitHub credential reaches**, with a prompt
+of the injector's choosing, and the run would push a branch and open a pull request there. What
+bounds it: `devjob_start` reaches write turns only; nothing merges; every run lands as a report in
+the Inbox and a push to the phone; and a pull request is a proposal a human reads.
+
+### The kubeconfig lives only in the bridge process
+
+The credential is the kubeconfig at `[devjob] kubeconfig` (default `~/.kube/ks-jesse.yaml`): the
+`jesse` ServiceAccount, cluster admin. The bridge reads it once at startup and builds its client
+from it (`kube` 4.2.0 with `k8s-openapi` 0.28.0, typed calls, no `kubectl`, no shell). **No MCP
+child, stub or spawned process reads it**: an `in_process` server has no process, and its stub
+in the child is `jesse-gateway-mcp`, which holds a socket path and nothing else. That is the
+reason the feature **requires the tool gateway**: without it there is nothing to serve an
+in-process server to a spawned child, and the only other way to give a child these tools would be
+a child process holding the kubeconfig. The bridge refuses to boot with `[devjob] enabled` and
+`[gateway] enabled = false`, with an unreadable kubeconfig, or with an `image` that is not a
+`@sha256:` digest reference.
+
+(The `kubernetes` server's launcher reads the same kubeconfig through `KUBECONFIG`, as before;
+this change does not touch that server or its grants.)
+
+### The credential inside the pod is the cluster side's decision
+
+What the pod holds (`jesse-dev-agent-keys`), how it is mounted (`envFrom`, the whole Secret, into
+the agent's environment) and what the GitHub credential can reach are set in the k3s repository,
+not here; the bridge copies the template's Secret reference unchanged and adds no credential,
+toleration or node selector of its own. Narrowing the token's reach, or minting one per run, is a
+change on that side.
+
+### Restart safety and the queue
+
+All state is the cluster's: the queue is the set of suspended labelled Jobs, a finished run is
+reported when its Job lacks `jesse.dev/reported=true`, and the report file names its Job, so a
+bridge that dies between writing a report and annotating the Job writes no second one.
+`[devjob] max_concurrent` (default 2, the namespace quota's pod count) caps running Jobs; a start
+past the cap creates the Job with `spec.suspend: true`, whose `activeDeadlineSeconds` clock
+starts on resume rather than on creation.
 
 ## Diet child tool isolation (in-process boundary)
 

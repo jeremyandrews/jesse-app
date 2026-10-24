@@ -954,6 +954,13 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `spreadsheets.readonly`, `drive.readonly`, `openid`, `userinfo.email` and `userinfo.profile`.
 // Why it is a third instance and not a flag on `google` is under GOOGLE-PERSEIDO above and on
 // the row in `crate::mcpservers`. Never a wildcard.
+//
+// DEVJOB: ALL THREE, NAMED ONE BY ONE (0.186.0). `devjob_start` starts a coding agent on the
+// cluster that can push a branch and open a pull request on any repository the cluster's GitHub
+// credential reaches; it is classed `write` in the row, so it reaches write turns only.
+// `devjob_status` and `devjob_list` only read the cluster. The server is `in_process` and is
+// rendered into a child's config only with the gateway on and `[devjob] enabled`, so with either
+// off these three names grant nothing. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1153,7 +1160,8 @@ mcp__google-sheets__list_spreadsheet_comments,mcp__google-sheets__create_spreads
 mcp__google-sheets__create_sheet,mcp__google-sheets__modify_sheet_values,\
 mcp__google-sheets__append_table_rows,mcp__google-sheets__format_sheet_range,\
 mcp__google-sheets__manage_conditional_formatting,\
-mcp__google-sheets__resize_sheet_dimensions,mcp__google-sheets__move_sheet_rows";
+mcp__google-sheets__resize_sheet_dimensions,mcp__google-sheets__move_sheet_rows,\
+mcp__devjob__devjob_start,mcp__devjob__devjob_status,mcp__devjob__devjob_list";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.
@@ -1224,6 +1232,9 @@ pub struct Config {
     /// The tool gateway (`[gateway]`, `[mcp.<name>]`): off unless the table turns it on. See
     /// [`crate::gateway`].
     pub gateway: crate::gateway::GatewaySettings,
+    /// Coding agents on the cluster (`[devjob]`): off unless the table turns it on, and refused at
+    /// boot without the gateway. See [`crate::devjob`].
+    pub devjob: crate::devjob::DevJobSettings,
     /// The per-turn run limit in seconds (`JESSE_TIMEOUT`, default
     /// [`DEFAULT_TIMEOUT_SECS`], clamped to `[1, HARD_TIMEOUT_CEILING]`).
     pub timeout_secs: u64,
@@ -4991,6 +5002,8 @@ impl Config {
             healthdb: HealthDbConfig::from_toml(load_healthdb_table(&home)),
             // The `[gateway]` table and `[mcp.*]` overrides. Off when absent.
             gateway: load_gateway_settings(&home),
+            // The `[devjob]` table. Off when absent; its service is built in `main`.
+            devjob: crate::devjob::DevJobSettings::from_toml(load_devjob_table(&home), &home),
             // 90m default; clamped to [1, HARD_TIMEOUT_CEILING].
             timeout_secs: clamp_timeout_secs(env_parse("JESSE_TIMEOUT", DEFAULT_TIMEOUT_SECS)),
             // The cut-off turn's partial-answer ring. Blocks are floored at 1 (a

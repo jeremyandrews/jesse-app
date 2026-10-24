@@ -26,7 +26,7 @@ async fn main() {
     // environment, Codex because `env_vars` can only forward a variable that exists here.
     export_mcp_server_env();
 
-    let cfg = Config::from_env();
+    let mut cfg = Config::from_env();
 
     if cfg.token.is_empty() {
         eprintln!("JESSE_TOKEN is not set — refusing to start.");
@@ -70,6 +70,9 @@ async fn main() {
     // …and the tool gateway: when `[gateway] enabled`, its stub must exist and every
     // `[mcp.<name>]` override must resolve. Off is the default and checks nothing.
     errors.extend(jesse_bridge::gateway::validate_gateway(&cfg));
+    // …and `[devjob]`: on, it needs the gateway (the kubeconfig must stay in this process), a
+    // kubeconfig it can read and an image pinned by digest. Off is the default and checks nothing.
+    errors.extend(jesse_bridge::devjob::validate_devjob(&cfg));
     // The `[concurrency]` table joins the SAME gate. A misspelled model id there is refused by
     // name rather than silently ignored — a config surface that quietly does nothing is the
     // failure mode this project keeps designing against.
@@ -383,12 +386,52 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // CODING AGENTS ON THE CLUSTER. The client is built from the kubeconfig here, in this process,
+    // and registered as the gateway's `devjob` in-process server BEFORE the gateway is first built
+    // (it copies the registry then). Building the client connects to nothing, so a cluster that is
+    // down costs the runs, never the boot; a kubeconfig that configures no client refuses it.
+    let devjobs = if cfg.devjob.enabled {
+        match jesse_bridge::devjob::DevJobs::connect(cfg.devjob.clone()).await {
+            Ok(d) => {
+                let d = std::sync::Arc::new(d);
+                cfg.gateway
+                    .in_process
+                    .0
+                    .insert(jesse_bridge::devjob::DEVJOB_SERVER.to_string(), d.clone());
+                let _ = cfg.devjob.service.0.set(d.clone());
+                eprintln!(
+                    "jesse-bridge: devjob ON (namespace {}, image {}, at most {} at once)",
+                    cfg.devjob.namespace, cfg.devjob.image, cfg.devjob.max_concurrent
+                );
+                Some(d)
+            }
+            Err(e) => {
+                eprintln!("jesse-bridge: refusing to start — [devjob]: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let addr = format!("{}:{}", cfg.bind, cfg.port);
     let mut state = AppState::new(cfg);
     // Install the APNs client if push is configured (JESSE_APNS_* set and the key
     // loads). `None` leaves every push path a no-op — the bridge behaves exactly
     // as it did before. `build_apns` logs whether push is enabled or why it isn't.
     state.apns = build_apns();
+    // The dev-job watcher: a background task owned by no turn. It reports every run that finished
+    // while the bridge was down, recomputes the queue from the cluster, and then follows each run.
+    if let Some(d) = &devjobs {
+        d.attach(jesse_bridge::devjob::ReportSink {
+            notes_root: jesse_bridge::notes_root(&state.cfg),
+            broker: state.broker.clone(),
+            notifier: Some(std::sync::Arc::new(jesse_bridge::devjob::AppNotifier::of(
+                &state,
+            ))),
+        });
+        d.spawn_watcher();
+    }
     // THE HEALTH ARCHIVE, only where `[healthdb]` is ready. The pool is LAZY, so a Postgres
     // that is down now costs nothing: the schema task retries in the background and the
     // ingest route answers `503 unavailable` until it connects. With no table, nothing here

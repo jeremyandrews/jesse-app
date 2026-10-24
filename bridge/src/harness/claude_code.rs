@@ -3467,6 +3467,77 @@ mod tests {
         }
     }
 
+    /// The main path WITH THE GATEWAY ON and `[devjob]` registered: the same twenty-four plus
+    /// `devjob`, the first `in_process` row, and nothing else. The gateway-off count above stays
+    /// twenty-four, because an `in_process` row renders into no gateway-off config.
+    #[test]
+    fn main_turn_with_the_gateway_on_also_declares_devjob() {
+        struct Null;
+        impl crate::gateway::InProcessServer for Null {
+            fn tools(&self) -> Vec<serde_json::Value> {
+                Vec::new()
+            }
+            fn call<'a>(
+                &'a self,
+                _tool: &'a str,
+                _arguments: serde_json::Value,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a,
+                >,
+            > {
+                Box::pin(async { Err("unused".to_string()) })
+            }
+        }
+        let mut cfg = test_config();
+        cfg.gateway.enabled = true;
+        let off = arg_value(
+            &build_claude_args(
+                &cfg,
+                "hi",
+                None,
+                Capability::Write,
+                main_mcp_config(&cfg, &ClaudeCode),
+                None,
+                None,
+            ),
+            "--mcp-config",
+        )
+        .unwrap();
+        cfg.gateway.in_process.0.insert(
+            crate::devjob::DEVJOB_SERVER.to_string(),
+            std::sync::Arc::new(Null),
+        );
+        let args = build_claude_args(
+            &cfg,
+            "hi",
+            None,
+            Capability::Write,
+            main_mcp_config(&cfg, &ClaudeCode),
+            None,
+            None,
+        );
+        let mcp = arg_value(&args, "--mcp-config").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert_eq!(
+            servers.len(),
+            25,
+            "with the gateway on, the main path must declare qmd, slack, browser, homeassistant, \
+             roon, google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
+             google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex, \
+             clockify-rs, runn-rs, google-sheets and devjob and nothing else: {mcp:?}"
+        );
+        assert_eq!(
+            servers["devjob"],
+            serde_json::json!({ "type": "in_process" })
+        );
+        // Unregistered (`[devjob]` off), the gateway-on config is the gateway-off one.
+        let off_parsed: serde_json::Value = serde_json::from_str(&off).unwrap();
+        assert_eq!(off_parsed["mcpServers"].as_object().unwrap().len(), 24);
+        assert!(!off.contains("devjob"));
+    }
+
     #[test]
     fn main_turn_mcp_config_honors_the_env_override() {
         // Same resolution as the vault-QA child: `--mcp-config` accepts a file PATH or
@@ -4535,8 +4606,21 @@ mod tests {
         let claude_mcp =
             McpSet::from_config(claude_set).expect("Claude Code's main set is shipped");
         let codex_mcp = McpSet::from_config(codex_set).expect("Codex's main set is shipped");
+        // Only the servers the config LOADS: an `in_process` row (`devjob`) is granted in the
+        // shared allowlist but rendered into no gateway-off config, so neither harness loads it
+        // here, and Codex's `enabled_tools` (one line per loaded server) cannot name it.
+        let loaded = server_names(claude_set);
+        let on_loaded = |t: &String| {
+            t.strip_prefix("mcp__")
+                .and_then(|r| r.split("__").next())
+                .is_some_and(|server| loaded.contains(server))
+        };
         for capability in [Capability::Read, Capability::Write] {
-            let claude = claude_granted(&ClaudeCode.capability_args(&cfg, capability, claude_mcp));
+            let claude: BTreeSet<String> =
+                claude_granted(&ClaudeCode.capability_args(&cfg, capability, claude_mcp))
+                    .into_iter()
+                    .filter(on_loaded)
+                    .collect();
             let codex = codex_granted(&Codex.capability_args(&cfg, capability, codex_mcp));
             assert!(
                 !claude.is_empty(),

@@ -783,6 +783,19 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
         ),
         &GOOGLE_SHEETS_WRITE_TOOLS,
     ),
+    // CODING AGENTS ON THE CLUSTER (0.186.0), served inside the bridge by
+    // [`crate::devjob::DevJobs`]: no process, no socket, and the only row whose credential (the
+    // kubeconfig) never leaves the bridge process. `in_process` rows render only with the gateway
+    // on ([`render_in_process_entry`]), so a gateway-off child never sees it, and only when
+    // `[devjob] enabled` registered the server. `devjob_start` creates a Job that can push a
+    // branch and open a pull request, so it is a write; the other two only read.
+    McpServerRow {
+        transport: Transport::InProcess,
+        ..writes(
+            http(crate::devjob::DEVJOB_SERVER, "", HttpAuthSpec::None),
+            &[crate::devjob::TOOL_START],
+        )
+    },
 ];
 
 /// The `google-sheets` tools that change a spreadsheet: granted on write turns only, and
@@ -928,6 +941,10 @@ pub const MAIN_SET: &[&str] = &[
     "clockify-rs",
     "runn-rs",
     "google-sheets",
+    // `in_process`: absent from the rendered string with the gateway off, so
+    // `MAIN_CHILD_MCP_CONFIG` is byte for byte the twenty-six-server golden. With the gateway on
+    // and `[devjob] enabled`, [`crate::render_child_mcp`] adds its entry and the gateway serves it.
+    "devjob",
 ];
 
 /// The today-brief child's opt-in set.
@@ -952,7 +969,9 @@ pub fn messages_plus(extra: &[&'static str]) -> Vec<&'static str> {
 ///
 /// An HTTP credential is rendered as Claude Code's own `${VAR}` expansion of a NAME; a client
 /// certificate is not expressible here and renders no header. An `in_process` row has no
-/// entry a CLI could start, so it renders nothing (and no shipped set names one).
+/// entry a CLI could start, so it renders nothing HERE: this is the gateway-off spelling, and a
+/// gateway-off child must never see it. With the gateway on, [`gateway_config_json`] renders it
+/// as [`render_in_process_entry`], which the gateway's child config then swaps for the stub.
 pub fn render_entry(row: &McpServerRow) -> String {
     let q = |s: &str| serde_json::to_string(s).expect("a string serialises");
     match row.transport {
@@ -997,12 +1016,78 @@ pub fn render_entry(row: &McpServerRow) -> String {
 /// On a name with no row. Every set is a constant of this module or a literal list built from
 /// them, and [`tests::every_set_names_only_rows`] proves each resolves.
 pub fn mcp_config_json(names: &[&str]) -> String {
+    let rendered = render_set(names, |_| false);
+    // A set that names an `in_process` row remembers its names under its gateway-off string, so
+    // the gateway can render the row back in ([`gateway_config_json`]) from the only thing a spawn
+    // site carries: the string.
+    if names
+        .iter()
+        .any(|n| row(n).is_some_and(|r| r.transport == Transport::InProcess))
+    {
+        IN_PROCESS_SETS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                rendered.clone(),
+                names.iter().map(|n| n.to_string()).collect(),
+            );
+    }
+    rendered
+}
+
+/// Render `names`, giving each `in_process` row for which `include` is true its gateway entry.
+fn render_set(names: &[&str], include: impl Fn(&str) -> bool) -> String {
     let entries: Vec<String> = names
         .iter()
-        .map(|n| render_entry(row(n).unwrap_or_else(|| panic!("no MCP_SERVERS row '{n}'"))))
+        .map(|n| {
+            let r = row(n).unwrap_or_else(|| panic!("no MCP_SERVERS row '{n}'"));
+            if r.transport == Transport::InProcess && include(n) {
+                render_in_process_entry(r)
+            } else {
+                render_entry(r)
+            }
+        })
         .filter(|e| !e.is_empty())
         .collect();
     format!(r#"{{"mcpServers":{{{}}}}}"#, entries.join(","))
+}
+
+/// Every rendered set that names an `in_process` row, keyed by its gateway-off string, with the
+/// ordered names it was rendered from. Filled by [`mcp_config_json`].
+static IN_PROCESS_SETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The `type` an `in_process` entry carries in a gateway-on config. No CLI could start it, and
+/// none is ever handed it: [`crate::gateway::child_mcp_config`] replaces every gateway-placed
+/// entry with the stub before a child sees the config.
+pub const IN_PROCESS_ENTRY_TYPE: &str = "in_process";
+
+/// An `in_process` row's entry in a GATEWAY-ON config: `"name":{"type":"in_process"}`. It is a
+/// marker for [`crate::gateway::admitted_servers`] and [`crate::gateway::child_mcp_config`], which
+/// admit it and swap it for the stub like any other gateway-placed server.
+pub fn render_in_process_entry(row: &McpServerRow) -> String {
+    let q = |s: &str| serde_json::to_string(s).expect("a string serialises");
+    format!(r#"{}:{{"type":{}}}"#, q(row.name), q(IN_PROCESS_ENTRY_TYPE))
+}
+
+/// `config` (a string [`mcp_config_json`] rendered) with each `in_process` row that `include`
+/// accepts rendered back in at its place in the set. `None` when `config` names no `in_process`
+/// row, or none is included: the caller keeps `config` unchanged, byte for byte.
+pub fn gateway_config_json(config: &str, include: impl Fn(&str) -> bool) -> Option<String> {
+    let names = IN_PROCESS_SETS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(config)
+        .cloned()?;
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    if !names
+        .iter()
+        .any(|n| row(n).is_some_and(|r| r.transport == Transport::InProcess) && include(n))
+    {
+        return None;
+    }
+    Some(render_set(&names, include))
 }
 
 // ---- THE CODEX VIEWS -------------------------------------------------------------------

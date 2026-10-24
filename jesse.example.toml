@@ -283,6 +283,27 @@ Answer the question I asked, not the one you wish I had asked.
 # url = "http://slack-mcp.jesse:8080/mcp"
 # bearer_env = "SLACK_ADAPTER_TOKEN"
 
+# -----------------------------------------------------------------------------
+# [devjob]: coding agents on the cluster (optional, OFF by default; needs [gateway])
+# -----------------------------------------------------------------------------
+#
+# With `enabled = true` a main write turn gets `devjob_start`, `devjob_status` and `devjob_list`:
+# start a coding agent Job in the k3s cluster's namespace, follow it, and get its report in
+# `Inbox/<date>-dev-job-<slug>.md`. The bridge holds the kubeconfig and nothing else reads it,
+# which is why it refuses to boot without `[gateway] enabled`, with an unreadable kubeconfig, or
+# with an image not pinned by digest. A `[[schedule]]` entry with `kind = "devjob"` (repo, agent,
+# branch_slug, prompt_file, optional model, test_command, timeout in minutes) does the same on a
+# clock. See SECURITY.md ("Coding agents on the cluster") and bridge/README.md.
+#
+# kubeconfig (optional): default ~/.kube/ks-jesse.yaml.
+# namespace (optional): default "jesse-dev".
+# image (optional): a `<repository>@sha256:<digest>` reference; default the pinned agent image.
+# max_concurrent (optional): running Jobs at once; default 2. More are queued suspended.
+# default_agent (optional): claude | codex | gemini; default claude.
+#
+# [devjob]
+# enabled = true
+
 # =============================================================================
 # [[models]] — the global model switch's registry (declarative, operator-configurable)
 # =============================================================================

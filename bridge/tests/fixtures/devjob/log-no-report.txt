@@ -1,0 +1,10 @@
+==> input
+repo=jeremyandrews/k3s agent=claude branch=jesse/read-readme
+==> credentials
+==> git configuration
+==> clone
+Cloning into '/home/agent/work/repo'...
+==> agent
+JESSE-DEV-REPORT
+status: ok
+(the pod was killed here, before the entrypoint printed its report)

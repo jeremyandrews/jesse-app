@@ -14,6 +14,69 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.186.0] - 2026-10-24
+
+**A main turn can start a coding agent on the cluster with one tool call, and the bridge watches
+it, reports it and pushes.** The k3s cluster already runs coding agents: `apps/jesse-dev` holds a
+namespace, a Secret with the agent keys and a GitHub credential, a cache claim, a quota and a Job
+template whose entrypoint clones a repository, runs Claude Code, Codex or Gemini CLI, runs the
+tests, pushes a branch and opens a pull request, and ends its log with a report block. But the
+only way to use it was by hand, through the generic `kubernetes` tools: build a ConfigMap and a
+Job from memory, poll the pod, read the log, parse the report. That costs a long turn every time,
+leaves the report in a chat, and cannot run from the scheduler, because an MCP server a turn
+starts dies with the turn while a run takes minutes to hours.
+
+The tool gateway (0.177.0) had the transport for this, `Transport::InProcess`: Rust tools inside
+the bridge with no process and no socket. But no spawned harness could reach one: `render_entry`
+rendered an in-process row as nothing, so neither Claude Code nor Codex ever saw it, and
+`tests/gateway.rs` reached its probe only through a placeholder entry written by hand.
+
+- **In-process rows reach spawned children (the gap closed first).** With `[gateway] enabled`, an
+  `in_process` row named in a set, and registered in `GatewaySettings.in_process`, is rendered by
+  `render_child_mcp` as `"name":{"type":"in_process"}` at its place in the set;
+  `admitted_servers` admits it and the child's config swaps it for the stub, on both harnesses,
+  as for every other gateway server. With the gateway off it renders nothing: every gateway-off
+  config, argv fixture and the main golden are byte for byte unchanged. Regression tests at that
+  layer; `tests/gateway.rs` now drives its in-process probe through the real rendering.
+- **`devjob`, an in-process server** (`src/devjob.rs`), in the main set only, registered at
+  startup when `[devjob] enabled`. Three tools, each named in `DEFAULT_ALLOWED_TOOLS`:
+  `devjob_start` (write: repo, prompt, agent, optional model, branch slug, optional test command,
+  timeout; returns the job name in well under a second and whether it is queued),
+  `devjob_status` and `devjob_list` (reads). The tool cannot name a path, a namespace, an image
+  or a credential. There is no repository allowlist, by decision: `repo` is checked by pattern.
+- **The Job is the k3s template, field for field** (read at `b8b6c00`; a unit test holds
+  `build_job` to a JSON copy of it), with the image pinned by digest
+  (`ghcr.io/jeremyandrews/jesse-dev-agent@sha256:90c3d190…`, what `:latest` resolved to) and no
+  scheduling of its own. `kube` 4.2.0 and `k8s-openapi` 0.28.0 (`v1_36`), pinned; no `kubectl`.
+- **The watcher is a bridge task owned by no turn.** It follows each run, parses the report block
+  between its marker lines only, writes `Inbox/<date>-dev-job-<slug>.md` (spec, prompt, report
+  table, pull request link, last 200 log lines; `-2` for a repeat the same day) through the
+  atomic writer under the write lock, pushes the outcome, annotates the Job
+  `jesse.dev/reported=true` and deletes the ConfigMap. All state is read from the cluster, so a
+  restart mid-run still yields exactly one report.
+- **The queue.** `[devjob] max_concurrent` (default 2, the quota's pods). A start past the cap
+  creates the Job suspended, so its deadline starts on resume rather than draining while the
+  quota refuses its pod; the oldest suspended Job is resumed when a slot frees. A pending pod
+  reports the scheduler's reason (a taint, the quota).
+- **`[devjob]`**: `enabled` (default false), `kubeconfig`, `namespace`, `image`, `max_concurrent`,
+  `default_agent`. The bridge refuses to boot, by name, with it enabled and the gateway off (the
+  kubeconfig must stay in the bridge process), with an unreadable kubeconfig, or with an image
+  that is not a digest reference.
+- **`kind = "devjob"` schedule entries** start a run exactly as the tool does, from a
+  `prompt_file` read at fire time; the outcome is `ran` or `failed` from the report, or
+  `fired-no-output` when no report lands within the run's deadline, so `expect_output` works
+  unchanged. `model` there is the dev agent's and is not checked against the model registry.
+- **Counts.** The main path declares 24 servers with the gateway off (unchanged) and 25 with it
+  on and `devjob` registered. `direct` takes the server through the gateway with no extra code,
+  so its record names it.
+- **Records.** `containment.toml`, `containment-codex.toml` and `containment-direct.toml` are
+  re-recorded with the gateway on and `[devjob]` enabled (the battery registers a stand-in that
+  lists the three tools and starts nothing); `capability-map.toml` gains the three rows.
+- **Docs:** SECURITY.md § "Coding agents on the cluster"; bridge/README.md § "Coding agents on
+  the cluster" and § "Dev jobs on a schedule"; `jesse.example.toml`.
+- **Lockfile:** `rustls-webpki` 0.103.15 → 0.103.16 (RUSTSEC-2026-0382) and `webpki-roots`
+  1.0.8 → 1.0.10 (RUSTSEC-2026-0381), both published after the last green `cargo audit` on
+  `main`; nothing else moves.
 ## [eval 0.7.1] - 2026-10-19
 
 **The currency rotation task covers the gold summary.** Root cause: the live vault gained a

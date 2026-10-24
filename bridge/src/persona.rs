@@ -540,6 +540,10 @@ struct LocalConfig {
     /// only while the gateway is on.
     #[serde(default)]
     mcp: std::collections::BTreeMap<String, crate::gateway::McpOverrideToml>,
+    /// The optional top-level `[devjob]` table: coding agents on the cluster, served by the
+    /// gateway in process. See [`crate::devjob`].
+    #[serde(default)]
+    devjob: Option<crate::devjob::DevJobToml>,
 }
 
 /// Resolve the local overlay file, first existing wins:
@@ -801,6 +805,12 @@ pub fn load_gateway_settings(home: &str) -> crate::gateway::GatewaySettings {
         Some(c) => crate::gateway::GatewaySettings::from_toml(c.gateway, c.mcp),
         None => crate::gateway::GatewaySettings::default(),
     }
+}
+
+/// Read the `[devjob]` table from the same overlay file. Absent or malformed file, or no table,
+/// is `None`: the server is off.
+pub fn load_devjob_table(home: &str) -> Option<crate::devjob::DevJobToml> {
+    load_local_config(home).and_then(|c| c.devjob)
 }
 
 /// The overlay file the bridge actually loaded, or `None` when there is none.

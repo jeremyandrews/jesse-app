@@ -3749,3 +3749,33 @@ placement = "upstream-pod"
 dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: moves rows between tabs of one spreadsheet (not a Drive move)."
+
+[grant."mcp__devjob__devjob_start"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[devjob] kubeconfig (the jesse ServiceAccount, cluster admin), read only by the bridge process; [gateway] enabled; the jesse-dev namespace, its agent-keys Secret and cache claim on the cluster"
+workflows = "a main turn that hands a coding task to an agent on the cluster; kind = \"devjob\" schedule entries"
+reason = "Starts a coding agent Job on the k3s cluster that can push a branch and open a pull request; the bridge watches it and writes the report to the Inbox."
+note = "in_process: rendered into a child's config only with [gateway] enabled and [devjob] enabled, and reached through the stub, so with both on codex and direct take it too (the rows record the shipped posture, gateway off). Classed write, so write turns only. No repository allowlist, by decision."
+
+[grant."mcp__devjob__devjob_status"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[devjob] kubeconfig, read only by the bridge process; [gateway] enabled"
+workflows = "following a dev job a turn started"
+reason = "Reads one dev job's phase, waiting reason, log tail and report from the cluster."
+note = "in_process: with [gateway] enabled and [devjob] enabled, codex and direct take it too."
+
+[grant."mcp__devjob__devjob_list"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[devjob] kubeconfig, read only by the bridge process; [gateway] enabled"
+workflows = "which dev jobs are running, queued or finished"
+reason = "Lists the running, queued and last twenty finished dev jobs."
+note = "in_process: with [gateway] enabled and [devjob] enabled, codex and direct take it too."

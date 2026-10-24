@@ -904,6 +904,31 @@ pub fn child_mcp_config(
     Ok(serde_json::json!({ "mcpServers": out }).to_string())
 }
 
+/// `config` with its `in_process` rows rendered in, for a deployment whose gateway is ON and has
+/// each such server registered ([`GatewaySettings::in_process`]). With the gateway off, or for a
+/// set that names no registered `in_process` row, `config` unchanged, byte for byte: every
+/// gateway-off config, argv fixture and containment record is exactly what it was before
+/// `in_process` rows could be named in a set.
+///
+/// The rendered entry ([`crate::mcpservers::render_in_process_entry`]) is never handed to a child:
+/// [`admitted_servers`] admits it and [`child_mcp_config`] swaps it for the stub, as for every
+/// other gateway-placed server. A row that is named but NOT registered stays out, so a child is
+/// never given a stub for a server nothing in the bridge would answer.
+pub fn render_in_process_mcp<'a>(
+    cfg: &crate::Config,
+    config: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    if !cfg.gateway.enabled {
+        return std::borrow::Cow::Borrowed(config);
+    }
+    match crate::mcpservers::gateway_config_json(config, |name| {
+        cfg.gateway.in_process.0.contains_key(name)
+    }) {
+        Some(c) => std::borrow::Cow::Owned(c),
+        None => std::borrow::Cow::Borrowed(config),
+    }
+}
+
 /// The `--mcp-config` a child gets, given the config the deployment rendered. With the gateway
 /// off, `rendered` unchanged. With it on, [`child_mcp_config`] for this turn, or, if that
 /// cannot be built, NO servers at all: a child is never given the direct-spawn config while

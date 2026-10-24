@@ -1,0 +1,142 @@
+{
+  "source": "git@github.com:jeremyandrews/k3s.git apps/jesse-dev/job-template.yaml at b8b6c0022142119e165e72837ad0f0606f6c35a4, converted to JSON verbatim (placeholders kept)",
+  "documents": [
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "prompt-<slug>",
+        "namespace": "jesse-dev"
+      },
+      "data": {
+        "prompt.md": "<the prompt, indented under this line>\n"
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "name": "agent-<slug>",
+        "namespace": "jesse-dev"
+      },
+      "spec": {
+        "backoffLimit": 0,
+        "activeDeadlineSeconds": 14400,
+        "ttlSecondsAfterFinished": 172800,
+        "template": {
+          "spec": {
+            "restartPolicy": "Never",
+            "securityContext": {
+              "runAsUser": 1000,
+              "runAsGroup": 1000,
+              "runAsNonRoot": true,
+              "fsGroup": 1000
+            },
+            "containers": [
+              {
+                "name": "agent",
+                "image": "ghcr.io/jeremyandrews/jesse-dev-agent:latest",
+                "imagePullPolicy": "Always",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false
+                },
+                "env": [
+                  {
+                    "name": "REPO",
+                    "value": "<owner/name>"
+                  },
+                  {
+                    "name": "AGENT",
+                    "value": "<agent>"
+                  },
+                  {
+                    "name": "MODEL",
+                    "value": ""
+                  },
+                  {
+                    "name": "BRANCH_SLUG",
+                    "value": "<slug>"
+                  },
+                  {
+                    "name": "PR_TITLE",
+                    "value": "<pr title>"
+                  },
+                  {
+                    "name": "TEST_COMMAND",
+                    "value": ""
+                  },
+                  {
+                    "name": "PROMPT_FILE",
+                    "value": "/prompt/prompt.md"
+                  },
+                  {
+                    "name": "AGENT_TIMEOUT_SECONDS",
+                    "value": "7200"
+                  }
+                ],
+                "envFrom": [
+                  {
+                    "secretRef": {
+                      "name": "jesse-dev-agent-keys"
+                    }
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "4",
+                    "memory": "16Gi"
+                  },
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "32Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "prompt",
+                    "mountPath": "/prompt",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "work",
+                    "mountPath": "/home/agent/work"
+                  },
+                  {
+                    "name": "cache",
+                    "mountPath": "/home/agent/.cargo/registry",
+                    "subPath": "cargo-registry"
+                  },
+                  {
+                    "name": "cache",
+                    "mountPath": "/home/agent/.npm",
+                    "subPath": "npm"
+                  }
+                ]
+              }
+            ],
+            "volumes": [
+              {
+                "name": "prompt",
+                "configMap": {
+                  "name": "prompt-<slug>"
+                }
+              },
+              {
+                "name": "work",
+                "emptyDir": {
+                  "sizeLimit": "40Gi"
+                }
+              },
+              {
+                "name": "cache",
+                "persistentVolumeClaim": {
+                  "claimName": "jesse-dev-cache"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

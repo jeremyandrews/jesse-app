@@ -97,6 +97,9 @@ mod containment;
 mod context;
 mod conversations;
 mod deletionstore;
+/// The `devjob` in-process server: coding agents on the cluster. Addressed through the module
+/// (`crate::devjob::…`).
+pub mod devjob;
 mod diet;
 mod dietgate;
 mod dietlog;

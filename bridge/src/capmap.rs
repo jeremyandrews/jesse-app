@@ -392,6 +392,10 @@ mod tests {
 
     /// The parity defects as they stand: every MCP grant misses `direct`, because the shipped
     /// direct posture has no `[[direct.mcp]]`. Pinned so that closing them is a visible change.
+    ///
+    /// An `in_process` server's grants (`devjob`) also miss `codex`: the shipped posture has
+    /// the gateway off, and an `in_process` row is rendered into no gateway-off config. With
+    /// `[gateway] enabled` and the server registered, both harnesses take it.
     #[test]
     fn the_parity_defects_are_exactly_the_mcp_grants_direct_does_not_reach() {
         let map = shipped_capability_map();
@@ -402,9 +406,19 @@ mod tests {
             .filter(|r| r.kind == GrantKind::Mcp)
             .count();
         assert_eq!(defects.len(), mcp);
-        assert!(defects
-            .iter()
-            .all(|(_, missing)| missing == &vec![DIRECT_ID]));
+        let in_process = |grant: &str| {
+            mcp_parts(grant)
+                .and_then(|(server, _)| crate::mcpservers::row(server))
+                .is_some_and(|r| r.transport == crate::mcpservers::Transport::InProcess)
+        };
+        for (grant, missing) in &defects {
+            let want = if in_process(grant) {
+                vec![CODEX_ID, DIRECT_ID]
+            } else {
+                vec![DIRECT_ID]
+            };
+            assert_eq!(missing, &want, "{grant}");
+        }
     }
 
     /// The placement seeds the spec fixed, held so a casual edit cannot move one.
@@ -495,8 +509,8 @@ mod tests {
             ),
             (4, 29, 6)
         );
-        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 375));
-        assert_eq!(servers.len(), 26);
+        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 378));
+        assert_eq!(servers.len(), 27);
     }
 
     /// **`capability_args` STAYS BYTE-IDENTICAL.** A committed golden of every harness's

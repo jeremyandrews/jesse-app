@@ -385,6 +385,134 @@ pub struct ScheduleJob {
     /// never loaded), no mode, no model and no output contract; everything else — its clock,
     /// its days, its record, its ledger line, its push — is exactly a turn job's.
     pub builtin: Option<BuiltinTask>,
+    /// `Some` for `kind = "devjob"`: a coding agent on the cluster in place of a turn. Its
+    /// `prompt` is the `prompt_file`, read at fire time; its `model` is `None` (the dev agent's
+    /// model is in the template and is not a registry id); its clock, chain, profiles, output
+    /// contract, record and push are a turn job's.
+    pub devjob: Option<DevJobTemplate>,
+}
+
+/// A `kind = "devjob"` entry's run, before the fire fills in the prompt and the date.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevJobTemplate {
+    pub repo: String,
+    pub agent: crate::devjob::Agent,
+    /// The DEV AGENT's model id, passed through to the run. Not checked against the bridge's
+    /// model registry: it names a model of the agent in the pod, not a bridge backend.
+    pub model: Option<String>,
+    /// May carry `{date}`, `{year}`, `{month}`, `{day}`, expanded against the occurrence.
+    pub branch_slug: String,
+    pub test_command: Option<String>,
+    pub timeout_minutes: Option<u64>,
+}
+
+impl DevJobTemplate {
+    /// The run's spec for one fire: `slug` already expanded, `prompt` already read.
+    pub fn spec(&self, slug: String, prompt: String) -> Result<crate::devjob::DevJobSpec, String> {
+        crate::devjob::DevJobSpec::validate(
+            crate::devjob::DevJobArgs {
+                repo: Some(self.repo.clone()),
+                prompt: Some(prompt),
+                agent: Some(self.agent.label().to_string()),
+                model: self.model.clone(),
+                branch_slug: Some(slug),
+                test_command: self.test_command.clone(),
+                timeout_minutes: self.timeout_minutes,
+            },
+            self.agent,
+        )
+    }
+}
+
+/// `raw` with the schedule's date tokens replaced by a sample date, for checking at load time
+/// that the slug a fire will produce is a valid one.
+fn sample_slug(raw: &str) -> String {
+    raw.replace("{date}", "2026-01-01")
+        .replace("{year}", "2026")
+        .replace("{month}", "01")
+        .replace("{day}", "01")
+}
+
+/// Validate the `kind = "devjob"` keys of an entry, or refuse them on a turn.
+fn validate_devjob_keys(t: &ScheduleToml) -> Result<Option<DevJobTemplate>, String> {
+    let devjob_keys = [
+        (t.repo.is_some(), "repo"),
+        (t.agent.is_some(), "agent"),
+        (t.branch_slug.is_some(), "branch_slug"),
+        (t.test_command.is_some(), "test_command"),
+        (t.timeout.is_some(), "timeout"),
+    ];
+    match t.kind.as_deref().map(str::trim) {
+        None => {
+            if let Some((_, key)) = devjob_keys.iter().find(|(present, _)| *present) {
+                return Err(format!(
+                    "`{key}` is set on a turn job; it belongs to `kind = \"devjob\"`"
+                ));
+            }
+            Ok(None)
+        }
+        Some("devjob") => {
+            for (present, key) in [
+                (t.prompt.is_some(), "prompt (a devjob reads `prompt_file`)"),
+                (t.mode.is_some(), "mode"),
+                (t.builtin.is_some(), "builtin"),
+                (
+                    t.timeout_secs.is_some(),
+                    "timeout_secs (a devjob takes `timeout`, in minutes)",
+                ),
+            ] {
+                if present {
+                    return Err(format!("`{key}` is set on a `kind = \"devjob\"` job"));
+                }
+            }
+            if t.prompt_file
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err("a `kind = \"devjob\"` job needs `prompt_file`".into());
+            }
+            let repo = t.repo.as_deref().unwrap_or("").trim().to_string();
+            if !crate::devjob::valid_repo(&repo) {
+                return Err(format!("`repo` {repo:?} is not owner/name"));
+            }
+            let agent = crate::devjob::Agent::parse(
+                t.agent
+                    .as_deref()
+                    .ok_or("a `kind = \"devjob\"` job needs `agent`")?,
+            )
+            .map_err(|e| format!("`agent`: {e}"))?;
+            let branch_slug = t.branch_slug.as_deref().unwrap_or("").trim().to_string();
+            if !crate::devjob::valid_slug(&sample_slug(&branch_slug)) {
+                return Err(format!(
+                    "`branch_slug` {branch_slug:?} must be lowercase letters, digits and \
+                     hyphens (date tokens allowed), at most {} once expanded",
+                    crate::devjob::MAX_SLUG_CHARS
+                ));
+            }
+            let template = DevJobTemplate {
+                repo,
+                agent,
+                model: t
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string),
+                branch_slug,
+                test_command: t.test_command.clone(),
+                timeout_minutes: t.timeout,
+            };
+            // Every remaining field is checked exactly as a run checks it, with a stand-in
+            // prompt (the real one is read at fire time).
+            template.spec(sample_slug(&template.branch_slug), "x".into())?;
+            Ok(Some(template))
+        }
+        Some(other) => Err(format!(
+            "`kind` names {other:?}; the only kind is \"devjob\" (absent is a turn)"
+        )),
+    }
 }
 
 /// WORK THE BRIDGE DOES ON A SCHEDULE WITHOUT AN AGENT TURN.
@@ -461,6 +589,7 @@ pub fn with_builtin_defaults(mut s: Schedule, speech_available: bool) -> Schedul
             promoted_from: None,
             profiles: Profiles::ALL,
             builtin: Some(BuiltinTask::SpeechModelUpdate),
+            devjob: None,
         });
     }
     s
@@ -612,6 +741,19 @@ pub struct ScheduleToml {
     pub profiles: Option<Vec<String>>,
     /// A task the bridge runs itself, in place of a prompt — see [`BuiltinTask`].
     pub builtin: Option<String>,
+    /// `"devjob"`: a coding agent on the cluster in place of a bridge turn — see
+    /// [`DevJobTemplate`]. Absent is a turn, as before the key existed.
+    pub kind: Option<String>,
+    /// `kind = "devjob"` only: `owner/name`.
+    pub repo: Option<String>,
+    /// `kind = "devjob"` only: `claude`, `codex` or `gemini`.
+    pub agent: Option<String>,
+    /// `kind = "devjob"` only: the branch slug; the date tokens are expanded at fire time.
+    pub branch_slug: Option<String>,
+    /// `kind = "devjob"` only.
+    pub test_command: Option<String>,
+    /// `kind = "devjob"` only: the agent's time limit in minutes (default 120, capped at 240).
+    pub timeout: Option<u64>,
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
@@ -732,6 +874,10 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
         );
     }
 
+    // A DEVJOB runs a coding agent on the cluster, not a turn: its own keys are checked here,
+    // and on a turn they are refused by name.
+    let devjob = validate_devjob_keys(t)?;
+
     // A BUILT-IN job runs no turn, so every turn-shaped key on one is a mistake worth naming
     // rather than a key that silently does nothing.
     let builtin = match t.builtin.as_deref() {
@@ -813,6 +959,8 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
     // exactly the typo that would otherwise surface as a failed turn at 03:30.
     let model = match t.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         None => None,
+        // A devjob's `model` is the dev agent's, carried in its template and never a registry id.
+        Some(_) if devjob.is_some() => None,
         Some(m) => {
             if let Some(known) = ctx.model_ids {
                 if !known.iter().any(|k| k == m) {
@@ -841,6 +989,7 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
         promoted_from: None,
         profiles,
         builtin,
+        devjob,
     })
 }
 

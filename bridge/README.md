@@ -769,6 +769,93 @@ bearer_env = "SLACK_ADAPTER_TOKEN"
 - **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
   turn and per gateway call, kept 90 days.
 
+### Coding agents on the cluster (`[devjob]`, 0.186.0)
+
+A main turn can start a coding agent on the k3s cluster with one tool call and get a job name
+back in seconds. The bridge, never the agent, holds the cluster credential: it creates the Job,
+watches it to its end from a background task no turn owns, writes the report into the vault and
+pushes a notification. `src/devjob.rs` is the code; SECURITY.md § "Coding agents on the cluster"
+has the posture.
+
+**It works only with the tool gateway on.** The server is `in_process` (no process, no socket of
+its own), and only the gateway can hand an in-process server to a spawned child: with
+`[gateway] enabled = false` the row renders into no child's config and the bridge refuses to boot
+with `[devjob] enabled = true`.
+
+```toml
+[gateway]
+enabled = true
+
+[devjob]
+enabled = true                              # default false
+kubeconfig = "~/.kube/ks-jesse.yaml"        # the default; read by the bridge process only
+# namespace = "jesse-dev"                   # the default
+# image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:90c3d190…"  # default: the pinned digest
+# max_concurrent = 2                        # the default: the namespace quota's two pods
+# default_agent = "claude"                  # claude | codex | gemini
+```
+
+**Boot refusals, by name:** `enabled` without `[gateway] enabled`; a kubeconfig that cannot be
+read or parsed; an `image` that is not `<repository>@sha256:<64 hex>`. The default image is
+`apps/jesse-dev/job-template.yaml`'s `:latest` as it resolved on 2026-10-24 (the same digest as
+`:20260924`).
+
+**The three tools**, all three named one by one in `DEFAULT_ALLOWED_TOOLS`, so both spawned
+harnesses (and `direct`, through the gateway) get them on a write turn:
+
+| Tool | Class | Arguments | Returns |
+|---|---|---|---|
+| `devjob_start` | write | `repo` (`owner/name`), `prompt` (≤ 64 KiB), `branch_slug` (lowercase letters, digits, hyphens, ≤ 60), optional `agent` (`claude`, `codex`, `gemini`), `model` (the agent's own model id), `test_command` (≤ 1 KiB), `timeout_minutes` (default 120, capped at 240) | the job name and whether it is queued |
+| `devjob_status` | read | `job_name` | phase (`queued`, `pending`, `running`, `finished`), why it is waiting (queued behind the cap, or the scheduler's reason, e.g. a taint), elapsed, the last 40 log lines, the parsed report once finished |
+| `devjob_list` | read | none | running, queued, and the last 20 finished |
+
+Any other argument is refused: the tool cannot name a namespace, an image, a path or a
+credential. There is no repository allowlist, by decision; see SECURITY.md.
+
+**The Job** is the k3s template field for field (`tests/fixtures/devjob/job-template.b8b6c00.json`
+holds the template at the commit it was read from, and a unit test holds `build_job` to it): the
+pinned image, its security context, resources, volumes and Secret reference, no scheduling of
+its own, `ttlSecondsAfterFinished = 172800`, `AGENT_TIMEOUT_SECONDS` from `timeout_minutes` and
+`activeDeadlineSeconds` twice that (14400 for the default, the template's value). Objects are
+named `agent-<slug>-<5 chars>` and `prompt-<slug>-<5 chars>` and labelled `jesse.dev/devjob=true`
+and `jesse.dev/slug=<slug>`.
+
+**The queue.** A start while `max_concurrent` Jobs are running (or while any is already queued)
+creates the Job with `spec.suspend: true`; when a running one finishes, the oldest suspended Job
+is resumed. Kubernetes starts a suspended Job's deadline on resume, whereas a Job whose pod the
+quota refuses would wait with its clock running.
+
+**The report** is written when a run ends, through the bridge's atomic writer and under the write
+lock, to `Inbox/<YYYY-MM-DD>-dev-job-<slug>.md` in the notes directory (`-2`, `-3`, … for a
+second run with the same slug the same day). It holds a heading, the spec with the prompt in a
+fenced block, the report block as a table, the pull request as a link, the agent's final message
+and the last 200 log lines. The block is parsed only between the last `JESSE-DEV-REPORT` and
+`JESSE-DEV-REPORT-END` lines; a log with no end marker is written as a failure with its tail. Then
+a push: the title is the outcome (`Pull request opened`, `No changes`, `Failed`), the body the
+slug and the wall time. A scheduled run is pushed by the scheduler instead, under its `notify`.
+Afterwards the Job is annotated `jesse.dev/reported=true` and the ConfigMap is deleted.
+
+**Restart safety.** Everything is read back from the cluster on every pass: running Jobs are
+followed again, the queue is the set of suspended Jobs, and a finished Job without the annotation
+is reported. The report names its Job, so a restart between writing it and annotating the Job
+does not write a second one.
+
+**The containment battery** registers a stand-in `devjob` (the same three tools, every call
+refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the
+gateway-on record names the server without a probe ever creating a Job:
+
+```bash
+JESSE_CONFIG=/path/to/a-copy-with-gateway-and-devjob.toml \
+  cargo run --features containment-probe --bin containment-probe -- --harness claude-code --write
+```
+
+**The live test** runs one real Job (`claude`, "Read README.md and make no changes." against
+`jeremyandrews/k3s`) and is skipped when the kubeconfig is absent:
+
+```bash
+cargo test --features devjob-live --test devjob_live -- --nocapture
+```
+
 ### How `claude` is run
 
 The bridge runs the turn as:
@@ -2653,6 +2740,40 @@ phone turn's `model` field takes: it backs only that turn and never touches the
 stored global default. Unset (every job today) uses the globally active model. A
 model that validated at load but is unhealthy at fire time is a **failure**, not a
 silent fall-back onto a different model.
+
+### Dev jobs on a schedule (`kind = "devjob"`)
+
+An entry with `kind = "devjob"` starts a coding agent on the cluster instead of a bridge turn,
+exactly as `devjob_start` does (it needs `[devjob] enabled`, and so the gateway):
+
+```toml
+[[schedule]]
+id = "nightly-deps"
+at = "02:10"
+kind = "devjob"
+repo = "jeremyandrews/k3s"
+agent = "claude"                     # claude | codex | gemini
+# model = "claude-sonnet-5-5"        # the DEV AGENT's model; see below
+branch_slug = "deps-{date}"          # the date tokens expand from the occurrence
+# test_command = "cargo test"
+# timeout = 120                      # minutes; default 120, capped at 240
+prompt_file = "vault/prompts/scheduled/nightly-deps.md"   # read at fire time
+expect_output = ["Inbox/{date}-dev-job-*.md"]
+```
+
+- **The outcome** is `ran` or `failed` from the run's report, and `fired-no-output` when no Inbox
+  report lands within the run's own deadline (counted from when it leaves the queue) plus ten
+  minutes, so `expect_output` works unchanged with a pattern like the one above.
+- `after`, `after_on`, `days`, `profiles`, `notify`, `enabled` and `catch_up_secs` keep their
+  meaning. A devjob holds no working-tree lock: it works in its own clone on the cluster and its
+  one vault write takes the write lock.
+- **`model` here is the dev agent's model id and is NOT validated against the bridge's model
+  registry**: it names a model of the agent running in the pod, not a bridge backend. (On a turn
+  entry `model` is still checked against the registry.)
+- `prompt`, `mode`, `builtin` and `timeout_secs` are refused on a devjob entry, and `repo`,
+  `agent`, `branch_slug`, `test_command` and `timeout` are refused on a turn entry, by name.
+- `GET /jesse/schedule` reports `runs` (`turn`, `builtin`, `devjob`; `kind` stays head or
+  link) and the devjob's fields under `devjob`.
 
 ### Failure visibility
 

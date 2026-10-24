@@ -74,6 +74,9 @@ rendered an in-process row as nothing, so neither Claude Code nor Codex ever saw
   lists the three tools and starts nothing); `capability-map.toml` gains the three rows.
 - **Docs:** SECURITY.md § "Coding agents on the cluster"; bridge/README.md § "Coding agents on
   the cluster" and § "Dev jobs on a schedule"; `jesse.example.toml`.
+- **Lockfile:** `rustls-webpki` 0.103.15 → 0.103.16 (RUSTSEC-2026-0382) and `webpki-roots`
+  1.0.8 → 1.0.10 (RUSTSEC-2026-0381), both published after the last green `cargo audit` on
+  `main`; nothing else moves.
 ## [eval 0.7.1] - 2026-10-19
 
 **The currency rotation task covers the gold summary.** Root cause: the live vault gained a

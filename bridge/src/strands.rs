@@ -1328,7 +1328,7 @@ fn scan_owned_files(notes_root: &Path, strands: &[Strand]) -> Vec<Finding> {
 }
 
 /// One frontmatter scalar from a file that may or may not have frontmatter.
-fn frontmatter_value(src: &str, key: &str) -> Option<String> {
+pub(crate) fn frontmatter_value(src: &str, key: &str) -> Option<String> {
     let lines: Vec<&str> = src.lines().collect();
     if lines.first().map(|l| l.trim()) != Some("---") {
         return None;

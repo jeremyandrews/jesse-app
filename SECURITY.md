@@ -2724,6 +2724,19 @@ bridge that dies between writing a report and annotating the Job writes no secon
 past the cap creates the Job with `spec.suspend: true`, whose `activeDeadlineSeconds` clock
 starts on resume rather than on creation.
 
+### Strand entries run what the vault queues (0.187.0)
+
+A `kind = "devjob"` schedule entry with `strand = "<Note>"` runs, at each fire, **any prompt file
+in the vault's `Projects/drafts/` folder that a Queue line of `Strands/<Note>.md` links and whose
+front matter carries `devjob-repo`** (and names that strand and that line's id). So anything able
+to write the vault (any turn with vault writes, and so a prompt injected into one) can queue a
+run: write a draft with `devjob-repo` set and link it from the strand's queue, and the next fire
+starts it against that repository. This is the same exposure as `devjob_start`, which a write
+turn can already call directly, and **there is still no repository allowlist (Jeremy,
+2026-10-24)**: `devjob-repo` is checked by pattern only. What bounds it is unchanged: nothing
+merges, and every run lands as an Inbox report and a push. The bridge reads the strand note and
+the prompt; it never writes, renames or moves anything under `Strands/` or `Projects/drafts/`.
+
 ## Diet child tool isolation (in-process boundary)
 
 The diet-logging pipeline (see the bridge README) spawns two **stateless,

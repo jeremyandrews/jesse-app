@@ -14,6 +14,50 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.187.0] - 2026-10-25
+
+**A schedule entry can run a strand's next step: `kind = "devjob"` with `strand = "<Note>"`.**
+Work is queued in strand notes, one per strand, and the next step changes every time a step
+finishes. Since 0.186.0 a devjob entry runs one fixed `prompt_file` against one fixed `repo`, so
+it cannot follow a queue that changes every day: turning a strand's queue into overnight work
+meant hand editing a schedule entry every evening. The bridge already parsed those notes
+(`src/strands.rs`) for `GET /jesse/strands` and the nightly audit, but never fed that parse to the
+scheduler.
+
+- **The strand form** (`src/strandjobs.rs`). At fire time the bridge reads `Strands/<Note>.md`
+  fresh, parses it with `parse_strand`, walks its Queue lines in file order and starts the first
+  eligible one, at most one per fire, through the same `DevJobs::start_run` that `devjob_start`
+  and the fixed form use. Optional `agent`, `model` and `timeout` are defaults.
+- **Eligibility, in order, so a skip names the first that failed**: an unchecked Queue line
+  with an id that can be a label value; no `(waits on: …)`; a link that resolves to a file under
+  `Projects/drafts/` with no `archive` segment; front matter `strand` and `strand-id` naming
+  this note and this line; and `devjob-repo: owner/name`, the opt in, so a prompt written for a
+  person is never run. `devjob-agent`, `devjob-model`, `devjob-test` and `devjob-timeout`
+  override the defaults, each validated as `devjob_start` validates it.
+- **The prompt** is the file's body without its front matter and without a trailing archive
+  footer (a rule followed only by checkbox lines). The branch slug is
+  `<note>-<id>-<YYYYMMDD>`, lowercased, cut from the left of the note part to fit 60.
+- **No step runs twice, and the bridge still writes no Strands note.** A line is `in flight`
+  while a Job labelled `jesse.dev/strand` and `jesse.dev/strand-id` exists in any phase, or while
+  an unarchived `Inbox/*-dev-job-*.md` names the step. The Job carries the two labels and a
+  `jesse.dev/prompt` annotation, and the report of a strand run adds `strand`, `strand-id` and
+  `prompt` to its front matter and a Strand row to its Spec table, all read back from the Job, so
+  a restart mid-run reports them too. Reports from the tool and from fixed entries are byte for
+  byte unchanged (a golden test holds them).
+- **Outcomes.** A fire that starts a run is the fixed form's. A fire with nothing eligible is
+  `ran`, with no push and no vault write, and its reason names the first Queue line and the check
+  it failed (`nothing eligible in strand X: B3: in flight`), or `no queue lines`. A missing
+  note, or one whose `state` is `done`, is `failed`. `GET /jesse/schedule` shows `strand` under
+  `devjob`.
+- **Refused by name**: on a strand entry `repo`, `prompt_file`, `branch_slug`, `test_command`,
+  `prompt`, `mode`, `builtin`, `timeout_secs` and `expect_output` (a night with nothing eligible
+  is normal, so an output pattern would report false failures); `strand` on a turn.
+- **Unchanged**: the three `devjob` tools, the allowlist, server counts and golden strings, the
+  fixed devjob form, turn entries and builtins. Still no repository allowlist; SECURITY.md says
+  that anything able to write the vault can now queue a run, the same exposure as `devjob_start`.
+- `devjob-live` gains a strand run: one eligible line in a scratch `Strands/Devjob-Live.md`,
+  reported with the strand keys, then a second fire that finds it `in flight`.
+
 ## [bridge 0.186.0] - 2026-10-24
 
 **A main turn can start a coding agent on the cluster with one tool call, and the bridge watches

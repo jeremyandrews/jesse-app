@@ -295,6 +295,17 @@ Answer the question I asked, not the one you wish I had asked.
 # branch_slug, prompt_file, optional model, test_command, timeout in minutes) does the same on a
 # clock. See SECURITY.md ("Coding agents on the cluster") and bridge/README.md.
 #
+# A devjob entry with `strand` instead runs a strand's next step: at each fire, the first eligible
+# `## Drafts` line of Strands/<Note>.md whose linked prompt under Projects/drafts/ names the strand
+# and the line's id and opts in with `devjob-repo` in its front matter. agent, model and timeout
+# are defaults the prompt may override (devjob-agent, devjob-model, devjob-timeout, devjob-test):
+#
+# [[schedule]]
+# id = "jesse-app-queue"
+# at = "02:20"
+# kind = "devjob"
+# strand = "Jesse-App"
+#
 # kubeconfig (optional): default ~/.kube/ks-jesse.yaml.
 # namespace (optional): default "jesse-dev".
 # image (optional): a `<repository>@sha256:<digest>` reference; default the pinned agent image.

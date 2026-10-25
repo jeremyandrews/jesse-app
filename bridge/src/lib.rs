@@ -184,6 +184,9 @@ mod state;
 pub mod strands;
 // A ticked strand step starting one agent turn. Namespaced beside `strands`, which it reads.
 pub mod strandticks;
+// A strand's queue fed to the dev-job scheduler: `kind = "devjob"` with `strand`. Namespaced
+// beside `strands`, which it reads, and `devjob`, which it starts through.
+pub mod strandjobs;
 mod titlestore;
 mod today;
 mod todaybrief;

@@ -390,6 +390,22 @@ pub struct ScheduleJob {
     /// model is in the template and is not a registry id); its clock, chain, profiles, output
     /// contract, record and push are a turn job's.
     pub devjob: Option<DevJobTemplate>,
+    /// `Some` for a `kind = "devjob"` entry with `strand`: at fire time the bridge picks the
+    /// first eligible line of `Strands/<note>.md` and runs the prompt it links (see
+    /// [`crate::strandjobs`]). Exclusive with [`ScheduleJob::devjob`], which is the fixed form.
+    pub devjob_strand: Option<StrandTemplate>,
+}
+
+/// A strand entry's defaults: what a picked prompt's front matter may override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StrandTemplate {
+    /// The note's slug: `Strands/<note>.md` under the notes directory.
+    pub note: String,
+    /// `None` is the bridge's `[devjob] default_agent`.
+    pub agent: Option<crate::devjob::Agent>,
+    /// The dev agent's model id, as on the fixed form.
+    pub model: Option<String>,
+    pub timeout_minutes: Option<u64>,
 }
 
 /// A `kind = "devjob"` entry's run, before the fire fills in the prompt and the date.
@@ -433,9 +449,71 @@ fn sample_slug(raw: &str) -> String {
         .replace("{day}", "01")
 }
 
+/// Validate a strand entry: `kind = "devjob"` with `strand`. Every key a picked prompt supplies
+/// (or that a fire with nothing eligible would misreport) is refused by name.
+fn validate_strand_keys(t: &ScheduleToml, note: &str) -> Result<StrandTemplate, String> {
+    for (present, key) in [
+        (t.repo.is_some(), "repo"),
+        (t.prompt_file.is_some(), "prompt_file"),
+        (t.branch_slug.is_some(), "branch_slug"),
+        (t.test_command.is_some(), "test_command"),
+        (t.prompt.is_some(), "prompt"),
+        (t.mode.is_some(), "mode"),
+        (t.builtin.is_some(), "builtin"),
+        (t.timeout_secs.is_some(), "timeout_secs"),
+        (t.expect_output.is_some(), "expect_output"),
+    ] {
+        if present {
+            return Err(format!(
+                "`{key}` is set on a strand entry; the picked prompt supplies the run"
+            ));
+        }
+    }
+    let note = note.trim();
+    if !crate::strands::is_safe_slug(note) || !crate::devjob::valid_label_value(note) {
+        return Err(format!(
+            "`strand` {note:?} must name a note directly in Strands/ and be a Kubernetes label \
+             value (letters, digits, '-', '_', '.', at most 63)"
+        ));
+    }
+    let agent = match t.agent.as_deref() {
+        None => None,
+        Some(a) => Some(crate::devjob::Agent::parse(a).map_err(|e| format!("`agent`: {e}"))?),
+    };
+    let template = StrandTemplate {
+        note: note.to_string(),
+        agent,
+        model: t
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string),
+        timeout_minutes: t.timeout,
+    };
+    // The defaults are checked exactly as a run checks them, with stand-ins for the rest.
+    crate::devjob::DevJobSpec::validate(
+        crate::devjob::DevJobArgs {
+            repo: Some("a/b".into()),
+            prompt: Some("x".into()),
+            agent: template.agent.map(|a| a.label().to_string()),
+            model: template.model.clone(),
+            branch_slug: Some("x".into()),
+            test_command: None,
+            timeout_minutes: template.timeout_minutes,
+        },
+        crate::devjob::Agent::Claude,
+    )?;
+    Ok(template)
+}
+
+/// The two forms a `kind = "devjob"` entry takes, or neither for a turn.
+type DevJobForms = (Option<DevJobTemplate>, Option<StrandTemplate>);
+
 /// Validate the `kind = "devjob"` keys of an entry, or refuse them on a turn.
-fn validate_devjob_keys(t: &ScheduleToml) -> Result<Option<DevJobTemplate>, String> {
+fn validate_devjob_keys(t: &ScheduleToml) -> Result<DevJobForms, String> {
     let devjob_keys = [
+        (t.strand.is_some(), "strand"),
         (t.repo.is_some(), "repo"),
         (t.agent.is_some(), "agent"),
         (t.branch_slug.is_some(), "branch_slug"),
@@ -449,8 +527,12 @@ fn validate_devjob_keys(t: &ScheduleToml) -> Result<Option<DevJobTemplate>, Stri
                     "`{key}` is set on a turn job; it belongs to `kind = \"devjob\"`"
                 ));
             }
-            Ok(None)
+            Ok((None, None))
         }
+        Some("devjob") if t.strand.is_some() => Ok((
+            None,
+            Some(validate_strand_keys(t, t.strand.as_deref().unwrap_or(""))?),
+        )),
         Some("devjob") => {
             for (present, key) in [
                 (t.prompt.is_some(), "prompt (a devjob reads `prompt_file`)"),
@@ -507,7 +589,7 @@ fn validate_devjob_keys(t: &ScheduleToml) -> Result<Option<DevJobTemplate>, Stri
             // Every remaining field is checked exactly as a run checks it, with a stand-in
             // prompt (the real one is read at fire time).
             template.spec(sample_slug(&template.branch_slug), "x".into())?;
-            Ok(Some(template))
+            Ok((Some(template), None))
         }
         Some(other) => Err(format!(
             "`kind` names {other:?}; the only kind is \"devjob\" (absent is a turn)"
@@ -590,12 +672,18 @@ pub fn with_builtin_defaults(mut s: Schedule, speech_available: bool) -> Schedul
             profiles: Profiles::ALL,
             builtin: Some(BuiltinTask::SpeechModelUpdate),
             devjob: None,
+            devjob_strand: None,
         });
     }
     s
 }
 
 impl ScheduleJob {
+    /// Whether this entry starts a dev job on the cluster, in either form.
+    pub fn is_devjob(&self) -> bool {
+        self.devjob.is_some() || self.devjob_strand.is_some()
+    }
+
     /// Whether this entry is a chain head (has a clock time).
     pub fn is_head(&self) -> bool {
         matches!(self.trigger, Trigger::At(_))
@@ -754,6 +842,9 @@ pub struct ScheduleToml {
     pub test_command: Option<String>,
     /// `kind = "devjob"` only: the agent's time limit in minutes (default 120, capped at 240).
     pub timeout: Option<u64>,
+    /// `kind = "devjob"` only: a strand note's slug. The entry then runs the first eligible
+    /// line of `Strands/<strand>.md` at each fire instead of a fixed `prompt_file`.
+    pub strand: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
@@ -876,7 +967,7 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
 
     // A DEVJOB runs a coding agent on the cluster, not a turn: its own keys are checked here,
     // and on a turn they are refused by name.
-    let devjob = validate_devjob_keys(t)?;
+    let (devjob, devjob_strand) = validate_devjob_keys(t)?;
 
     // A BUILT-IN job runs no turn, so every turn-shaped key on one is a mistake worth naming
     // rather than a key that silently does nothing.
@@ -902,6 +993,8 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
     };
 
     let prompt = match (builtin, t.prompt.as_deref(), t.prompt_file.as_deref()) {
+        // A strand entry's prompt is the picked line's file, read at fire time.
+        _ if devjob_strand.is_some() => PromptSource::Inline(String::new()),
         (Some(_), _, _) => PromptSource::Inline(String::new()),
         (None, Some(p), None) => {
             if p.trim().is_empty() {
@@ -960,7 +1053,7 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
     let model = match t.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         None => None,
         // A devjob's `model` is the dev agent's, carried in its template and never a registry id.
-        Some(_) if devjob.is_some() => None,
+        Some(_) if devjob.is_some() || devjob_strand.is_some() => None,
         Some(m) => {
             if let Some(known) = ctx.model_ids {
                 if !known.iter().any(|k| k == m) {
@@ -990,6 +1083,7 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
         profiles,
         builtin,
         devjob,
+        devjob_strand,
     })
 }
 

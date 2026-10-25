@@ -77,6 +77,12 @@ pub const ANN_OUTCOME: &str = "jesse.dev/outcome";
 pub const ANN_REPORT_PATH: &str = "jesse.dev/report-path";
 /// The pull request URL the report named, when there was one.
 pub const ANN_PULL_REQUEST: &str = "jesse.dev/pull-request";
+/// On a Job a strand entry started: the strand note's slug (`Strands/<slug>.md`).
+pub const LABEL_STRAND: &str = "jesse.dev/strand";
+/// On a Job a strand entry started: the id of the queue line it runs.
+pub const LABEL_STRAND_ID: &str = "jesse.dev/strand-id";
+/// On a Job a strand entry started: the prompt file's path under the notes directory.
+pub const ANN_PROMPT: &str = "jesse.dev/prompt";
 /// The label Kubernetes puts on a Job's pods.
 const POD_JOB_LABEL: &str = "batch.kubernetes.io/job-name";
 
@@ -208,6 +214,55 @@ pub fn valid_slug(slug: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !slug.starts_with('-')
         && !slug.ends_with('-')
+}
+
+/// Whether `v` may be a Kubernetes label value: at most 63 of letters, digits, `-`, `_` and `.`,
+/// starting and ending with a letter or digit. A strand's slug and a line's id become two.
+pub fn valid_label_value(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 63
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && v.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && v.ends_with(|c: char| c.is_ascii_alphanumeric())
+}
+
+/// The strand step a run was started for: carried on its Job as [`LABEL_STRAND`],
+/// [`LABEL_STRAND_ID`] and [`ANN_PROMPT`], and written into its report's front matter, so the
+/// vault's morning routine can close the step. Never kept in memory: [`strand_of`] reads it
+/// back from the Job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandRef {
+    /// The note's slug: `Strands/<note>.md`.
+    pub note: String,
+    /// The queue line's id.
+    pub id: String,
+    /// The prompt file, relative to the notes directory.
+    pub prompt: String,
+}
+
+/// The strand step a Job was started for, from its labels and annotation. `None` for a run
+/// the tool or a fixed schedule entry started.
+pub fn strand_of(job: &Job) -> Option<StrandRef> {
+    let labels = job.metadata.labels.as_ref()?;
+    let note = labels.get(LABEL_STRAND)?.clone();
+    let id = labels.get(LABEL_STRAND_ID)?.clone();
+    let prompt = job
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ANN_PROMPT))
+        .cloned()
+        .unwrap_or_default();
+    Some(StrandRef { note, id, prompt })
+}
+
+/// Whether a Job carries both strand labels for `note` and `id`, in any phase.
+pub fn carries_strand_step(job: &Job, note: &str, id: &str) -> bool {
+    job.metadata.labels.as_ref().is_some_and(|l| {
+        l.get(LABEL_STRAND).map(String::as_str) == Some(note)
+            && l.get(LABEL_STRAND_ID).map(String::as_str) == Some(id)
+    })
 }
 
 /// Whether `model` is a plausible model id: no whitespace or control characters, at most 200.
@@ -1021,14 +1076,28 @@ pub fn human_secs(secs: u64) -> String {
 /// The vault note for one finished run. Its front matter names the Job, which is how
 /// [`find_existing_report`] knows the run was already reported.
 pub fn render_report(r: &ReportInput) -> String {
+    render_report_for(r, None)
+}
+
+/// [`render_report`], for a run a strand entry started: the front matter adds `strand`,
+/// `strand-id` and `prompt` after the existing keys, and the Spec table adds a Strand row.
+/// With `None` it is byte for byte the report of a run the tool or a fixed entry started.
+pub fn render_report_for(r: &ReportInput, strand: Option<&StrandRef>) -> String {
     let outcome = RunOutcome::of(r.report);
     let mut s = String::new();
     s.push_str(&format!(
-        "---\ndevjob: {}\nrepo: {}\noutcome: {}\n---\n\n",
+        "---\ndevjob: {}\nrepo: {}\noutcome: {}\n",
         r.job_name,
         r.spec.repo,
         outcome.label()
     ));
+    if let Some(step) = strand {
+        s.push_str(&format!(
+            "strand: {}\nstrand-id: {}\nprompt: {}\n",
+            step.note, step.id, step.prompt
+        ));
+    }
+    s.push_str("---\n\n");
     s.push_str(&format!("# Dev job {}: {}\n\n", r.slug, outcome.label()));
     if let Some(url) = r.report.pull_request_url() {
         s.push_str(&format!("Pull request: [{url}]({url})\n\n"));
@@ -1044,6 +1113,12 @@ pub fn render_report(r: &ReportInput) -> String {
         .test_command
         .clone()
         .unwrap_or_else(|| "(none)".into());
+    if let Some(step) = strand {
+        s.push_str(&format!(
+            "| Strand | {} |\n",
+            cell(&format!("{} {}", step.note, step.id))
+        ));
+    }
     for (k, v) in [
         ("Repository", r.spec.repo.clone()),
         ("Agent", r.spec.agent.clone()),
@@ -1359,6 +1434,18 @@ impl DevJobs {
     /// Start one run: the prompt ConfigMap, then the Job, suspended when the queue says so.
     /// `origin` is `turn` or `schedule:<id>`.
     pub async fn start(&self, spec: &DevJobSpec, origin: &str) -> Result<Started, String> {
+        self.start_run(spec, origin, None).await
+    }
+
+    /// [`DevJobs::start`], for every caller: the tool and a fixed schedule entry pass no strand;
+    /// a strand entry passes the step, which the Job then carries as two labels and an
+    /// annotation ([`strand_of`]).
+    pub async fn start_run(
+        &self,
+        spec: &DevJobSpec,
+        origin: &str,
+        strand: Option<&StrandRef>,
+    ) -> Result<Started, String> {
         let _gate = self.gate.lock().await;
         let views: Vec<JobView> = self.views().await?.into_iter().map(|(_, v)| v).collect();
         let queued = must_queue(&views, self.settings.max_concurrent);
@@ -1369,7 +1456,7 @@ impl DevJobs {
             .create(&PostParams::default(), &cm)
             .await
             .map_err(|e| format!("could not create the prompt ConfigMap: {e}"))?;
-        let job = build_job(
+        let mut job = build_job(
             ns,
             &job_name,
             &cm_name,
@@ -1378,6 +1465,15 @@ impl DevJobs {
             queued,
             origin,
         );
+        if let Some(step) = strand {
+            let meta = &mut job.metadata;
+            let labels = meta.labels.get_or_insert_with(Default::default);
+            labels.insert(LABEL_STRAND.into(), step.note.clone());
+            labels.insert(LABEL_STRAND_ID.into(), step.id.clone());
+            meta.annotations
+                .get_or_insert_with(Default::default)
+                .insert(ANN_PROMPT.into(), step.prompt.clone());
+        }
         let created = match self.jobs().create(&PostParams::default(), &job).await {
             Ok(j) => j,
             Err(e) => {
@@ -1405,10 +1501,13 @@ impl DevJobs {
             }
         }
         eprintln!(
-            "jesse-bridge: devjob START {job_name} repo={} agent={} slug={} queued={queued} origin={origin}",
+            "jesse-bridge: devjob START {job_name} repo={} agent={} slug={} queued={queued} origin={origin}{}",
             spec.repo,
             spec.agent.label(),
-            spec.branch_slug
+            spec.branch_slug,
+            strand
+                .map(|s| format!(" strand={} step={}", s.note, s.id))
+                .unwrap_or_default()
         );
         drop(_gate);
         self.wake.notify_one();
@@ -1418,6 +1517,18 @@ impl DevJobs {
             branch_slug: spec.branch_slug.clone(),
             timeout_minutes: spec.timeout_minutes,
         })
+    }
+
+    /// Every Job in the namespace labelled with strand `note`, in any phase, suspended included.
+    /// Listed by the strand label alone, not the dev job label, so the in-flight guard sees any
+    /// Job that claims the step.
+    pub async fn strand_jobs(&self, note: &str) -> Result<Vec<Job>, String> {
+        let list = self
+            .jobs()
+            .list(&ListParams::default().labels(&format!("{LABEL_STRAND}={note}")))
+            .await
+            .map_err(|e| format!("could not list the dev jobs of strand {note}: {e}"))?;
+        Ok(list.items)
     }
 
     /// The newest pod of `job`.
@@ -1670,11 +1781,11 @@ impl DevJobs {
             }
         }
         if let Some(sink) = self.sink.get() {
-            for (_, v) in views
+            for (job, v) in views
                 .iter()
                 .filter(|(_, v)| v.finished.is_some() && !v.reported)
             {
-                if let Err(e) = self.finalize(v, sink).await {
+                if let Err(e) = self.finalize(v, strand_of(job).as_ref(), sink).await {
                     eprintln!(
                         "jesse-bridge: devjob {}: report not written yet: {e}",
                         v.name
@@ -1707,8 +1818,14 @@ impl DevJobs {
     /// Write one finished run's report, push, annotate its Job and delete its ConfigMap.
     ///
     /// Idempotent across restarts: a report already in the Inbox for this Job is not written
-    /// (or pushed) again, only the annotation and the delete are redone.
-    async fn finalize(&self, v: &JobView, sink: &ReportSink) -> Result<(), String> {
+    /// (or pushed) again, only the annotation and the delete are redone. `strand` is read from
+    /// the Job ([`strand_of`]), never from memory, so a restart mid-run reports the same keys.
+    async fn finalize(
+        &self,
+        v: &JobView,
+        strand: Option<&StrandRef>,
+        sink: &ReportSink,
+    ) -> Result<(), String> {
         let rel = match find_existing_report(&sink.notes_root, &v.slug, &v.name) {
             Some(rel) => {
                 eprintln!("jesse-bridge: devjob {}: already reported at {rel}", v.name);
@@ -1759,17 +1876,20 @@ impl DevJobs {
                         .and_then(|d| d.get("prompt.md").cloned()),
                     None => None,
                 };
-                let text = render_report(&ReportInput {
-                    job_name: &v.name,
-                    slug: &v.slug,
-                    spec: &v.spec,
-                    prompt: prompt.as_deref(),
-                    report: &report,
-                    log_tail: &tail,
-                    queued_ms: v.created_ms,
-                    started_ms: v.started_ms,
-                    finished_ms: v.finished_ms,
-                });
+                let text = render_report_for(
+                    &ReportInput {
+                        job_name: &v.name,
+                        slug: &v.slug,
+                        spec: &v.spec,
+                        prompt: prompt.as_deref(),
+                        report: &report,
+                        log_tail: &tail,
+                        queued_ms: v.created_ms,
+                        started_ms: v.started_ms,
+                        finished_ms: v.finished_ms,
+                    },
+                    strand,
+                );
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
                 let rel = write_report(sink, &v.name, &date, &v.slug, &text).await?;
                 eprintln!(

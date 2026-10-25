@@ -826,11 +826,13 @@ pub fn render_healthdb_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
     Cow::Owned(config.replacen(HEALTHDB_MCP_ENTRY.as_str(), "", 1))
 }
 
-/// Every conditional server, rendered: `house` ([`render_house_mcp`]) then `healthdb`. The one
-/// function a spawn site calls, so a third conditional server is a change here and not at each
-/// site.
+/// Every conditional server, rendered: the gateway's `in_process` rows
+/// ([`crate::gateway::render_in_process_mcp`]), then `house` ([`render_house_mcp`]), then
+/// `healthdb`. The one function a spawn site calls, so a further conditional server is a change
+/// here and not at each site.
 pub fn render_child_mcp(cfg: &Config, config: &str) -> String {
-    render_healthdb_mcp(cfg, &render_house_mcp(cfg, config)).into_owned()
+    let config = crate::gateway::render_in_process_mcp(cfg, config);
+    render_healthdb_mcp(cfg, &render_house_mcp(cfg, &config)).into_owned()
 }
 
 /// The variables a `jesse-healthdb-mcp` child reads, as `(name, value)`: the two paths, and the

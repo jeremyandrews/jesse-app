@@ -202,6 +202,12 @@
 //! forwarded BY NAME in `env_vars`, `enabled_tools` (empty on the read site, the thirteen tools
 //! on the write sites) and the approve mode. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.186.0, for `devjob`, on Claude Code's two write sites only.** The
+//! server is `in_process` and renders into no gateway-off config, so no `--mcp-config` digest
+//! moved and no Codex site moved at all (Codex's `enabled_tools` names only servers its config
+//! loads). The two write sites' `--allowedTools` digest moved for the three `mcp__devjob__*`
+//! grants. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

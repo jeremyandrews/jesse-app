@@ -409,3 +409,174 @@ fn no_gateway_source_reads_the_model_or_the_harness() {
         }
     }
 }
+
+// ---- `in_process` rows reach a spawned child (0.186.0) ------------------------------------
+
+/// An in-process server that answers nothing, standing in for `devjob`.
+struct Silent;
+
+impl InProcessServer for Silent {
+    fn tools(&self) -> Vec<Value> {
+        crate::devjob::tool_descriptors()
+    }
+    fn call<'a>(
+        &'a self,
+        _tool: &'a str,
+        _arguments: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        Box::pin(async { Ok(json!({ "content": [] })) })
+    }
+}
+
+fn with_devjob(mut cfg: crate::Config) -> crate::Config {
+    cfg.gateway
+        .in_process
+        .0
+        .insert(crate::devjob::DEVJOB_SERVER.to_string(), Arc::new(Silent));
+    cfg
+}
+
+/// THE GAP 0.177.0 LEFT: an `in_process` row named in a set rendered as nothing, so no spawned
+/// child ever saw it and `admitted_servers` never admitted it. With the gateway on and the
+/// server registered, the shipped main set now carries it, admitted, and the child is handed the
+/// stub for it under its own name, on both harnesses.
+#[test]
+fn an_in_process_row_in_a_set_reaches_a_spawned_child_through_the_stub_with_the_gateway_on() {
+    let cfg = with_devjob(gateway_on());
+    let rendered = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str());
+    let s = servers(&rendered);
+    assert!(
+        rendered.ends_with(r#","devjob":{"type":"in_process"}}}"#),
+        "in the set's order (last): {rendered}"
+    );
+    assert_eq!(
+        s["devjob"],
+        json!({ "type": crate::mcpservers::IN_PROCESS_ENTRY_TYPE })
+    );
+    // Byte for byte: the gateway-off string with one entry added at the set's place for it.
+    assert_eq!(
+        rendered.replace(r#","devjob":{"type":"in_process"}"#, ""),
+        render_child_mcp(&gateway_on(), MAIN_CHILD_MCP_CONFIG.as_str())
+    );
+
+    let admitted = admitted_servers(
+        &cfg.gateway,
+        &rendered,
+        Capability::Write,
+        DEFAULT_ALLOWED_TOOLS,
+    )
+    .unwrap();
+    let devjob = admitted
+        .iter()
+        .find(|a| a.server.name == "devjob")
+        .expect("admitted");
+    assert_eq!(
+        devjob.server.transport,
+        crate::mcpservers::Transport::InProcess
+    );
+    let mut tools = devjob.tools.clone();
+    tools.sort();
+    assert_eq!(tools, ["devjob_list", "devjob_start", "devjob_status"]);
+    // A read turn's grant names none of them: the server is listed with no tools.
+    let read = admitted_servers(
+        &cfg.gateway,
+        &rendered,
+        Capability::Read,
+        crate::READ_ALLOWED_TOOLS,
+    )
+    .unwrap();
+    assert!(read
+        .iter()
+        .find(|a| a.server.name == "devjob")
+        .is_some_and(|a| a.tools.is_empty()));
+
+    let stub = Path::new("/opt/bin/jesse-gateway-mcp");
+    let child = child_mcp_config(
+        &cfg.gateway,
+        &rendered,
+        Path::new("/tmp/jesse-gw-unit"),
+        "job-1",
+        stub,
+    )
+    .unwrap();
+    let c = servers(&child);
+    assert_eq!(
+        c["devjob"],
+        json!({
+            "type": "stdio",
+            "command": "/opt/bin/jesse-gateway-mcp",
+            "args": ["--upstream", "devjob", "--socket", "/tmp/jesse-gw-unit/gw/job-1/devjob.sock"],
+        })
+    );
+    // Codex takes the stub too, with no environment and exactly the three grants.
+    let codex = codex_mcp_args(CODEX_ID, &child, DEFAULT_ALLOWED_TOOLS).unwrap();
+    assert!(codex
+        .iter()
+        .any(|a| a == r#"mcp_servers.devjob.command="/opt/bin/jesse-gateway-mcp""#));
+    assert!(codex.iter().any(|a| a
+        == r#"mcp_servers.devjob.enabled_tools=["devjob_start", "devjob_status", "devjob_list"]"#));
+    assert!(!codex
+        .iter()
+        .any(|a| a.starts_with("mcp_servers.devjob.env")));
+}
+
+/// …AND WITH THE GATEWAY OFF IT IS ABSENT, byte for byte, registered or not: every gateway-off
+/// config, argv fixture and containment record is what it was before. With the gateway on but
+/// the server not registered (`[devjob]` off) it is absent too: no child is handed a stub for a
+/// server nothing in the bridge answers.
+#[test]
+fn an_in_process_row_is_absent_with_the_gateway_off_or_unregistered() {
+    let golden = crate::mcpservers::golden_main_config();
+    let off = with_devjob(test_config());
+    let rendered = render_child_mcp(&off, MAIN_CHILD_MCP_CONFIG.as_str());
+    assert!(!servers(&rendered).contains_key("devjob"));
+    assert_eq!(child_config_for_turn(&off, &rendered, "j"), rendered);
+    assert_eq!(MAIN_CHILD_MCP_CONFIG.as_str(), golden);
+
+    let unregistered = gateway_on();
+    let rendered = render_child_mcp(&unregistered, MAIN_CHILD_MCP_CONFIG.as_str());
+    assert!(!servers(&rendered).contains_key("devjob"));
+    assert!(admitted_servers(
+        &unregistered.gateway,
+        &rendered,
+        Capability::Write,
+        DEFAULT_ALLOWED_TOOLS
+    )
+    .unwrap()
+    .iter()
+    .all(|a| a.server.name != "devjob"));
+
+    // A set that names no `in_process` row is never re-rendered.
+    for set in McpSet::ALL {
+        let on = with_devjob(gateway_on());
+        if set.config() != MAIN_CHILD_MCP_CONFIG.as_str() {
+            assert_eq!(
+                crate::gateway::render_in_process_mcp(&on, set.config()),
+                set.config(),
+                "{}",
+                set.label()
+            );
+        }
+    }
+}
+
+/// THE GOLDEN MCP STRINGS: the shipped main config with the gateway off is the twenty-six-server
+/// golden; with it on and `devjob` registered it is that golden with exactly one entry appended.
+#[test]
+fn the_main_config_golden_with_the_gateway_off_and_on() {
+    let golden = crate::mcpservers::golden_main_config();
+    assert_eq!(
+        crate::gateway::render_in_process_mcp(&test_config(), MAIN_CHILD_MCP_CONFIG.as_str()),
+        golden
+    );
+    let on = crate::gateway::render_in_process_mcp(
+        &with_devjob(gateway_on()),
+        MAIN_CHILD_MCP_CONFIG.as_str(),
+    );
+    let want = format!(
+        "{},\"devjob\":{{\"type\":\"in_process\"}}}}}}",
+        golden.strip_suffix("}}").unwrap()
+    );
+    assert_eq!(on, want);
+}

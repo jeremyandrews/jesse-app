@@ -3185,6 +3185,18 @@ pub async fn run_battery(base: &Config, opts: &BatteryOptions) -> Result<RunOutc
             GATEWAY_NONCE_ENV,
             format!("GWNONCE-{}", probe_nonce(stamp, "gateway-bridge-nonce")),
         );
+        // THE DEVJOB SERVER, when the config turns `[devjob]` on: registered as the gateway's
+        // `devjob` in-process server exactly as `main` registers the real one, so every child's
+        // config carries it and the record names it and its tools. A STAND-IN: it lists the same
+        // three tools and starts nothing, because an adversarial probe that reaches for
+        // `devjob_start` must not create a Job on the cluster.
+        if cfg.devjob.enabled {
+            cfg.gateway.in_process.0.insert(
+                crate::devjob::DEVJOB_SERVER.to_string(),
+                Arc::new(crate::devjob::BatteryStandIn),
+            );
+            eprintln!("containment: devjob registered (stand-in: lists its tools, starts nothing)");
+        }
     }
 
     let spend: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));

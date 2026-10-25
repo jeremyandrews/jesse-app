@@ -773,16 +773,27 @@ async fn a_scratch_bridge_turn_drives_three_upstreams_through_the_gateway() {
     let cfg = Config {
         claude_bin: fake.to_string_lossy().into_owned(),
         state_dir: Some(state.to_string_lossy().into_owned()),
-        main_mcp_config: Some(
-            r#"{"mcpServers":{"gwprobe":{"type":"stdio","command":"jesse-gateway-probe-server","args":[]},"gwprobe-http":{"type":"http","url":"http://127.0.0.1:9/mcp"},"gwprobe-inproc":{"type":"http","url":""}}}"#
-                .to_string(),
-        ),
+        // RENDERED, not hand-written: the gateway-off string names no `gwprobe-inproc` at all,
+        // and the gateway renders it back in because it is registered (0.186.0). Until then this
+        // test wrote a placeholder entry by hand, because nothing rendered an in-process row.
+        main_mcp_config: Some(jesse_bridge::mcpservers::mcp_config_json(&[
+            "gwprobe",
+            "gwprobe-http",
+            "gwprobe-inproc",
+        ])),
         allowed_tools: format!(
             "{DEFAULT_ALLOWED_TOOLS},mcp__gwprobe__probe_echo,mcp__gwprobe-http__probe_echo,mcp__gwprobe-inproc__probe_echo"
         ),
         gateway: gw_settings,
         ..test_config()
     };
+    assert!(
+        !cfg.main_mcp_config
+            .as_deref()
+            .unwrap()
+            .contains("gwprobe-inproc"),
+        "the gateway-off spelling of the set names no in-process row"
+    );
     let st = AppState::new(cfg);
     let resp = app(st.clone())
         .oneshot(jesse_request(

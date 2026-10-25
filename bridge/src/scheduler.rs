@@ -1371,11 +1371,14 @@ async fn run_chain(sched: Arc<Scheduler>, st: AppState, schedule: Arc<Schedule>,
     // expires is skipped and recorded, never started hours late.
     //
     // A chain made ONLY of built-in jobs (the weekly speech-model check) touches no working
-    // tree, so it neither waits behind nor holds up the lock that keeps two agents off one.
-    let needs_tree = schedule
-        .chain(&run.start_at)
-        .iter()
-        .any(|id| schedule.get(id).is_some_and(|j| j.builtin.is_none()));
+    // tree, so it neither waits behind nor holds up the lock that keeps two agents off one. A
+    // `devjob` runs on the cluster in a clone of its own, and its one vault write (the report)
+    // takes the write lock, so it does not need the tree either.
+    let needs_tree = schedule.chain(&run.start_at).iter().any(|id| {
+        schedule
+            .get(id)
+            .is_some_and(|j| j.builtin.is_none() && j.devjob.is_none())
+    });
     let now = sched.clock().now_ms();
     let deadline_ms = due.due_ms + head.catch_up_secs.saturating_mul(1000);
     let wait = Duration::from_millis(deadline_ms.saturating_sub(now));
@@ -1455,6 +1458,18 @@ async fn run_chain(sched: Arc<Scheduler>, st: AppState, schedule: Arc<Schedule>,
             // model slot, no output contract — and lands in the record like any other member.
             MemberDecision::Run if job.builtin.is_some() => {
                 run_builtin(&sched, &st, job, &run).await
+            }
+            // A DEVJOB starts a coding agent on the cluster exactly as the tool does, and waits
+            // for its report. Its output contract is checked like a turn's, before and after.
+            MemberDecision::Run if job.devjob.is_some() => {
+                match output_already_fresh(&sched, &st, job, &run) {
+                    Some(path) => {
+                        broken_by.insert(id.clone(), id.clone());
+                        sched.state.set_output_path(&job.id, Some(path));
+                        RunResult::skipped(OUTPUT_FRESH_SKIP)
+                    }
+                    None => run_devjob(&sched, &st, job, &run).await,
+                }
             }
             MemberDecision::Run => match output_already_fresh(&sched, &st, job, &run) {
                 Some(path) => {
@@ -1762,6 +1777,160 @@ async fn run_builtin(
         reply: None,
         conversation_id: None,
         transient: false,
+    }
+}
+
+/// How often a scheduled devjob's Job is read while the scheduler waits for its report.
+const DEVJOB_POLL: Duration = Duration::from_secs(15);
+
+/// How long past a run's Kubernetes deadline the scheduler still waits for its report: the
+/// watcher's pass interval, a log read and a vault write, with room to spare.
+const DEVJOB_REPORT_GRACE: Duration = Duration::from_secs(600);
+
+/// The longest a scheduled devjob may wait in the queue before the scheduler gives up on it.
+const DEVJOB_QUEUE_CEILING: Duration = Duration::from_secs(24 * 3600);
+
+/// A scheduled devjob's outcome, from its Job's annotations once it is reported: `failed` from
+/// a failed report; otherwise `ran`, unless the output contract is unmet.
+pub fn devjob_outcome(
+    job_name: &str,
+    outcome: Option<&str>,
+    pull_request: Option<&str>,
+    contract_missing: Option<&str>,
+) -> (Outcome, String) {
+    let what = outcome.unwrap_or("reported");
+    let pr = pull_request.map(|u| format!(" ({u})")).unwrap_or_default();
+    if outcome == Some(crate::devjob::RunOutcome::Failed.label()) {
+        return (Outcome::Failed, format!("dev job {job_name}: failed"));
+    }
+    match contract_missing {
+        Some(patterns) => (
+            Outcome::FiredNoOutput,
+            format!("dev job {job_name}: {what}{pr}, but nothing matching {patterns} was written"),
+        ),
+        None => (Outcome::Ran, format!("dev job {job_name}: {what}{pr}")),
+    }
+}
+
+/// Run one `kind = "devjob"` job: read the prompt, start the run exactly as `devjob_start` does,
+/// and wait for its report. `fired-no-output` when no report lands within the run's own
+/// Kubernetes deadline (counted from when it leaves the queue) plus [`DEVJOB_REPORT_GRACE`].
+async fn run_devjob(
+    sched: &Arc<Scheduler>,
+    st: &AppState,
+    job: &ScheduleJob,
+    run: &ChainRun,
+) -> RunResult {
+    let Some(template) = job.devjob.as_ref() else {
+        return RunResult::failed("not a devjob");
+    };
+    let Some(svc) = st.cfg.devjob.service() else {
+        return RunResult::failed(
+            "`kind = \"devjob\"` needs [devjob] enabled (and [gateway] enabled) on this bridge",
+        );
+    };
+    let prompt = match job.prompt.load(Path::new(&st.cfg.vault)) {
+        Ok(p) => p,
+        Err(e) => return RunResult::failed(e),
+    };
+    let slug = sched
+        .clock()
+        .expand_tokens(&template.branch_slug, run.calendar_ms);
+    let spec = match template.spec(slug, prompt) {
+        Ok(s) => s,
+        Err(e) => return RunResult::failed(format!("the run's spec is invalid: {e}")),
+    };
+    let started = Instant::now();
+    let fire_ms = system_time_to_ms(SystemTime::now());
+    sched.state.started_without_turn(&job.id, fire_ms);
+    let start = match svc.start(&spec, &format!("schedule:{}", job.id)).await {
+        Ok(s) => s,
+        Err(e) => return RunResult::failed(format!("the dev job did not start: {e}")),
+    };
+    eprintln!(
+        "jesse-bridge: schedule FIRE id={} devjob={} repo={} agent={} queued={}{}",
+        job.id,
+        start.job_name,
+        spec.repo,
+        spec.agent.label(),
+        start.queued,
+        if run.is_operator() { " (operator)" } else { "" }
+    );
+    let deadline = Duration::from_secs(spec.active_deadline_secs()) + DEVJOB_REPORT_GRACE;
+    let finished = |outcome, reason| RunResult {
+        outcome,
+        reason,
+        job_id: None,
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+        reply: None,
+        conversation_id: None,
+        transient: false,
+    };
+    loop {
+        tokio::time::sleep(DEVJOB_POLL).await;
+        let now = system_time_to_ms(SystemTime::now());
+        match svc.view(&start.job_name).await {
+            Ok(Some(v)) if v.reported => {
+                let missing =
+                    if v.outcome.as_deref() == Some(crate::devjob::RunOutcome::Failed.label()) {
+                        None
+                    } else {
+                        match verify_output(sched, st, job, run, fire_ms) {
+                            OutputVerdict::Missing(p) => {
+                                sched.state.set_output_path(&job.id, None);
+                                Some(p)
+                            }
+                            OutputVerdict::Satisfied(p) => {
+                                sched.state.set_output_path(&job.id, Some(p));
+                                None
+                            }
+                            OutputVerdict::NoContract => None,
+                        }
+                    };
+                let (outcome, reason) = devjob_outcome(
+                    &start.job_name,
+                    v.outcome.as_deref(),
+                    v.pull_request.as_deref(),
+                    missing.as_deref(),
+                );
+                return finished(outcome, reason);
+            }
+            Ok(Some(v)) => {
+                // The deadline runs from when the Job left the queue, as Kubernetes's does.
+                let released = v.started_ms.filter(|_| !v.suspended);
+                let overdue = match released {
+                    Some(s) => now.saturating_sub(s) > deadline.as_millis() as u64,
+                    None => started.elapsed() > DEVJOB_QUEUE_CEILING,
+                };
+                if overdue {
+                    return finished(
+                        Outcome::FiredNoOutput,
+                        format!(
+                            "dev job {}: no report landed in the Inbox within its deadline",
+                            start.job_name
+                        ),
+                    );
+                }
+            }
+            Ok(None) => {
+                return finished(
+                    Outcome::FiredNoOutput,
+                    format!(
+                        "dev job {}: the Job is gone and no report was written",
+                        start.job_name
+                    ),
+                )
+            }
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: schedule id={} devjob: {e} — retrying",
+                    job.id
+                );
+                if started.elapsed() > deadline + DEVJOB_QUEUE_CEILING {
+                    return finished(Outcome::FiredNoOutput, e);
+                }
+            }
+        }
     }
 }
 
@@ -2475,6 +2644,16 @@ fn schedule_row(sched: &Scheduler, schedule: &Schedule, job: &ScheduleJob) -> Va
             None => job.prompt.label(),
         },
         "builtin": job.builtin.map(|t| t.label()),
+        // WHAT THE JOB RUNS: `turn`, `builtin` or `devjob` (`kind` is head or link).
+        "runs": if job.devjob.is_some() { "devjob" } else if job.builtin.is_some() { "builtin" } else { "turn" },
+        "devjob": job.devjob.as_ref().map(|d| json!({
+            "repo": d.repo,
+            "agent": d.agent.label(),
+            "model": d.model,
+            "branch_slug": d.branch_slug,
+            "test_command": d.test_command,
+            "timeout_minutes": d.timeout_minutes,
+        })),
         "notify": job.notify,
         "timeout_secs": job.timeout_secs,
         "catch_up_secs": job.is_head().then_some(job.catch_up_secs),

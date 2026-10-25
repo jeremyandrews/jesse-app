@@ -1,0 +1,19 @@
+==> input
+repo=jeremyandrews/k3s agent=codex branch=jesse/codex-try
+==> credentials
+OPENAI_API_KEY is empty or a placeholder; codex cannot run.
+JESSE-DEV-REPORT
+status: failed
+failure: OPENAI_API_KEY is not set (codex needs it)
+repo: jeremyandrews/k3s
+agent: codex
+agent_version: unknown
+model: (agent default)
+branch: jesse/codex-try
+pull_request: none
+test_command: (none)
+test_command_exit: skipped
+agent_exit: not run
+wall_seconds: 3
+agent_final_message: |
+JESSE-DEV-REPORT-END

@@ -1073,6 +1073,10 @@ fn should_push(job: &ScheduleJob, outcome: Outcome, reason: &str, cascaded: bool
     if outcome == Outcome::Ran && reason == QUIET_REASON {
         return false;
     }
+    // A strand entry that found nothing eligible is the queue working: a quiet night.
+    if outcome == Outcome::Ran && reason.starts_with(crate::strandjobs::NOTHING_ELIGIBLE) {
+        return false;
+    }
     true
 }
 
@@ -1377,7 +1381,7 @@ async fn run_chain(sched: Arc<Scheduler>, st: AppState, schedule: Arc<Schedule>,
     let needs_tree = schedule.chain(&run.start_at).iter().any(|id| {
         schedule
             .get(id)
-            .is_some_and(|j| j.builtin.is_none() && j.devjob.is_none())
+            .is_some_and(|j| j.builtin.is_none() && !j.is_devjob())
     });
     let now = sched.clock().now_ms();
     let deadline_ms = due.due_ms + head.catch_up_secs.saturating_mul(1000);
@@ -1461,7 +1465,7 @@ async fn run_chain(sched: Arc<Scheduler>, st: AppState, schedule: Arc<Schedule>,
             }
             // A DEVJOB starts a coding agent on the cluster exactly as the tool does, and waits
             // for its report. Its output contract is checked like a turn's, before and after.
-            MemberDecision::Run if job.devjob.is_some() => {
+            MemberDecision::Run if job.is_devjob() => {
                 match output_already_fresh(&sched, &st, job, &run) {
                     Some(path) => {
                         broken_by.insert(id.clone(), id.clone());
@@ -1812,48 +1816,92 @@ pub fn devjob_outcome(
     }
 }
 
-/// Run one `kind = "devjob"` job: read the prompt, start the run exactly as `devjob_start` does,
-/// and wait for its report. `fired-no-output` when no report lands within the run's own
-/// Kubernetes deadline (counted from when it leaves the queue) plus [`DEVJOB_REPORT_GRACE`].
+/// Run one `kind = "devjob"` job: read the prompt (the fixed form) or pick the strand's first
+/// eligible line (the strand form, [`crate::strandjobs::fire`]), start the run exactly as
+/// `devjob_start` does, and wait for its report. `fired-no-output` when no report lands within
+/// the run's own Kubernetes deadline (counted from when it leaves the queue) plus
+/// [`DEVJOB_REPORT_GRACE`]. A strand fire with nothing eligible is `ran`, with its reason.
 async fn run_devjob(
     sched: &Arc<Scheduler>,
     st: &AppState,
     job: &ScheduleJob,
     run: &ChainRun,
 ) -> RunResult {
-    let Some(template) = job.devjob.as_ref() else {
+    if !job.is_devjob() {
         return RunResult::failed("not a devjob");
-    };
+    }
     let Some(svc) = st.cfg.devjob.service() else {
         return RunResult::failed(
             "`kind = \"devjob\"` needs [devjob] enabled (and [gateway] enabled) on this bridge",
         );
     };
-    let prompt = match job.prompt.load(Path::new(&st.cfg.vault)) {
-        Ok(p) => p,
-        Err(e) => return RunResult::failed(e),
-    };
-    let slug = sched
-        .clock()
-        .expand_tokens(&template.branch_slug, run.calendar_ms);
-    let spec = match template.spec(slug, prompt) {
-        Ok(s) => s,
-        Err(e) => return RunResult::failed(format!("the run's spec is invalid: {e}")),
-    };
-    let started = Instant::now();
-    let fire_ms = system_time_to_ms(SystemTime::now());
-    sched.state.started_without_turn(&job.id, fire_ms);
-    let start = match svc.start(&spec, &format!("schedule:{}", job.id)).await {
-        Ok(s) => s,
-        Err(e) => return RunResult::failed(format!("the dev job did not start: {e}")),
+    let origin = format!("schedule:{}", job.id);
+    let (spec, start, step, started, fire_ms) = match (&job.devjob, &job.devjob_strand) {
+        (Some(template), _) => {
+            let prompt = match job.prompt.load(Path::new(&st.cfg.vault)) {
+                Ok(p) => p,
+                Err(e) => return RunResult::failed(e),
+            };
+            let slug = sched
+                .clock()
+                .expand_tokens(&template.branch_slug, run.calendar_ms);
+            let spec = match template.spec(slug, prompt) {
+                Ok(s) => s,
+                Err(e) => return RunResult::failed(format!("the run's spec is invalid: {e}")),
+            };
+            let started = Instant::now();
+            let fire_ms = system_time_to_ms(SystemTime::now());
+            sched.state.started_without_turn(&job.id, fire_ms);
+            let start = match svc.start(&spec, &origin).await {
+                Ok(s) => s,
+                Err(e) => return RunResult::failed(format!("the dev job did not start: {e}")),
+            };
+            (spec, start, None, started, fire_ms)
+        }
+        (None, Some(template)) => {
+            let started = Instant::now();
+            let fire_ms = system_time_to_ms(SystemTime::now());
+            sched.state.started_without_turn(&job.id, fire_ms);
+            let date = sched
+                .clock()
+                .expand_tokens("{year}{month}{day}", run.calendar_ms);
+            match crate::strandjobs::fire(&svc, &notes_root(&st.cfg), template, &date, &origin)
+                .await
+            {
+                crate::strandjobs::StrandFire::Failed(e) => return RunResult::failed(e),
+                crate::strandjobs::StrandFire::Nothing(reason) => {
+                    eprintln!(
+                        "jesse-bridge: schedule FIRE id={} strand={} — {reason}",
+                        job.id, template.note
+                    );
+                    return RunResult {
+                        outcome: Outcome::Ran,
+                        reason,
+                        job_id: None,
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        reply: None,
+                        conversation_id: None,
+                        transient: false,
+                    };
+                }
+                crate::strandjobs::StrandFire::Started {
+                    started: start,
+                    step,
+                    spec,
+                } => (*spec, start, Some(step), started, fire_ms),
+            }
+        }
+        (None, None) => return RunResult::failed("not a devjob"),
     };
     eprintln!(
-        "jesse-bridge: schedule FIRE id={} devjob={} repo={} agent={} queued={}{}",
+        "jesse-bridge: schedule FIRE id={} devjob={} repo={} agent={} queued={}{}{}",
         job.id,
         start.job_name,
         spec.repo,
         spec.agent.label(),
         start.queued,
+        step.map(|s| format!(" strand={} step={} prompt={}", s.note, s.id, s.prompt))
+            .unwrap_or_default(),
         if run.is_operator() { " (operator)" } else { "" }
     );
     let deadline = Duration::from_secs(spec.active_deadline_secs()) + DEVJOB_REPORT_GRACE;
@@ -2639,21 +2687,32 @@ fn schedule_row(sched: &Scheduler, schedule: &Schedule, job: &ScheduleJob) -> Va
         "profiles": job.profiles.names(),
         "mode": job.mode,
         // A built-in job has no prompt; it says which task it runs instead.
-        "prompt": match job.builtin {
-            Some(task) => format!("builtin:{}", task.label()),
-            None => job.prompt.label(),
+        "prompt": match (job.builtin, &job.devjob_strand) {
+            (Some(task), _) => format!("builtin:{}", task.label()),
+            (None, Some(d)) => format!("strand:{}", d.note),
+            (None, None) => job.prompt.label(),
         },
         "builtin": job.builtin.map(|t| t.label()),
         // WHAT THE JOB RUNS: `turn`, `builtin` or `devjob` (`kind` is head or link).
-        "runs": if job.devjob.is_some() { "devjob" } else if job.builtin.is_some() { "builtin" } else { "turn" },
-        "devjob": job.devjob.as_ref().map(|d| json!({
-            "repo": d.repo,
-            "agent": d.agent.label(),
-            "model": d.model,
-            "branch_slug": d.branch_slug,
-            "test_command": d.test_command,
-            "timeout_minutes": d.timeout_minutes,
-        })),
+        "runs": if job.is_devjob() { "devjob" } else if job.builtin.is_some() { "builtin" } else { "turn" },
+        "devjob": match (&job.devjob, &job.devjob_strand) {
+            (Some(d), _) => json!({
+                "repo": d.repo,
+                "agent": d.agent.label(),
+                "model": d.model,
+                "branch_slug": d.branch_slug,
+                "test_command": d.test_command,
+                "timeout_minutes": d.timeout_minutes,
+            }),
+            // A strand entry's defaults; the repository and the rest come from the picked prompt.
+            (None, Some(d)) => json!({
+                "strand": d.note,
+                "agent": d.agent.map(|a| a.label()),
+                "model": d.model,
+                "timeout_minutes": d.timeout_minutes,
+            }),
+            (None, None) => Value::Null,
+        },
         "notify": job.notify,
         "timeout_secs": job.timeout_secs,
         "catch_up_secs": job.is_head().then_some(job.catch_up_secs),
@@ -4625,5 +4684,61 @@ prompt = "go"
             .find(|r| r.starts_with("overnight-wrapup"))
             .unwrap();
         assert!(wrapup.contains("home,away"), "{wrapup}");
+    }
+}
+
+#[cfg(test)]
+mod strand_entry_tests {
+    use super::*;
+
+    fn strand_schedule() -> Schedule {
+        validate_schedule(&[ScheduleToml {
+            id: Some("queue".to_string()),
+            at: Some("02:20".to_string()),
+            kind: Some("devjob".to_string()),
+            strand: Some("Jesse-App".to_string()),
+            agent: Some("codex".to_string()),
+            timeout: Some(60),
+            ..Default::default()
+        }])
+    }
+
+    /// `GET /jesse/schedule` names the strand under `devjob`, and the prompt as `strand:<note>`.
+    #[test]
+    fn the_endpoint_shows_a_strand_entry_with_its_strand() {
+        let schedule = strand_schedule();
+        assert!(schedule.invalid.is_empty(), "{:?}", schedule.invalid);
+        let sched = Scheduler::new(Arc::new(schedule.clone()), None);
+        let row = schedule_row(&sched, &schedule, schedule.get("queue").unwrap());
+        assert_eq!(row["runs"], "devjob");
+        assert_eq!(row["prompt"], "strand:Jesse-App");
+        assert_eq!(
+            row["devjob"],
+            json!({ "strand": "Jesse-App", "agent": "codex", "model": null, "timeout_minutes": 60 })
+        );
+    }
+
+    /// A fire with nothing eligible is `ran`, and not pushed; a strand failure still is.
+    #[test]
+    fn nothing_eligible_is_a_quiet_ran() {
+        let schedule = strand_schedule();
+        let job = schedule.get("queue").unwrap();
+        let reason = format!(
+            "{}Jesse-App: A1: in flight",
+            crate::strandjobs::NOTHING_ELIGIBLE
+        );
+        assert!(!should_push(job, Outcome::Ran, &reason, false));
+        assert!(should_push(
+            job,
+            Outcome::Failed,
+            "strand Jesse-App is done (its front matter says state: done)",
+            false
+        ));
+        assert!(should_push(
+            job,
+            Outcome::Ran,
+            "dev job agent-x: no changes",
+            false
+        ));
     }
 }

@@ -2775,6 +2775,78 @@ expect_output = ["Inbox/{date}-dev-job-*.md"]
 - `GET /jesse/schedule` reports `runs` (`turn`, `builtin`, `devjob`; `kind` stays head or
   link) and the devjob's fields under `devjob`.
 
+#### Strand entries (`strand = "<Note>"`, 0.187.0)
+
+Work is queued in strand notes, and the next step changes every time one finishes, so a fixed
+`prompt_file` cannot follow it. A devjob entry with `strand` instead runs the strand's next step:
+
+```toml
+[[schedule]]
+id = "jesse-app-queue"
+at = "02:20"
+kind = "devjob"
+strand = "Jesse-App"            # Strands/Jesse-App.md
+# agent = "claude"              # defaults; the prompt's front matter overrides each
+# model = "claude-sonnet-5-5"
+# timeout = 120                 # minutes
+```
+
+At each fire the bridge reads `Strands/<Note>.md` fresh, walks its `## Drafts` Queue lines in
+file order (never `### Later`, running or `### Done` lines) and starts **the first eligible one**,
+at most one per fire, through the same start `devjob_start` uses (`src/strandjobs.rs`). A line is
+eligible when, in this order (a skip names the first that failed):
+
+1. it is an unchecked Queue line (above `### Later`, not `Launched YYYY-MM-DD.`) with an id that
+   can be a Kubernetes label value;
+2. it has no `(waits on: …)`;
+3. its link resolves to a file under `Projects/drafts/` with no `archive` segment;
+4. that file's front matter has `strand: <Note>` and `strand-id: <the line's id>`;
+5. that file's front matter has `devjob-repo: owner/name`. **This is the opt in**: a prompt
+   written for a person at a desk has none and is never run.
+
+A prompt opts in and tunes its run with front matter:
+
+```yaml
+---
+strand: Jesse-App
+strand-id: B3
+devjob-repo: jeremyandrews/jesse-app   # required
+devjob-agent: codex                    # optional: claude | codex | gemini
+devjob-model: gpt-5-codex              # optional
+devjob-test: cargo test                # optional: the test command
+devjob-timeout: 90                     # optional: minutes
+---
+```
+
+Each override is validated as `devjob_start` validates the same field, and a bad one makes that
+line ineligible with the key named. The prompt is the file's body without its front matter and
+without a trailing archive footer (a horizontal rule followed only by checkbox lines). The branch
+slug is `<note>-<id>-<YYYYMMDD>`, lowercased, cut from the left of the note part to fit 60.
+
+**The in-flight guard.** An eligible line is refused as `in flight`, and the walk goes on, while a
+Job labelled `jesse.dev/strand=<Note>` and `jesse.dev/strand-id=<ID>` exists in any phase
+(suspended included), or while a `*-dev-job-*.md` directly in `Inbox/` (not `Inbox/archive/`)
+names the step in its front matter.
+
+**The report** of a strand run adds `strand`, `strand-id` and `prompt` (the prompt's notes-root
+relative path) to its front matter, after the existing keys, and a Strand row to its Spec table.
+They are read back from the Job's labels and its `jesse.dev/prompt` annotation, so a restart
+mid-run reports them too. Reports from the tool and from fixed entries are unchanged.
+
+**Outcomes.** A fire that starts a run is recorded exactly as the fixed form. A fire with nothing
+eligible is `ran`, with no push and no vault write, and its reason names the first Queue line's
+id and the check it failed (`nothing eligible in strand Jesse-App: B3: in flight`), or `no queue
+lines`. A missing note, or one whose `state` is `done`, is `failed`.
+
+`repo`, `prompt_file`, `branch_slug`, `test_command`, `prompt`, `mode`, `builtin`, `timeout_secs`
+and `expect_output` are refused on a strand entry by name (a night with nothing eligible is
+normal, so an output pattern would report false failures), and `strand` is refused on a turn.
+`GET /jesse/schedule` shows `strand` under `devjob` and the prompt as `strand:<Note>`.
+
+**The bridge never writes a Strands note.** Its only vault write stays the dev job's Inbox
+report, so recording the launch and the outcome on the strand line is the vault's job: the
+morning routine reads the report and moves or blocks the line.
+
 ### Failure visibility
 
 `consecutive_failures` on each row is reset by a `ran`, incremented by a `failed`

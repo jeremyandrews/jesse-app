@@ -23,11 +23,21 @@ struct ThreadListView: View {
     // Set alongside `showSettings` by the first-run pairing CTA so Settings opens
     // straight to the Scan-to-pair sheet; the gear button leaves it false.
     @Binding var pairViaScanner: Bool
-    // The selected conversation, bridged to the root navigation. On iPad/regular
-    // width it drives the detail column of the `NavigationSplitView`; on
-    // iPhone/compact the row's `NavigationLink` still owns the push, so this just
-    // tracks the current thread and changes nothing about that behavior.
-    @Binding var selection: JesseThread?
+    // The selected conversation, bridged to the root navigation: the visible
+    // conversation is always `path.last`. On iPad/regular width it drives the detail
+    // column of the `NavigationSplitView`; on iPhone/compact the row's `NavigationLink`
+    // still owns the push, so this just tracks the current thread and changes nothing
+    // about that behavior.
+    //
+    // DERIVED HERE, from `path`, and not handed in. It used to be a closure `Binding`
+    // built in `ContentView`'s body, which is a NEW value on every render that SwiftUI
+    // cannot compare, so every rebuild of the Chats tab re-ran this whole list (its
+    // layout, every folder summary, every row) even when nothing in it had changed.
+    // `$path` is a binding to `ContentView`'s own state, the same location every time.
+    private var selection: Binding<JesseThread?> {
+        Binding(get: { path.last },
+                set: { path = $0.map { [$0] } ?? [] })
+    }
     // When true, a "can't reach the bridge" banner sits atop the list so the phone
     // signals offline before the user composes — mirroring the watch's `.queued`
     // state. The reachability probe lives in `ContentView`; the decision is the
@@ -81,7 +91,9 @@ struct ThreadListView: View {
     /// Thread ids with at least one undelivered (`.failed`) outbox message — drives
     /// the small orange badge on those rows.
     private var threadsWithFailedOutbox: Set<UUID> {
-        Set(outbox.filter { $0.state == .failed }.map(\.threadID))
+        Log.nav.interval("failedOutboxSet") {
+            Set(outbox.filter { $0.state == .failed }.map(\.threadID))
+        }
     }
 
     // Whether the on-device query-expansion tier is enabled (Settings toggle,
@@ -111,6 +123,13 @@ struct ThreadListView: View {
     // folders default collapsed (absent here); day sections never fold. Reset on
     // launch, so old history opens closed every time.
     @State private var expandedFolders: Set<ThreadSection> = []
+
+    /// The list's layout and folder headers, computed once per change to what they are
+    /// built from rather than once per body evaluation. See `ThreadListLayoutCache`.
+    @State private var layoutCache = ThreadListLayoutCache()
+
+    /// Whether the launch sweep of abandoned conversations has run (see `pruneEmpty`).
+    @State private var sweptAtLaunch = false
 
     /// Threads the active scope shows, before search. The All view keeps date order
     /// untouched; Favorites narrows to starred threads; Watch narrows to
@@ -233,10 +252,18 @@ struct ThreadListView: View {
                                                         ? nil : morningRoutineLastFiredDay,
                                                     now: .now))
         }
-        .onAppear(perform: pruneEmpty)
-        // …and again when a composer is LEFT. On a pop this list can appear before the popped
-        // composer's departure lands, and then the appear above skips that conversation as
-        // still open; this is where it is judged, after the draft is known. See `mayReap`.
+        // ONCE PER LAUNCH on appear, to sweep anything an earlier launch left behind, and
+        // not on every return to this tab: a tab switch or a pop leaves no new empty
+        // conversation that a departure below does not already judge.
+        .onAppear {
+            guard !sweptAtLaunch else { return }
+            sweptAtLaunch = true
+            pruneEmpty()
+        }
+        // …and when a composer is LEFT, which is the one moment an abandoned `+`-then-back
+        // becomes reapable. On a pop this list can appear before the popped composer's
+        // departure lands; this is where it is judged, after the draft is known. See
+        // `mayReap`.
         .onReceive(NotificationCenter.default.publisher(for: ComposerDrafts.composerLeft)) { _ in
             pruneEmpty()
         }
@@ -336,7 +363,7 @@ struct ThreadListView: View {
             } else {
                 // A search: one flat list in rank order (title hits, body hits, then
                 // expansion only hits, each newest first), snippets on visible rows.
-                List(selection: $selection) {
+                List(selection: selection) {
                     rows(found.map(\.thread),
                          hits: Dictionary(found.map { ($0.thread.id, $0.hit) },
                                           uniquingKeysWith: { a, _ in a }),
@@ -344,7 +371,7 @@ struct ThreadListView: View {
                 }
             }
         } else {
-            List(selection: $selection) {
+            List(selection: selection) {
                 switch layout {
                 case .flat(let threads):
                     // Favorites tab: one flat, newest-first list, no folder chrome.
@@ -374,7 +401,11 @@ struct ThreadListView: View {
     /// deterministic count/date-range summary), not a flat dark section bar.
     @ViewBuilder
     private func folderSection(_ rendered: RenderedThreadSection) -> some View {
-        let header = folderHeader(for: rendered, calendar: .current, locale: .current)
+        let header = layoutCache.header(for: rendered) {
+            Log.nav.interval("folderSummary") {
+                folderHeader(for: rendered, calendar: .current, locale: .current)
+            }
+        }
         Section {
             DisclosureGroup(isExpanded: folderBinding(for: rendered)) {
                 rows(rendered.threads)
@@ -405,6 +436,9 @@ struct ThreadListView: View {
     private func rows(_ threads: [JesseThread],
                       hits: [UUID: ThreadSearchHit] = [:],
                       result: ThreadSearchResult = .inactive) -> some View {
+        // Once per list of rows, not once per row: the rows' closures below run lazily, one
+        // per visible row, and each used to rebuild this set from the whole outbox.
+        let failed = threadsWithFailedOutbox
         ForEach(threads) { thread in
             NavigationLink(value: thread) {
                 // A search hit ONLY while searching, so the row shows its matched
@@ -412,7 +446,7 @@ struct ThreadListView: View {
                 // idle (the search-only exception to #22).
                 ThreadRow(thread: thread,
                           running: coordinator.isRunning(thread.id),
-                          hasFailedOutbox: threadsWithFailedOutbox.contains(thread.id),
+                          hasFailedOutbox: failed.contains(thread.id),
                           searchHit: hits[thread.id],
                           searchQueries: hits[thread.id].map(result.queries(for:)) ?? [])
             }
@@ -554,6 +588,10 @@ struct ThreadListView: View {
     }
 
     private func newThread() {
+        Log.nav.interval("newThread") { insertNewThread() }
+    }
+
+    private func insertNewThread() {
         // Insert before pushing so the thread's identity is stable across the
         // first send (a not-yet-inserted model's id changes on insert, which
         // would confuse the navigation path). Abandoned empties — opened via +
@@ -569,14 +607,18 @@ struct ThreadListView: View {
     /// against the same instant. A search never comes through here: its ranked list is
     /// `searchRows`.
     private var layout: ThreadListLayout {
-        threadListLayout(threads,
-                         favoritesOnly: favoritesOnly,
-                         originScope: originScope,
-                         archivedOnly: archivedOnly,
-                         searchQueries: [],
-                         expanded: expandedFolders,
-                         now: Date.now,
-                         calendar: .current)
+        layoutCache.layout(for: threads, scope: scopeRaw, expanded: expandedFolders) {
+            Log.nav.interval("threadListLayout") {
+                threadListLayout(threads,
+                                 favoritesOnly: favoritesOnly,
+                                 originScope: originScope,
+                                 archivedOnly: archivedOnly,
+                                 searchQueries: [],
+                                 expanded: expandedFolders,
+                                 now: Date.now,
+                                 calendar: .current)
+            }
+        }
     }
 
     /// Give the search model its index and build it in the background, once the field
@@ -658,25 +700,160 @@ struct ThreadListView: View {
     /// A real pop has already emptied `path` by the time the departure lands, so the
     /// conversation the user just left is judged, and the one they are still in is not.
     private func pruneEmpty() {
-        var changed = false
-        let onScreen = selection?.id
-        for thread in threads
-        where thread.turns.isEmpty && thread.sessionId == nil
-                && thread.id != onScreen
-                && ComposerDraftStore.shared.mayReap(thread.id)
-                && !coordinator.isRunning(thread.id)
-                && !RecordingRunService.shared.runs.isInFlight(thread.id) {
+        Log.nav.interval("pruneEmpty") { pruneEmptyNow() }
+    }
+
+    private func pruneEmptyNow() {
+        let onScreen = path.last?.id
+        EmptyConversations.reap(in: context) { id in
+            id == onScreen
+                || !ComposerDraftStore.shared.mayReap(id)
+                || coordinator.isRunning(id)
+                || RecordingRunService.shared.runs.isInFlight(id)
+        }
+    }
+}
+
+/// The Chats list's layout (`threadListLayout`) and its folder headers, kept from one body
+/// evaluation to the next until something they are built from changes.
+///
+/// WHY. At 1,000 conversations the layout is about 9 ms and the folder headers about 10 ms
+/// (each walks its month's conversations for a count and a date range), and the list's body
+/// runs on far more than data changes: a push or a pop moves `path`, which the list's
+/// selection reads. Each of those paid the whole layout again for the same answer.
+///
+/// WHAT INVALIDATES IT, which is everything the layout reads:
+///  * a save that inserts, updates or deletes a conversation, in ANY context (the watch
+///    relay and Siri write through their own), counted by `generation`;
+///  * the number of conversations the query returned, and its first one, so an insert
+///    seen by the query before its save still counts;
+///  * the scope picker and the set of open folders;
+///  * the calendar day, because "Today", "Yesterday" and the month folders are relative
+///    to it.
+/// Anything else, a push, a pop, a badge, the selection, is answered from the cache.
+///
+/// A reference type held in `@State` and deliberately NOT observable: reading or filling
+/// it must never itself invalidate a body.
+@MainActor
+final class ThreadListLayoutCache {
+
+    private struct Key: Equatable {
+        let generation: Int
+        let count: Int
+        let first: PersistentIdentifier?
+        let scope: String
+        let expanded: Set<ThreadSection>
+        let day: Date
+    }
+
+    private var key: Key?
+    private var cached: ThreadListLayout?
+    private var headers: [ThreadSection: (key: HeaderKey, header: FolderHeaderModel)] = [:]
+
+    /// Everything a folder's header is made of: whether it is open, how many conversations
+    /// it holds, and its newest and oldest dates (members are sorted newest first). Kept
+    /// across layout rebuilds, so a new conversation landing in Today recomputes Today's
+    /// layout but not every month folder's summary.
+    private struct HeaderKey: Equatable {
+        let expanded: Bool
+        let count: Int
+        let newest: Date?
+        let oldest: Date?
+    }
+
+    func layout(for threads: [JesseThread], scope: String, expanded: Set<ThreadSection>,
+                build: () -> ThreadListLayout) -> ThreadListLayout {
+        Self.watchSaves()
+        let now = Key(generation: Self.generation, count: threads.count,
+                      first: threads.first?.persistentModelID, scope: scope,
+                      expanded: expanded, day: Calendar.current.startOfDay(for: .now))
+        if now == key, let cached { return cached }
+        let built = build()
+        key = now
+        cached = built
+        return built
+    }
+
+    /// A folder's header, recomputed only when what it is made of changed (`HeaderKey`).
+    func header(for rendered: RenderedThreadSection,
+                build: () -> FolderHeaderModel) -> FolderHeaderModel {
+        let key = HeaderKey(expanded: rendered.isExpanded, count: rendered.threads.count,
+                            newest: rendered.threads.first?.updatedAt,
+                            oldest: rendered.threads.last?.updatedAt)
+        if let held = headers[rendered.section], held.key == key { return held.header }
+        let built = build()
+        headers[rendered.section] = (key, built)
+        return built
+    }
+
+    /// Bumped by every save that touches a conversation, in any context.
+    private(set) static var generation = 0
+    private static var observer: (any NSObjectProtocol)?
+
+    private static func watchSaves() {
+        guard observer == nil else { return }
+        // `queue: nil`, so a save on the main actor bumps the generation before `save()`
+        // returns, ahead of the body its query refetch schedules. A save in a background
+        // context hops over.
+        observer = NotificationCenter.default.addObserver(
+            forName: ModelContext.didSave, object: nil, queue: nil) { note in
+            let keys: [ModelContext.NotificationKey] = [.insertedIdentifiers, .updatedIdentifiers,
+                                                        .deletedIdentifiers]
+            let touched = keys.contains { key in
+                (note.userInfo?[key.rawValue] as? [PersistentIdentifier] ?? [])
+                    .contains { $0.entityName == "JesseThread" }
+            }
+            guard touched else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { generation += 1 }
+            } else {
+                Task { @MainActor in generation += 1 }
+            }
+        }
+    }
+}
+
+/// The abandoned conversations `pruneEmpty` removes: purely local (no `sessionId`) and
+/// with no turns, unless the caller says to keep one.
+///
+/// EMPTINESS IS ANSWERED BY THE STORE, never by touching a conversation's turns. This
+/// used to loop over every conversation in the list and read `turns.isEmpty` first, which
+/// faulted every conversation's turns into the main context on every return to Chats and
+/// every composer departure: 48 ms per tab cycle at 1,000 conversations, and the turns'
+/// full text left resident. The predicate below is evaluated in SQL (and against pending
+/// in-memory inserts, so a `+` not yet saved is still found), so only the handful of
+/// candidates are ever materialized, and a turn object never is.
+enum EmptyConversations {
+
+    static func candidates() -> FetchDescriptor<JesseThread> {
+        FetchDescriptor<JesseThread>(
+            predicate: #Predicate { $0.sessionId == nil && $0.turns.isEmpty })
+    }
+
+    /// Test hook: how many conversations the last reap loaded. Only candidates may be, so a
+    /// conversation with turns is never even materialized, let alone its turns faulted.
+    private(set) static var lastLoaded = 0
+
+    /// Delete every candidate `keep` does not claim, with its stored draft, and save.
+    /// Returns how many went.
+    @discardableResult
+    static func reap(in context: ModelContext, keeping keep: (UUID) -> Bool) -> Int {
+        let found = (try? context.fetch(candidates())) ?? []
+        lastLoaded = found.count
+        var reaped = 0
+        for thread in found where !keep(thread.id) {
             ComposerDraftStore.shared.delete(thread.id)
             context.delete(thread)
-            changed = true
+            reaped += 1
         }
-        if changed {
+        if reaped > 0 {
             do {
                 try context.save()
             } catch {
                 Log.run.error("pruneEmpty save failed: \(error.localizedDescription)")
             }
         }
+        return reaped
     }
 }
 

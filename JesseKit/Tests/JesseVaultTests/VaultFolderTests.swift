@@ -135,6 +135,27 @@ final class VaultFolderTests: XCTestCase {
         }
     }
 
+    /// `resolve` is called from a body (the Today tab asks it on every evaluation), on every
+    /// Vault tab appearance and on every activation. It used to start access on every call
+    /// and never stop, so grants piled up for as long as the app ran. It now holds ONE per
+    /// folder however often it is asked, and `forget()` gives it back: the count returns to
+    /// where it started.
+    func testResolvingRepeatedlyHoldsOneAccessAndForgettingReturnsItToZero() throws {
+        let folder = makeFolder()
+        try folder.adopt(url: directory)
+        let baseline = VaultFolder.outstandingAccessCount
+
+        for _ in 0..<10 {
+            XCTAssertNotNil(folder.resolve().url)
+        }
+        let held = VaultFolder.outstandingAccessCount - baseline
+        XCTAssertLessThanOrEqual(held, 1, "ten resolves left \(held) accesses open")
+
+        folder.forget()
+        XCTAssertEqual(VaultFolder.outstandingAccessCount - baseline, 0,
+                       "forgetting the folder gives back what resolve held")
+    }
+
     func testTwoFoldersUnderDifferentKeysDoNotSeeEachOther() throws {
         let a = VaultFolder(defaults: defaults, key: "key.a")
         let b = VaultFolder(defaults: defaults, key: "key.b")

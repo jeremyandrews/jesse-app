@@ -286,6 +286,24 @@ final class RunCoordinator {
     // launch clears it, and a new turn (new key) makes one fresh attempt.
     @ObservationIgnored private var titlesInFlight: Set<UUID> = []
     @ObservationIgnored private var titleAttemptedKeys: [UUID: String] = [:]
+    // `titleChecked` is the guard IN FRONT of both: the threads whose content key was
+    // computed this launch and needed nothing (current, or already attempted), with the
+    // `updatedAt` seen then. A row that appears again with that same stamp is answered
+    // from here without touching a turn. Any save that inserts, edits or deletes a turn
+    // drops its thread's entry (see `invalidateTitleChecks`), so a new or edited turn is
+    // hashed and retitled exactly as before.
+    @ObservationIgnored private var titleChecked: [UUID: Date] = [:]
+    @ObservationIgnored private weak var titleContext: ModelContext?
+    @ObservationIgnored private var saveObserver: (any NSObjectProtocol)?
+    // The sync pass's conversation set, and the count of saves (in any context) that
+    // inserted or deleted a conversation. See `syncThreads`.
+    @ObservationIgnored private var syncThreadSet: (generation: Int, context: ObjectIdentifier,
+                                                    threads: [JesseThread])?
+    @ObservationIgnored private var threadSetGeneration = 0
+    /// Test hook: how many times `ensureTitle` has computed a content key, which is the
+    /// full text hash of every turn. Counting it is how a test proves a row appearing again
+    /// with nothing changed costs no hash.
+    @ObservationIgnored private(set) var titleKeyComputations = 0
     // Called after a turn is delivered successfully — the "sensible moment" to ask
     // for push-notification authorization (not on cold launch). `JesseApp` wires
     // this to `PushManager`; the default is a no-op so tests never touch
@@ -1488,7 +1506,9 @@ final class RunCoordinator {
     /// 4. **Save once**, if anything changed.
     private func applySessionSync(_ list: [ConversationSummary], deleted: [ConversationTombstone],
                                   client: any JesseClientProtocol, context: ModelContext) async {
-        let existing = (try? context.fetch(FetchDescriptor<JesseThread>())) ?? []
+        let signpost = NavTrace.begin("applySessionSync")
+        defer { NavTrace.end("applySessionSync", signpost) }
+        let existing = syncThreads(context)
         var changed = false
 
         // ── Pass 1: legacy bind ────────────────────────────────────────────────────────
@@ -1507,11 +1527,18 @@ final class RunCoordinator {
         }
 
         // ── Pass 2: merge duplicates ───────────────────────────────────────────────────
-        let merged = mergeDuplicateThreads(existing, remote: list, context: context)
+        let merged = Log.nav.interval("syncMerge") {
+            mergeDuplicateThreads(existing, remote: list, context: context)
+        }
         changed = changed || merged > 0
 
         // ── Pass 3: plan and apply ────────────────────────────────────────────────────
-        let live = (try? context.fetch(FetchDescriptor<JesseThread>())) ?? []
+        // The set the merge left, without a second fetch of every conversation when it
+        // merged nothing, which is every pass on a clean store. A fetch of 1,000
+        // conversations is about 20 ms on the main actor, and this used to pay it twice.
+        let live = merged == 0 ? existing : Log.nav.interval("syncFetch") {
+            (try? context.fetch(FetchDescriptor<JesseThread>())) ?? []
+        }
         var byConversation: [String: JesseThread] = [:]
         for t in live {
             guard let cid = t.conversationId, !cid.isEmpty else { continue }
@@ -1558,6 +1585,8 @@ final class RunCoordinator {
         // UPDATE: refresh the server title, the CURRENT session (which moves when the CLI
         // forks), the activity stamp, and the flags. Applied identically on iOS and macOS:
         // the two used to diverge here, which was its own source of confusion.
+        let updatePass = NavTrace.begin("syncUpdate")
+        defer { NavTrace.end("syncUpdate", updatePass) }
         for c in plan.update {
             guard let thread = byConversation[c.conversationId] else { continue }
             if let title = c.title, !title.isEmpty, thread.aiTitle != title {
@@ -1605,6 +1634,30 @@ final class RunCoordinator {
                 Log.run.error("conversation sync save failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Every conversation in `context`, for the sync pass.
+    ///
+    /// The pass needs the SET of conversations; the values it reads off each one are read
+    /// live. That set changes only when a conversation is inserted or deleted, so it is
+    /// kept from one pass to the next and fetched again only when a save in any context
+    /// inserted or deleted one (`threadSetGeneration`), or this context holds an insert or
+    /// a delete it has not saved yet. A fetch of 1,000 conversations is about 24 ms on the
+    /// main actor, and every pull after a reply paid it (twice, before the merge pass
+    /// learned to skip its refetch).
+    private func syncThreads(_ context: ModelContext) -> [JesseThread] {
+        watchSaves(context)
+        let pending = context.insertedModelsArray.contains { $0 is JesseThread }
+            || context.deletedModelsArray.contains { $0 is JesseThread }
+        if !pending, let held = syncThreadSet, held.generation == threadSetGeneration,
+           held.context == ObjectIdentifier(context) {
+            return held.threads.filter { !$0.isDeleted }
+        }
+        let fetched = Log.nav.interval("syncFetch") {
+            (try? context.fetch(FetchDescriptor<JesseThread>())) ?? []
+        }
+        syncThreadSet = pending ? nil : (threadSetGeneration, ObjectIdentifier(context), fetched)
+        return fetched
     }
 
     /// Collapse every group of local threads sharing one conversation id into the group's
@@ -2808,11 +2861,24 @@ final class RunCoordinator {
     /// title in place — no error, no spinner. The cached (possibly stale) title
     /// keeps displaying while a refresh runs, so the row never flickers to blank.
     func ensureTitle(for thread: JesseThread, context: ModelContext) {
-        let key = threadContentKey(for: thread)
-        guard !key.isEmpty,
-              thread.titleSourceKey != key,
-              !titlesInFlight.contains(thread.id),
-              titleAttemptedKeys[thread.id] != key else { return }
+        Log.nav.interval("ensureTitle") { ensureTitleNow(for: thread, context: context) }
+    }
+
+    private func ensureTitleNow(for thread: JesseThread, context: ModelContext) {
+        // GUARD FIRST. The key below hashes the full text of every turn, and this runs on
+        // every row appearance, scrolling included. A thread already checked this launch,
+        // with no save to one of its turns since and the same activity stamp, cannot have
+        // a different key.
+        if let seen = titleChecked[thread.id], seen == thread.updatedAt { return }
+        titleContext = context
+        watchSaves(context)
+        titleKeyComputations += 1
+        let key = Log.nav.interval("threadContentKey") { threadContentKey(for: thread) }
+        if key.isEmpty || thread.titleSourceKey == key || titleAttemptedKeys[thread.id] == key {
+            titleChecked[thread.id] = thread.updatedAt
+            return
+        }
+        guard !titlesInFlight.contains(thread.id) else { return }
 
         let threadID = thread.id
         titlesInFlight.insert(threadID)
@@ -2834,6 +2900,63 @@ final class RunCoordinator {
             thread.aiTitle = title
             thread.titleSourceKey = key
             try? self.save(context)
+        }
+    }
+
+    /// Watch every save in every context, once, for the two caches that depend on what
+    /// was saved: a saved turn drops its thread's title check, and an inserted or deleted
+    /// conversation drops the sync pass's conversation set.
+    private func watchSaves(_ context: ModelContext) {
+        guard saveObserver == nil else { return }
+        // `queue: nil`, so a save on the main actor is handled before `save()` returns and
+        // no later call can see a cache the save just made stale. A save in a background
+        // context hops over.
+        saveObserver = NotificationCenter.default.addObserver(
+            forName: ModelContext.didSave, object: nil, queue: nil) { [weak self] note in
+            let saved = (note.object as? ModelContext).map(ObjectIdentifier.init)
+            let turns = Self.saved(note, entity: "Turn",
+                                   [.insertedIdentifiers, .updatedIdentifiers, .deletedIdentifiers])
+            let threadSetMoved = !Self.saved(note, entity: "JesseThread",
+                                             [.insertedIdentifiers, .deletedIdentifiers]).isEmpty
+            let apply: @MainActor @Sendable () -> Void = { [weak self] in
+                guard let self else { return }
+                if threadSetMoved { self.threadSetGeneration += 1 }
+                self.invalidateTitleChecks(turns: turns, savedIn: saved)
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { apply() }
+            } else {
+                Task { @MainActor in apply() }
+            }
+        }
+    }
+
+    /// The identifiers of one entity a save reported under the given keys.
+    nonisolated private static func saved(_ note: Notification, entity: String,
+                                          _ keys: [ModelContext.NotificationKey]) -> [PersistentIdentifier] {
+        keys.flatMap { key in
+            (note.userInfo?[key.rawValue] as? [PersistentIdentifier] ?? [])
+                .filter { $0.entityName == entity }
+        }
+    }
+
+    /// Drop the check for the thread each saved turn belongs to. A turn that cannot be
+    /// traced to its thread (saved by another context, or deleted) drops every check: a
+    /// recomputation per visible row is the worst that costs, and a stale title is not.
+    private func invalidateTitleChecks(turns ids: [PersistentIdentifier],
+                                       savedIn saved: ObjectIdentifier?) {
+        guard !ids.isEmpty, !titleChecked.isEmpty else { return }
+        guard let context = titleContext, saved == ObjectIdentifier(context) else {
+            titleChecked.removeAll()
+            return
+        }
+        for id in ids {
+            guard let turn: Turn = context.registeredModel(for: id), !turn.isDeleted,
+                  let threadID = turn.thread?.id else {
+                titleChecked.removeAll()
+                return
+            }
+            titleChecked[threadID] = nil
         }
     }
 

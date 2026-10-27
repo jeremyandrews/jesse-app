@@ -118,7 +118,9 @@ struct TodayTabView: View {
     /// Read once per body rather than held in state: `VaultFolder` caches nothing (every
     /// call reads the bookmark back out of `UserDefaults`), and the answer can change while
     /// this screen is up — somebody picks the folder in Settings and comes back.
-    static var hasVaultFolder: Bool { VaultFolder().resolve().isReady }
+    static var hasVaultFolder: Bool {
+        Log.nav.interval("todayBookmarkResolve") { VaultFolder().resolve().isReady }
+    }
 
     var body: some View {
         let _ = RenderProbe.body("TodayTabView")

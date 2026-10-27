@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 import SwiftUI
 
 // THE VAULT AS A SCREEN: a field, a list, and a note one tap away — with the bridge off.
@@ -205,9 +206,74 @@ public final class VaultBrowserModel {
     /// Whether a folder is held at all. Everything on the screen hangs off this.
     public var hasFolder: Bool { folderStatus.isReady }
 
-    /// The 30 most recently modified notes, the index's counts, and the folder's status.
-    /// Cheap enough to run on every appearance.
+    /// The 30 most recently modified notes, the index's counts, and the folder's status,
+    /// answered here and now. What every explicit change (a folder, a scope, a strand
+    /// picked) and every test calls; the tab's own appearance uses `refreshInBackground`.
     public func refresh() {
+        let signpost = Self.navSignposter.beginInterval("vaultRefresh",
+                                                        id: Self.navSignposter.makeSignpostID())
+        defer { Self.navSignposter.endInterval("vaultRefresh", signpost) }
+        refreshGeneration += 1
+        guard let (index, inputs) = prepareRefresh() else { return }
+        apply(Self.answer(from: index, inputs), for: inputs)
+    }
+
+    /// The same refresh, with the index's queries OFF the main thread.
+    ///
+    /// The tab calls this on every appearance. At 5,000 notes the queries (every folder's
+    /// count, the chunk table's count, up to a thousand strand rows) are about 8 ms, and
+    /// they ran on the main thread inside the tab switch itself. The answer is the one
+    /// `refresh` gives, applied when it lands, and dropped if anything it was asked about
+    /// changed first (a folder, a scope or a strand picked, or another refresh started).
+    public func refreshInBackground() {
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        guard let (index, inputs) = prepareRefresh() else { return }
+        Task { [weak self] in
+            let answer = await Task.detached {
+                let signpost = Self.navSignposter.beginInterval(
+                    "vaultRefreshQueries", id: Self.navSignposter.makeSignpostID())
+                defer { Self.navSignposter.endInterval("vaultRefreshQueries", signpost) }
+                return Self.answer(from: index, inputs)
+            }.value
+            guard let self, generation == self.refreshGeneration,
+                  inputs == self.currentRefreshInputs else { return }
+            self.apply(answer, for: inputs)
+        }
+    }
+
+    /// Counts refreshes, so a background answer that lost a race is dropped.
+    private var refreshGeneration = 0
+
+    /// What a refresh is asked about.
+    struct RefreshInputs: Equatable, Sendable {
+        let folders: VaultFolderSelection
+        let strand: String?
+        let scope: VaultSearchScope
+    }
+
+    /// What a refresh found.
+    struct RefreshAnswer: Sendable {
+        var folderCounts: [VaultFolderCount] = []
+        var counts = VaultIndexCounts()
+        /// Held folders the index no longer has.
+        var goneFolders: [String] = []
+        /// The held strand, when the index no longer has it.
+        var goneStrand: String?
+        var strandNotes: [VaultIndexedFile] = []
+        var recents: [VaultIndexedFile] = []
+        var archivedRecents: [VaultIndexedFile] = []
+        var error: String?
+    }
+
+    private var currentRefreshInputs: RefreshInputs {
+        RefreshInputs(folders: folderStorage, strand: strandStorage, scope: scopeStorage)
+    }
+
+    /// The main-thread half: the folder's status (a held bookmark, so cheap) and the
+    /// index. Nil when there is nothing to query, with the screen already cleared or the
+    /// error already set.
+    private func prepareRefresh() -> (VaultIndex, RefreshInputs)? {
         folderStatus = source.folderStatus
         guard folderStatus.isReady else {
             recents = []
@@ -215,80 +281,101 @@ public final class VaultBrowserModel {
             strandNotes = []
             folderCounts = []
             counts = VaultIndexCounts()
-            return
+            return nil
         }
         do {
-            guard let index = try source.index() else { return }
-            folderCounts = index.folders()
-            counts = index.counts()
-            lastError = nil
-            // A FOLDER CAN GO. It was deleted or renamed in Obsidian, the reindex noticed,
-            // and the tab is now narrowed to a folder that does not exist — which shows as
-            // fewer notes, or none, with no reason given. Drop only the folders that went,
-            // and SAY SO, naming them. Guarded on a non-empty index, because before the
-            // first pass every folder is missing and none of them have gone anywhere.
-            if counts.fileCount > 0 {
-                let known = Set(folderCounts.map(\.path))
-                let gone = folderStorage.paths.filter { !known.contains($0) }
-                if !gone.isEmpty {
-                    for path in gone { folderStorage.remove(path) }
-                    lastError = Self.goneSentence(gone, remaining: folderStorage.count)
-                }
-            }
-            strandNotes = index.recentFiles(limit: 1_000, underPrefix: VaultStrandRecord.folder)
-                .sorted {
-                    $0.title.localizedStandardCompare($1.title) == .orderedAscending
-                }
-            // A HELD STRAND CAN GO, for a folder's reason: renamed, or deleted. Widen to
-            // every strand and say so rather than show one empty row.
-            if let held = strandStorage, counts.fileCount > 0,
-               !strandNotes.contains(where: { $0.path == held }) {
-                strandStorage = nil
-                lastError = "\(VaultStrandRecord.slug(of: held)) is not in the vault any more, so every strand is showing."
-            }
-            let scope = self.scopeStorage
-            if scope == .strands, folderStorage.isEmpty {
-                // EVERY strand, not a recent thirty: the scope is the record, and the
-                // archive under its header is only useful whole. Two dozen live notes
-                // and a growing archive, all from one indexed prefix query.
-                let all = strandNotes.filter { note in strandStorage.map { note.path == $0 } ?? true }
-                    .sorted { $0.modified > $1.modified }
-                if strandStorage != nil {
-                    recents = all
-                    archivedRecents = []
-                } else {
-                    recents = all.filter { !VaultStrandRecord.isArchived($0.path) }
-                    archivedRecents = all.filter { VaultStrandRecord.isArchived($0.path) }
-                }
-            } else if !folderStorage.isEmpty {
-                // TWO QUERIES, each with its own LIMIT, so an archive can never crowd a
-                // live note out: a folder whose archive holds hundreds of notes newer than
-                // its live ones still lists every one of the live ones first.
-                recents = index.recentFiles(limit: Self.recentLimit, in: folderStorage,
-                                            archive: .live)
-                archivedRecents = index.recentFiles(limit: Self.archivedLimit,
-                                                    in: folderStorage, archive: .archived)
-            } else {
-                recents = Array(index.recentFiles(limit: Self.recentLimit,
-                                                  underPrefix: scope.pathPrefix)
-                    .filter { scope.includes($0.path) })
-                archivedRecents = []
-            }
+            guard let index = try source.index() else { return nil }
+            return (index, currentRefreshInputs)
         } catch {
             lastError = VaultIndexer.describe(error)
-            return
+            return nil
         }
+    }
+
+    /// Every query a refresh makes, and nothing else: no state is read or written here,
+    /// so it can run on any thread.
+    nonisolated static func answer(from index: VaultIndex, _ inputs: RefreshInputs) -> RefreshAnswer {
+        var answer = RefreshAnswer()
+        answer.folderCounts = index.folders()
+        answer.counts = index.counts()
+        // A FOLDER CAN GO. It was deleted or renamed in Obsidian, the reindex noticed,
+        // and the tab is now narrowed to a folder that does not exist — which shows as
+        // fewer notes, or none, with no reason given. Drop only the folders that went,
+        // and SAY SO, naming them. Guarded on a non-empty index, because before the
+        // first pass every folder is missing and none of them have gone anywhere.
+        var folders = inputs.folders
+        if answer.counts.fileCount > 0 {
+            let known = Set(answer.folderCounts.map(\.path))
+            answer.goneFolders = folders.paths.filter { !known.contains($0) }
+            for path in answer.goneFolders { folders.remove(path) }
+        }
+        answer.strandNotes = index.recentFiles(limit: 1_000, underPrefix: VaultStrandRecord.folder)
+            .sorted {
+                $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+        // A HELD STRAND CAN GO, for a folder's reason: renamed, or deleted. Widen to
+        // every strand and say so rather than show one empty row.
+        var strand = inputs.strand
+        if let held = strand, answer.counts.fileCount > 0,
+           !answer.strandNotes.contains(where: { $0.path == held }) {
+            answer.goneStrand = held
+            strand = nil
+        }
+        let scope = inputs.scope
+        if scope == .strands, folders.isEmpty {
+            // EVERY strand, not a recent thirty: the scope is the record, and the
+            // archive under its header is only useful whole. Two dozen live notes
+            // and a growing archive, all from one indexed prefix query.
+            let all = answer.strandNotes.filter { note in strand.map { note.path == $0 } ?? true }
+                .sorted { $0.modified > $1.modified }
+            if strand != nil {
+                answer.recents = all
+            } else {
+                answer.recents = all.filter { !VaultStrandRecord.isArchived($0.path) }
+                answer.archivedRecents = all.filter { VaultStrandRecord.isArchived($0.path) }
+            }
+        } else if !folders.isEmpty {
+            // TWO QUERIES, each with its own LIMIT, so an archive can never crowd a
+            // live note out: a folder whose archive holds hundreds of notes newer than
+            // its live ones still lists every one of the live ones first.
+            answer.recents = index.recentFiles(limit: Self.recentLimit, in: folders, archive: .live)
+            answer.archivedRecents = index.recentFiles(limit: Self.archivedLimit,
+                                                       in: folders, archive: .archived)
+        } else {
+            answer.recents = Array(index.recentFiles(limit: Self.recentLimit,
+                                                     underPrefix: scope.pathPrefix)
+                .filter { scope.includes($0.path) })
+        }
+        return answer
+    }
+
+    /// Put an answer on screen, and drop any folder or strand it found gone.
+    private func apply(_ answer: RefreshAnswer, for inputs: RefreshInputs) {
+        folderCounts = answer.folderCounts
+        counts = answer.counts
+        lastError = nil
+        if !answer.goneFolders.isEmpty {
+            for path in answer.goneFolders { folderStorage.remove(path) }
+            lastError = Self.goneSentence(answer.goneFolders, remaining: folderStorage.count)
+        }
+        strandNotes = answer.strandNotes
+        if let held = answer.goneStrand {
+            strandStorage = nil
+            lastError = "\(VaultStrandRecord.slug(of: held)) is not in the vault any more, so every strand is showing."
+        }
+        recents = answer.recents
+        archivedRecents = answer.archivedRecents
         // A strand's own `updated:` stamp outranks its mtime — see `VaultStrandOrder`.
         // Done as a second pass rather than in the query because the stamp is inside the
         // note and the index does not hold it: fifteen small reads, off the main actor,
         // and the list is already on screen in mtime order while they happen.
-        if scope.ordersByFrontmatterUpdated { applyFrontmatterOrder(for: scope) }
+        if inputs.scope.ordersByFrontmatterUpdated { applyFrontmatterOrder(for: inputs.scope) }
     }
 
     /// How many live notes the recents list shows.
-    static let recentLimit = 30
+    nonisolated static let recentLimit = 30
     /// How many archived notes a folder selection's collapsed section holds.
-    static let archivedLimit = 100
+    nonisolated static let archivedLimit = 100
 
     /// What the screen says when held folders have left the vault. Names every one.
     nonisolated static func goneSentence(_ gone: [String], remaining: Int) -> String {
@@ -302,6 +389,11 @@ public final class VaultBrowserModel {
             ? "\(names) \(verb) not in the vault any more, so every note is showing."
             : "\(names) \(verb) not in the vault any more, so the filter dropped \(gone.count == 1 ? "it" : "them")."
     }
+
+    /// The `nav` signposter (`JesseCore.NavTrace`'s subsystem and category), declared here
+    /// because this package depends on nothing and so cannot reach that one. One
+    /// subsystem and one category, so Instruments shows one timeline either way.
+    nonisolated static let navSignposter = OSSignposter(subsystem: "com.tag1.jesse", category: "nav")
 
     /// Re-sort the recents by each note's `updated:` frontmatter.
     ///
@@ -502,7 +594,11 @@ public struct VaultBrowserView: View {
         }
         .onChange(of: model.query) { _, _ in model.search() }
         .task {
-            model.refresh()
+            // No refresh here: `onAppear` below already starts one on every appearance,
+            // and a `.task` in a tab bar restarts on every appearance too, so a refresh
+            // here ran the index's queries a second time, on the main thread, each time
+            // the tab was shown.
+            //
             // The one automatic reindex: coming to this screen is the strongest signal
             // there is that the index is about to be read. Debounced, so arriving twice in
             // a minute costs one walk.
@@ -513,12 +609,12 @@ public struct VaultBrowserView: View {
         // different tab. Without this, a user who picks the folder and comes back here is
         // told there is no folder until the next launch. It costs a bookmark resolve and two
         // COUNT queries.
-        .onAppear { model.refresh() }
+        .onAppear { model.refreshInBackground() }
         // An index that finished has both new counts AND new answers: a query typed while
         // the first index was still running must not be left showing the empty result it
         // legitimately had thirty seconds ago.
         .onChange(of: model.indexer.lastReport) { _, _ in
-            model.refresh()
+            model.refreshInBackground()
             model.search()
         }
     }

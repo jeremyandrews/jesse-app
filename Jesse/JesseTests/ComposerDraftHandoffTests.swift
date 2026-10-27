@@ -467,4 +467,51 @@ final class ComposerDraftHandoffTests: XCTestCase {
         XCTAssertTrue(reapable(abandoned), "a bare +-then-back is still reaped")
         XCTAssertTrue(reapable(emptied), "and so is one whose draft was deliberately emptied")
     }
+
+    /// `EmptyConversations.reap`, the reaper `pruneEmpty` runs, reaps exactly the
+    /// conversations the old loop did, and finds them WITHOUT touching a single turn.
+    ///
+    /// It runs on every composer departure. It used to load every conversation and read its
+    /// `turns.isEmpty` first, which faulted every conversation's turn relationship (one
+    /// query each) on the main actor: 48 ms per tab cycle at 1,000 conversations. It may now
+    /// load only the candidates, which the store selects: a conversation that has turns is
+    /// never materialized, so its turns cannot have been touched.
+    func testTheReaperRemovesTheSameConversationsAndFaultsNoTurn() throws {
+        let url = directory.appendingPathComponent("reap.store")
+        let container = try ModelContainer(
+            for: JesseThread.self, Turn.self, OutboxItem.self, OutboxAttachment.self,
+            DraftAttachment.self, configurations: ModelConfiguration(url: url))
+        let seed = ModelContext(container)
+
+        let abandoned = JesseThread(mode: .ask); seed.insert(abandoned)
+        let adoptedStub = JesseThread(mode: .ask); seed.insert(adoptedStub)
+        adoptedStub.sessionId = "sess-from-the-mac"
+        let open = JesseThread(mode: .ask); seed.insert(open)
+        var talked: [JesseThread] = []
+        for n in 0..<20 {
+            let thread = JesseThread(mode: .ask); seed.insert(thread)
+            if n % 2 == 0 { thread.sessionId = "sess-\(n)" }
+            for t in 0..<5 {
+                let turn = Turn(role: t % 2 == 0 ? .user : .jesse, text: "turn \(t) of \(n)")
+                turn.thread = thread
+                seed.insert(turn)
+            }
+            talked.append(thread)
+        }
+        try seed.save()
+
+        let fresh = ModelContext(container)
+        let reaped = EmptyConversations.reap(in: fresh) { $0 == open.id }
+
+        XCTAssertEqual(reaped, 1, "only the abandoned +-then-back goes")
+        let left = Set(try fresh.fetch(FetchDescriptor<JesseThread>()).map(\.id))
+        XCTAssertFalse(left.contains(abandoned.id), "the abandoned conversation is reaped")
+        XCTAssertTrue(left.contains(adoptedStub.id), "an adopted stub waiting to hydrate is kept")
+        XCTAssertTrue(left.contains(open.id), "a conversation the caller keeps is kept")
+        XCTAssertEqual(left.count, 22, "every conversation with turns is kept")
+        // Only the two turn-less local conversations (the abandoned one and the one kept)
+        // are candidates. The old loop loaded all 23 and read each one's turns.
+        XCTAssertEqual(EmptyConversations.lastLoaded, 2,
+                       "the reaper loaded \(EmptyConversations.lastLoaded) conversations")
+    }
 }

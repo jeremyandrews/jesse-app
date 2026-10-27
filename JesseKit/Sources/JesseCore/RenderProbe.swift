@@ -43,7 +43,17 @@ public nonisolated struct RenderProbe: Sendable {
     public nonisolated static func body(_ view: StaticString) {
         guard isEnabled else { return }
         logger.notice("body \(view, privacy: .public)")
+        counts.withLock { $0[view.description, default: 0] += 1 }
     }
+
+    /// Every body evaluation so far, by view, while the probe is on. Kept in memory as
+    /// well as logged so a UI test can read the numbers back from the running app (see
+    /// `RenderProbeReadout`) and assert a bound, which a log read after the run cannot.
+    public nonisolated static func bodyCounts() -> [String: Int] {
+        counts.withLock { $0 }
+    }
+
+    private nonisolated static let counts = OSAllocatedUnfairLock(initialState: [String: Int]())
 
     /// Note a named moment, so the body lines either side of it can be attributed to an
     /// action. Used by the measurement's driver, never by the app.

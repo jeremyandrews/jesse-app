@@ -31,7 +31,10 @@ struct AppModelStore {
 
 enum AppModelContainer {
     /// The app's shared store, opened once at process start.
-    static let shared: AppModelStore = load()
+    /// `ScaleSeedUITestSeam.storeURL` is nil in every ordinary launch (and in every Release
+    /// build), so this is the default location; a UI test measuring at scale gets a store
+    /// of its own instead, seeded once and never mixed with the real one.
+    static let shared: AppModelStore = load(url: ScaleSeedUITestSeam.storeURL)
 
     /// Open the store at `url` (nil → the default Application-Support location),
     /// under the current schema with automatic lightweight migration. Factored out of

@@ -220,6 +220,13 @@ struct RootTabView: View {
                 StoreErrorBanner()
             }
         }
+        // A UI test's window onto the body counts (see `RenderProbeReadout`). Absent in
+        // every ordinary launch.
+        .overlay(alignment: .topLeading) {
+            if RenderProbeReadout.isArmed {
+                RenderProbeReadout().frame(width: 1, height: 1)
+            }
+        }
         // EVERY vault reader in this app, wherever it is presented from, gets the one thing
         // it cannot own: a way to ask for a marked up note to be reviewed. Injected HERE
         // rather than at each of the four places a reader is presented (this shell's Vault
@@ -259,6 +266,8 @@ struct RootTabView: View {
             TranscriptFoldUITestSeam.arm(context: context)
             // The same, for the returned-file viewers (see `ArtifactViewerUITestSeam`).
             ArtifactViewerUITestSeam.arm(context: context)
+            // The same, for the navigation cost measurement (see `ScaleSeedUITestSeam`).
+            ScaleSeedUITestSeam.arm(context: context)
             buildTheReplayer()
             todayModel.refreshPending()
             healthModel.refreshPending()
@@ -280,7 +289,7 @@ struct RootTabView: View {
             // the moment the local copy may have been resynced behind the app's back. The
             // folder's status is re-read with it, because it may have been picked (or
             // forgotten) in Settings while this app was in the background.
-            vaultModel.refresh()
+            vaultModel.refreshInBackground()
             vaultModel.indexer.reindexIfDue()
             // AND the captures. An activation is the moment the local copy may have been
             // resynced behind the app's back, which is exactly when a capture written here

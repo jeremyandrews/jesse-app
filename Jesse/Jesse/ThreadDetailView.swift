@@ -141,7 +141,9 @@ struct ThreadDetailView: View {
     /// The `.failed` outbox item for a given user turn, if any — drives the compact
     /// per-message "Not delivered" line with Retry/Discard under that bubble.
     private func failedItem(for turnID: UUID) -> OutboxItem? {
-        outbox.first { $0.turnID == turnID && $0.threadID == thread.id && $0.state == .failed }
+        Log.nav.interval("failedItem") {
+            outbox.first { $0.turnID == turnID && $0.threadID == thread.id && $0.state == .failed }
+        }
     }
 
     // Haptic decisions, pulled out of `body` as typed methods so the SwiftUI
@@ -216,28 +218,7 @@ struct ThreadDetailView: View {
         // A staged discussion opens ON the composer, empty and focused: not firing a
         // turn is only an improvement if the user's first move is to type. (A thread
         // opened any other way keeps the keyboard down, as before.)
-        .onAppear {
-            // BEFORE the focus decision and before any edit can be recorded: the composer
-            // has to hold the user's unsent text again the instant this view exists.
-            let restored = restoreDraft()
-            // Then this conversation's recording run knows its composer is on screen, and a
-            // transcript that landed in the draft while a still-open composer was away is
-            // added to the live text. A freshly restored draft already holds it.
-            RecordingRunService.shared.runs.attach(thread.id, restored: restored)
-            claimLandedTranscript()
-            if attachedContext != nil && turns.isEmpty { inputFocused = true }
-            // Empty in every ordinary launch: a conversation always opens with its folds closed.
-            openFolds = TranscriptFoldUITestSeam.initialOpenFolds(for: thread.id)
-            isOnScreen = true
-            // NOT ON THIS TURN OF THE LOOP. `onAppear` runs inside the push's own
-            // transaction, and marking read is a `context.save()` — a sqlite write, plus
-            // whatever every live query over the container does about it — so doing it here
-            // put a database write inside the frames that animate the transcript in. One
-            // hop later the animation is committed and the save is nobody's frame.
-            // `markReadIfOnScreen` re-checks the gate when it runs, so a conversation that
-            // left the screen in between is (correctly) not marked.
-            Task { markReadIfOnScreen() }
-        }
+        .onAppear { Log.nav.interval("detailOnAppear") { detailAppeared() } }
         // THE THREE MOMENTS A TRANSCRIPT IS READ, and there are only three: it came on
         // screen (above), the app came back to the foreground with it still there, and a
         // reply landed while it was being watched. Each one runs through the same gate, so
@@ -282,7 +263,7 @@ struct ThreadDetailView: View {
                 // transcript. ShareLink gives Copy + the system share sheet for
                 // free. Hidden until there's something to share.
                 if !turns.isEmpty {
-                    ShareLink(item: thread.sharedTranscript) {
+                    ShareLink(item: Log.nav.interval("sharedTranscript") { thread.sharedTranscript }) {
                         Label("Share conversation", systemImage: "square.and.arrow.up")
                     }
                 }
@@ -316,6 +297,32 @@ struct ThreadDetailView: View {
         }
     }
 
+    /// This conversation came on screen: a push, a return from another tab, or the iPad
+    /// detail column replacing its conversation.
+    private func detailAppeared() {
+        // BEFORE the focus decision and before any edit can be recorded: the composer
+        // has to hold the user's unsent text again the instant this view exists.
+        let restored = restoreDraft()
+        // Then this conversation's recording run knows its composer is on screen, and a
+        // transcript that landed in the draft while a still-open composer was away is
+        // added to the live text. A freshly restored draft already holds it.
+        RecordingRunService.shared.runs.attach(thread.id, restored: restored)
+        claimLandedTranscript()
+        if attachedContext != nil && turns.isEmpty { inputFocused = true }
+        // Empty in every ordinary launch: a conversation always opens with its folds closed.
+        openFolds = TranscriptFoldUITestSeam.initialOpenFolds(for: thread.id)
+        isOnScreen = true
+        // NOT ON THIS TURN OF THE LOOP. `onAppear` runs inside the push's own
+        // transaction, and marking read is a `context.save()` — a sqlite write, plus
+        // whatever every live query over the container does about it — so doing it here
+        // put a database write inside the frames that animate the transcript in. One
+        // hop later the animation is committed and the save is nobody's frame.
+        // `markReadIfOnScreen` re-checks the gate when it runs, so a conversation that
+        // left the screen in between is (correctly) not marked.
+        Task { markReadIfOnScreen() }
+    
+    }
+
     // MARK: - Transcript
 
     private var transcript: some View {
@@ -333,7 +340,7 @@ struct ThreadDetailView: View {
                     // The transcript as it renders: a prompt the owner did not type folds under a
                     // Prompt row, and narration folds into a Thinking row above its answer. The
                     // grouping is JesseKit's (`TranscriptItem`), shared with the Mac.
-                    ForEach(TranscriptItem.items(turns)) { item in
+                    ForEach(Log.nav.interval("transcriptItems") { TranscriptItem.items(turns) }) { item in
                         transcriptRow(item)
                             .id(item.id)
                     }

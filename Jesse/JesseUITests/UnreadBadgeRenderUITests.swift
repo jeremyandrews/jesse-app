@@ -115,6 +115,60 @@ final class UnreadBadgeRenderUITests: XCTestCase {
                       "the app pulled the list more than once: \(stub.requestSummary)")
     }
 
+    /// THE ONE COUNT THIS FILE DOES ASSERT: a tab switch away from Chats and back costs the
+    /// conversation list a bounded number of body evaluations, on a store of 1,000
+    /// conversations.
+    ///
+    /// The list is the most expensive view in the app at scale (its layout, one summary per
+    /// month folder, one row per visible conversation), and tab switches used to re-run it
+    /// while it was hidden. The store is the navigation measurement's own
+    /// (`JESSE_UITEST_SCALE`, see `ScaleSeedUITestSeam`), served by the same stub
+    /// (`ScaleStub`), so every return to Chats runs the conversation pull as it does on a
+    /// phone. Read through `RenderProbeReadout`, the app's live counts, at the two ends of
+    /// the window, so nothing here depends on the simulator's log.
+    func testATabSwitchCostsTheConversationListABoundedNumberOfBodyEvaluations() throws {
+        let scale = ScaleStub.renderBoundScale
+        let bridge = try ScaleStub(count: scale)
+        defer { bridge.stop() }
+        let app = XCUIApplication()
+        app.launchEnvironment["JESSE_UITEST_SCALE"] = String(scale)
+        app.launchEnvironment["JESSE_UITEST_BRIDGE"] = "127.0.0.1,\(bridge.port),stub-token"
+        app.launchEnvironment["JESSE_RENDER_PROBE"] = "1"
+        app.launchEnvironment["JESSE_MUTE"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        let chats = app.tabBars.buttons["Chats"]
+        let today = app.tabBars.buttons["Today"]
+        let probe = app.staticTexts[NavigationCostUITestCase.probeTitle]
+        XCTAssertTrue(probe.waitForExistence(timeout: 900), "the seeded store is up")
+        // One round trip first, so every tab has been built once and the window below
+        // measures returning, not first appearance.
+        today.tap()
+        chats.tap()
+        XCTAssertTrue(probe.waitForExistence(timeout: 30))
+        settle()
+
+        let readout = app.otherElements[RenderProbeCounts.identifier]
+        XCTAssertTrue(readout.waitForExistence(timeout: 10), "the render probe readout")
+        let before = RenderProbeCounts(readout)
+        let roundTrips = 3
+        for _ in 0..<roundTrips {
+            today.tap()
+            XCTAssertTrue(today.isSelected, "Today selected")
+            chats.tap()
+            XCTAssertTrue(probe.waitForExistence(timeout: 30), "back on the Chats list")
+            settle()
+        }
+        let after = RenderProbeCounts(readout)
+
+        let list = after["ThreadListView"] - before["ThreadListView"]
+        let content = after["ContentView"] - before["ContentView"]
+        print("PF1 render: \(roundTrips) round trips, ThreadListView +\(list), ContentView +\(content)")
+        XCTAssertLessThanOrEqual(list, ScaleStub.renderBoundPerRoundTrip * roundTrips,
+                                 "the conversation list re-rendered \(list) times for \(roundTrips) tab round trips")
+    }
+
     // MARK: - Driving
 
     /// Log a window boundary into the same subsystem the app's probe uses, so the log the
@@ -138,6 +192,23 @@ final class UnreadBadgeRenderUITests: XCTestCase {
     private func settle() {
         RunLoop.current.run(until: Date().addingTimeInterval(3))
     }
+}
+
+/// `RenderProbeReadout`'s value, parsed: `View=count;View=count`.
+struct RenderProbeCounts {
+    static let identifier = "render-probe-readout"
+    private let counts: [String: Int]
+
+    init(_ element: XCUIElement) {
+        var counts: [String: Int] = [:]
+        for pair in ((element.value as? String) ?? "").split(separator: ";") {
+            let parts = pair.split(separator: "=")
+            if parts.count == 2, let n = Int(parts[1]) { counts[String(parts[0])] = n }
+        }
+        self.counts = counts
+    }
+
+    subscript(view: String) -> Int { counts[view] ?? 0 }
 }
 
 /// A loopback `GET /jesse/conversations` serving a configurable list, in the test runner.

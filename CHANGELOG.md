@@ -14,6 +14,12 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (199)] - 2026-10-27
+
+**Tab switches and new chats stay fast at 1,000 conversations.** Root cause: the hidden Chats list
+rebuilt its layout and folder summaries 8 times per tab round trip, and each return reaped empty
+chats by faulting every conversation's turns.
+
 ## [bridge 0.187.0] - 2026-10-25
 
 **A schedule entry can run a strand's next step: `kind = "devjob"` with `strand = "<Note>"`.**

@@ -27,6 +27,8 @@ struct ContentView: View {
     @StateObject private var pushRouter = PushRouter.shared
     @StateObject private var voice = VoiceCaptureModel()
     @State private var path: [JesseThread] = []
+    /// Whether the launch startup work has run (see `appeared`).
+    @State private var startedUp = false
     /// The note a citation link in an offline answer asked for, presented as a sheet.
     @State private var citedNote: VaultNoteRoute?
     /// A `[[wiki link]]` tapped in a reply. Held as its own object rather than folded
@@ -56,15 +58,6 @@ struct ContentView: View {
         shouldShowOfflineBanner(isConfigured: config.isConfigured, reachability: reachability.state)
     }
 
-    /// The selected conversation, expressed over the existing `path` model so the
-    /// split view's detail column and the stack's push share one source of truth:
-    /// the visible conversation is always `path.last`. Selecting one in the sidebar
-    /// replaces the detail; `newThread`/voice/push that set `path` update it too.
-    private var selectedThread: Binding<JesseThread?> {
-        Binding(get: { path.last },
-                set: { path = $0.map { [$0] } ?? [] })
-    }
-
     var body: some View {
         let _ = RenderProbe.body("ContentView")
         Group {
@@ -72,7 +65,7 @@ struct ContentView: View {
                 // iPhone / compact: the original stack — unchanged behavior.
                 NavigationStack(path: $path) {
                     ThreadListView(path: $path, config: $config, showSettings: $showSettings,
-                                   pairViaScanner: $pairViaScanner, selection: selectedThread,
+                                   pairViaScanner: $pairViaScanner,
                                    showOfflineBanner: offlineBannerVisible)
                         .navigationDestination(for: JesseThread.self) { thread in
                             ThreadDetailView(thread: thread)
@@ -82,7 +75,7 @@ struct ContentView: View {
                 // iPad / regular: list as sidebar, conversation as detail.
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     ThreadListView(path: $path, config: $config, showSettings: $showSettings,
-                                   pairViaScanner: $pairViaScanner, selection: selectedThread,
+                                   pairViaScanner: $pairViaScanner,
                                    showOfflineBanner: offlineBannerVisible)
                         .navigationSplitViewColumnWidth(min: 320, ideal: 360)
                 } detail: {
@@ -113,22 +106,7 @@ struct ContentView: View {
         }) {
             SettingsView(config: $config, autoPresentScanner: pairViaScanner)
         }
-        .onAppear {
-            // The app-wide network monitor, and the recovery it drives: re-attach every
-            // in-flight job, drain the send outbox and replay queued intents the moment the
-            // phone is back on a network. Idempotent, so a second appearance is free.
-            coordinator.startConnectivityRecovery(context: context)
-            BridgeReachabilityModel.shared.follow(ConnectivityMonitor.shared) { ConfigStore.load() }
-            coordinator.resume(context: context)
-            // Pull the session list and reconcile favorite/archive flags across devices
-            // (cache-first; a star/archive made on the Mac lands here). Best-effort.
-            Task { await coordinator.refreshSessions(context: context) }
-            inbox.drain()
-            drainSharedRecording()
-            RecordingRunUITestSeam.startIfArmed(context: context) { land(on: $0) }
-            PushManager.shared.refreshRegistration()
-            reachability.refresh(config: config)
-        }
+        .onAppear { Log.nav.interval("contentOnAppear") { appeared() } }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
@@ -252,6 +230,38 @@ struct ContentView: View {
         }
     }
 
+    /// Everything the Chats tab does when it appears. A tab bar keeps this tab mounted, so
+    /// `onAppear` fires on EVERY return to Chats, not once per launch.
+    ///
+    /// The startup half runs ONCE PER LAUNCH: the connectivity watch, the resume pass over
+    /// the outbox and in-flight jobs, the hand-off drains and the push re-registration. A
+    /// tab switch teaches none of them anything; every return to the foreground repeats
+    /// each of them in the `scenePhase` handler above, and the network-recovery path covers
+    /// a network coming back.
+    ///
+    /// The conversation pull stays on EVERY appearance. It is how a reply or a star made on
+    /// the Mac reaches this list while the phone is in use, a conditional GET that is
+    /// answered "not modified" when nothing moved, and its cost after a real change is the
+    /// sync pass's own (see `RunCoordinator.applySessionSync`).
+    private func appeared() {
+        Task { await coordinator.refreshSessions(context: context) }
+        // Throttled to one probe per 30 seconds by the model itself, so the offline banner
+        // stays as current as it was.
+        reachability.refresh(config: config)
+        guard !startedUp else { return }
+        startedUp = true
+        // The app-wide network monitor, and the recovery it drives: re-attach every
+        // in-flight job, drain the send outbox and replay queued intents the moment the
+        // phone is back on a network. Idempotent, so a second appearance is free.
+        coordinator.startConnectivityRecovery(context: context)
+        BridgeReachabilityModel.shared.follow(ConnectivityMonitor.shared) { ConfigStore.load() }
+        Log.nav.interval("coordinatorResume") { coordinator.resume(context: context) }
+        inbox.drain()
+        drainSharedRecording()
+        RecordingRunUITestSeam.startIfArmed(context: context) { land(on: $0) }
+        PushManager.shared.refreshRegistration()
+    }
+
     /// A "Jesse finished" notification was tapped: re-attach to fetch the reply, resolve
     /// which conversation the notification was reporting on, and navigate there.
     ///
@@ -333,6 +343,7 @@ struct ContentView: View {
         coordinator.send(thread: thread, text: req.text, voice: true, context: context)
     }
 }
+
 
 /// What the Settings "Save" action should do once persistence has been attempted.
 enum SaveOutcome: Equatable {

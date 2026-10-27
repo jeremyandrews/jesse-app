@@ -30,7 +30,7 @@ struct MarkdownText: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     init(_ raw: String, selectable: Bool = true) {
-        self.blocks = parseMarkdownBlocks(raw)
+        self.blocks = Log.nav.interval("markdownParse") { parseMarkdownBlocks(raw) }
         self.selectable = selectable
     }
 

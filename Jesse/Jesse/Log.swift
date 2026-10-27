@@ -42,6 +42,15 @@ struct FixSignpost: Sendable {
                          _ message: String) {
         signposter.endInterval(name, state, "\(message, privacy: .public)")
     }
+
+    /// Run `body` inside a named interval with no message, for the navigation signposts,
+    /// whose question is only "how long".
+    @inline(__always)
+    nonisolated func interval<T>(_ name: StaticString, _ body: () throws -> T) rethrows -> T {
+        let state = signposter.beginInterval(name, id: signposter.makeSignpostID())
+        defer { signposter.endInterval(name, state) }
+        return try body()
+    }
 }
 
 enum Log {
@@ -73,4 +82,8 @@ enum Log {
     /// every other line in this category — **no coordinate and no place name**.
     nonisolated static let locationFix = FixSignpost(
         signposter: OSSignposter(subsystem: subsystem, category: "location"))
+    /// Intervals around the work a tab switch, a push, a pop or a new conversation does on
+    /// the main thread (see `NavTrace`). The same signposter the packages write through,
+    /// so the app and JesseKit land on one `nav` timeline.
+    nonisolated static let nav = FixSignpost(signposter: NavTrace.signposter)
 }

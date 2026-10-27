@@ -234,6 +234,48 @@ final class AITitleTests: XCTestCase {
                        "a missing endpoint isn't re-requested per row appearance")
     }
 
+    /// A row appearing again with nothing changed costs NO hash, and a turn added or edited
+    /// (and saved) still retitles.
+    ///
+    /// The content key hashes the full text of every turn, and `ensureTitle` runs on every
+    /// row appearance, scrolling included; it used to compute that key before any guard,
+    /// so every appearance of a long conversation re-read and re-hashed all of it.
+    @MainActor
+    func testAnUnchangedThreadIsNotHashedAgainAndAnAddedOrEditedTurnStillRetitles() async throws {
+        let context = try makeContext()
+        let client = TitleCountingClient(returns: "Fresh title")
+        let coordinator = RunCoordinator(config: { self.cfg }, makeClient: { _ in client })
+        let thread = insertedThread(context)
+        thread.aiTitle = "Cached title"
+        thread.titleSourceKey = threadContentKey(for: thread)   // current
+        try context.save()
+
+        coordinator.ensureTitle(for: thread, context: context)
+        coordinator.ensureTitle(for: thread, context: context)
+        coordinator.ensureTitle(for: thread, context: context)
+        XCTAssertEqual(coordinator.titleKeyComputations, 1,
+                       "three appearances of an unchanged thread hash it once")
+        XCTAssertEqual(client.titleCalls, 0)
+
+        // A turn ADDED, and saved, as every turn is.
+        let added = Turn(role: .jesse, text: "And a call at five.",
+                         createdAt: Date(timeIntervalSince1970: 2))
+        thread.turns.append(added)
+        try context.save()
+        coordinator.ensureTitle(for: thread, context: context)
+        await waitUntil("the retitle after an added turn") { client.titleCalls == 1 }
+        await waitUntil("the minted title to land") {
+            thread.titleSourceKey == threadContentKey(for: thread)
+        }
+
+        // A turn EDITED, and saved.
+        coordinator.ensureTitle(for: thread, context: context)   // current again: checked
+        added.text = "And a call at six."
+        try context.save()
+        coordinator.ensureTitle(for: thread, context: context)
+        await waitUntil("the retitle after an edited turn") { client.titleCalls == 2 }
+    }
+
     /// An empty thread (no turns) is never titled.
     @MainActor
     func testEmptyThreadIsNeverTitled() async throws {

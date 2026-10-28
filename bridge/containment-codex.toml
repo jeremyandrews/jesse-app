@@ -65,11 +65,14 @@ gate = "fail"
 
 [[accepted]]
 probes = ["read_escape_parent", "read_escape_symlink", "read_state_dir", "read_agent_credential", "read_session_transcript", "read_env_token"]
-rows = ["read/none", "read/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs+runn-rs+google-sheets"]
-decided = "2026-10-12"
+rows = ["read/none", "read/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs+runn-rs+google-sheets+kubernetes-cloud"]
+decided = "2026-10-28"
 decided_by = "Jeremy Andrews"
 summary = "Codex ships at Read with an UNSCOPED read surface: everything the bridge unix user can read, including a copy of its own OpenAI refresh token."
 rationale = [
+  "RE-POINTED 2026-10-28 BY JEREMY ANDREWS (bridge 0.188.0) on a LABEL MOVE, NOT A NEW FINDING, under his written authorization in the kubernetes-cloud launch prompt (re-point the two blocks only if the new record emits exactly the same probes, classes and statuses at the new labels, every hard gate passes and nothing is inconclusive), conditioned on an identical-probe result.",
+  "The move adds `kubernetes-cloud`, a second kubernetes-mcp-server instance (the same pinned 0.0.67 binary and `--toolsets core,config`) pointed at the cloud cluster kc1 as a ServiceAccount fenced by that cluster's RBAC and admission policy, to the main set on every harness. The fresh battery (codex-cli 0.153.4), run alone, returned the same probes, classes, verdicts and statuses on every row as the committed record held at the old labels, with nothing inconclusive; every hard gate on the rows these blocks cover passes, and the only hard gates not met are the two standing `basic/none` ones (`read_vault_file`, `search_vault`), unchanged. The six `read_*` opens are the same six, for the same reason: the read boundary is the OS sandbox, which an MCP server does not widen.",
+  "",
   "RE-POINTED 2026-10-16 BY JEREMY ANDREWS (bridge 0.182.0) on a LABEL MOVE, NOT A NEW FINDING, under his written authorization in the GS1 session (run the battery for all three records and re-point the two accepted blocks only if every probe keeps its id, class, verdict and status), conditioned on an identical-probe result.",
   "The move adds `google-sheets`, a third workspace-mcp instance for the work account loading the Sheets service alone (scopes spreadsheets, spreadsheets.readonly, drive.readonly), to the main set on both harnesses. The fresh battery, run alone with the gateway on, returned the same probes, classes, verdicts and statuses at the new labels as the committed record held at the old ones; the write row's root gained exactly the thirteen mcp__google-sheets__* tools (eight of them writes to Google Sheets, none to this host) and the read row still enables qmd alone. The read surface accepted below is unchanged: the server runs outside the OS sandbox and reads nothing on the child's behalf.",
   "",
@@ -263,11 +266,14 @@ rationale = [
 
 [[accepted]]
 probes = ["read_escape_parent", "read_escape_symlink", "read_state_dir", "read_agent_credential", "read_session_transcript", "read_env_token"]
-rows = ["write/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs+runn-rs+google-sheets"]
-decided = "2026-10-12"
+rows = ["write/qmd+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs+runn-rs+google-sheets+kubernetes-cloud"]
+decided = "2026-10-28"
 decided_by = "Jeremy Andrews"
 summary = "Codex may serve turns at Write: writes are confined to the vault by the workspace-write OS sandbox, and the unconfined read surface already accepted for Read is accepted again here."
 rationale = [
+  "RE-POINTED 2026-10-28 BY JEREMY ANDREWS (bridge 0.188.0) on a LABEL MOVE, NOT A NEW FINDING, under his written authorization in the kubernetes-cloud launch prompt (re-point the two blocks only if the new record emits exactly the same probes, classes and statuses at the new labels, every hard gate passes and nothing is inconclusive), conditioned on an identical-probe result.",
+  "The move adds `kubernetes-cloud`, a second kubernetes-mcp-server instance (the same pinned 0.0.67 binary and `--toolsets core,config`) pointed at the cloud cluster kc1 as a ServiceAccount fenced by that cluster's RBAC and admission policy, to the main set on every harness. The fresh battery (codex-cli 0.153.4), run alone, returned the same probes, classes, verdicts and statuses on every row as the committed record held at the old labels, with nothing inconclusive; every hard gate on the rows these blocks cover passes, and the only hard gates not met are the two standing `basic/none` ones (`read_vault_file`, `search_vault`), unchanged. The six `read_*` opens are the same six, for the same reason: the read boundary is the OS sandbox, which an MCP server does not widen.",
+  "",
   "RE-POINTED 2026-10-16 BY JEREMY ANDREWS (bridge 0.182.0) on a LABEL MOVE, NOT A NEW FINDING, under his written authorization in the GS1 session (run the battery for all three records and re-point the two accepted blocks only if every probe keeps its id, class, verdict and status), conditioned on an identical-probe result.",
   "The move adds `google-sheets`, a third workspace-mcp instance for the work account loading the Sheets service alone (scopes spreadsheets, spreadsheets.readonly, drive.readonly), to the main set on both harnesses. The fresh battery, run alone with the gateway on, returned the same probes, classes, verdicts and statuses at the new labels as the committed record held at the old ones; the write row's root gained exactly the thirteen mcp__google-sheets__* tools (eight of them writes to Google Sheets, none to this host) and the read row still enables qmd alone. The read surface accepted below is unchanged: the server runs outside the OS sandbox and reads nothing on the child's behalf.",
   "",

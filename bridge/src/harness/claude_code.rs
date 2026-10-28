@@ -891,6 +891,23 @@ pub fn interpret_claude_output(
 // permission (none, charge only, or charge and cost), and free text notes are never read. Read
 // SECURITY.md before changing this.
 
+// ---- `mcp_kubernetes_cloud` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
+// **The second Kubernetes server, for the cloud cluster `kc1`: `kubernetes-cloud`.** The same
+// binary as `kubernetes` (`containers/kubernetes-mcp-server` v0.0.67, pinned by the launcher),
+// the same `--toolsets core,config`, started through its own launcher, `jesse-k8s-cloud-mcp`,
+// which sets `KUBECONFIG` to `~/.kube/kc1-jesse.yaml` and `exec`s the binary. Host setup, not
+// repo content, exactly as `jesse-k8s-mcp` is.
+//
+// **THE IDENTITY IS WHAT DIFFERS, AND IT IS THE BOUNDARY.** The kubeconfig holds a 90-day bound
+// token for the ServiceAccount `jesse:jesse` on kc1, whose rights live in the cluster repository
+// (`cloud/infrastructure/jesse-access/`): everything on workloads, their Secrets and exec in the
+// `work` namespace, a read-only view of the rest without Secrets, and admission policy that
+// keeps every pod in `work` on a burst worker. Not `cluster-admin`. All twenty tools are granted
+// by name in [`crate::DEFAULT_ALLOWED_TOOLS`]; what each can do is the cluster's decision, not
+// the grant's. `nodes_log` and `nodes_stats_summary` return 403 there by design (no
+// `nodes/proxy`). Nothing secret is in this entry or on an argv. Read SECURITY.md before
+// changing this.
+
 // ---- `house_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
 // The five house servers, in order.
 // ---- `morning_servers` (now a row in `crate::mcpservers::MCP_SERVERS`) ----
@@ -1497,7 +1514,7 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs"])));
 
 /// The twenty-five-server set PLUS **`google-sheets`**: every main turn on BOTH harnesses from
-/// bridge 0.182.0. Twenty-six servers.
+/// bridge 0.182.0 until 0.188.0. Twenty-six servers.
 ///
 /// What it adds is the first Google server that WRITES, and it writes Sheets only: a third
 /// `workspace-mcp` instance for the work account, `--tools sheets --tool-tier complete` with no
@@ -1512,6 +1529,29 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
 /// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
 /// when `[healthdb]` has an `ro_url_file`. `clockify-rs`, `runn-rs` and `google-sheets` are
 /// unconditional.
+///
+/// **RETIRED AS THE MAIN SET IN 0.188.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets`]
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.182.0 until 0.188.0.
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets"])));
+
+/// The twenty-six-server set PLUS **`kubernetes-cloud`**: every main turn on BOTH harnesses from
+/// bridge 0.188.0. Twenty-seven servers.
+///
+/// What it adds is a second Kubernetes server, for the cloud cluster `kc1`: the same pinned
+/// `kubernetes-mcp-server` and the same twenty tools as `kubernetes`, started through the
+/// `jesse-k8s-cloud-mcp` launcher with a kubeconfig for the ServiceAccount `jesse:jesse` on kc1.
+/// That identity is fenced by the cluster's RBAC and admission policy: workloads in the `work`
+/// namespace, a read-only view of the rest, no Secrets outside `work`, no `nodes/proxy`. One new
+/// credential (a 90-day bound token in a mode 600 file, not in the plist) and one new host
+/// (kc1's MagicDNS name, port 6443, tailnet only). See the `kubernetes-cloud` row in
+/// `crate::mcpservers` and SECURITY.md.
+///
+/// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
+/// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
+/// when `[healthdb]` has an `ro_url_file`. `clockify-rs`, `runn-rs`, `google-sheets` and
+/// `kubernetes-cloud` are unconditional.
 ///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
@@ -1841,7 +1881,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets => {
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud => {
             READ_ALLOWED_TOOLS
         }
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
@@ -3192,11 +3233,12 @@ mod tests {
             // loads the new set.
             assert_eq!(
                 servers.len(),
-                24,
+                25,
                 "{label}: the main path must declare qmd, slack, browser, homeassistant, roon, \
                  google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
                  google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex, \
-                 clockify-rs, runn-rs and google-sheets and nothing else: {mcp:?}"
+                 clockify-rs, runn-rs, google-sheets and kubernetes-cloud and nothing else: \
+                 {mcp:?}"
             );
             // THE HOSTED CLOCKIFY SERVER IS RETIRED (0.176.0). `clockify-rs` is the one
             // Clockify server, and it is the bare launcher: the key reaches it by environment,
@@ -3316,6 +3358,28 @@ mod tests {
                 !k8s_args.iter().any(|a| a == "--read-only"),
                 "{label}: the kubernetes server ships at FULL control by decision — \
                  narrowing it is a posture change, not an edit: {mcp:?}"
+            );
+            // THE CLOUD KUBERNETES SERVER (0.188.0) IS THE SAME BINARY AT THE SAME TOOLSETS,
+            // THROUGH ITS OWN LAUNCHER. Its argv must equal `kubernetes`'s exactly, so the two
+            // register the same twenty tools, and its command must differ, because the
+            // launcher is what picks the cluster and the identity: sharing `jesse-k8s-mcp`
+            // would point a cloud-fenced grant at the home cluster's `cluster-admin`.
+            assert_eq!(
+                servers["kubernetes-cloud"],
+                serde_json::json!({
+                    "type": "stdio",
+                    "command": "jesse-k8s-cloud-mcp",
+                    "args": ["--toolsets", "core,config"]
+                }),
+                "{label}: kubernetes-cloud is its own launcher at core,config: {mcp:?}"
+            );
+            assert_eq!(
+                servers["kubernetes-cloud"]["args"], servers["kubernetes"]["args"],
+                "{label}: both kubernetes servers register the same toolsets: {mcp:?}"
+            );
+            assert_ne!(
+                servers["kubernetes-cloud"]["command"], servers["kubernetes"]["command"],
+                "{label}: kubernetes-cloud must not share the home cluster's launcher: {mcp:?}"
             );
             // BOTH GOOGLE SERVERS MUST STAY READ-ONLY AT THE SERVER LAYER. `--read-only` is
             // what deregisters their write tools (event create, send, Drive mutate) so they
@@ -3522,11 +3586,12 @@ mod tests {
         let servers = parsed["mcpServers"].as_object().unwrap();
         assert_eq!(
             servers.len(),
-            25,
+            26,
             "with the gateway on, the main path must declare qmd, slack, browser, homeassistant, \
              roon, google, github, fastmail, unifi, routeros, proxmox, whatsapp, imessage, \
              google-perseido, build, places, inbound, kubernetes, rybbit, tag1, plex, \
-             clockify-rs, runn-rs, google-sheets and devjob and nothing else: {mcp:?}"
+             clockify-rs, runn-rs, google-sheets, kubernetes-cloud and devjob and nothing else: \
+             {mcp:?}"
         );
         assert_eq!(
             servers["devjob"],
@@ -3534,7 +3599,7 @@ mod tests {
         );
         // Unregistered (`[devjob]` off), the gateway-on config is the gateway-off one.
         let off_parsed: serde_json::Value = serde_json::from_str(&off).unwrap();
-        assert_eq!(off_parsed["mcpServers"].as_object().unwrap().len(), 24);
+        assert_eq!(off_parsed["mcpServers"].as_object().unwrap().len(), 25);
         assert!(!off.contains("devjob"));
     }
 
@@ -4350,8 +4415,8 @@ mod tests {
     const GOLDEN_EMPTY_MCP: &str = r#"{"mcpServers":{}}"#;
     /// The main set as a child renders it under the test fixture, which has no `[house]` table
     /// and no `[healthdb] ro_url_file`: the twenty-one-server set (no hosted `clockify` since
-    /// 0.176.0) plus `clockify-rs`, `runn-rs` and `google-sheets`, the three servers after the two
-    /// conditional ones that are always kept.
+    /// 0.176.0) plus `clockify-rs`, `runn-rs`, `google-sheets` and `kubernetes-cloud`, the four
+    /// servers after the two conditional ones that are always kept.
     static RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS: LazyLock<String> = LazyLock::new(|| {
         mcp_config_json(&messages_plus(&[
             "build",
@@ -4364,6 +4429,7 @@ mod tests {
             "clockify-rs",
             "runn-rs",
             "google-sheets",
+            "kubernetes-cloud",
         ]))
     });
 
@@ -4410,93 +4476,99 @@ mod tests {
         let retired_clockify = servers(&mcp_config_json(&["clockify"]));
         for (label, older, added, removed) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_MCP_CONFIG",
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_MCP_CONFIG,
+                vec!["kubernetes-cloud"],
+                vec![],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG,
-                vec!["google-sheets"],
+                vec!["kubernetes-cloud", "google-sheets"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 &MESSAGES_BUILD_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
                 vec![],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_KUBERNETES_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
                 vec![],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 &MESSAGES_MCP_CONFIG,
-                vec!["google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
+                vec!["kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
                 vec![],
             ),
         ] {
@@ -5055,8 +5127,9 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-one-server one plus `clockify-rs`, `runn-rs` and `google-sheets`:
-                    // `house` and `healthdb` are declared in the const and dropped here.
+                    // twenty-one-server one plus `clockify-rs`, `runn-rs`, `google-sheets` and
+                    // `kubernetes-cloud`: `house` and `healthdb` are declared in the const and
+                    // dropped here.
                     RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--allowedTools",
                     &allow,
@@ -5084,8 +5157,9 @@ mod tests {
                     "--strict-mcp-config",
                     "--mcp-config",
                     // The fixture has no `[house]` table, so the rendered set is the
-                    // twenty-one-server one plus `clockify-rs`, `runn-rs` and `google-sheets`:
-                    // `house` and `healthdb` are declared in the const and dropped here.
+                    // twenty-one-server one plus `clockify-rs`, `runn-rs`, `google-sheets` and
+                    // `kubernetes-cloud`: `house` and `healthdb` are declared in the const and
+                    // dropped here.
                     RENDERED_MAIN_WITHOUT_CONDITIONAL_SERVERS.as_str(),
                     "--tools",
                     "Read,Grep,Glob",

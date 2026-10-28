@@ -125,6 +125,14 @@ dependency = "the vault and checkout remotes' credentials (GitHub token, the LAN
 workflows = "vault commits after every write skill, code review checkouts, health-new-day git log, strand-update"
 reason = "Runs git; the credential-free half (status, log, diff, local commit) could run in a turn pod as a changeset, but the grant also covers fetch, clone and push, which need the core's credentials."
 
+[grant."Bash(kc-burst:*)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "kc-burst CLI on the Studio: ~/.config/kc-burst/config.toml, the DigitalOcean CLI token, the Tailscale OAuth client, the k3s agent token, and ~/.kube/kc1-burst.yaml (ServiceAccount jesse:kc-burst on kc1)"
+workflows = "adding and removing disposable workers on kc1 for load tests and other short work"
+reason = "Creates, lists and deletes paid DigitalOcean workers for kc1, within the CLI's caps (10 workers, 8 hour TTL, 25 EUR a run); on kc1 it may change or delete burst nodes only."
+
 [grant."Bash(mv:*)"]
 kind = "bash"
 harnesses = ["claude-code"]
@@ -3749,6 +3757,188 @@ placement = "upstream-pod"
 dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: moves rows between tabs of one spreadsheet (not a Drive move)."
+
+[grant."mcp__kubernetes-cloud__configuration_view"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__namespaces_list"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__events_list"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__projects_list"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__nodes_log"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+note = "Returns 403 on kc1 by design: the identity holds no nodes/proxy."
+
+[grant."mcp__kubernetes-cloud__nodes_top"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__nodes_stats_summary"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+note = "Returns 403 on kc1 by design: the identity holds no nodes/proxy."
+
+[grant."mcp__kubernetes-cloud__pods_list"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__pods_list_in_namespace"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__pods_get"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__pods_log"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__pods_top"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__pods_run"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes-cloud__pods_exec"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes-cloud__pods_delete"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes-cloud__resources_list"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__resources_get"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Reads cluster, namespace, pod, node or resource state."
+
+[grant."mcp__kubernetes-cloud__resources_create_or_update"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes-cloud__resources_scale"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
+
+[grant."mcp__kubernetes-cloud__resources_delete"]
+kind = "mcp"
+server = "kubernetes-cloud"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-jesse.yaml (a 90-day bound token for ServiceAccount jesse:jesse on kc1, fenced by RBAC and admission policy, not cluster-admin); pinned kubernetes-mcp-server 0.0.67; kc1's MagicDNS name, port 6443, over the tailnet"
+workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
+reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
 
 [grant."mcp__devjob__devjob_start"]
 kind = "mcp"

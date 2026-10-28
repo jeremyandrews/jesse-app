@@ -318,6 +318,7 @@ Default allowlist (`JESSE_ALLOWED_TOOLS` to override):
 | `mcp__qmd__query`, `mcp__qmd__get`, `mcp__qmd__multi_get`, `mcp__qmd__status` | Read-only QMD vault search — the first step for any vault lookup |
 | `Skill(diet-logging)` | Auto-invoke the vault's `diet-logging` skill on a food/exercise/weigh-in log. The Skill tool only **loads instruction text** — it executes nothing itself; every action the skill prescribes still flows through the scoped `Read`/`Write`/`Edit` and the three `Bash(node vault/*.js:*)` scripts, so the action surface is unchanged. Pinned to the single named skill, never a bare `Skill` (which would let any future vault skill run from a phone request) |
 | `Bash(git:*)` | Vault history / status, and clone/fetch/log/diff/show for **read-only code review** (see [Code review checkouts](#code-review-checkouts-review-only)) |
+| `Bash(kc-burst:*)` | Add and remove disposable DigitalOcean workers on kc1 (`up`, `down`, `status`, `gc`). **It spends money**, within the CLI's caps (10 workers, 8 hour TTL, 25 EUR a run) and the in-cluster reaper; on kc1 it may change or delete burst nodes only. Claude Code only: Codex's shell is an OS sandbox, not a grant list, and `direct` has no shell. See [The cloud cluster](#the-cloud-cluster-kubernetes-cloud-fenced-by-the-cluster-2026-10-28) |
 | `Bash(mv:*)` | Scoped file wrangling. **Note the asymmetry left after 0.125.0 removed the six read verbs:** this is a *verb* scope on a **mutating** command with an unrestricted destination path, so it is a wider grant than any of the reads that were dropped. It stays because narrowing it is a separate change with its own workflow cost, and it is named here rather than left implied |
 | `Bash(date:*)`, `Bash(cal:*)` | Clock / date math backing the per-turn clock header (relative-date math, alternate formats). Pure computation — `date -s` needs root and fails as a non-privileged user, `cal` only prints, so no side effect is reachable |
 | `Bash(node vault/generate-diet-today.js:*)` | Regenerate the `diet-today.js` dashboard cache from the authoritative CSVs after a food/exercise/weigh-in log (without it, a phone log appends the CSV but leaves the cache stale) |
@@ -336,6 +337,7 @@ Default allowlist (`JESSE_ALLOWED_TOOLS` to override):
 | `mcp__slack__*` (six) | Read-only Slack read and search. See [Slack](#slack-read-only-2026-08-05) for the six granted and the nine withheld |
 | `mcp__browser__*` (nineteen) | Headless browser: navigate, read, and the interaction verbs. Added 2026-08-07, because `WebFetch` is refused outright on a large set of hosts. See [Browser](#browser-headless-2026-08-07) for the five withheld and why |
 | `mcp__kubernetes__*` (twenty) | **`cluster-admin` on the home k3s cluster.** All twenty tools the pinned server registers with `--toolsets core,config`: fourteen readers, and six writers of which the server annotates five `destructiveHint=true` — `resources_create_or_update`, `resources_delete`, `resources_scale`, `pods_delete` and `pods_exec`. `pods_exec` runs an arbitrary command inside any container; `resources_delete` deletes a namespace. Named individually, never `mcp__kubernetes__*`, because upstream ships roughly monthly and a wildcard would grant whatever the next release advertises. Full control by operator decision, 2026-09-21 — see [The cluster](#the-cluster-kubernetes-full-control-2026-09-22) for what would falsify that and how to narrow it |
+| `mcp__kubernetes-cloud__*` (twenty) | **The cloud cluster `kc1`, as ServiceAccount `jesse:jesse`, not `cluster-admin`.** The same twenty tools as `kubernetes`, granted by name. What they can do is set by kc1's RBAC and admission policy: workloads, their Secrets and exec in the `work` namespace, a read-only view of the rest, and every pod on a burst worker. See [The cloud cluster](#the-cloud-cluster-kubernetes-cloud-fenced-by-the-cluster-2026-10-28) |
 | `mcp__build__build_bridge`, `mcp__build__test_bridge` | **Compile and run the Rust bridge out of the review checkout.** This is the only grant in this table that EXECUTES CODE. Each tool takes an EMPTY argument object — the program, subcommand, flags, target directory and working directory are compile-time constants in `bridge/src/buildsvc.rs`, so nothing a turn says reaches a command line. That is the whole difference from the `Bash(cargo:*)` grant it replaces, and it is structural rather than a matter of degree. It does **not** make the capability safe: the child can edit that checkout and then have it compiled and run, which is arbitrary code execution by construction. What bounds it is the sandbox the build runs inside, not the shape of the tool. Named individually, never `mcp__build__*`. Added 2026-08-21 — see [The build capability](#the-build-capability-typed-tools-inside-a-sandbox-2026-08-21) |
 
 These four `node vault/<script>.js` entries are pinned to the **exact script
@@ -2655,6 +2657,103 @@ env -i PATH="$(launchctl getenv PATH)" HOME="$HOME" jesse-k8s-mcp --toolsets cor
 If the launcher is absent the server simply fails to start, the twenty tools are missing from
 every turn, and nothing else degrades — but the containment record will then describe a row
 that loaded nothing, which is worth less than no row at all.
+
+## The cloud cluster (`kubernetes-cloud`, fenced by the cluster, 2026-10-28)
+
+Bridge 0.188.0 adds a second Kubernetes server to every main turn on both spawned harnesses,
+and through the gateway to `direct`: the same pinned `kubernetes-mcp-server`, pointed at the
+cloud cluster `kc1` instead of the home cluster. It is there so a turn can run work on kc1 and
+its disposable burst workers: load tests, builds, batch jobs, experiments, short lived services.
+The difference from `kubernetes` is the identity behind it, and that identity is the boundary.
+
+### What it can do
+
+| | |
+|---|---|
+| Server | `containers/kubernetes-mcp-server` v0.0.67, the same binary `kubernetes` runs |
+| Transport | `stdio`, bare command `jesse-k8s-cloud-mcp`, argv `--toolsets core,config` |
+| Cluster | `kc1`, one Hetzner node plus burst workers, k3s v1.36.4+k3s1, API `https://<kc1's MagicDNS name>:6443`, reachable over the tailnet only |
+| Identity | ServiceAccount `jesse` in namespace `jesse` on kc1, with the RBAC below. **Not `cluster-admin`**, and no `admin` or `edit` binding |
+| Credential | a kubeconfig at `~/.kube/kc1-jesse.yaml`, mode `600`, supplied by the launcher through `KUBECONFIG`; a bound ServiceAccount token minted for 90 days (2160h), expiring **2027-01-26 17:34:38 UTC** |
+| Posture | **20 of 20 registered tools granted** |
+| Enforced by | **kc1's RBAC and admission policy**, not the grant list |
+
+The rights live in the k3s repository, `cloud/infrastructure/jesse-access/`, and changing them is
+a pull request there:
+
+- **Role `work-operator` in `work`**: get, list, watch, create, update, patch, delete and
+  deletecollection on pods, `pods/log`, `pods/exec`, `pods/portforward`, services, configmaps,
+  **secrets**, persistentvolumeclaims, events, jobs, cronjobs, deployments, statefulsets and
+  replicasets; read only on the namespace's NetworkPolicies, ResourceQuota and LimitRange.
+  Nothing on serviceaccounts, roles or rolebindings, so it can neither mint a token nor widen
+  itself.
+- **ClusterRole `jesse-cloud-observer`**: get, list and watch on nodes, namespaces, pods, events,
+  services, endpointslices, persistent volumes and claims, storage classes, the `apps` and
+  `batch` workload kinds, `metrics.k8s.io` and Flux's kinds. No Secrets, no ConfigMaps outside
+  `work`, no pod logs or exec outside `work`, no write verb, no `nodes/proxy`, `escalate`,
+  `bind` or `impersonate`.
+- **The `work` namespace**: Pod Security `baseline` enforced (no privileged container, host
+  namespace or `hostPath`); its `default` ServiceAccount mounts no token; a quota (100 pods,
+  44 CPU and 88Gi requested, 96Gi memory limits, 20 Jobs, no LoadBalancer or NodePort);
+  NetworkPolicies that allow traffic within `work`, to the cluster DNS, and to any public
+  address, and nothing private (10/8, 100.64/10, 169.254/16, 172.16/12, 192.168/16, 127/8).
+- **Admission policy `work-pods-on-burst-nodes`**: a pod created in `work` without
+  `nodeSelector: {kc.pozza/burst: "true"}` is denied, so nothing a turn starts lands on kc1,
+  the control-plane node. `pods_run` cannot set a node selector, so its pods are always denied
+  there; a turn creates Pods and Jobs from manifests with `resources_create_or_update`.
+
+`nodes_log` and `nodes_stats_summary` need `nodes/proxy`, which the identity does not hold, so
+**on kc1 they return 403 by design**. `nodes_top` and `pods_top` work, through `metrics.k8s.io`.
+
+### What a turn can still do, and what it cannot
+
+**Can:** run any public image in `work` on a burst worker, `exec` into it, port-forward to it,
+read and write its Secrets and ConfigMaps, and from there send traffic to **any public
+address**: a load test is exactly that, and so is exfiltration. Read the cluster's state, its
+events and Flux's status.
+
+**Cannot:** read a Secret outside `work` (the Flux age key, the reaper's DigitalOcean token),
+change or delete anything outside `work`, schedule a pod on kc1, run a privileged pod or mount
+the host, reach the API server, the tailnet (so not home) or a metadata service from a pod,
+reach the kubelet API, or change its own rights. Verified live on 2026-10-28 with the token
+itself; the commands and outputs are in the k3s pull request that created the identity.
+
+### Residual risks, accepted
+
+- **Egress from `work` to the whole public internet.** A prompt-injected turn could run a pod
+  that sends data it holds (the turn's context, a Secret it put in `work`) anywhere. Bounded by
+  what is in `work`, which is only what a turn put there. An allowlist of targets is the
+  narrowing, and is not done.
+- **Secrets in `work` are readable by every turn.** API keys a workload needs are written there
+  by a turn and read back by the next one. Nothing else on kc1 can be read.
+- **The `kc-burst` shell verb spends money.** `Bash(kc-burst:*)` (Claude Code only) lets a turn
+  create DigitalOcean workers for kc1. The CLI caps a run at 10 workers, an 8 hour TTL and
+  25 EUR, refuses before any API call when a cap would be exceeded, and kc1's reaper deletes any
+  worker past its TTL within about ten minutes. So the worst a turn can spend without a human is
+  bounded by those caps, run after run, until someone notices; the DigitalOcean account itself
+  has no spend cap. On kc1 the CLI acts as `jesse:kc-burst`, which admission policy confines to
+  nodes labelled `kc.pozza/burst=true`, so it cannot cordon, label or delete kc1.
+- **The token is bearer and long lived.** 90 days, in a mode `600` file readable by the bridge's
+  unix user and therefore by every MCP child and shell the bridge starts. Revoke it at once by
+  deleting the ServiceAccount (`kubectl -n jesse delete sa jesse` with the admin kubeconfig);
+  Flux recreates it with a new UID that no old token matches.
+
+#### Deployment
+
+`jesse-k8s-cloud-mcp` sits next to `jesse-k8s-mcp` in the launchers directory and is the same
+script with one line changed: `KUBECONFIG="${HOME}/.kube/kc1-jesse.yaml"`. Same owner, same
+mode, same pinned binary, `exec` and never a symlink, for the reasons under `kubernetes` above.
+`sentinel::deploy`'s manifest test names it as a host program. Handshake it the same way:
+
+```sh
+env -i PATH="$PATH_FROM_THE_BRIDGE_PLIST" HOME="$HOME" jesse-k8s-cloud-mcp --toolsets core,config
+# → initialize, then tools/list must return the same twenty tools as jesse-k8s-mcp
+```
+
+Over SSH, `launchctl getenv PATH` prints nothing; take `EnvironmentVariables.PATH` from the
+bridge plist with `plutil -extract` instead. Rotate the token before it expires by minting a new
+one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
+--duration=2160h`) and replacing the file; see the k3s README, "Jesse's access to kc1".
 
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 

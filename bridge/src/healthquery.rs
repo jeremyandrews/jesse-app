@@ -1363,15 +1363,21 @@ mod registration_tests {
             assert!(!without.contains("healthdb"), "{without}");
             // No house table in the fixture either, so both conditional servers are gone and
             // nothing else moved: the twenty-one-server set (no hosted `clockify` since 0.176.0)
-            // plus the unconditional `clockify-rs`, `runn-rs` and `google-sheets`, byte for byte.
-            let unconditional = ["clockify-rs", "runn-rs", "google-sheets"]
-                .map(|n| {
-                    format!(
-                        ",{}",
-                        crate::mcpservers::render_entry(crate::mcpservers::row(n).unwrap())
-                    )
-                })
-                .concat();
+            // plus the unconditional `clockify-rs`, `runn-rs`, `google-sheets` and `kubernetes-cloud`,
+            // byte for byte.
+            let unconditional = [
+                "clockify-rs",
+                "runn-rs",
+                "google-sheets",
+                "kubernetes-cloud",
+            ]
+            .map(|n| {
+                format!(
+                    ",{}",
+                    crate::mcpservers::render_entry(crate::mcpservers::row(n).unwrap())
+                )
+            })
+            .concat();
             assert_eq!(
                 without.replacen(&unconditional, "", 1),
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG.as_str()

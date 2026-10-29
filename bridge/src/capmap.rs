@@ -448,6 +448,7 @@ mod tests {
             "places",
             "inbound",
             "kubernetes",
+            "kubernetes-cloud",
             "plex",
             "build",
         ] {
@@ -507,10 +508,10 @@ mod tests {
                 count(GrantKind::Bash),
                 count(GrantKind::Skill)
             ),
-            (4, 29, 6)
+            (4, 30, 6)
         );
-        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 378));
-        assert_eq!(servers.len(), 27);
+        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 398));
+        assert_eq!(servers.len(), 28);
     }
 
     /// **`capability_args` STAYS BYTE-IDENTICAL.** A committed golden of every harness's

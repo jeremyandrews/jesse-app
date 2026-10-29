@@ -662,14 +662,15 @@ mod tests {
         assert_eq!(env_of(&cmd), None);
     }
 
-    /// CLAUDE CODE, THE WHOLE ARGV: with a ready table the main turn declares twenty-five
+    /// CLAUDE CODE, THE WHOLE ARGV: with a ready table the main turn declares twenty-six
     /// servers and `house` carries the configured URL and the token BY NAME; without one it
-    /// declares twenty-four (the hosted `clockify` server left in 0.176.0, `runn-rs` came in
-    /// 0.180.0, `google-sheets` in 0.182.0). The placeholder and the token value are on no argv either way.
+    /// declares twenty-five (the hosted `clockify` server left in 0.176.0, `runn-rs` came in
+    /// 0.180.0, `google-sheets` in 0.182.0, `kubernetes-cloud` in 0.188.0). The placeholder and
+    /// the token value are on no argv either way.
     #[test]
     fn a_claude_code_main_turn_carries_house_exactly_when_the_table_is_ready() {
         let mut cfg = test_config();
-        for (house, count) in [(ready(), 25), (HouseConfig::Absent, 24)] {
+        for (house, count) in [(ready(), 26), (HouseConfig::Absent, 25)] {
             let loads = house.ready().is_some();
             cfg.house = house;
             let args = build_claude_args(
@@ -880,8 +881,10 @@ mod tests {
         let runn_rs = crate::mcpservers::render_entry(crate::mcpservers::row("runn-rs").unwrap());
         let sheets =
             crate::mcpservers::render_entry(crate::mcpservers::row("google-sheets").unwrap());
+        let k8s_cloud =
+            crate::mcpservers::render_entry(crate::mcpservers::row("kubernetes-cloud").unwrap());
         assert!(MAIN_CHILD_MCP_CONFIG.ends_with(&format!(
-            "{}{},{clockify_rs},{runn_rs},{sheets}}}}}",
+            "{}{},{clockify_rs},{runn_rs},{sheets},{k8s_cloud}}}}}",
             HOUSE_MCP_ENTRY.as_str(),
             HEALTHDB_MCP_ENTRY.as_str()
         )));

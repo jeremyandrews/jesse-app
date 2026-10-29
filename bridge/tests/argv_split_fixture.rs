@@ -208,6 +208,15 @@
 //! loads). The two write sites' `--allowedTools` digest moved for the three `mcp__devjob__*`
 //! grants. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.188.0, for `kubernetes-cloud` and `Bash(kc-burst:*)`, on both
+//! harnesses' three main sites only.** `kubernetes-cloud` is unconditional, so Claude Code's
+//! rendered `--mcp-config` digest moved on all three main sites and its two write sites'
+//! `--allowedTools` digest moved for the twenty `mcp__kubernetes-cloud__*` grants and the
+//! `kc-burst` shell verb. Codex's three main sites gained eight arguments each: the
+//! `jesse-k8s-cloud-mcp` launcher, its `--toolsets core,config` argv, `enabled_tools` (empty on
+//! the read site, the twenty tools on the write sites) and the approve mode; no `env_vars`, as
+//! for `kubernetes`, because the launcher supplies `KUBECONFIG`. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

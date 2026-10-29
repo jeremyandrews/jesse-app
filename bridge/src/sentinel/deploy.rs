@@ -3632,7 +3632,7 @@ serde = { version = "1", features = ["derive"] }
     /// in-tree launcher that no deploy installed — shipped in 0.182.0 and rolled back every
     /// deploy of it. Enumerating the host programs means a new command fails until someone
     /// states which of the three it is: a `bins` entry, a `launchers` entry, or one of these.
-    const HOST_PROVIDED: [&str; 13] = [
+    const HOST_PROVIDED: [&str; 14] = [
         // The vault index (`qmd mcp`).
         "qmd",
         // Node's package runner: `slack`, `browser` (Playwright) and `fastmail` start
@@ -3651,6 +3651,9 @@ serde = { version = "1", features = ["derive"] }
         // `KUBECONFIG`. `jesse-` because it is this deployment's wrapper, not this crate's
         // target.
         "jesse-k8s-mcp",
+        // Its sibling for the cloud cluster kc1: the same pinned binary, a different
+        // `KUBECONFIG` (0.188.0).
+        "jesse-k8s-cloud-mcp",
         "plex-mcp",
         "clockify-rs-mcp",
         "runn-rs-mcp",

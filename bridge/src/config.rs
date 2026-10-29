@@ -961,12 +961,35 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `devjob_status` and `devjob_list` only read the cluster. The server is `in_process` and is
 // rendered into a child's config only with the gateway on and `[devjob] enabled`, so with either
 // off these three names grant nothing. Never a wildcard.
+//
+// KUBERNETES-CLOUD: ALL TWENTY OF TWENTY ON THE CLOUD CLUSTER, AND THE CLUSTER IS THE FENCE
+// (0.188.0).
+//
+// The same pinned `kubernetes-mcp-server` v0.0.67 at `--toolsets core,config`, started through
+// `jesse-k8s-cloud-mcp`, which points it at kc1 as the ServiceAccount `jesse:jesse`. A bare
+// environment `tools/list` through that launcher on 2026-10-28 returned exactly the twenty
+// tools `kubernetes` registers, and all twenty are granted by name, so the six writers reach
+// write turns only through the row's classes, as on `kubernetes`. What a tool can DO there is
+// not this list's decision: kc1's RBAC gives the identity everything on workloads, their
+// Secrets, exec and port-forward in the `work` namespace and a read-only view of the rest
+// without Secrets, and its admission policy keeps every pod in `work` on a burst worker
+// (k3s repository, `cloud/infrastructure/jesse-access/`). `nodes_log` and
+// `nodes_stats_summary` need `nodes/proxy`, which the identity does not hold, so they return
+// 403 there by design. Never a wildcard.
+//
+// KC-BURST: ONE MORE SHELL VERB, ON CLAUDE CODE ONLY (0.188.0). `Bash(kc-burst:*)` lets a turn
+// add and remove disposable DigitalOcean workers on kc1 (`up`, `down`, `status`, `gc`). It
+// spends money, bounded by the CLI's own caps (at most 10 workers, an 8 hour TTL, 25 EUR a
+// run) and by the in-cluster reaper; on kc1 it acts as the ServiceAccount `jesse:kc-burst`,
+// which admission policy confines to burst nodes. Granted beside `git`, the one other verb
+// that reaches a network service with the bridge's credentials. Codex's shell is an OS
+// sandbox, not a grant list, and `direct` has no shell, so neither takes it.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
 mcp__qmd__query,mcp__qmd__get,mcp__qmd__multi_get,mcp__qmd__status,\
 Skill(diet-logging),\
-Bash(git:*),Bash(mv:*),\
+Bash(git:*),Bash(kc-burst:*),Bash(mv:*),\
 Bash(date:*),Bash(cal:*),\
 Bash(node vault/generate-diet-today.js:*),\
 Bash(node vault/validate-diet-today.js:*),\
@@ -1161,6 +1184,16 @@ mcp__google-sheets__create_sheet,mcp__google-sheets__modify_sheet_values,\
 mcp__google-sheets__append_table_rows,mcp__google-sheets__format_sheet_range,\
 mcp__google-sheets__manage_conditional_formatting,\
 mcp__google-sheets__resize_sheet_dimensions,mcp__google-sheets__move_sheet_rows,\
+mcp__kubernetes-cloud__configuration_view,mcp__kubernetes-cloud__namespaces_list,\
+mcp__kubernetes-cloud__events_list,mcp__kubernetes-cloud__projects_list,\
+mcp__kubernetes-cloud__nodes_log,mcp__kubernetes-cloud__nodes_top,\
+mcp__kubernetes-cloud__nodes_stats_summary,\
+mcp__kubernetes-cloud__pods_list,mcp__kubernetes-cloud__pods_list_in_namespace,\
+mcp__kubernetes-cloud__pods_get,mcp__kubernetes-cloud__pods_log,mcp__kubernetes-cloud__pods_top,\
+mcp__kubernetes-cloud__pods_run,mcp__kubernetes-cloud__pods_exec,mcp__kubernetes-cloud__pods_delete,\
+mcp__kubernetes-cloud__resources_list,mcp__kubernetes-cloud__resources_get,\
+mcp__kubernetes-cloud__resources_create_or_update,mcp__kubernetes-cloud__resources_scale,\
+mcp__kubernetes-cloud__resources_delete,\
 mcp__devjob__devjob_start,mcp__devjob__devjob_status,mcp__devjob__devjob_list";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
@@ -5996,6 +6029,79 @@ mod tests {
         }
     }
 
+    /// THE KUBERNETES-CLOUD GRANT IS EXACTLY THE TWENTY TOOLS THE PINNED SERVER REGISTERS.
+    ///
+    /// Taken from a bare environment `tools/list` through the `jesse-k8s-cloud-mcp` launcher
+    /// on 2026-10-28 (`kubernetes-mcp-server` v0.0.67, `--toolsets core,config`, kc1 as
+    /// `jesse:jesse`): the same twenty names `kubernetes` registers. Equality, so a missing
+    /// grant and a grant for a name the server does not register both fail, and a failure
+    /// names the tool. The cluster's RBAC and admission policy, not this list, bound what each
+    /// one can do; see SECURITY.md.
+    #[test]
+    fn the_kubernetes_cloud_grant_is_the_servers_twenty_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__kubernetes-cloud__"))
+            .collect();
+        let mut expected: Vec<String> = [
+            "configuration_view",
+            "namespaces_list",
+            "events_list",
+            "projects_list",
+            "nodes_log",
+            "nodes_top",
+            "nodes_stats_summary",
+            "pods_list",
+            "pods_list_in_namespace",
+            "pods_get",
+            "pods_log",
+            "pods_top",
+            "pods_run",
+            "pods_exec",
+            "pods_delete",
+            "resources_list",
+            "resources_get",
+            "resources_create_or_update",
+            "resources_scale",
+            "resources_delete",
+        ]
+        .iter()
+        .map(|t| format!("mcp__kubernetes-cloud__{t}"))
+        .collect();
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "the kubernetes-cloud grant moved; re-probe the pinned server's tools/list through \
+             jesse-k8s-cloud-mcp and record the decision before changing this list; it moves \
+             `toolset_args`, which costs a live battery run"
+        );
+
+        // THE SAME TWENTY AS `kubernetes`, tool for tool: one binary, one toolset argv.
+        let mut home: Vec<String> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter_map(|e| e.strip_prefix("mcp__kubernetes__"))
+            .map(|t| format!("mcp__kubernetes-cloud__{t}"))
+            .collect();
+        home.sort_unstable();
+        assert_eq!(
+            home, expected,
+            "both kubernetes servers grant the same tools"
+        );
+    }
+
+    /// NO WILDCARD ON THE KUBERNETES-CLOUD SERVER: a wildcard grants whatever the next release
+    /// adds.
+    #[test]
+    fn no_kubernetes_cloud_wildcard_is_granted() {
+        assert!(
+            !DEFAULT_ALLOWED_TOOLS
+                .split(',')
+                .any(|e| e == "mcp__kubernetes-cloud__*" || e == "mcp__kubernetes-cloud"),
+            "a wildcard grant on the cloud cluster server is never acceptable"
+        );
+    }
+
     /// THE `Bash` SURFACE IS PINNED WHOLE, so the cluster-repo write path cannot widen it.
     ///
     /// 0.146.0 gave the agent a push-and-open-a-PR path on one repository. Everything that
@@ -6026,6 +6132,7 @@ mod tests {
             .collect();
         let expected = vec![
             "Bash(git:*)",
+            "Bash(kc-burst:*)",
             "Bash(mv:*)",
             "Bash(date:*)",
             "Bash(cal:*)",

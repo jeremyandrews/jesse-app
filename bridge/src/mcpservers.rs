@@ -32,6 +32,8 @@
 //!     their tools AND answer a read call with no variable beyond [`BASE_ENV`]: each reads its
 //!     own launcher or env file (`mcp-proxmox`, `plex-mcp` and its `~/.config/jesse-plex`,
 //!     `jesse-k8s-mcp` and its kubeconfig, `workspace-mcp-perseido` and its own directory).
+//!     `kubernetes-cloud` (0.188.0) does the same through `jesse-k8s-cloud-mcp` and its own
+//!     kubeconfig (2026-10-28, launchd's PATH and `HOME` only).
 //!   * `google` with no variable lists its tools and then fails every call ("OAuth client
 //!     credentials not found"); `slack` with no variable does not start. Their rows carry the
 //!     Codex set, each name of which was needed there.
@@ -783,6 +785,26 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
         ),
         &GOOGLE_SHEETS_WRITE_TOOLS,
     ),
+    // THE CLOUD CLUSTER (0.188.0): the same pinned binary and toolsets as `kubernetes`, through
+    // the `jesse-k8s-cloud-mcp` launcher, which points it at kc1 as the ServiceAccount
+    // `jesse:jesse`. The six writers are classed `write` as on `kubernetes`. What each tool can
+    // actually do there is decided by kc1's RBAC and admission policy, not by this row.
+    writes(
+        stdio(
+            "kubernetes-cloud",
+            "jesse-k8s-cloud-mcp",
+            &["--toolsets", "core,config"],
+            &[],
+        ),
+        &[
+            "pods_run",
+            "pods_exec",
+            "pods_delete",
+            "resources_create_or_update",
+            "resources_scale",
+            "resources_delete",
+        ],
+    ),
     // CODING AGENTS ON THE CLUSTER (0.186.0), served inside the bridge by
     // [`crate::devjob::DevJobs`]: no process, no socket, and the only row whose credential (the
     // kubeconfig) never leaves the bridge process. `in_process` rows render only with the gateway
@@ -941,8 +963,9 @@ pub const MAIN_SET: &[&str] = &[
     "clockify-rs",
     "runn-rs",
     "google-sheets",
+    "kubernetes-cloud",
     // `in_process`: absent from the rendered string with the gateway off, so
-    // `MAIN_CHILD_MCP_CONFIG` is byte for byte the twenty-six-server golden. With the gateway on
+    // `MAIN_CHILD_MCP_CONFIG` is byte for byte the twenty-seven-server golden. With the gateway on
     // and `[devjob] enabled`, [`crate::render_child_mcp`] adds its entry and the gateway serves it.
     "devjob",
 ];
@@ -1139,7 +1162,7 @@ pub(crate) fn golden_main_config() -> String {
     [
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         HOME_ASSISTANT_MCP_URL,
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","--tool-tier","complete"]}}}"#,
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","--tool-tier","complete"]},"kubernetes-cloud":{"type":"stdio","command":"jesse-k8s-cloud-mcp","args":["--toolsets","core,config"]}}}"#,
     ]
     .concat()
 }
@@ -1363,6 +1386,7 @@ mod tests {
             "imcp",
             "google-perseido",
             "kubernetes",
+            "kubernetes-cloud",
             "plex",
             "homeassistant",
         ] {

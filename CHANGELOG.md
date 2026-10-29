@@ -14,6 +14,69 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.188.0] - 2026-10-28
+
+**A second Kubernetes server, `kubernetes-cloud`, for the cloud cluster `kc1`, fenced by the
+cluster rather than by the grant; and Claude Code can run `kc-burst`.** The assistant can now run
+any workload on kc1 and its disposable burst workers (load tests, builds, batch jobs, short lived
+services). What a turn can do there is decided by kc1's RBAC and admission policy (k3s
+repository, `cloud/infrastructure/jesse-access/`), not by this list.
+
+- **The row** (`src/mcpservers.rs`): `kubernetes-cloud`, stdio, bare command
+  `jesse-k8s-cloud-mcp`, argv `--toolsets core,config`, the six writers classed `write` as on
+  `kubernetes`. Added to `MAIN_SET` after `google-sheets`, so it reaches Claude Code and Codex main
+  turns and, through the gateway, `direct` at the same levels as `kubernetes` (all twenty at write;
+  read turns get the qmd-only grant). No environment column: the launcher supplies `KUBECONFIG`.
+- **The launcher is host setup**, like `jesse-k8s-mcp`: the same script with
+  `KUBECONFIG="${HOME}/.kube/kc1-jesse.yaml"`, the same pinned `kubernetes-mcp-server` 0.0.67,
+  `exec`, not a symlink. `sentinel::deploy`'s `HOST_PROVIDED` names it (14 entries). A bare
+  environment `tools/list` through it on 2026-10-28 returned the same twenty tools as
+  `jesse-k8s-mcp`, and `resources_list` on `Node` returned `kc1`.
+- **The identity**: ServiceAccount `jesse:jesse` on kc1, a 90-day bound token (expires
+  2027-01-26) in `~/.kube/kc1-jesse.yaml`, mode 600. Everything on workloads, their Secrets, exec
+  and port-forward in the `work` namespace; a read-only view of the rest without Secrets; no
+  `nodes/proxy`, so `nodes_log` and `nodes_stats_summary` return 403 there by design. Every pod in
+  `work` must select a burst worker. Not `cluster-admin`.
+- **The grant**: all twenty tools by name in `DEFAULT_ALLOWED_TOOLS`, never a wildcard; new tests
+  `the_kubernetes_cloud_grant_is_the_servers_twenty_tools_and_nothing_else` (equality with the
+  live `tools/list`, and with `kubernetes`'s twenty) and `no_kubernetes_cloud_wildcard_is_granted`.
+- **`Bash(kc-burst:*)`** beside `Bash(git:*)`, on Claude Code only: Codex's shell is an OS sandbox
+  with no grant list and `direct` has no shell. It adds and removes paid DigitalOcean workers
+  within the CLI's caps (10 workers, 8 hour TTL, 25 EUR a run); on kc1 the CLI acts as
+  `jesse:kc-burst`, which admission policy confines to burst nodes. The Bash surface test now pins
+  thirty entries. `kc-burst` is not installed on the Studio yet.
+- **New row label** on Claude Code and Codex,
+  `McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud`;
+  the twenty-six-server set is kept as a retired label and const. The `direct` label gains
+  `+kubernetes-cloud` before `+devjob`.
+- **Records, re-recorded live on the Studio** from the bridge LaunchAgent's environment (every
+  plist variable, plus `USER`, `LOGNAME`, `SHELL`, `LANG` and `TMPDIR`, which launchd gives the
+  serving bridge), run from Terminal.app in the owner's GUI session, one harness at a time, with
+  a scratch `CARGO_TARGET_DIR` and `JESSE_CLAUDE_BIN` pinned to 2.1.303.
+  - Claude Code (2.1.303): gate pass, $14.19 (the check run before it $14.98). Every probe on
+    every row kept its class, verdict and status; the write root gained the twenty
+    `kubernetes-cloud` tools and nothing else moved.
+  - Codex (codex-cli 0.153.4): gate `fail` for the standing `basic/none` reason only, as
+    committed; same comparison, same result. `binary_version` unchanged.
+  - `direct` (jesse-agent 0.14.0): `cargo test -p jesse-agent --test containment_direct`
+    (13 passed), then `containment-probe --harness direct --write`: gate pass, every probe
+    unchanged; the labels gained `+kubernetes-cloud` and the write row's toolset its twenty tools.
+- **Codex's two main-row `[[accepted]]` blocks re-pointed** to the new labels, on a label move:
+  same probes, classes and statuses at the new labels as the committed record held at the old
+  ones, nothing inconclusive, and every hard gate on the rows they cover passes. The earlier
+  rationale is unchanged below the new paragraph.
+- **Three things that make a battery record lie, found on the way** (none in the code):
+  a launchd job cannot reach `house.pozza` (Local Network privacy for the ad hoc signed probe),
+  so `house` registers zero tools; an environment without `USER` cannot refresh Claude Code's
+  Keychain OAuth token, so every attempt ends in 3 s at $0.000 and records `inconclusive`; and
+  five concurrent rows of twenty-seven gateway upstreams exceed the default 256 open files, so
+  upstreams fail with `Too many open files`. Runs hit by each were discarded, not committed.
+- `capability-map.toml` gains the twenty grants and `Bash(kc-burst:*)`;
+  `golden/capability-args.json` and the argv fixture move on the three main sites only.
+- **Docs:** SECURITY.md § "The cloud cluster" and two allowlist rows; bridge/README.md § "The
+  cloud cluster: `kubernetes-cloud`" and the host-launcher paragraph. kc1's MagicDNS name is
+  spelled out nowhere tracked, because `scripts/ci-guards.sh` refuses it.
+
 ## [App 1.0 (199)] - 2026-10-27
 
 **Tab switches and new chats stay fast at 1,000 conversations.** Root cause: the hidden Chats list

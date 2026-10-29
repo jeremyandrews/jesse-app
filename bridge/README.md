@@ -3110,11 +3110,12 @@ shipped child config is in the manifest, an error line per unresolvable server a
 bridge startup, and the `restart` phase's `mcp_servers_unresolved` gate, which
 rolls the deploy back.
 
-**One `jesse-*` command is deliberately NOT in the manifest**, since 0.146.0:
-`jesse-k8s-mcp` is a host launcher that pins a third-party binary's version and supplies
-its `KUBECONFIG`, on the same terms as `whatsapp-mcp` and `workspace-mcp-perseido`. It
-carries the prefix because it is this deployment's wrapper, not because it is this
-crate's target. The manifest test names it by hand in a `HOST_LAUNCHERS` list rather
+**Two `jesse-*` commands are deliberately NOT in the manifest**: since 0.146.0
+`jesse-k8s-mcp`, and since 0.188.0 its sibling for the cloud cluster, `jesse-k8s-cloud-mcp`.
+Each is a host launcher that pins a third-party binary's version and supplies its
+`KUBECONFIG`, on the same terms as `whatsapp-mcp` and `workspace-mcp-perseido`. They
+carry the prefix because they are this deployment's wrappers, not because they are this
+crate's targets. The manifest test names them by hand in its `HOST_PROVIDED` list rather
 than weakening its rule — skipping any command with no matching `src/bin/*.rs` would
 restore exactly the `jesse-places-mcp` failure above — so a new `jesse-*` server still
 fails the test until somebody states which of the two it is.
@@ -4037,6 +4038,52 @@ does not open, the URL is printed; open it by hand.
   only, and only to a port the OAuth client accepts.
 - **Revoking:** delete the token file, and remove the grant in the Google account's third
   party access page. The read only `google` token is a separate grant and survives both.
+
+## The cloud cluster: `kubernetes-cloud` (0.188.0)
+
+`kubernetes-cloud` is a second Kubernetes server on every main turn, for the cloud cluster `kc1`
+and its disposable burst workers. It is the same pinned `kubernetes-mcp-server` 0.0.67 that
+`kubernetes` runs, with the same `--toolsets core,config` and the same twenty tools granted by
+name. What differs is the cluster and the identity, and the identity is the boundary: kc1's RBAC
+and admission policy decide what each tool can do, not the grant list. The full posture is in
+`../SECURITY.md` § "The cloud cluster".
+
+| | `kubernetes` | `kubernetes-cloud` |
+|---|---|---|
+| Launcher (host setup) | `jesse-k8s-mcp` | `jesse-k8s-cloud-mcp` |
+| Cluster | home, `https://ks1.pozza:6443` | `kc1`, `https://<kc1's MagicDNS name>:6443` (tailnet only) |
+| Identity | ServiceAccount `jesse:jesse`, `cluster-admin` | ServiceAccount `jesse:jesse` on kc1: the `work` namespace plus a read-only view, no Secrets outside `work`, no `nodes/proxy` |
+| Credential | `~/.kube/ks-jesse.yaml`, mode 600 | `~/.kube/kc1-jesse.yaml`, mode 600, a 90-day bound token (expires 2027-01-26) |
+| Tools granted | 20 of 20 | 20 of 20; `nodes_log` and `nodes_stats_summary` return 403 by design |
+| Enforced by | nothing, by decision | kc1's RBAC and admission policy (k3s repo, `cloud/infrastructure/jesse-access/`) |
+
+**Workloads go in `work`, on burst workers.** Every pod there must carry
+`nodeSelector: {kc.pozza/burst: "true"}` and the toleration for `kc.pozza/burst=true:NoSchedule`,
+or admission refuses it. `pods_run` cannot set a node selector, so a turn creates Pods and Jobs
+from manifests with `resources_create_or_update`. With no burst worker up, an admitted pod waits
+in Pending until one joins.
+
+**The host launcher.** `~/.local/bin/jesse-k8s-cloud-mcp` is `jesse-k8s-mcp` with one line
+changed, `KUBECONFIG="${HOME}/.kube/kc1-jesse.yaml"`: same owner, mode and pinned binary, and it
+`exec`s rather than being a symlink. Like `jesse-k8s-mcp` it is not in `deploy-bins.toml`; the
+manifest test lists it as a host program. Handshake it from a bare environment after any change:
+
+```bash
+P=$(plutil -extract EnvironmentVariables.PATH raw ~/Library/LaunchAgents/*.jesse-bridge.plist)
+env -i PATH="$P" HOME="$HOME" jesse-k8s-cloud-mcp --toolsets core,config
+# initialize, then tools/list: the same twenty tools as jesse-k8s-mcp
+```
+
+**The token.** Minted with the admin kubeconfig on the laptop (`kubectl -n jesse create token jesse
+--duration=2160h`) and written straight to `~/.kube/kc1-jesse.yaml` on the Studio, never to the
+laptop's disk. Rotate it before 2027-01-26 the same way. Revoke it by deleting the ServiceAccount
+on kc1; see the k3s README, "Jesse's access to kc1".
+
+**`Bash(kc-burst:*)`.** The same release grants Claude Code the `kc-burst` CLI, which adds and
+removes paid DigitalOcean workers for kc1 within its own caps (10 workers, 8 hour TTL, 25 EUR a
+run). Codex's shell is not a grant list and `direct` has no shell, so neither changes. The CLI
+reads `~/.config/kc-burst/config.toml` and, on kc1, acts as `jesse:kc-burst` through
+`~/.kube/kc1-burst.yaml`.
 
 ## Shutting down a scratch or eval bridge: BY PID, NEVER BY PATH
 

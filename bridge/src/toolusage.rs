@@ -741,7 +741,7 @@ mod tests {
         )]);
         let bash = r.classes.iter().find(|c| c.class == "Bash").unwrap();
         assert_eq!((bash.count.calls, bash.count.turns), (2, 1));
-        assert_eq!(bash.grants.len(), 29);
+        assert_eq!(bash.grants.len(), 30);
         let skill = r.classes.iter().find(|c| c.class == "Skill").unwrap();
         assert_eq!((skill.count.calls, skill.grants.len()), (0, 6));
         assert!(r

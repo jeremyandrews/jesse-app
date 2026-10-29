@@ -30,16 +30,18 @@ unlimited; the plist sets neither), and one gateway-on turn costs about half of 
   descriptors, so nothing leaks; the soft limit is the cause.
 - **The measured peak** (`tests/gateway_fds.rs`, new): the shipped main set with the gateway and
   `devjob` on admits 25 servers. Binding, connecting and starting every one took the process from
-  10 descriptors to 132 and back to 10 when `TurnGuard` dropped, twice: **122 per turn**, five per
-  stdio upstream (listener, connection, three pipes) and two for the in-process `devjob`. Under
-  256, that is two turns. The test fails if a turn ever costs more than `TURN_PEAK_FDS` or leaves
-  a descriptor open.
+  10 descriptors to 132 and back to 10 when `TurnGuard` dropped, twice: **122 per turn on
+  macOS**, five per stdio upstream (listener, connection, three pipes) and two for the in-process
+  `devjob`. On Linux (CI) it went from 12 to 158 and back to 12: **146**, one more per stdio
+  upstream (the child's pidfd). `TURN_PEAK_FDS` is 146, the larger. Under 256, either is two
+  turns. The test fails if a turn ever costs more than `TURN_PEAK_FDS` or leaves a descriptor
+  open.
 - **The fix** (`src/nofile.rs`, new): first thing in `main`, before any listener, child or turn,
   the soft limit is raised to the hard limit, capped at `NOFILE_CAP` (8192) and on macOS at
   `kern.maxfilesperproc`, since `setrlimit` there refuses `RLIM_INFINITY`. It never lowers a
   limit. One line says what happened, `jesse-bridge: open files limit: soft 256 → 8192 (hard
   unlimited)`, and a failure to raise is a warning, never a refused boot. A limit with room for
-  fewer than 8 turns of `TURN_PEAK_FDS` is a startup warning. The target is a pure function,
+  fewer than 8 turns of `TURN_PEAK_FDS` (146) is a startup warning. The target is a pure function,
   `target_soft(soft, hard, cap)`, unit tested.
 - **`/health`** (authenticated) reports `open_files_limit`: `soft`, `hard` and `turns` (how many
   turns of the measured peak fit), beside the gateway fields.

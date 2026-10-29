@@ -77,8 +77,8 @@ A clean `cargo build --release` is the gate — if it doesn't compile, it isn't 
 ### Under launchd: the open files limit
 
 launchd starts an agent with a soft open files limit of **256**, and a gateway-on turn costs the
-bridge about 120 descriptors (a socket, a connection and an upstream's pipes per server; measured
-by `tests/gateway_fds.rs`), so two turns at once ran out (`EMFILE`, 0.189.0). The bridge raises
+bridge 122 descriptors on macOS and 146 on Linux (a socket, a connection and an upstream's pipes
+per server; measured by `tests/gateway_fds.rs`), so two turns at once ran out (`EMFILE`, 0.189.0). The bridge raises
 its own soft limit to the hard limit at startup, capped at 8192, logs one line saying so, and
 reports the limit as `open_files_limit` on authenticated `/health`; the plist keys below are the
 backstop for a bridge that cannot. Put them in the bridge's LaunchAgent beside its

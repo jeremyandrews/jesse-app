@@ -25,12 +25,14 @@ pub const NOFILE_CAP: rlim_t = 8192;
 /// gateway_fds -- --nocapture`): the shipped main set with the gateway and `devjob` on, every
 /// admitted server bound, connected and its upstream started (stdio upstreams stand in for the
 /// HTTP ones, so this is the upper bound), counted from `/dev/fd` on macOS and `/proc/self/fd`
-/// on Linux. On 2026-10-29 (bridge 0.188.0, macOS) that turn admitted 25 servers and went from
-/// 10 descriptors to 132 and back to 10: 122, which is five per stdio upstream (listener,
-/// connection, three pipes) and two for the in-process `devjob`. Under launchd's 256 that is
-/// two turns. The test fails when a turn costs more than this, so the constant cannot fall
-/// behind a growing server list.
-pub const TURN_PEAK_FDS: rlim_t = 122;
+/// on Linux. On 2026-10-29 (bridge 0.188.0) that turn admitted 25 servers. On macOS it went
+/// from 10 descriptors to 132 and back to 10: 122, five per stdio upstream (listener,
+/// connection, three pipes) and two for the in-process `devjob`. On Linux (CI) it went from 12
+/// to 158 and back to 12: 146, one more per stdio upstream (the child's pidfd, through which
+/// tokio reaps it). This is the larger, since the bridge runs on both. Under launchd's 256 a
+/// turn of either size leaves room for two. The test fails when a turn costs more than this, so
+/// the constant cannot fall behind a growing server list.
+pub const TURN_PEAK_FDS: rlim_t = 146;
 
 /// Fewer whole turns than this fitting under the soft limit is a startup warning.
 pub const MIN_CONCURRENT_TURNS: rlim_t = 8;

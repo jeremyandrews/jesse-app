@@ -194,6 +194,20 @@ async fn health_authenticated_returns_paths() {
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(body["vault"], st.cfg.vault);
     assert_eq!(body["claude"], st.cfg.claude_bin);
+    // The open files limit the process runs with, beside the gateway fields.
+    let now = jesse_bridge::nofile::current().unwrap();
+    assert_eq!(
+        body["open_files_limit"]["soft"],
+        jesse_bridge::nofile::label(now.soft)
+    );
+    assert_eq!(
+        body["open_files_limit"]["hard"],
+        jesse_bridge::nofile::label(now.hard)
+    );
+    assert_eq!(
+        body["open_files_limit"]["turns"],
+        jesse_bridge::nofile::turn_headroom(now.soft)
+    );
 }
 #[tokio::test]
 async fn jesse_no_auth_is_401() {

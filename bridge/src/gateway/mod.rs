@@ -660,7 +660,7 @@ impl Gateway {
                     ));
                 }
                 let task = listen::serve_unix(session.clone(), name.clone(), &path)
-                    .map_err(|e| format!("could not bind {}: {e}", path.display()))?;
+                    .map_err(|e| self.bind_error(&path, &e))?;
                 session.add_task(task);
             }
         }
@@ -669,6 +669,27 @@ impl Gateway {
                 .map_err(|e| format!("could not write the turn token file: {e}"))?;
         }
         Ok(guard)
+    }
+
+    /// Why a turn's socket did not bind. Running out of descriptors is named as that, with the
+    /// soft limit and the turns open (this one included), so the log says what to raise rather
+    /// than only `os error 24`.
+    fn bind_error(&self, path: &Path, e: &std::io::Error) -> String {
+        if !crate::nofile::is_out_of_files(e) {
+            return format!("could not bind {}: {e}", path.display());
+        }
+        let open = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len();
+        let soft = crate::nofile::current()
+            .map_or("unknown".to_string(), |l| crate::nofile::label(l.soft));
+        format!(
+            "could not bind {}: the bridge ran out of open files ({e}); open files soft limit \
+             {soft}, {open} gateway turn(s) open including this one",
+            path.display()
+        )
     }
 
     /// The live session for `job`, if its turn is open.

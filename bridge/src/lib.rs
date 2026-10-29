@@ -125,6 +125,9 @@ pub mod mcpservers;
 mod mealqueue;
 mod metrics;
 mod modelstore;
+/// The open files limit: raised at startup, reported on `/health`, named in an `EMFILE`.
+/// Addressed through the module, `crate::nofile::…`.
+pub mod nofile;
 mod patterns;
 mod persona;
 mod places;

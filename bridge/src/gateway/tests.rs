@@ -580,3 +580,33 @@ fn the_main_config_golden_with_the_gateway_off_and_on() {
     );
     assert_eq!(on, want);
 }
+
+/// A bind that fails for lack of descriptors SAYS SO: the bridge ran out of open files, the soft
+/// limit, and the turns open. Any other bind failure keeps its plain message.
+#[test]
+fn a_bind_out_of_open_files_names_the_limit_and_the_open_turns() {
+    let gw = Gateway::new(
+        Path::new("/tmp/jesse-gw-unit"),
+        GatewaySettings::default(),
+        HashMap::new(),
+        None,
+    );
+    let path = Path::new("/tmp/jesse-gw-unit/gw/j/slack.sock");
+    let soft = crate::nofile::label(crate::nofile::current().unwrap().soft);
+    for errno in [libc::EMFILE, libc::ENFILE] {
+        let m = gw.bind_error(path, &std::io::Error::from_raw_os_error(errno));
+        assert!(
+            m.starts_with("could not bind /tmp/jesse-gw-unit/gw/j/slack.sock: ")
+                && m.contains("the bridge ran out of open files")
+                && m.contains(&format!("open files soft limit {soft}"))
+                && m.contains("0 gateway turn(s) open"),
+            "{m}"
+        );
+    }
+    let m = gw.bind_error(path, &std::io::Error::from_raw_os_error(libc::EADDRINUSE));
+    assert!(
+        m.starts_with("could not bind /tmp/jesse-gw-unit/gw/j/slack.sock: ")
+            && !m.contains("open files"),
+        "{m}"
+    );
+}

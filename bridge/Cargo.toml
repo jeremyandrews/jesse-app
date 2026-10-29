@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.188.0"
+version = "0.189.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -43,6 +43,12 @@ required-features = ["containment-probe"]
 
 [[test]]
 name = "gateway"
+required-features = ["containment-probe"]
+
+# One turn's descriptor cost, counted across the whole process: its own binary, so no other
+# test opens a descriptor while it counts. It starts the probe upstream, hence the same gate.
+[[test]]
+name = "gateway_fds"
 required-features = ["containment-probe"]
 
 [[test]]

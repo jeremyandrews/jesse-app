@@ -20,6 +20,12 @@ use jesse_bridge::{
 
 #[tokio::main]
 async fn main() {
+    // THE OPEN FILES LIMIT, raised FIRST: before any listener is bound, any child spawned or any
+    // turn admitted, every one of which costs descriptors, and a gateway-on turn costs over a
+    // hundred. launchd's default soft limit of 256 is two turns. ADVISORY, never fatal: a bridge
+    // that cannot raise it serves at the limit it was given, and says so. See `nofile`.
+    raise_open_files_limit();
+
     // BEFORE any child spawns: republish the plist's `JESSE_*` credentials under the names
     // the MCP servers read, and supply their non-secret settings. Both harnesses depend on
     // this having already run — Claude Code because its subprocesses inherit this
@@ -749,4 +755,44 @@ async fn main() {
     axum::serve(listener, app(state))
         .await
         .expect("server error");
+}
+
+/// Raise the soft open files limit and say what the bridge runs with, in one line; then warn
+/// when that leaves room for fewer than `MIN_CONCURRENT_TURNS` gateway turns.
+fn raise_open_files_limit() {
+    use jesse_bridge::nofile::{self, label, MIN_CONCURRENT_TURNS, TURN_PEAK_FDS};
+    let soft = match nofile::raise() {
+        Ok((before, after)) => {
+            eprintln!(
+                "jesse-bridge: open files limit: soft {} → {} (hard {})",
+                label(before.soft),
+                label(after.soft),
+                label(after.hard)
+            );
+            after.soft
+        }
+        Err(e) => {
+            let now = nofile::current();
+            eprintln!(
+                "jesse-bridge: WARNING — could not raise the open files limit ({e}); serving at \
+                 soft {} (hard {})",
+                now.map_or("unknown".into(), |l| label(l.soft)),
+                now.map_or("unknown".into(), |l| label(l.hard))
+            );
+            match now {
+                Some(l) => l.soft,
+                None => return,
+            }
+        }
+    };
+    let turns = nofile::turn_headroom(soft);
+    if turns < MIN_CONCURRENT_TURNS {
+        eprintln!(
+            "jesse-bridge: WARNING — the open files limit ({}) has room for {turns} gateway \
+             turn(s) of {TURN_PEAK_FDS} descriptors, fewer than {MIN_CONCURRENT_TURNS}. A turn \
+             past it fails to bind its sockets or start its servers with EMFILE. Raise \
+             SoftResourceLimits NumberOfFiles in the bridge's launchd plist.",
+            label(soft)
+        );
+    }
 }

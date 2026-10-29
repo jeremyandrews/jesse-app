@@ -32,7 +32,8 @@
 //!
 //! ## Reuse, not a second parser
 //!
-//! A `Dashboard/<Topic>.md` page is written in the same grammar as the day file —
+//! A Dashboard topic (`Dashboard/<Topic>.md`, plus any sub-files in
+//! `Dashboard/<Topic>/`) is written in the same grammar as the day file —
 //! `## ` sections, `* [ ] **bold lead.** body` task lines — so the matching entry
 //! is found by running [`crate::today::parse_today`] over it. That buys link
 //! extraction, lead normalization and section headings for free, and means a
@@ -190,11 +191,27 @@ fn is_dashboard_link(link: &TodayLink) -> bool {
 /// Lead overlap is the fallback for an entry that carries no project link, and
 /// it is deliberately conservative: a weak match is worse than none, because a
 /// wrong entry would hand the turn another item's urgency and deadline.
+///
+/// **A topic is its page plus its sub-files.** When the linked page is a topic
+/// home (`Dashboard/Tag1`, or one of its sub-files), every file of that topic is
+/// searched ([`crate::today::topic_files`]), the best entry across all of them
+/// wins under the same rules, and `path` is the file it was found in: an item
+/// keeps linking the topic index while its entry lives in `Dashboard/Tag1/Clients.md`.
+/// Each file goes through [`resolve_target`] and its own read cap; one that is
+/// missing or unreadable contributes nothing. Any other Dashboard page is read
+/// alone, as before.
 fn match_dashboard_entry(notes_root: &Path, item: &TodayItem) -> Option<DashboardEntry> {
     let link = item.links.iter().find(|l| is_dashboard_link(l))?;
-    let path = resolve_target(notes_root, &link.target)?;
-    let (src, _) = read_capped(&path, NOTE_CAP_BYTES * 4).ok()?;
-    let page = parse_today(&src);
+    let pages: Vec<PathBuf> = match crate::today::topic_home_stem(&note_key(&link.target)) {
+        Some(stem) => crate::today::topic_files(&notes_root.join("Dashboard"), stem)
+            .iter()
+            .filter_map(|p| {
+                let rel = p.strip_prefix(notes_root).ok()?.to_str()?;
+                resolve_target(notes_root, rel)
+            })
+            .collect(),
+        None => vec![resolve_target(notes_root, &link.target)?],
+    };
 
     // The item's own project notes — every wiki link that is not the Dashboard
     // page itself. These are what a matching entry should also link.
@@ -206,30 +223,38 @@ fn match_dashboard_entry(notes_root: &Path, item: &TodayItem) -> Option<Dashboar
         .collect();
 
     let lead_words = word_set(&normalize_lead(&item.lead));
-    let mut best: Option<(f32, &TodaySection, &TodayItem)> = None;
-    for section in &page.sections {
-        for entry in &section.items {
-            let shares_note = !wanted.is_empty()
-                && entry
-                    .links
-                    .iter()
-                    .any(|l| l.kind == "wiki" && wanted.contains(&note_key(&l.target)));
-            let score = if shares_note {
-                1.0
-            } else {
-                jaccard(&lead_words, &word_set(&normalize_lead(&entry.lead)))
-            };
-            if score > best.as_ref().map_or(0.0, |(s, _, _)| *s) {
-                best = Some((score, section, entry));
+    // (score, the file, the heading, the entry's text): owned, because each page
+    // is parsed and dropped in turn.
+    let mut best: Option<(f32, &PathBuf, String, String)> = None;
+    for path in &pages {
+        let Ok((src, _)) = read_capped(path, NOTE_CAP_BYTES * 4) else {
+            continue;
+        };
+        let page = parse_today(&src);
+        for section in &page.sections {
+            for entry in &section.items {
+                let shares_note = !wanted.is_empty()
+                    && entry
+                        .links
+                        .iter()
+                        .any(|l| l.kind == "wiki" && wanted.contains(&note_key(&l.target)));
+                let score = if shares_note {
+                    1.0
+                } else {
+                    jaccard(&lead_words, &word_set(&normalize_lead(&entry.lead)))
+                };
+                if score > best.as_ref().map_or(0.0, |(s, ..)| *s) {
+                    best = Some((score, path, section.name.clone(), entry.text.clone()));
+                }
             }
         }
     }
     // 0.5 keeps a genuine rewording and refuses a coincidental word or two.
-    let (_score, section, entry) = best.filter(|(s, _, _)| *s >= 0.5)?;
+    let (_score, path, heading, text) = best.filter(|(s, ..)| *s >= 0.5)?;
     Some(DashboardEntry {
-        path: vault_display_path(notes_root, &path).unwrap_or_else(|| link.target.clone()),
-        heading: section.name.clone(),
-        text: entry.text.clone(),
+        path: vault_display_path(notes_root, path).unwrap_or_else(|| link.target.clone()),
+        heading,
+        text,
     })
 }
 
@@ -2131,6 +2156,102 @@ mod tests {
             !entry.text.contains("Something else"),
             "the wrong entry must never be matched"
         );
+    }
+
+    /// A topic split into sub-files: `Dashboard/Tag1.md` is an index (a title, a header
+    /// line, links to its sub-files, no items) and the entries live in the sub-files.
+    /// `Tag1` because a topic is one of the five constant topic stems; the content is
+    /// invented.
+    fn split_tag1(v: &Vault, clients: &str, ops: &str) {
+        v.write(
+            "Dashboard/Tag1.md",
+            "# Dashboard: Tag1\n\nThe Tag1 action list, split by area.\n\n\
+             - [[todo-list/Dashboard/Tag1/Clients]]\n- [[todo-list/Dashboard/Tag1/Ops]]\n",
+        );
+        v.write("Dashboard/Tag1/Clients.md", clients);
+        v.write("Dashboard/Tag1/Ops.md", ops);
+    }
+
+    /// The item links only the topic index; its entry lives in a sub-file, and the
+    /// brief reports the sub-file's path and the heading the entry sits under there.
+    #[test]
+    fn the_dashboard_entry_is_found_in_a_sub_file_when_the_item_links_only_the_index() {
+        let v = Vault::new("dash-split");
+        v.write("Projects/Acme/Contract.md", "# Contract\n");
+        split_tag1(
+            &v,
+            "# Tag1: Clients\n\n## URGENT\n\n\
+             * [ ] **Countersign the Acme renewal (both copies) by Friday.** \
+             Dana Whitfield, email 2026-09-02. [[todo-list/Projects/Acme/Contract]]\n\n\
+             ## This Week\n\n* [ ] **Something else entirely.** [[todo-list/Projects/Other]]\n",
+            "# Tag1: Ops\n\n## This Week\n\n* [ ] **Move the servers.**\n",
+        );
+        let day = "# Today\n\n## Do now\n\n\
+            * [ ] **Countersign the renewal.** \
+            [[todo-list/Projects/Acme/Contract]] [[todo-list/Dashboard/Tag1]] (Added 2026-09-10)\n";
+        let got = gather(&v.notes(), &item_of(day, "Countersign the renewal"));
+        let entry = got.dashboard.expect("the entry in the sub-file is found");
+        assert_eq!(
+            entry.path, "Dashboard/Tag1/Clients.md",
+            "the file it was found in"
+        );
+        assert_eq!(entry.heading, "URGENT", "the sub-file's own heading");
+        assert!(entry.text.contains("Dana Whitfield"), "{}", entry.text);
+    }
+
+    /// With no shared note the lead overlap decides, across the index and every
+    /// sub-file at once: the best score wins wherever it is, not the first file's
+    /// passable one, and nothing under 0.5 is ever matched.
+    #[test]
+    fn the_best_dashboard_match_across_the_index_and_its_sub_files_wins_at_the_same_threshold() {
+        let v = Vault::new("dash-best");
+        split_tag1(
+            &v,
+            "# Tag1: Clients\n\n## URGENT\n\n\
+             * [ ] **Renew Northwind hosting contract.**\n",
+            "# Tag1: Ops\n\n## This Week\n\n\
+             * [ ] **Renew the Northwind hosting contract before March.**\n",
+        );
+        let day = "# Today\n\n## Do now\n\n\
+            * [ ] **Renew the Northwind hosting contract before March.** \
+            [[todo-list/Dashboard/Tag1]] (Added 2026-09-10)\n";
+        let it = item_of(day, "Renew the Northwind");
+        let entry = gather(&v.notes(), &it)
+            .dashboard
+            .expect("the best entry is found");
+        assert_eq!(entry.path, "Dashboard/Tag1/Ops.md", "the higher score wins");
+        assert_eq!(entry.heading, "This Week");
+
+        // Only a weak overlap anywhere: no entry, exactly as on a one-file page.
+        let w = Vault::new("dash-weak");
+        split_tag1(
+            &w,
+            "# Tag1: Clients\n\n## URGENT\n\n* [ ] **Ask Northwind about hosting prices.**\n",
+            "# Tag1: Ops\n\n## This Week\n\n* [ ] **Renew the gym membership.**\n",
+        );
+        assert_eq!(gather(&w.notes(), &it).dashboard, None);
+    }
+
+    /// A topic with no sub-file folder reads its one page, as it always has.
+    #[test]
+    fn a_one_file_topic_dashboard_entry_is_unchanged() {
+        let v = Vault::new("dash-one");
+        v.write("Projects/Home/Roof.md", "# Roof\n");
+        v.write(
+            "Dashboard/Personal.md",
+            "# Dashboard: Personal\n\n## URGENT\n\n\
+             * [ ] **Get three quotes for the roof.** Before the rains. \
+             [[todo-list/Projects/Home/Roof]]\n",
+        );
+        let day = "# Today\n\n## Do now\n\n\
+            * [ ] **Roof quotes.** [[todo-list/Projects/Home/Roof]] \
+            [[todo-list/Dashboard/Personal]] (Added 2026-09-10)\n";
+        let entry = gather(&v.notes(), &item_of(day, "Roof quotes"))
+            .dashboard
+            .expect("found");
+        assert_eq!(entry.path, "Dashboard/Personal.md");
+        assert_eq!(entry.heading, "URGENT");
+        assert!(entry.text.contains("Before the rains"));
     }
 
     /// An unchanged item does not regenerate; a reworded one does.

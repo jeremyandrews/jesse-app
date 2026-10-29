@@ -289,11 +289,12 @@ pub const PROJECT_SLUGS: [&str; 6] = [
     PROJECT_UNFILED,
 ];
 
-/// The five Dashboard topic homes: `(file stem under `Dashboard/`, wire slug,
+/// The five Dashboard topics: `(file stem under `Dashboard/`, wire slug,
 /// the lowercased needle that identifies the topic in a section heading)`.
 ///
 /// The stem is also the display name — `Dashboard/Via-Con-Me.md` — so one table
-/// drives the link mapping, the rollup loader and the heading tiebreak.
+/// drives the link mapping, the rollup loader and the heading tiebreak. A topic
+/// is its page plus any sub-files in `Dashboard/<stem>/` ([`topic_files`]).
 const TOPICS: [(&str, &str, &str); 5] = [
     ("Tag1", "tag1", "tag1"),
     ("Personal", "personal", "personal"),
@@ -340,19 +341,69 @@ pub fn vault_relative(target: &str) -> String {
     t.trim_matches('/').to_string()
 }
 
-/// The slug for a key that IS a Dashboard topic home (`Dashboard/Tag1`).
-fn topic_home_slug(key: &str) -> Option<&'static str> {
-    let stem = key.strip_prefix("dashboard/")?;
+/// The stem of the topic a key is the home of: the topic's own page
+/// (`dashboard/tag1`) or one of its sub-files one level down
+/// (`dashboard/tag1/clients`), case insensitive. Anything deeper
+/// (`dashboard/tag1/archive/old`) is not a topic home.
+pub(crate) fn topic_home_stem(key: &str) -> Option<&'static str> {
+    let rest = key.strip_prefix("dashboard/")?;
+    let stem = match rest.split_once('/') {
+        Some((stem, file)) if !file.is_empty() && !file.contains('/') => stem,
+        Some(_) => return None,
+        None => rest,
+    };
     TOPICS
         .iter()
         .find(|(name, _, _)| stem.eq_ignore_ascii_case(name))
+        .map(|(name, _, _)| *name)
+}
+
+/// The slug for a key that IS a Dashboard topic home (`Dashboard/Tag1`, or a
+/// sub-file of it, `Dashboard/Tag1/Clients`): the parent topic's slug.
+fn topic_home_slug(key: &str) -> Option<&'static str> {
+    let stem = topic_home_stem(key)?;
+    TOPICS
+        .iter()
+        .find(|(name, _, _)| *name == stem)
         .map(|(_, slug, _)| *slug)
 }
 
-/// Which topic files claim which notes, read from the five `Dashboard/<Topic>.md`
-/// files. This is the "rolls up to one topic" half of the derivation: an item
-/// that links a project note rather than a topic home inherits the topic whose
-/// Dashboard page links that note.
+/// **A topic's files**: `Dashboard/<stem>.md` when it exists, then every `*.md`
+/// directly inside `Dashboard/<stem>/`, sorted by name. A topic too large for
+/// one page keeps its file as an index and its items in those sub-files; a topic
+/// with no folder is its one file, as every topic once was.
+///
+/// **Not recursive**: `Dashboard/<stem>/archive/` and anything else below the
+/// first level is never read. A sub-file is a regular file in the folder itself;
+/// a symlink there is skipped rather than followed.
+///
+/// `dashboard` is the configured notes root's `Dashboard/` and `stem` is one of
+/// the constant [`TOPICS`]; no part of either comes from a request.
+pub(crate) fn topic_files(dashboard: &Path, stem: &str) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let page = dashboard.join(format!("{stem}.md"));
+    if page.is_file() {
+        files.push(page);
+    }
+    let Ok(entries) = std::fs::read_dir(dashboard.join(stem)) else {
+        return files;
+    };
+    let mut subs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    subs.sort();
+    files.extend(subs);
+    files
+}
+
+/// Which topic files claim which notes, read from the five topics: each topic's
+/// `Dashboard/<Topic>.md` plus its sub-files in `Dashboard/<Topic>/` (see
+/// [`topic_files`]). This is the "rolls up to one topic" half of the derivation:
+/// an item that links a project note rather than a topic home inherits the topic
+/// whose Dashboard page, or one of its sub-files, links that note.
 ///
 /// **It is not single-valued in practice.** Seven notes on the live vault are
 /// linked from more than one topic page — including `Projects/Tag1/HR-Finance`,
@@ -369,28 +420,33 @@ pub struct ProjectRollup {
 }
 
 impl ProjectRollup {
-    /// Read the five topic pages under the configured vault root.
+    /// Read the five topics' files under the configured vault root: each topic's
+    /// page and its sub-files. Every link in any of them claims that topic; an
+    /// index's links to its own sub-files claim nothing an item links, and are
+    /// harmless.
     ///
-    /// The paths are composed from a constant table and the configured root —
-    /// **no part of them comes from a request** — so this reads a fixed set of
-    /// five files and is not a path surface. The link-keyed reader that IS one
-    /// lives in [`crate::todaydetail`], behind the sandbox.
+    /// The paths are composed from a constant table, the configured root and the
+    /// listing of the topic's own folder — **no part of them comes from a
+    /// request** — so this is not a path surface. The link-keyed reader that IS
+    /// one lives in [`crate::todaydetail`], behind the sandbox.
     pub fn load(cfg: &Config) -> Self {
         let dashboard = notes_root(cfg).join("Dashboard");
         let mut map: HashMap<String, Vec<&'static str>> = HashMap::new();
         for (stem, slug, _) in TOPICS {
-            let Ok(src) = std::fs::read_to_string(dashboard.join(format!("{stem}.md"))) else {
-                continue;
-            };
-            for link in extract_links(&src) {
-                if link.kind != "wiki" {
+            for file in topic_files(&dashboard, stem) {
+                let Ok(src) = std::fs::read_to_string(&file) else {
                     continue;
+                };
+                for link in extract_links(&src) {
+                    if link.kind != "wiki" {
+                        continue;
+                    }
+                    let key = note_key(&link.target);
+                    if key.is_empty() {
+                        continue;
+                    }
+                    push_unique(map.entry(key).or_default(), slug);
                 }
-                let key = note_key(&link.target);
-                if key.is_empty() {
-                    continue;
-                }
-                push_unique(map.entry(key).or_default(), slug);
             }
         }
         Self { map }
@@ -418,9 +474,9 @@ impl ProjectRollup {
     /// Re-derive every item's project with this rollup in hand.
     ///
     /// The second pass exists because [`parse_today`] is a pure function of the
-    /// day file's own bytes and the rollup lives in five OTHER files. Parsing
-    /// resolves what the day file alone can settle (a direct topic-home link);
-    /// this fills in the rest. Both passes run the same [`derive_project`], so
+    /// day file's own bytes and the rollup lives in the topics' OTHER files.
+    /// Parsing resolves what the day file alone can settle (a direct topic-home
+    /// link); this fills in the rest. Both passes run the same [`derive_project`], so
     /// there is one derivation, not two that could drift.
     pub fn stamp_into(&self, snapshot: &mut TodaySnapshot) {
         if self.map.is_empty() {
@@ -448,8 +504,9 @@ fn push_unique(out: &mut Vec<&'static str>, slug: &'static str) {
 ///
 /// In order:
 ///
-/// 1. A direct `[[…/Dashboard/<Topic>]]` link is the item's declared home and
-///    wins outright.
+/// 1. A direct `[[…/Dashboard/<Topic>]]` link, or a link to one of its sub-files
+///    (`[[…/Dashboard/<Topic>/<File>]]`), is the item's declared home and wins
+///    outright.
 /// 2. Otherwise every topic page that claims one of the item's linked notes is a
 ///    candidate.
 /// 3. Exactly one candidate → that slug.
@@ -649,7 +706,7 @@ fn strand_note_slug(key: &str) -> Option<&str> {
 }
 
 /// Whether a link can never place an item on a strand: one of the five
-/// Dashboard topic homes, or `Today` itself. Every item carries a topic link,
+/// Dashboard topic homes or a sub-file of one, or `Today` itself. Every item carries a topic link,
 /// and a topic is not a thread, so matching on it would put every item on
 /// whichever strand lists its topic page.
 fn never_a_strand_signal(key: &str) -> bool {
@@ -2795,4 +2852,176 @@ mod tests {
 ## Do Now\n\n\
 * [ ] **Reply to Ada.** About the date. (Added 2026-03-01)\n\
 * [ ] **Order the replacement.** (Added 2026-02-27)\n";
+
+    // ---- A topic split into sub-files ----------------------------------------
+    //
+    // Invented content throughout. `Tag1` is the split topic because a topic is one of
+    // the five constant `TOPICS` stems and nothing else: its `Dashboard/Tag1.md` is an
+    // index (a title, a header line, links to its sub-files, no items), and its items
+    // live in `Dashboard/Tag1/Clients.md` and `Dashboard/Tag1/Ops.md`. `Personal` beside
+    // it is a one-file topic, as every topic was before.
+
+    /// A throwaway vault repo whose `vault/Dashboard/` holds the split topic, one
+    /// archived sub-file a level too deep, and a one-file topic. Removed on drop.
+    struct SplitVault {
+        root: PathBuf,
+    }
+
+    impl SplitVault {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("jesse-split-{}", random_hex()));
+            let dash = root.join(crate::config::VAULT_SUBDIR).join("Dashboard");
+            std::fs::create_dir_all(dash.join("Tag1/archive")).unwrap();
+            std::fs::write(
+                dash.join("Tag1.md"),
+                "# Dashboard: Tag1\n\nThe Tag1 action list, split by area.\n\n\
+                 - [[todo-list/Dashboard/Tag1/Clients]]\n- [[todo-list/Dashboard/Tag1/Ops]]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dash.join("Tag1/Clients.md"),
+                "# Tag1: Clients\n\n## URGENT\n\n\
+                 * [ ] **Countersign the Acme renewal.** [[todo-list/Projects/Acme/Contract]]\n\n\
+                 ## This Week\n\n* [ ] **Nothing else.**\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dash.join("Tag1/Ops.md"),
+                "# Tag1: Ops\n\n## This Week\n\n\
+                 * [ ] **Move the Acme servers.** [[todo-list/Projects/Acme/Servers]]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dash.join("Tag1/archive/Old.md"),
+                "# Old\n\n## Backlog\n\n* [ ] **Retired.** [[todo-list/Projects/Acme/Legacy]]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dash.join("Personal.md"),
+                "# Dashboard: Personal\n\n## URGENT\n\n\
+                 * [ ] **Fix the roof.** [[todo-list/Projects/Home/Roof]]\n",
+            )
+            .unwrap();
+            Self { root }
+        }
+
+        fn cfg(&self) -> Config {
+            Config {
+                vault: self.root.to_string_lossy().into_owned(),
+                ..crate::testutil::test_config()
+            }
+        }
+
+        fn dashboard(&self) -> PathBuf {
+            self.root
+                .join(crate::config::VAULT_SUBDIR)
+                .join("Dashboard")
+        }
+    }
+
+    impl Drop for SplitVault {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The project of a one-item day file whose item carries `links`.
+    fn project_with(links: &str, rollup: &ProjectRollup) -> &'static str {
+        let day = format!("# Today\n\n## Do Now\n\n* [ ] **An item.** {links}\n");
+        let snap = parse_today(&day);
+        let it = item(section(&snap, "Do Now"), "An item");
+        derive_project(&it.links, &it.section_name, rollup)
+    }
+
+    #[test]
+    fn a_note_claimed_only_by_a_sub_file_rolls_up_to_its_topic() {
+        let v = SplitVault::new();
+        let rollup = ProjectRollup::load(&v.cfg());
+        assert_eq!(
+            project_with("[[todo-list/Projects/Acme/Contract]]", &rollup),
+            "tag1",
+            "Clients.md claims the note for Tag1"
+        );
+        assert_eq!(
+            project_with("[[todo-list/Projects/Acme/Servers]]", &rollup),
+            "tag1",
+            "Ops.md claims the note for Tag1"
+        );
+        assert_eq!(
+            project_with("[[todo-list/Projects/Acme/Legacy]]", &rollup),
+            PROJECT_UNFILED,
+            "a sub-folder of a topic folder is never read"
+        );
+    }
+
+    #[test]
+    fn a_direct_link_to_a_sub_file_is_a_topic_home_with_the_parents_slug() {
+        let none = ProjectRollup::default();
+        assert_eq!(topic_home_slug("dashboard/tag1/clients"), Some("tag1"));
+        assert_eq!(
+            project_with("[[todo-list/Dashboard/Tag1/Clients]]", &none),
+            "tag1"
+        );
+        assert_eq!(
+            project_with("[[vault/dashboard/TAG1/ops.md#This Week]]", &none),
+            "tag1",
+            "case, the vault spelling, the extension and a heading all normalise away"
+        );
+        assert_eq!(
+            topic_home_slug("dashboard/tag1/archive/old"),
+            None,
+            "one level only"
+        );
+        assert_eq!(topic_home_slug("dashboard/tag1/"), None);
+        assert_eq!(topic_home_slug("dashboard/acme/clients"), None);
+        assert_eq!(
+            project_with("[[todo-list/Dashboard/Tag1/archive/Old]]", &none),
+            PROJECT_UNFILED
+        );
+    }
+
+    #[test]
+    fn a_sub_file_link_is_never_a_strand_signal() {
+        assert!(never_a_strand_signal("dashboard/tag1/clients"));
+        assert!(never_a_strand_signal("dashboard/via-con-me/events"));
+        assert!(
+            !never_a_strand_signal("dashboard/tag1/archive/old"),
+            "a note two levels down is not a topic home"
+        );
+        assert!(!never_a_strand_signal("projects/acme/contract"));
+    }
+
+    #[test]
+    fn a_topics_files_are_its_file_then_its_sub_files_sorted_and_never_deeper() {
+        let v = SplitVault::new();
+        let names = |stem: &str| -> Vec<String> {
+            topic_files(&v.dashboard(), stem)
+                .iter()
+                .map(|p| p.strip_prefix(v.dashboard()).unwrap().display().to_string())
+                .collect()
+        };
+        assert_eq!(names("Tag1"), ["Tag1.md", "Tag1/Clients.md", "Tag1/Ops.md"]);
+        assert_eq!(
+            names("Personal"),
+            ["Personal.md"],
+            "a one-file topic is one file"
+        );
+        assert!(names("Network").is_empty(), "an absent topic has no files");
+    }
+
+    #[test]
+    fn a_one_file_topic_rolls_up_and_homes_exactly_as_before() {
+        let v = SplitVault::new();
+        let rollup = ProjectRollup::load(&v.cfg());
+        assert_eq!(
+            project_with("[[todo-list/Projects/Home/Roof]]", &rollup),
+            "personal"
+        );
+        assert_eq!(topic_home_slug("dashboard/personal"), Some("personal"));
+        assert_eq!(
+            project_with("[[todo-list/Dashboard/Personal]]", &rollup),
+            "personal"
+        );
+        assert!(never_a_strand_signal("dashboard/personal"));
+    }
 }

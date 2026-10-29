@@ -844,16 +844,11 @@ pub const GOOGLE_SHEETS_READ_TOOLS: [&str; 5] = [
 
 /// The row for `name`, or `None`.
 pub fn row(name: &str) -> Option<&'static McpServerRow> {
-    MCP_SERVERS.iter().find(|r| r.name == name).or_else(|| {
-        #[cfg(feature = "containment-probe")]
-        {
-            PROBE_ROWS.iter().find(|r| r.name == name)
-        }
-        #[cfg(not(feature = "containment-probe"))]
-        {
-            None
-        }
-    })
+    #[cfg(feature = "containment-probe")]
+    let mut rows = MCP_SERVERS.iter().chain(PROBE_ROWS.iter());
+    #[cfg(not(feature = "containment-probe"))]
+    let mut rows = MCP_SERVERS.iter();
+    rows.find(|r| r.name == name)
 }
 
 /// THE GATEWAY'S PROBE UPSTREAMS, one per transport, for its tests and its containment probes.

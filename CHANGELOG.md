@@ -14,6 +14,62 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.189.2] - 2026-10-29
+
+**`tests/gateway_fds.rs` measures from a settled baseline.** On Linux the warm-up turn's
+descriptors were still being released when the first measured turn read its baseline (23, settling
+to 13), so the test compared against a count that was falling. The baseline is now the count once
+it has not changed for half a second. Test only; no change to the bridge.
+
+## [bridge 0.189.1] - 2026-10-29
+
+**`TURN_PEAK_FDS` is 146, not 122.** CI ran `tests/gateway_fds.rs` on Linux, where the same turn
+costs 146 descriptors (12 → 158 → 12, nothing left open): six per stdio upstream instead of
+macOS's five, the sixth being the child's pidfd. The bridge runs on both, so the constant is the
+larger; the startup warning and `/health`'s `turns` divide by it. No other change.
+
+## [bridge 0.189.0] - 2026-10-29
+
+**The bridge raises its own open files limit at startup, so a turn no longer fails for lack of
+descriptors when two run at once.** launchd gave the bridge a soft `RLIMIT_NOFILE` of 256 (hard
+unlimited; the plist sets neither), and one gateway-on turn costs about half of that.
+
+- **The incidents.** On 2026-10-26 at 23:30 the scheduled `comms-sweep-2330` failed with `could
+  not read prompt_file …: Too many open files (os error 24)`, and the schedule state could not be
+  persisted in the same minutes. On 2026-10-29 at 13:04 a turn failed
+  in `Gateway::open_turn`: `could not bind <state_dir>/gw/<job>/inbound.sock`. The log holds 323
+  `os error 24` lines in 12 bursts from 2026-10-25 to 2026-10-29, nearly all `gateway: upstream
+  '<server>' did not start …`: turns that ran without some of their tools and said nothing. The
+  bursts came with two or three turns in flight. Between them the bridge holds about 21 to 31
+  descriptors, so nothing leaks; the soft limit is the cause.
+- **The measured peak** (`tests/gateway_fds.rs`, new): the shipped main set with the gateway and
+  `devjob` on admits 25 servers. Binding, connecting and starting every one took the process from
+  10 descriptors to 132 and back to 10 when `TurnGuard` dropped, twice: **122 per turn on
+  macOS**, five per stdio upstream (listener, connection, three pipes) and two for the in-process
+  `devjob`. On Linux (CI) it went from 12 to 158 and back to 12: **146**, one more per stdio
+  upstream (the child's pidfd). `TURN_PEAK_FDS` is 146, the larger. Under 256, either is two
+  turns. The test fails if a turn ever costs more than `TURN_PEAK_FDS` or leaves a descriptor
+  open.
+- **The fix** (`src/nofile.rs`, new): first thing in `main`, before any listener, child or turn,
+  the soft limit is raised to the hard limit, capped at `NOFILE_CAP` (8192) and on macOS at
+  `kern.maxfilesperproc`, since `setrlimit` there refuses `RLIM_INFINITY`. It never lowers a
+  limit. One line says what happened, `jesse-bridge: open files limit: soft 256 → 8192 (hard
+  unlimited)`, and a failure to raise is a warning, never a refused boot. A limit with room for
+  fewer than 8 turns of `TURN_PEAK_FDS` (146) is a startup warning. The target is a pure function,
+  `target_soft(soft, hard, cap)`, unit tested.
+- **`/health`** (authenticated) reports `open_files_limit`: `soft`, `hard` and `turns` (how many
+  turns of the measured peak fit), beside the gateway fields.
+- **A bind that fails with `EMFILE` or `ENFILE` says so**: the bridge ran out of open files, the
+  soft limit, and how many gateway turns are open. The turn still fails; only the message changed.
+- **`docs/platform-dependencies.md`** gains the row for `nofile.rs`'s macOS branch
+  (`kern.maxfilesperproc`); elsewhere the hard limit is the ceiling.
+- **README**: the launchd plist's `SoftResourceLimits` and `HardResourceLimits` (`NumberOfFiles`
+  8192) as the backstop. The installed plist is not changed by this release.
+- `mcpservers::row` chains the probe rows instead of an `or_else` closure that clippy 1.97's
+  `unnecessary_lazy_evaluations` refused in a build without `containment-probe`. Same lookup,
+  same order.
+- No change to which servers a turn admits, to socket paths or to the gateway protocol.
+
 ## [bridge 0.188.0] - 2026-10-28
 
 **A second Kubernetes server, `kubernetes-cloud`, for the cloud cluster `kc1`, fenced by the

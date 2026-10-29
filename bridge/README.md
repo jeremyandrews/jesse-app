@@ -74,6 +74,31 @@ export JESSE_ADVERTISE_HOST="your-host.tailnet.ts.net"
 
 A clean `cargo build --release` is the gate — if it doesn't compile, it isn't done.
 
+### Under launchd: the open files limit
+
+launchd starts an agent with a soft open files limit of **256**, and a gateway-on turn costs the
+bridge 122 descriptors on macOS and 146 on Linux (a socket, a connection and an upstream's pipes
+per server; measured by `tests/gateway_fds.rs`), so two turns at once ran out (`EMFILE`, 0.189.0). The bridge raises
+its own soft limit to the hard limit at startup, capped at 8192, logs one line saying so, and
+reports the limit as `open_files_limit` on authenticated `/health`; the plist keys below are the
+backstop for a bridge that cannot. Put them in the bridge's LaunchAgent beside its
+`EnvironmentVariables`:
+
+```xml
+<key>SoftResourceLimits</key>
+<dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+</dict>
+<key>HardResourceLimits</key>
+<dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+</dict>
+```
+
+A plist change takes effect only on `launchctl bootout` + `bootstrap`, not `kickstart -k`.
+
 ## Source layout
 
 The crate is a small library (`src/lib.rs`) plus a wiring-only binary

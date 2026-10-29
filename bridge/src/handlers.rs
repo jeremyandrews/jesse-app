@@ -704,6 +704,15 @@ pub async fn health(State(st): State<AppState>, headers: HeaderMap) -> Json<Valu
                     json!(gw.upstream_health(&crate::gateway::config_server_names(&rendered)));
             }
         }
+        // THE OPEN FILES LIMIT the process runs with now (raised at startup, see `nofile`), and
+        // how many gateway turns of the measured peak fit under it.
+        if let Some(l) = crate::nofile::current() {
+            body["open_files_limit"] = json!({
+                "soft": crate::nofile::label(l.soft),
+                "hard": crate::nofile::label(l.hard),
+                "turns": crate::nofile::turn_headroom(l.soft),
+            });
+        }
         if let Some(drift) = BINARY_DRIFT.get().filter(|d| !d.is_empty()) {
             body["containment_stale"] = json!(drift
                 .iter()

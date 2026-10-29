@@ -14,6 +14,40 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.190.0] - 2026-10-29
+
+**A Dashboard topic may be split into sub-files.** A topic is `Dashboard/<Topic>.md` plus, when it
+exists, every `*.md` directly inside `Dashboard/<Topic>/`, in name order: the topic file becomes
+an index linking its sub-files, and each sub-file carries its own `## URGENT`, `## This Week`,
+`## Waiting` and `## Backlog` items in the day-file grammar. Day-file items keep linking the topic
+index as their home. Only one level is read: `Dashboard/<Topic>/archive/` and anything deeper never
+is, and a symlink in the folder is skipped.
+
+- **One helper** (`today::topic_files`) lists a topic's files. Its paths come only from the
+  constant `TOPICS` table, the configured notes root and the listing of the topic's own folder;
+  nothing from a request reaches it.
+- **The four places that now read sub-files:**
+  - `ProjectRollup::load`: every link in the topic file or any sub-file claims the topic's slug,
+    so a note linked only from `Dashboard/Tag1/Clients.md` rolls up to `tag1`.
+  - `topic_home_slug`: `dashboard/<stem>` and `dashboard/<stem>/<file>` (one level, case
+    insensitive) are topic homes, with the parent topic's slug.
+  - `never_a_strand_signal`: through `topic_home_slug`, a link to a sub-file is never a strand
+    signal.
+  - `todaybrief::match_dashboard_entry`: for a topic home, the topic file and every sub-file are
+    searched, the best entry across all of them wins under the existing rules and 0.5 threshold,
+    and `DashboardEntry.path` is the file the entry was found in. Each file keeps its read cap and
+    goes through `resolve_target`; a missing or unreadable file contributes nothing.
+- **A one-file topic is unchanged**: with no `Dashboard/<Topic>/` folder, exactly one file is read,
+  as before. Any Dashboard page that is not one of the five topics is still read alone.
+- The wire format does not change: the same six project slugs, the same `DashboardEntry` fields.
+- **Tests** (`today.rs`, `todaybrief.rs`) use a fixture vault where `Dashboard/Tag1.md` is an
+  index and `Tag1/Clients.md` and `Tag1/Ops.md` hold the items, beside a one-file `Personal`. They
+  cover: rollup from a note only a sub-file claims; a sub-file link as a home with the parent's
+  slug, and one level only; a sub-file link never being a strand signal; the topic's files in order
+  and never deeper; the brief finding an entry in a sub-file from an index-only link, with that
+  sub-file's path and heading; the best match across index and sub-files at the same threshold;
+  and a one-file topic behaving as before.
+
 ## [bridge 0.189.2] - 2026-10-29
 
 **`tests/gateway_fds.rs` measures from a settled baseline.** On Linux the warm-up turn's

@@ -14,6 +14,13 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.189.1] - 2026-10-29
+
+**`TURN_PEAK_FDS` is 146, not 122.** CI ran `tests/gateway_fds.rs` on Linux, where the same turn
+costs 146 descriptors (12 → 158 → 12, nothing left open): six per stdio upstream instead of
+macOS's five, the sixth being the child's pidfd. The bridge runs on both, so the constant is the
+larger; the startup warning and `/health`'s `turns` divide by it. No other change.
+
 ## [bridge 0.189.0] - 2026-10-29
 
 **The bridge raises its own open files limit at startup, so a turn no longer fails for lack of

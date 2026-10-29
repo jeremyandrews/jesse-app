@@ -14,6 +14,13 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.189.2] - 2026-10-29
+
+**`tests/gateway_fds.rs` measures from a settled baseline.** On Linux the warm-up turn's
+descriptors were still being released when the first measured turn read its baseline (23, settling
+to 13), so the test compared against a count that was falling. The baseline is now the count once
+it has not changed for half a second. Test only; no change to the bridge.
+
 ## [bridge 0.189.1] - 2026-10-29
 
 **`TURN_PEAK_FDS` is 146, not 122.** CI ran `tests/gateway_fds.rs` on Linux, where the same turn

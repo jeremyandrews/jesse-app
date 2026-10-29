@@ -160,6 +160,26 @@ async fn settle_to(target: usize) -> usize {
     }
 }
 
+/// The count once it has stopped changing: unchanged for half a second, up to a bound. The
+/// baseline a turn is measured from, so a previous turn still being released cannot inflate it.
+async fn settle_stable() -> usize {
+    let start = Instant::now();
+    let mut last = open_fds();
+    let mut since = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let now = open_fds();
+        if now != last {
+            last = now;
+            since = Instant::now();
+        } else if since.elapsed() >= Duration::from_millis(500)
+            || start.elapsed() > Duration::from_secs(10)
+        {
+            return now;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_turn_releases_every_descriptor_and_fits_the_raised_limit_many_times() {
     let dir = PathBuf::from(format!("/tmp/jgw-fds-{}", std::process::id()));
@@ -192,11 +212,10 @@ async fn one_turn_releases_every_descriptor_and_fits_the_raised_limit_many_times
     // A first turn warms what the runtime opens once and keeps (its child-reaping machinery),
     // so the turns measured below start from the process's steady state.
     let _ = one_turn(&gw, &cfg, "warm").await;
-    let warm = open_fds();
-    let warmed = settle_to(warm).await;
+    let warmed = settle_stable().await;
 
     for round in 0..2 {
-        let before = settle_to(warmed).await;
+        let before = settle_stable().await;
         let (peak, servers) = one_turn(&gw, &cfg, &format!("measured-{round}")).await;
         let after = settle_to(before).await;
         let cost = (peak - before) as libc::rlim_t;

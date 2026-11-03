@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "jesse-bridge"
-version = "0.190.0"
+version = "0.191.0"
 dependencies = [
  "axum",
  "chrono",

@@ -508,7 +508,7 @@ mod tests {
                 count(GrantKind::Bash),
                 count(GrantKind::Skill)
             ),
-            (4, 30, 6)
+            (4, 31, 6)
         );
         assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 398));
         assert_eq!(servers.len(), 28);

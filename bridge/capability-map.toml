@@ -189,6 +189,14 @@ dependency = "node on the turn pod's PATH"
 workflows = "overnight-currency scheduled job"
 reason = "Runs the fixed vault script that rotates the currency summary."
 
+[grant."Bash(node vault/roll-living-notes.js --daily)"]
+kind = "bash"
+harnesses = ["claude-code"]
+placement = "turn-pod"
+dependency = "node on the turn pod's PATH"
+workflows = "strands-sweep scheduled job"
+reason = "Runs the fixed vault script that rolls the living notes' history, guarded to once a day after 04:00."
+
 [grant."Bash(./.claude/skills/archive-processing/find-checked-archive-boxes.sh:*)"]
 kind = "bash"
 harnesses = ["claude-code"]

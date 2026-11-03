@@ -2838,7 +2838,8 @@ mod tests {
             "expected scoped Bash(...) entries: {tools:?}"
         );
 
-        // `node` is granted ONLY for the three named diet-cache scripts — never a
+        // `node` is granted ONLY for named scripts — the three diet-cache scripts
+        // asserted here and the strands sweep's exact daily roll — never a
         // bare `Bash(node:*)`, which would permit `node -e "<arbitrary JS>"` (RCE
         // from a phone request). Pin both the presence of the scoped scripts and
         // the absence of any broader node scope.
@@ -2846,6 +2847,7 @@ mod tests {
             "Bash(node vault/generate-diet-today.js:*)",
             "Bash(node vault/validate-diet-today.js:*)",
             "Bash(node vault/verify-diet-consistency.js:*)",
+            "Bash(node vault/roll-living-notes.js --daily)",
         ] {
             assert!(
                 tools.contains(&script),

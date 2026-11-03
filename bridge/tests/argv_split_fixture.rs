@@ -217,6 +217,12 @@
 //! the read site, the twenty tools on the write sites) and the approve mode; no `env_vars`, as
 //! for `kubernetes`, because the launcher supplies `KUBECONFIG`. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.191.0, for `Bash(node vault/roll-living-notes.js --daily)`, on
+//! Claude Code's two write sites only.** `main-write` and `main-write-resume` moved their
+//! `--allowedTools` digest for the one exact-form grant and gained or lost no argument. No
+//! `--mcp-config` digest moved, and no Codex site moved, because a `Bash(...)` grant never
+//! reaches Codex. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

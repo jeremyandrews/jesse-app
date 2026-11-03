@@ -70,7 +70,7 @@
         "--mcp-config",
         "sha256:1b3f746b7e4e0996d4d7a4a40f51bfed47b51c7eaa76f3791d2f82580c1a5b07",
         "--allowedTools",
-        "sha256:ecd0f5a8dd139e3c30aae21e0a3fee665369921051997c2e41161e8feca86c37",
+        "sha256:b1ee307abaf489daf826ac428b24c642adc85adc2235c3465e236c13d7f5de3d",
         "--disallowedTools",
         "NotebookEdit"
       ],
@@ -95,7 +95,7 @@
         "--mcp-config",
         "sha256:1b3f746b7e4e0996d4d7a4a40f51bfed47b51c7eaa76f3791d2f82580c1a5b07",
         "--allowedTools",
-        "sha256:ecd0f5a8dd139e3c30aae21e0a3fee665369921051997c2e41161e8feca86c37",
+        "sha256:b1ee307abaf489daf826ac428b24c642adc85adc2235c3465e236c13d7f5de3d",
         "--disallowedTools",
         "NotebookEdit",
         "--resume",

@@ -3921,7 +3921,7 @@ them against the map compiled into it, and prints:
 
 What it can and cannot match: MCP and web grants match by exact name, and a file grant
 matches its bare tool name (`Read`). `Bash` and `Skill` are bare class names in the trace,
-so the 29 `Bash(...)` and 6 `Skill(...)` grants cannot be told apart; they are two class
+so the 31 `Bash(...)` and 6 `Skill(...)` grants cannot be told apart; they are two class
 rows with their totals and are never reported as never used. Records from before 0.168.0
 carry no `harness` or `model` and are grouped as `unknown`. A 30-day, per-harness audit
 needs 30 days of records written by 0.168.0 or later.

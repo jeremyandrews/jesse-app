@@ -284,11 +284,27 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // Without it the running summaries grow unbounded and eventually cost more context
 // than the analysis they feed.
 //
+// `Bash(node vault/roll-living-notes.js --daily)` — the strands sweep's once-a-day roll of
+// the living notes. The sweep runs it as its own command; without a grant here every sweep
+// recorded `Roll not run` and the `vault/Strands/*.md` notes and the `Journal.md` files grew
+// unrolled (a vault `.claude/settings.json` grant never reaches a bridge child). The script
+// takes no path argument — every path is computed from its own directory — and `--daily`
+// refuses before 04:00 local and again once `vault/Strands/history/.last-roll` holds today.
+// IT IS THE EXACT FORM, NOT `:*`, AND THE ONLY ONE IN THIS CONST: the free tail of
+// `node vault/roll-living-notes.js:*` would admit the unguarded roll (no flag) and
+// `--overview`, which a bridge turn must not run. Measured live against claude 2.1.303 on
+// 2026-11-03 (headless `-p`, `--permission-mode default`, `--setting-sources user,project`,
+// this one grant and no other Bash grant, stub scripts that log their own argv): the exact
+// command ran; no flag, `--overview`, `--daily --overview`, `--dry-run`, another
+// `node vault/` script and `node -e` were all refused, and
+// `node vault/roll-living-notes.js --daily && node vault/other.js` was refused whole —
+// neither half ran. It carries the same write-then-execute cost as the other pinned scripts.
+//
 // KNOWN OPEN, STATED PLAINLY AND NOT CLOSED HERE: every pinned-script grant is a
 // WRITE-THEN-EXECUTE PATH TO ARBITRARY CODE, not a grant to run today's file
 // contents. The child holds a scoped write grant over the same tree, so it can
 // rewrite the script and then invoke it under its own pinned rule. That is true of
-// the four `node vault/*.js` scopes, the two skill scripts, and the three wrappers
+// the five `node vault/*.js` scopes, the two skill scripts, and the three wrappers
 // above. The mitigation is that the tree is version-controlled and committed — NOT
 // that the path is pinned. The wrappers narrow it further by validating their own
 // inputs and, for `week.sql`, the query file itself; they do not close it.
@@ -995,6 +1011,7 @@ Bash(node vault/generate-diet-today.js:*),\
 Bash(node vault/validate-diet-today.js:*),\
 Bash(node vault/verify-diet-consistency.js:*),\
 Bash(node vault/rotate-currency-summary.js:*),\
+Bash(node vault/roll-living-notes.js --daily),\
 Bash(./.claude/skills/archive-processing/find-checked-archive-boxes.sh:*),\
 Bash(bin/vault-links:*),Bash(./bin/vault-links:*),\
 Bash(./.claude/skills/draft-lint/lint-draft.sh:*),\
@@ -6113,7 +6130,7 @@ mod tests {
     /// # Why the whole list rather than "nothing but git and gh pr create"
     ///
     /// Stated that way the assertion would be false the day it was written: the allowlist has
-    /// carried `mv`, `date`, `cal`, four `node vault/*.js` scripts, five skill scripts,
+    /// carried `mv`, `date`, `cal`, five `node vault/*.js` scripts, five skill scripts,
     /// `shasum`, ten read-only `gh` subcommands and one scoped `gh api` path for many
     /// versions, each for a reason recorded above. A test asserting an aspiration instead of
     /// reality is red from birth and gets deleted, which is the failure mode this file's
@@ -6140,6 +6157,7 @@ mod tests {
             "Bash(node vault/validate-diet-today.js:*)",
             "Bash(node vault/verify-diet-consistency.js:*)",
             "Bash(node vault/rotate-currency-summary.js:*)",
+            "Bash(node vault/roll-living-notes.js --daily)",
             "Bash(./.claude/skills/archive-processing/find-checked-archive-boxes.sh:*)",
             "Bash(bin/vault-links:*)",
             "Bash(./bin/vault-links:*)",
@@ -6208,6 +6226,60 @@ mod tests {
         assert!(
             !DEFAULT_ALLOWED_TOOLS.split(',').any(|e| e == "Bash"),
             "an unscoped Bash grant makes every scope above meaningless"
+        );
+    }
+
+    /// The strands sweep's daily roll is granted as ONE exact command, and the `node vault/`
+    /// surface is exactly five named scripts. The roll's free-tail spelling
+    /// (`node vault/roll-living-notes.js:*`) would admit the unguarded roll and `--overview`,
+    /// and a bare spelling would admit the unguarded roll alone; both are refused here, as are
+    /// `node` scopes that would run arbitrary JavaScript and a sixth script or a glob.
+    #[test]
+    fn the_living_notes_roll_is_granted_as_the_exact_daily_command_only() {
+        let granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS.split(',').collect();
+        let roll = "Bash(node vault/roll-living-notes.js --daily)";
+        assert_eq!(
+            granted.iter().filter(|e| **e == roll).count(),
+            1,
+            "the daily roll must be granted exactly once: {DEFAULT_ALLOWED_TOOLS}"
+        );
+
+        let mut node: Vec<&str> = granted
+            .iter()
+            .copied()
+            .filter(|e| e.starts_with("Bash(node vault/"))
+            .collect();
+        node.sort_unstable();
+        let mut expected = vec![
+            "Bash(node vault/generate-diet-today.js:*)",
+            "Bash(node vault/validate-diet-today.js:*)",
+            "Bash(node vault/verify-diet-consistency.js:*)",
+            "Bash(node vault/rotate-currency-summary.js:*)",
+            roll,
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            node, expected,
+            "the `node vault/` grants are exactly five named scripts"
+        );
+
+        for forbidden in [
+            "Bash(node:*)",
+            "Bash(node)",
+            "Bash(node vault/roll-living-notes.js:*)",
+            "Bash(node vault/roll-living-notes.js --daily:*)",
+            "Bash(node vault/roll-living-notes.js)",
+        ] {
+            assert!(
+                !granted.contains(&forbidden),
+                "{forbidden} is wider than the one command the sweep runs"
+            );
+        }
+        assert!(
+            !granted
+                .iter()
+                .any(|e| e.contains("roll-living-notes") && e.contains(":*")),
+            "no `:*` spelling of the roll: its free tail admits the unguarded roll"
         );
     }
 

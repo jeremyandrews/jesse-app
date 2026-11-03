@@ -14,6 +14,42 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.191.0] - 2026-11-03
+
+**A bridge turn can run the vault's daily living notes roll.** The strands sweep scheduled job
+runs `node vault/roll-living-notes.js --daily` as its own command, once per sweep. The bridge's
+main turn allowlist (`DEFAULT_ALLOWED_TOOLS`) had no grant for it, and a grant in the vault's own
+`.claude/settings.json` never reaches a bridge child, so every sweep recorded `Roll not run` and
+the living notes in `vault/Strands/*.md` and the `Journal.md` files grew unrolled. Phone turns and
+scheduled jobs share the one list, so the scheduler needed no change.
+
+- **One grant, in exact form:** `Bash(node vault/roll-living-notes.js --daily)`. It is the only
+  exact-command entry in the const. The `:*` spelling was not used because its free tail would
+  admit the unguarded roll (no flag) and `--overview`. The script takes no path argument, and
+  `--daily` refuses before 04:00 local and again once `vault/Strands/history/.last-roll` holds
+  today's date. It carries the same write-then-execute cost as the other pinned scripts.
+- **Measured live before it was written**, against claude 2.1.303 with the bridge's own flags
+  (`--permission-mode default`, `--setting-sources user,project`, `--strict-mcp-config`), this one
+  grant and no other Bash grant, and stub scripts that log their own argv. Judged from the log:
+  the exact command ran; no flag, `--overview`, `--daily --overview`, `--dry-run`,
+  `node vault/other.js` and `node -e` were refused; `… --daily && node vault/other.js` was
+  refused whole, and neither half ran.
+- **Records:** `containment.toml` (Claude Code) re-recorded live with the gateway and devjob on:
+  gate pass, and every probe on every row kept its id, class, verdict and status. The write row's
+  `toolset_args` gained exactly the one entry. Also moved, none of it compared by the gate: the
+  header's version and date, the free-text `evidence` strings, and the write row's observed
+  `root_tools`, which lists two more CLI built-ins (`PublishPlugin`, `ShareOnboardingGuide`). `golden/capability-args.json` moved for the Claude Code write row only; the
+  Codex and `direct` records and goldens did not move, because `Bash(...)` grants never reach
+  those harnesses. `tests/fixtures/argv-before-split.json` moved only the `--allowedTools`
+  digest on Claude Code's `main-write` and `main-write-resume` sites. `capability-map.toml` gains
+  the grant's row.
+- **Tests:** a new `config.rs` test pins the roll as exactly one exact-form grant, the `node vault/`
+  grants as exactly five named scripts, and refuses `Bash(node:*)`, `Bash(node)`, any `:*` spelling
+  of the roll and a bare roll grant. The Bash surface list, the harness's scoped node script
+  assertion, and the Bash grant counts in `capmap.rs` and `toolusage.rs` (30 to 31) moved with it.
+- **Docs:** `SECURITY.md` gains the grant's row and counts five `node vault/*.js` scripts;
+  `bridge/README.md` counts 31 `Bash(...)` grants.
+
 ## [bridge 0.190.0] - 2026-10-29
 
 **A Dashboard topic may be split into sub-files.** A topic is `Dashboard/<Topic>.md` plus, when it

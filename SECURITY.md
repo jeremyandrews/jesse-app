@@ -167,7 +167,7 @@ A `claude-code` turn at `write` on this deployment can reach a great deal that a
 cannot, and the gap is the whole point rather than a limitation to close:
 
 - **35 allowlisted `Bash` verb patterns**, including `git:*`, `mv:*`, `find:*`, `shasum:*`,
-  eleven `gh` subcommands, four `node vault/*.js` scripts and six vault shell scripts.
+  eleven `gh` subcommands, five `node vault/*.js` scripts and six vault shell scripts.
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
@@ -324,6 +324,7 @@ Default allowlist (`JESSE_ALLOWED_TOOLS` to override):
 | `Bash(node vault/generate-diet-today.js:*)` | Regenerate the `diet-today.js` dashboard cache from the authoritative CSVs after a food/exercise/weigh-in log (without it, a phone log appends the CSV but leaves the cache stale) |
 | `Bash(node vault/validate-diet-today.js:*)`, `Bash(node vault/verify-diet-consistency.js:*)` | The generator's two guards — field-contract validation and CSV-vs-cache consistency — run after each regeneration |
 | `Bash(node vault/rotate-currency-summary.js:*)` | Keep the running currency summaries bounded (newest 60 rows live, the rest into a per-year archive). Pinned like the three above, and carrying the same write-then-execute cost named below |
+| `Bash(node vault/roll-living-notes.js --daily)` | The strands sweep's once-a-day roll of the living notes: old status, done and decision lines move verbatim out of `vault/Strands/*.md` and every `Journal.md` into monthly history files. **The only exact-command grant in the list**, deliberately not `:*`: the free tail would admit the unguarded roll (no flag) and `--overview`. The script takes no path argument, and `--daily` refuses before 04:00 local and again once `vault/Strands/history/.last-roll` holds today. Measured live against claude 2.1.303 on 2026-11-03: the exact command ran; every other flag spelling, another `node vault/` script, `node -e` and a `&&` chain were refused. Same write-then-execute cost named below |
 | `Bash(./.claude/skills/diet-query/run-week-query.sh:*)`, `Bash(./.claude/skills/currency-stats/currency-stats.py:*)`, `Bash(./.claude/skills/gh-review/create-pending-review.sh:*)` | **The compute wrappers that replaced the interpreters.** Each accepts DATA, never code: the duckdb wrapper runs only the committed `week.sql` and takes at most two round-trip-validated dates; the stats script reads a rate series on stdin with no `eval` and refuses unknown arguments; the review wrapper fixes the method, repo and path. See the withdrawal note below |
 | `Bash(shasum:*)` | Fingerprinting. It reads and prints — there is no destination path to point outside the vault |
 | `Bash(./.claude/skills/archive-processing/find-checked-archive-boxes.sh:*)`, `Bash(./.claude/skills/draft-lint/lint-draft.sh:*)` | The one command each of `archive-box` and `overnight-vault-lint` actually runs. Without them each job reads its skill's instructions and cannot act on them. Same write-then-execute cost as the pinned `node` scripts |
@@ -340,7 +341,7 @@ Default allowlist (`JESSE_ALLOWED_TOOLS` to override):
 | `mcp__kubernetes-cloud__*` (twenty) | **The cloud cluster `kc1`, as ServiceAccount `jesse:jesse`, not `cluster-admin`.** The same twenty tools as `kubernetes`, granted by name. What they can do is set by kc1's RBAC and admission policy: workloads, their Secrets and exec in the `work` namespace, a read-only view of the rest, and every pod on a burst worker. See [The cloud cluster](#the-cloud-cluster-kubernetes-cloud-fenced-by-the-cluster-2026-10-28) |
 | `mcp__build__build_bridge`, `mcp__build__test_bridge` | **Compile and run the Rust bridge out of the review checkout.** This is the only grant in this table that EXECUTES CODE. Each tool takes an EMPTY argument object — the program, subcommand, flags, target directory and working directory are compile-time constants in `bridge/src/buildsvc.rs`, so nothing a turn says reaches a command line. That is the whole difference from the `Bash(cargo:*)` grant it replaces, and it is structural rather than a matter of degree. It does **not** make the capability safe: the child can edit that checkout and then have it compiled and run, which is arbitrary code execution by construction. What bounds it is the sandbox the build runs inside, not the shape of the tool. Named individually, never `mcp__build__*`. Added 2026-08-21 — see [The build capability](#the-build-capability-typed-tools-inside-a-sandbox-2026-08-21) |
 
-These four `node vault/<script>.js` entries are pinned to the **exact script
+These five `node vault/<script>.js` entries are pinned to the **exact script
 paths**, never a bare `Bash(node:*)`: a bare node scope would allow
 `node -e "<arbitrary JS>"` — arbitrary code execution from a phone request — so
 only the named scripts are permitted
@@ -350,7 +351,7 @@ only the named scripts are permitted
 WRITE-THEN-EXECUTE path to arbitrary code.** It is not a grant to run *today's*
 file contents. The child holds a scoped write grant over the same tree, so it can
 rewrite one of these scripts and then invoke it under its own pinned rule. That is
-true of the four `node vault/*.js` scopes, the two pinned skill scripts, and the
+true of the five `node vault/*.js` scopes, the two pinned skill scripts, and the
 three compute wrappers. The mitigation is that the tree is version-controlled and
 committed — **not** that the path is pinned. It is carried in the containment
 record's notes as a baseline so it stays visible.

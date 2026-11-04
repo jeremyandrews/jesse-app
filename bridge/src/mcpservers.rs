@@ -761,6 +761,15 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
     // at the root. `manage_spreadsheet_comment` registers and is DELIBERATELY UNGRANTED: a
     // comment can @mention people, which mails them, and that is a send path.
     //
+    // DOCS JOIN IT (0.193.0): `--tools sheets docs drive`, so a turn can create a Google Doc,
+    // fill and format it, and read it back. `create_doc` takes no parent folder, so `drive` is
+    // loaded for ONE tool, `create_drive_file`, which takes a `folder_id` and, given the Docs
+    // MIME type, makes an empty Doc in that folder for the Docs tools to fill. The token widens
+    // to `documents`, `documents.readonly`, `drive` and `drive.file`. `drive` is the full Drive
+    // scope, so what bounds this server's Drive reach is the grant below, not the token. See
+    // [`GOOGLE_DOCS_WRITE_TOOLS`] and [`GOOGLE_DRIVE_WRITE_TOOLS`] for what is granted and what
+    // registers and is deliberately not.
+    //
     // The command is the `workspace-mcp-sheets` launcher (`bridge/launchers/`), which points
     // the server at its OWN credentials directory, `~/.config/jesse-google-sheets/creds`. The
     // bridge's environment carries `google`'s directory, so `WORKSPACE_MCP_CREDENTIALS_DIR` is
@@ -774,6 +783,8 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
                 "--single-user",
                 "--tools",
                 "sheets",
+                "docs",
+                "drive",
                 "--tool-tier",
                 "complete",
             ],
@@ -783,7 +794,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
                 "USER_GOOGLE_EMAIL",
             ],
         ),
-        &GOOGLE_SHEETS_WRITE_TOOLS,
+        &GOOGLE_SHEETS_ROW_WRITE_TOOLS,
     ),
     // THE CLOUD CLUSTER (0.188.0): the same pinned binary and toolsets as `kubernetes`, through
     // the `jesse-k8s-cloud-mcp` launcher, which points it at kc1 as the ServiceAccount
@@ -840,6 +851,69 @@ pub const GOOGLE_SHEETS_READ_TOOLS: [&str; 5] = [
     "read_sheet_values",
     "list_sheet_tables",
     "list_spreadsheet_comments",
+];
+
+/// The `google-sheets` Docs tools that change a document (0.193.0): create, insert and modify
+/// text, heading and paragraph styles, tables, lists and page breaks, find and replace. Write
+/// turns only, classed `write`.
+///
+/// From `workspace-mcp` 1.23.1, `--tools sheets docs drive --tool-tier complete`, the Docs
+/// tools that register and are DELIBERATELY UNGRANTED: `batch_update_doc` and
+/// `insert_doc_image` (both insert an image by URI, which has Google fetch any URL the turn
+/// names, a route out for whatever the URL carries), `manage_document_comment` (a comment can
+/// @mention people, and Google mails them), `export_doc_to_pdf` (writes a second Drive file),
+/// `update_doc_headers_footers` and `manage_doc_tab` (not needed to make a document), and the
+/// reads `search_docs`, `list_docs_in_folder`, `list_document_comments` and
+/// `debug_table_structure`.
+pub const GOOGLE_DOCS_WRITE_TOOLS: [&str; 6] = [
+    "create_doc",
+    "modify_doc_text",
+    "update_paragraph_style",
+    "insert_doc_elements",
+    "create_table_with_data",
+    "find_and_replace_doc",
+];
+
+/// The `google-sheets` Docs tools that only read a document back.
+pub const GOOGLE_DOCS_READ_TOOLS: [&str; 3] = [
+    "get_doc_content",
+    "get_doc_as_markdown",
+    "inspect_doc_structure",
+];
+
+/// The ONE `google-sheets` Drive tool granted (0.193.0): `create_drive_file`, which creates a
+/// file in a given `folder_id`, so a Doc can be made in a named folder (`create_doc` takes no
+/// parent). Write turns only, classed `write`. Its `fileUrl` argument can fetch a public
+/// `http(s)` URL into the new file (`workspace-mcp` refuses internal addresses) or read a
+/// `file://` path inside the instance's own attachment directory, nothing else.
+///
+/// Every other Drive tool `drive` registers is DELIBERATELY UNGRANTED: `update_drive_file`
+/// (renames, moves between folders, trashes), `copy_drive_file`, `manage_drive_access` and
+/// `set_drive_file_permissions` (share and permission changes), `create_drive_folder`,
+/// `import_to_google_doc`, `import_to_google_sheets` and `import_to_google_slides` (conversion
+/// imports), and the reads `search_drive_files`, `list_drive_items`, `get_drive_file_content`,
+/// `get_drive_file_download_url`, `get_drive_shareable_link`, `get_drive_file_permissions` and
+/// `check_drive_file_public_access` (the read-only `google` server already reads Drive).
+pub const GOOGLE_DRIVE_WRITE_TOOLS: [&str; 1] = ["create_drive_file"];
+
+/// Every `google-sheets` write: the Sheets, Docs and Drive lists above, in that order, which
+/// `tests::google_sheets_row_writes_are_the_three_lists` holds it to.
+pub const GOOGLE_SHEETS_ROW_WRITE_TOOLS: [&str; 15] = [
+    "create_spreadsheet",
+    "create_sheet",
+    "modify_sheet_values",
+    "append_table_rows",
+    "format_sheet_range",
+    "manage_conditional_formatting",
+    "resize_sheet_dimensions",
+    "move_sheet_rows",
+    "create_doc",
+    "modify_doc_text",
+    "update_paragraph_style",
+    "insert_doc_elements",
+    "create_table_with_data",
+    "find_and_replace_doc",
+    "create_drive_file",
 ];
 
 /// The row for `name`, or `None`.
@@ -1157,7 +1231,7 @@ pub(crate) fn golden_main_config() -> String {
     [
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         HOME_ASSISTANT_MCP_URL,
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","--tool-tier","complete"]},"kubernetes-cloud":{"type":"stdio","command":"jesse-k8s-cloud-mcp","args":["--toolsets","core,config"]}}}"#,
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","docs","drive","--tool-tier","complete"]},"kubernetes-cloud":{"type":"stdio","command":"jesse-k8s-cloud-mcp","args":["--toolsets","core,config"]}}}"#,
     ]
     .concat()
 }
@@ -1408,11 +1482,12 @@ mod tests {
     const SHEETS_LAUNCHER: &str = include_str!("../launchers/workspace-mcp-sheets");
     const SHEETS_CONSENT: &str = include_str!("../launchers/consent-google-sheets");
 
-    /// `google-sheets` LOADS THE SHEETS SERVICE AND NOTHING ELSE. `--tools` names `sheets`
-    /// alone, so no Gmail, Calendar or Drive tool registers on the one Google instance that can
-    /// write, and `--read-only` is absent because writing Sheets is the row's whole purpose.
+    /// `google-sheets` LOADS SHEETS, DOCS AND DRIVE AND NOTHING ELSE (0.193.0). `--tools` names
+    /// those three, so no Gmail or Calendar tool registers on the one Google instance that can
+    /// write, and `--read-only` is absent because writing is the row's whole purpose. Drive is
+    /// loaded for the one tool [`GOOGLE_DRIVE_WRITE_TOOLS`] grants.
     #[test]
-    fn google_sheets_loads_only_the_sheets_service() {
+    fn google_sheets_loads_only_sheets_docs_and_drive() {
         let r = row("google-sheets").expect("the google-sheets row");
         assert_eq!(r.transport, Transport::BridgeStdio);
         assert_eq!(r.command, "workspace-mcp-sheets");
@@ -1422,6 +1497,8 @@ mod tests {
                 "--single-user",
                 "--tools",
                 "sheets",
+                "docs",
+                "drive",
                 "--tool-tier",
                 "complete"
             ]
@@ -1432,9 +1509,16 @@ mod tests {
             .take_while(|a| !a.starts_with("--"))
             .copied()
             .collect();
-        assert_eq!(services, ["sheets"]);
+        assert_eq!(services, ["sheets", "docs", "drive"]);
         for other in [
-            "gmail", "calendar", "drive", "docs", "slides", "forms", "chat",
+            "gmail",
+            "calendar",
+            "slides",
+            "forms",
+            "chat",
+            "tasks",
+            "contacts",
+            "appscript",
         ] {
             assert!(!r.args.contains(&other), "google-sheets loads {other}");
         }
@@ -1500,8 +1584,8 @@ mod tests {
         assert!(SHEETS_CONSENT.contains("~/.config/jesse-google-sheets/creds/"));
     }
 
-    /// EVERY `google-sheets` TOOL IS DECIDED: the eight writes are classed `write`, the five
-    /// reads are not, and the grant is exactly those thirteen.
+    /// EVERY `google-sheets` TOOL IS DECIDED: the Sheets, Docs and Drive writes are classed
+    /// `write`, the reads are not, and the grant is exactly those twenty-three.
     #[test]
     fn google_sheets_classes_every_granted_tool() {
         let r = row("google-sheets").unwrap();
@@ -1516,10 +1600,95 @@ mod tests {
         let mut expected: Vec<String> = GOOGLE_SHEETS_WRITE_TOOLS
             .iter()
             .chain(GOOGLE_SHEETS_READ_TOOLS.iter())
+            .chain(GOOGLE_DOCS_WRITE_TOOLS.iter())
+            .chain(GOOGLE_DOCS_READ_TOOLS.iter())
+            .chain(GOOGLE_DRIVE_WRITE_TOOLS.iter())
             .map(|t| t.to_string())
             .collect();
         expected.sort_unstable();
         assert_eq!(granted, expected);
+    }
+
+    /// EVERY `google-sheets` DOCS AND DRIVE TOOL IS DECIDED (0.193.0): the six Docs writes and
+    /// `create_drive_file` are classed `write`, the three Docs reads are not, and the Docs and
+    /// Drive part of the grant is exactly those ten. The tools that register and are left out
+    /// on purpose are never granted.
+    #[test]
+    fn google_docs_classes_every_granted_tool() {
+        let r = row("google-sheets").unwrap();
+        for t in GOOGLE_DOCS_WRITE_TOOLS
+            .iter()
+            .chain(GOOGLE_DRIVE_WRITE_TOOLS.iter())
+        {
+            assert_eq!(r.class_of(t), ToolClass::Write, "{t}");
+        }
+        for t in GOOGLE_DOCS_READ_TOOLS {
+            assert_eq!(r.class_of(t), ToolClass::Read, "{t}");
+        }
+        let granted = r.granted_tools(DEFAULT_ALLOWED_TOOLS);
+        let mut docs_and_drive: Vec<&str> = granted
+            .iter()
+            .map(String::as_str)
+            .filter(|t| !GOOGLE_SHEETS_WRITE_TOOLS.contains(t))
+            .filter(|t| !GOOGLE_SHEETS_READ_TOOLS.contains(t))
+            .collect();
+        docs_and_drive.sort_unstable();
+        let mut expected: Vec<&str> = GOOGLE_DOCS_WRITE_TOOLS
+            .iter()
+            .chain(GOOGLE_DOCS_READ_TOOLS.iter())
+            .chain(GOOGLE_DRIVE_WRITE_TOOLS.iter())
+            .copied()
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(docs_and_drive, expected);
+        for never in [
+            "batch_update_doc",
+            "insert_doc_image",
+            "manage_document_comment",
+            "export_doc_to_pdf",
+            "update_doc_headers_footers",
+            "manage_doc_tab",
+            "update_drive_file",
+            "copy_drive_file",
+            "manage_drive_access",
+            "set_drive_file_permissions",
+            "create_drive_folder",
+            "import_to_google_doc",
+            "import_to_google_sheets",
+            "import_to_google_slides",
+            "get_drive_shareable_link",
+            "get_drive_file_permissions",
+        ] {
+            assert!(!granted.iter().any(|g| g == never), "{never} is granted");
+        }
+    }
+
+    /// THE ROW'S WRITE CLASS IS THE THREE LISTS, no more and no fewer.
+    #[test]
+    fn google_sheets_row_writes_are_the_three_lists() {
+        let joined: Vec<&str> = GOOGLE_SHEETS_WRITE_TOOLS
+            .iter()
+            .chain(GOOGLE_DOCS_WRITE_TOOLS.iter())
+            .chain(GOOGLE_DRIVE_WRITE_TOOLS.iter())
+            .copied()
+            .collect();
+        assert_eq!(joined, GOOGLE_SHEETS_ROW_WRITE_TOOLS);
+        assert_eq!(
+            row("google-sheets").unwrap().write_tools,
+            GOOGLE_SHEETS_ROW_WRITE_TOOLS
+        );
+    }
+
+    /// A READ-ONLY TURN GETS NO `google-sheets` WRITE (0.193.0): neither the read allowlist nor
+    /// the replies one grants any Sheets, Docs or Drive write on this server.
+    #[test]
+    fn a_read_only_turn_grants_no_google_sheets_write() {
+        let r = row("google-sheets").unwrap();
+        for list in [crate::READ_ALLOWED_TOOLS, crate::REPLIES_ALLOWED_TOOLS] {
+            for t in r.granted_tools(list) {
+                assert_ne!(r.class_of(&t), ToolClass::Write, "{t} on a read-only turn");
+            }
+        }
     }
 
     /// `inbound` FETCHES GMAIL ATTACHMENTS WITH `google`'s TOKEN AND NO OTHER. It reads

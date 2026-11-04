@@ -2444,6 +2444,9 @@ flags for BOTH Google instances live in the bridge's own const, where a test ass
 
 ## Google Sheets: the one Google server that writes (`google-sheets`, 0.182.0)
 
+> **0.193.0: it writes Google Docs too, and its token now holds full `drive`.** See "Docs join
+> it" at the end of this section. The rest describes 0.182.0, and still holds for Sheets.
+
 Bridge 0.182.0 adds a third Google Workspace instance to every main turn on both harnesses. It
 is the first Google server that can change anything, and what it can change is Sheets in the
 work account (`jeremy@tag1consulting.com`) and nothing else. The other two are not touched:
@@ -2462,12 +2465,12 @@ ungranted.
 
 | | |
 |---|---|
-| Server | `workspace-mcp` 1.23.1, `--single-user --tools sheets --tool-tier complete`, no `--read-only` |
+| Server | `workspace-mcp` 1.23.1, `--single-user --tools sheets docs drive --tool-tier complete` (0.193.0; `--tools sheets` before), no `--read-only` |
 | Command | `workspace-mcp-sheets` (`bridge/launchers/`), a host launcher whose job is the token cache |
 | Token | its own, at `~/.config/jesse-google-sheets/creds`, from its own consent; never `google`'s |
 | Client | `google`'s OAuth client (`GOOGLE_OAUTH_CLIENT_ID`/`_SECRET`, forwarded by name) |
-| Scopes | `spreadsheets`, `spreadsheets.readonly`, `drive.readonly`, `openid`, `userinfo.email`, `userinfo.profile` |
-| Granted | 13 of 14 registered tools; the 8 writes on write turns only |
+| Scopes | 0.193.0: `spreadsheets`, `spreadsheets.readonly`, `documents`, `documents.readonly`, `drive`, `drive.readonly`, `drive.file`, `openid`, `userinfo.email`, `userinfo.profile` (0.182.0: the Sheets two, `drive.readonly` and the identity three) |
+| Granted | 0.193.0: 23 of 49 registered tools; the 15 writes on write turns only (0.182.0: 13 of 14, 8 writes) |
 | Enforced by | the scopes, the server's `--tools`, and the allowlist |
 
 Reads: `list_spreadsheets`, `get_spreadsheet_info`, `read_sheet_values`, `list_sheet_tables`,
@@ -2484,7 +2487,7 @@ Google mails each one. That is a send path, and sending stays off on every Googl
 
 ### What it cannot do, at the credential
 
-The token's only Drive scope is `drive.readonly`, so even a tool outside the grant could not
+**Until 0.193.0.** The token's only Drive scope was `drive.readonly`, so even a tool outside the grant could not
 share a file, change its permissions, move it, trash it or create anything that is not a
 spreadsheet. It holds no Gmail and no Calendar scope at all. Consenting mints a separate refresh
 token for the same client (`workspace-mcp` does not request `include_granted_scopes`), so it
@@ -2508,6 +2511,49 @@ the consent URL; nothing hangs. The launcher points `BROWSER` at `true` outside 
 helper, because a stdio `workspace-mcp` with no token otherwise opens that URL in a browser on
 the host's screen from a headless turn, and starts a loopback listener for the callback. The
 listener still starts; it is loopback only and serves only Google's redirect for that one flow.
+
+### Docs join it (0.193.0)
+
+Turns could read Drive but not produce a document, so every Doc request ended as an HTML file
+uploaded by hand. The same instance now loads `--tools sheets docs drive`.
+
+**Why `drive`.** `create_doc` takes no parent folder, so a Doc it makes lands in the Drive root,
+and no granted Docs tool moves it. The one tool that creates a file in a given folder is Drive's
+`create_drive_file` (`folder_id`, and with the Google Docs MIME type an empty Doc there for the
+Docs tools to fill). `drive` is loaded for that tool alone.
+
+**Granted (10 new):** Docs writes `create_doc`, `modify_doc_text`, `update_paragraph_style`,
+`insert_doc_elements`, `create_table_with_data`, `find_and_replace_doc`; Docs reads
+`get_doc_content`, `get_doc_as_markdown`, `inspect_doc_structure`; Drive `create_drive_file`.
+The seven writes are classed `write`: write turns only, on both harnesses.
+
+**Registered and never granted:** `batch_update_doc` and `insert_doc_image` (both can insert an
+image by URI, which has Google fetch any URL the turn names, and a URL can carry data out),
+`manage_document_comment` (a comment can @mention people, and Google mails them),
+`export_doc_to_pdf`, `update_doc_headers_footers`, `manage_doc_tab`, the Docs reads
+`search_docs`, `list_docs_in_folder`, `list_document_comments`, `debug_table_structure`, and
+every other Drive tool: `update_drive_file` (rename, move, trash), `copy_drive_file`,
+`manage_drive_access`, `set_drive_file_permissions`, `create_drive_folder`, the three
+`import_to_google_*`, and the Drive reads (the read-only `google` server already reads Drive).
+
+**The credential no longer bounds Drive.** `--tools drive` requests the full `drive` scope, and
+`workspace-mcp` 1.23.1 has no per-tool scope switch. The token CAN now share, move, trash or
+delete any file the work account can. What stops a turn is the grant: the allowlist on Claude
+Code, `enabled_tools` on Codex, the `--tools` manifest on direct, and the gateway's manifest
+when it is on. Tests hold that no Drive share, permission, move, copy, update or trash tool is
+granted on any Google server, and that `create_drive_file` is granted on `google-sheets` only.
+Gmail and Calendar are still absent at the root: neither service is loaded and the token holds
+neither scope. `google` and `google-perseido` are unchanged.
+
+**`create_drive_file`'s `fileUrl`.** Besides inline content it can fill the new file from a
+`fileUrl`. `http(s)` is fetched by the bridge host; `workspace-mcp` refuses internal addresses,
+so it reaches the public internet only. `file://` is confined to the instance's own attachment
+directory (`~/.config/jesse-google-sheets/attachments`); no `ALLOWED_FILE_DIRS` is set. So a
+write turn can make a GET to a public URL of its choosing, which the granted browser server's
+navigation can already do.
+
+**Re-consent.** The widened scopes do not reach the existing token: it must be deleted and
+consented again (bridge README, "Google Sheets: the one-time setup").
 
 ### Residual risks, accepted
 

@@ -14,6 +14,35 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.193.0] - 2026-11-04
+
+**Bridge turns create and edit Google Docs in the work account.** Turns could read Drive but
+not produce a document, so every Doc request ended as an HTML file Jeremy uploaded by hand. The
+write capable `google-sheets` instance now also loads Docs, keeping Gmail, Calendar and the
+`google` Drive read only.
+
+- **Server:** `google-sheets` runs `--single-user --tools sheets docs drive --tool-tier
+  complete` (was `--tools sheets`). Same name, launcher and credentials directory; `google` and
+  `google-perseido` are unchanged.
+- **Folder placement:** `create_doc` takes no parent folder, so Drive is loaded for one tool,
+  `create_drive_file`, which takes a `folder_id`; with the Google Docs MIME type it makes an
+  empty Doc in that folder for the Docs tools to fill.
+- **Granted (10 new, both harnesses):** writes `create_doc`, `modify_doc_text`,
+  `update_paragraph_style`, `insert_doc_elements`, `create_table_with_data`,
+  `find_and_replace_doc`, `create_drive_file` (classed `write`, write turns only); reads
+  `get_doc_content`, `get_doc_as_markdown`, `inspect_doc_structure`. New
+  `GOOGLE_DOCS_WRITE_TOOLS`, `GOOGLE_DOCS_READ_TOOLS` and `GOOGLE_DRIVE_WRITE_TOOLS`, with tests
+  that the grant is exactly those and that a read-only turn gets no `google-sheets` write.
+- **Deliberately not granted:** `batch_update_doc` and `insert_doc_image` (an image by URI has
+  Google fetch any URL), `manage_document_comment` (an @mention mails people),
+  `export_doc_to_pdf`, `update_doc_headers_footers`, `manage_doc_tab`, four Docs reads, and every
+  other Drive tool (update, move, copy, share, permissions, folder, import, trash).
+- **Scopes widen** to add `documents`, `documents.readonly`, `drive` and `drive.file`. Full
+  `drive` is what `--tools drive` requests, so on this instance the grant, not the token, now
+  bounds Drive. The existing token must be deleted and re-consented (bridge README, "Google
+  Sheets: the one-time setup", step 3).
+- All three containment records re-recorded live.
+
 ## [bridge 0.192.0, App 1.0 (200)] - 2026-11-04
 
 **Word, PowerPoint, text, CSV and Excel attachments, from the phone and the Mac, on every

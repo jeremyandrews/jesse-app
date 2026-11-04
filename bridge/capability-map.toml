@@ -3654,7 +3654,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "Lists the spreadsheets in the work Drive the account can see."
 
@@ -3663,7 +3663,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "Reads a spreadsheet's title, tabs and their sizes."
 
@@ -3672,7 +3672,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "Reads the values in a range of a spreadsheet."
 
@@ -3681,7 +3681,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "Lists a spreadsheet's structured tables and their columns."
 
@@ -3690,7 +3690,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "Reads the comments on a spreadsheet."
 
@@ -3699,7 +3699,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: creates a new spreadsheet in the work Drive and returns its link."
 
@@ -3708,7 +3708,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: adds a tab to a spreadsheet, or duplicates one."
 
@@ -3717,7 +3717,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: writes, overwrites or clears the values in a range."
 
@@ -3726,7 +3726,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: appends rows to a structured table."
 
@@ -3735,7 +3735,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: formats a range: bold, italics, colours, number formats, wrapping, alignment."
 
@@ -3744,7 +3744,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: adds, updates or deletes conditional formatting rules."
 
@@ -3753,7 +3753,7 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: resizes, freezes, hides, inserts or deletes rows and columns."
 
@@ -3762,9 +3762,111 @@ kind = "mcp"
 server = "google-sheets"
 harnesses = ["claude-code", "codex"]
 placement = "upstream-pod"
-dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, drive.readonly (workspace-mcp 1.23.1)"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Sheet: create, fill and format a spreadsheet in the work Drive and return the link (write turns only for the writes)"
 reason = "WRITES: moves rows between tabs of one spreadsheet (not a Drive move)."
+
+# GOOGLE-SHEETS DOCS (0.193.0): the same instance, `--tools sheets docs drive`. Six Docs writes,
+# three Docs reads and ONE Drive tool, `create_drive_file`, the only way to put a new Doc in a
+# named folder. Registered and deliberately NOT granted: `batch_update_doc` and `insert_doc_image`
+# (an image by URI has Google fetch any URL), `manage_document_comment` (a comment can @mention
+# people, and Google mails them), `export_doc_to_pdf`, `update_doc_headers_footers`,
+# `manage_doc_tab`, `search_docs`, `list_docs_in_folder`, `list_document_comments`,
+# `debug_table_structure`, and every other Drive tool: `update_drive_file`, `copy_drive_file`,
+# `manage_drive_access`, `set_drive_file_permissions`, `create_drive_folder`,
+# `import_to_google_doc`, `import_to_google_sheets`, `import_to_google_slides`,
+# `search_drive_files`, `list_drive_items`, `get_drive_file_content`, `get_drive_file_download_url`,
+# `get_drive_shareable_link`, `get_drive_file_permissions`, `check_drive_file_public_access`.
+
+[grant."mcp__google-sheets__get_doc_content"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "Reads a Google Doc's text."
+
+[grant."mcp__google-sheets__get_doc_as_markdown"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "Reads a Google Doc back as Markdown, headings and tables included."
+
+[grant."mcp__google-sheets__inspect_doc_structure"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "Reads a Google Doc's element structure and indices, to place text, styles and tables exactly."
+
+[grant."mcp__google-sheets__create_doc"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: creates a new Google Doc in the Drive root, optionally with initial text."
+
+[grant."mcp__google-sheets__modify_doc_text"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: inserts or replaces text in a Doc and applies character formatting."
+
+[grant."mcp__google-sheets__update_paragraph_style"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: applies heading levels and paragraph styles (alignment, spacing, indents) to a range."
+
+[grant."mcp__google-sheets__insert_doc_elements"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: inserts a table, a list or a page break into a Doc."
+
+[grant."mcp__google-sheets__create_table_with_data"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: inserts a table into a Doc and fills its cells."
+
+[grant."mcp__google-sheets__find_and_replace_doc"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: finds and replaces text throughout a Doc."
+
+[grant."mcp__google-sheets__create_drive_file"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: creates one new file in a given Drive folder (with the Google Docs MIME type, an empty Doc there to fill); updates, moves, shares and deletes nothing."
 
 [grant."mcp__kubernetes-cloud__configuration_view"]
 kind = "mcp"

@@ -643,6 +643,15 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // `drive.readonly` and the three identity scopes. Its grant is under GOOGLE-SHEETS
 // below.
 //
+// DOCS JOIN `google-sheets` (0.193.0). It now loads `--tools sheets docs drive`, so its
+// token adds `documents`, `documents.readonly`, `drive` and `drive.file`, and the grant
+// adds six Docs writes, three Docs reads and ONE Drive tool, `create_drive_file`, the
+// only way to put a new Doc in a named folder (`create_doc` takes no parent). No other
+// Drive tool is granted: no update, move, copy, share, permission, import or trash.
+// `google` and `google-perseido` are untouched. The decided lists are
+// `crate::mcpservers::GOOGLE_DOCS_WRITE_TOOLS`, `GOOGLE_DOCS_READ_TOOLS` and
+// `GOOGLE_DRIVE_WRITE_TOOLS`, with the tools left out on purpose named there.
+//
 // THE SERVER NAME CARRIES A HYPHEN, which no server before it did, and both
 // harnesses were checked rather than assumed: Claude Code matched
 // `mcp__google-perseido__list_calendars` from this allowlist and called it, and
@@ -1201,6 +1210,11 @@ mcp__google-sheets__create_sheet,mcp__google-sheets__modify_sheet_values,\
 mcp__google-sheets__append_table_rows,mcp__google-sheets__format_sheet_range,\
 mcp__google-sheets__manage_conditional_formatting,\
 mcp__google-sheets__resize_sheet_dimensions,mcp__google-sheets__move_sheet_rows,\
+mcp__google-sheets__get_doc_content,mcp__google-sheets__get_doc_as_markdown,\
+mcp__google-sheets__inspect_doc_structure,mcp__google-sheets__create_doc,\
+mcp__google-sheets__modify_doc_text,mcp__google-sheets__update_paragraph_style,\
+mcp__google-sheets__insert_doc_elements,mcp__google-sheets__create_table_with_data,\
+mcp__google-sheets__find_and_replace_doc,mcp__google-sheets__create_drive_file,\
 mcp__kubernetes-cloud__configuration_view,mcp__kubernetes-cloud__namespaces_list,\
 mcp__kubernetes-cloud__events_list,mcp__kubernetes-cloud__projects_list,\
 mcp__kubernetes-cloud__nodes_log,mcp__kubernetes-cloud__nodes_top,\
@@ -5802,14 +5816,17 @@ mod tests {
         );
     }
 
-    /// THE GOOGLE-SHEETS GRANT IS EXACTLY THE THIRTEEN DECIDED TOOLS, by equality, with no
-    /// wildcard and without the one registered tool left out on purpose.
+    /// THE GOOGLE-SHEETS GRANT IS EXACTLY THE TWENTY-THREE DECIDED TOOLS, by equality, with no
+    /// wildcard and without the registered tools left out on purpose.
     ///
     /// From `workspace-mcp` 1.23.1, `--single-user --tools sheets --tool-tier complete`, on
     /// 2026-10-16: fourteen registered, thirteen granted, `manage_spreadsheet_comment` not
-    /// (a comment can @mention people, and Google mails them).
+    /// (a comment can @mention people, and Google mails them). With `docs drive` added on
+    /// 2026-11-04: forty-nine registered, twenty-three granted; the Docs and Drive tools left
+    /// out are named on `crate::mcpservers::GOOGLE_DOCS_WRITE_TOOLS` and
+    /// `GOOGLE_DRIVE_WRITE_TOOLS`.
     #[test]
-    fn the_google_sheets_grant_is_the_thirteen_decided_tools() {
+    fn the_google_sheets_grant_is_the_twenty_three_decided_tools() {
         let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
             .split(',')
             .filter(|e| e.starts_with("mcp__google-sheets"))
@@ -5817,6 +5834,9 @@ mod tests {
         let mut expected: Vec<String> = crate::mcpservers::GOOGLE_SHEETS_WRITE_TOOLS
             .iter()
             .chain(crate::mcpservers::GOOGLE_SHEETS_READ_TOOLS.iter())
+            .chain(crate::mcpservers::GOOGLE_DOCS_WRITE_TOOLS.iter())
+            .chain(crate::mcpservers::GOOGLE_DOCS_READ_TOOLS.iter())
+            .chain(crate::mcpservers::GOOGLE_DRIVE_WRITE_TOOLS.iter())
             .map(|t| format!("mcp__google-sheets__{t}"))
             .collect();
         granted.sort_unstable();
@@ -5831,6 +5851,13 @@ mod tests {
             "mcp__google-sheets",
             "mcp__google-sheets__manage_spreadsheet_comment",
             "mcp__google-sheets__start_google_auth",
+            "mcp__google-sheets__batch_update_doc",
+            "mcp__google-sheets__insert_doc_image",
+            "mcp__google-sheets__manage_document_comment",
+            "mcp__google-sheets__update_drive_file",
+            "mcp__google-sheets__copy_drive_file",
+            "mcp__google-sheets__manage_drive_access",
+            "mcp__google-sheets__set_drive_file_permissions",
         ] {
             assert!(
                 !DEFAULT_ALLOWED_TOOLS.split(',').any(|e| e == never),
@@ -5846,6 +5873,11 @@ mod tests {
     /// The names are what `workspace-mcp` 1.23.1 registers for `--tools gmail calendar drive`
     /// WITHOUT `--read-only` and deregisters with it (enumerated 2026-10-16), plus the send
     /// spellings the `message_send_mail_*` probes watch for.
+    ///
+    /// ONE EXCEPTION, ON ONE SERVER (0.193.0): `google-sheets` is granted `create_drive_file`,
+    /// the only tool that puts a new Doc in a named folder. It creates; it updates, moves,
+    /// shares and trashes nothing. Every other Drive mutation stays forbidden there, and on
+    /// `google` and `google-perseido` `create_drive_file` stays forbidden too.
     #[test]
     fn no_google_send_or_calendar_write_is_granted_anywhere() {
         const WRITE_ONLY: [&str; 20] = [
@@ -5879,6 +5911,11 @@ mod tests {
             for server in ["google", "google-perseido", "google-sheets"] {
                 let granted = crate::granted_mcp_tools(list, server);
                 for t in WRITE_ONLY.iter().chain(probe_spellings.iter()) {
+                    if server == "google-sheets"
+                        && crate::mcpservers::GOOGLE_DRIVE_WRITE_TOOLS.contains(t)
+                    {
+                        continue;
+                    }
                     assert!(!granted.iter().any(|g| g == t), "{server}::{t} is granted");
                 }
                 for g in &granted {

@@ -3410,18 +3410,19 @@ mod tests {
                     "{label}: the {name} server must scope --tools: {mcp:?}"
                 );
             }
-            // THE THIRD GOOGLE INSTANCE WRITES, AND ONLY SHEETS (0.182.0). It is the one entry
-            // without `--read-only`, so what bounds it at the server layer is `--tools sheets`
-            // alone: no `gmail`, `calendar` or `drive` may ever join it, and it must stay its
-            // own launcher (its own token cache), never the `google` command.
+            // THE THIRD GOOGLE INSTANCE WRITES, SHEETS AND DOCS (0.182.0, 0.193.0). It is the
+            // one entry without `--read-only`, so what bounds it at the server layer is
+            // `--tools sheets docs drive`: no `gmail` or `calendar` may ever join it (Drive is
+            // loaded for one granted tool), and it must stay its own launcher (its own token
+            // cache), never the `google` command.
             assert_eq!(
                 servers["google-sheets"],
                 serde_json::json!({
                     "type": "stdio",
                     "command": "workspace-mcp-sheets",
-                    "args": ["--single-user", "--tools", "sheets", "--tool-tier", "complete"]
+                    "args": ["--single-user", "--tools", "sheets", "docs", "drive", "--tool-tier", "complete"]
                 }),
-                "{label}: google-sheets loads the sheets service alone: {mcp:?}"
+                "{label}: google-sheets loads sheets, docs and drive alone: {mcp:?}"
             );
             assert_ne!(
                 servers["google-sheets"]["command"], servers["google"]["command"],

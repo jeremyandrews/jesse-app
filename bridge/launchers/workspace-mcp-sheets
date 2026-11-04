@@ -1,5 +1,6 @@
 #!/bin/sh
-# Third workspace-mcp instance: Google SHEETS for the work account, and nothing else.
+# Third workspace-mcp instance: Google SHEETS and DOCS for the work account (Docs since
+# 0.193.0, with Drive loaded for the one granted `create_drive_file`), and nothing else.
 #
 # Installed on the host as `~/.local/bin/workspace-mcp-sheets` BY THE DEPLOY, which stages it
 # with the bridge from `launchers` in bridge/deploy-bins.toml. The bridge names it as the
@@ -26,9 +27,9 @@
 # `include_granted_scopes`, so consenting here mints a separate refresh token and neither
 # widens nor revokes the read-only one.
 #
-# FLAGS COME FROM THE CALLER, NOT FROM HERE. `--single-user --tools sheets --tool-tier
-# complete` live in the bridge's server table, where the containment record commits them and
-# a test asserts this instance loads `sheets` alone. A flag hidden here would be invisible to
+# FLAGS COME FROM THE CALLER, NOT FROM HERE. `--single-user --tools sheets docs drive
+# --tool-tier complete` live in the bridge's server table, where the containment record
+# commits them and a test asserts this instance loads those three services alone. A flag hidden here would be invisible to
 # both.
 set -eu
 

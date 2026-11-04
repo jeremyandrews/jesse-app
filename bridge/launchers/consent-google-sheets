@@ -32,7 +32,7 @@ import time
 # The bridge's own arguments for the row, kept identical so the consent is for exactly the
 # scope set the bridge will run with. `tests::google_sheets_consent_helper_matches_the_row`
 # holds this line to the row in `bridge/src/mcpservers.rs`.
-SERVER_ARGS = ["--single-user", "--tools", "sheets", "--tool-tier", "complete"]
+SERVER_ARGS = ["--single-user", "--tools", "sheets", "docs", "drive", "--tool-tier", "complete"]
 CONSENT_WAIT_SECS = 300
 
 

@@ -280,7 +280,7 @@ fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Result<String, &'stat
     if !bytes.len().is_multiple_of(2) {
         return Err("UTF-16 with an odd number of bytes");
     }
-    char::decode_utf16(bytes.chunks_exact(2).map(|c| unit([c[0], c[1]])))
+    char::decode_utf16(bytes.as_chunks::<2>().0.iter().map(|c| unit(*c)))
         .collect::<Result<String, _>>()
         .map_err(|_| "not valid UTF-16")
 }

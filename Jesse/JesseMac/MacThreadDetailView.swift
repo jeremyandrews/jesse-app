@@ -482,7 +482,7 @@ struct MacThreadDetailView: View {
                       allowedContentTypes: importKind.contentTypes,
                       allowsMultipleSelection: importKind.allowsMultipleSelection) { result in
             switch importKind {
-            case .images, .pdfs: handleFileImport(result)
+            case .images, .documents: handleFileImport(result)
             // One recording at a time: the composer holds one transcript.
             case .audio: handleAudioImport(result)
             }
@@ -530,9 +530,9 @@ struct MacThreadDetailView: View {
                 importKind = .images
                 showImporter = true
             }
-            Button("PDF Document…", systemImage: "doc") {
+            Button("Document…", systemImage: "doc") {
                 attachError = nil
-                importKind = .pdfs
+                importKind = .documents
                 showImporter = true
             }
             Button("From Photos…", systemImage: "photo.on.rectangle") {
@@ -553,17 +553,19 @@ struct MacThreadDetailView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Attach a photo, image or PDF, or transcribe a recording into this message")
+        .help("Attach a photo, an image or a document, or transcribe a recording into this message")
         .accessibilityLabel("Add attachment")
         .disabled(running || attachments.count >= AttachmentLimits.maxCount)
     }
 
     /// The ONE staging call on this Mac, shared with the phone's `addAttachment`: every source
     /// here (the two importers, Photos, paste, drop, Continuity Camera) ends in it.
-    private func addAttachment(data: Data, fallbackName: String, suggestedName: String? = nil) {
+    private func addAttachment(data: Data, fallbackName: String, suggestedName: String? = nil,
+                               contentType: UTType? = nil) {
         // The Mac has no frugal mode: it is never on a metered link it knows about.
         attachError = AttachmentStaging.add(data: data, fallbackName: fallbackName,
-                                            suggestedName: suggestedName, to: &attachments,
+                                            suggestedName: suggestedName,
+                                            contentType: contentType, to: &attachments,
                                             frugal: .off)
     }
 
@@ -573,8 +575,9 @@ struct MacThreadDetailView: View {
         attachError = nil
         for item in items {
             guard let data = item.data else {
-                attachError = item.suggestedName.map { "Couldn’t attach “\($0)” (images or PDF only)." }
-                    ?? "Couldn’t paste that item (images or PDF only)."
+                let kinds = AttachmentLimits.supportedKinds
+                attachError = item.suggestedName.map { "Couldn’t attach “\($0)” (\(kinds) only)." }
+                    ?? "Couldn’t paste that item (\(kinds) only)."
                 continue
             }
             addAttachment(data: data, fallbackName: "Pasted", suggestedName: item.suggestedName)
@@ -596,8 +599,11 @@ struct MacThreadDetailView: View {
                     attachError = "Couldn’t read “\(url.lastPathComponent)”."
                     continue
                 }
+                // The picked file's own type chooses between the text formats, which have
+                // no magic bytes; the bytes are still what decides whether it is text.
                 addAttachment(data: data, fallbackName: "Document",
-                              suggestedName: url.lastPathComponent)
+                              suggestedName: url.lastPathComponent,
+                              contentType: try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
             }
         case .failure(let error):
             attachError = error.localizedDescription
@@ -716,12 +722,14 @@ struct MacDraftReader<Content: View>: View {
 
 /// What the composer's one file panel is choosing.
 enum MacFileImportKind: Equatable {
-    case images, pdfs, audio
+    case images, documents, audio
 
     var contentTypes: [UTType] {
         switch self {
         case .images: return [.image]
-        case .pdfs: return [.pdf]
+        // PDF, Word, RTF, PowerPoint, text, Markdown, CSV, TSV, JSON and Excel: the same
+        // list the phone's "Document…" picker takes.
+        case .documents: return AttachmentDocumentTypes.pickerContentTypes
         case .audio: return AudioRecordingTypes.contentTypes
         }
     }

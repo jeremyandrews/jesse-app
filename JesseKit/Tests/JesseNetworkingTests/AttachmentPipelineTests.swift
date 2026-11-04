@@ -1,6 +1,7 @@
 import XCTest
 import CoreGraphics
 import ImageIO
+import UniformTypeIdentifiers
 @testable import JesseNetworking
 
 /// The shared attachment pipeline, run on macOS (and on the iOS simulator by the local CI on
@@ -119,6 +120,139 @@ final class AttachmentPipelineTests: XCTestCase {
         ]
         let previews = await AttachmentThumbnail.previews(for: files)
         XCTAssertEqual(previews.map(\.filename), ["a.png", "b.pdf"])
+    }
+
+    // MARK: - Documents (Word, RTF, PowerPoint, Excel, the text family)
+
+    /// The bridge's own fixtures, read from the checkout, so the client and the bridge are
+    /// tested against the same bytes. Found by walking up from this file rather than a fixed
+    /// number of levels, because the local gate runs a COPY of this package from inside
+    /// `Jesse/build/` on an older host; both paths are inside the same checkout.
+    private func document(_ name: String, file: StaticString = #filePath) throws -> Data {
+        let relative = "bridge/tests/fixtures/documents/\(name)"
+        var dir = URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
+        while dir.path != "/" {
+            let candidate = dir.appendingPathComponent(relative)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try Data(contentsOf: candidate)
+            }
+            dir.deleteLastPathComponent()
+        }
+        throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: relative])
+    }
+
+    func testOfficeFilesAndRTFSniffFromTheirBytesAlone() throws {
+        XCTAssertEqual(JesseAttachment.sniffMime(try document("memo.docx")), AttachmentDocumentTypes.docxMime)
+        XCTAssertEqual(JesseAttachment.sniffMime(try document("budget.xlsx")), AttachmentDocumentTypes.xlsxMime)
+        XCTAssertEqual(JesseAttachment.sniffMime(try document("deck.pptx")), AttachmentDocumentTypes.pptxMime)
+        XCTAssertEqual(JesseAttachment.sniffMime(try document("memo.rtf")), AttachmentDocumentTypes.rtfMime)
+    }
+
+    func testALegacyWordFileNeedsItsDeclaredTypeAndXlsDoesNotPass() throws {
+        let doc = try document("memo.doc")
+        XCTAssertNil(JesseAttachment.sniffMime(doc), "an OLE file is not Word by its bytes alone")
+        XCTAssertEqual(JesseAttachment.sniffMime(doc, contentType: UTType(filenameExtension: "doc")),
+                       AttachmentDocumentTypes.docMime)
+        XCTAssertNil(JesseAttachment.sniffMime(doc, contentType: UTType(filenameExtension: "xls")),
+                     "legacy Excel is refused, as the bridge refuses it")
+    }
+
+    func testTheTextFamilyTakesItsTypeFromTheDeclaredTypeAndItsVerdictFromTheBytes() throws {
+        let cases: [(String, String, String)] = [
+            ("note.txt", "txt", "text/plain"), ("readme.md", "md", "text/markdown"),
+            ("cities.csv", "csv", "text/csv"), ("cities.tsv", "tsv", "text/tab-separated-values"),
+            ("quote.json", "json", "application/json"),
+        ]
+        for (name, ext, mime) in cases {
+            let data = try document(name)
+            XCTAssertNil(JesseAttachment.sniffMime(data), "\(name): no magic bytes, no type")
+            XCTAssertEqual(JesseAttachment.sniffMime(data, contentType: UTType(filenameExtension: ext)),
+                           mime, name)
+            XCTAssertTrue(AttachmentLimits.allowedMimes.contains(mime), name)
+            XCTAssertEqual(JesseAttachment.fileExtension(forMime: mime), ext, name)
+        }
+        let utf16 = Data([0xFF, 0xFE] + "a,b\n".utf16.flatMap { [UInt8($0 & 0xFF), UInt8($0 >> 8)] })
+        XCTAssertEqual(JesseAttachment.sniffMime(utf16, contentType: .commaSeparatedText), "text/csv",
+                       "UTF-16 with a BOM is text; the bridge transcodes it")
+        XCTAssertNil(JesseAttachment.sniffMime(Data(#"{"a": }"#.utf8), contentType: .json),
+                     "JSON must parse")
+    }
+
+    func testEveryDocumentTypeIsAllowedAndNamedByItsExtension() {
+        for (mime, ext) in AttachmentDocumentTypes.extensions {
+            XCTAssertTrue(AttachmentLimits.allowedMimes.contains(mime), mime)
+            XCTAssertEqual(JesseAttachment.fileExtension(forMime: mime), ext, mime)
+        }
+    }
+
+    /// A BINARY FILE PICKED AS `.txt` IS REFUSED HERE, before it is uploaded to be refused by
+    /// the bridge: the name chooses which text format, and the bytes decide whether it is text.
+    func testABinaryPickedAsTxtIsRejectedClientSide() {
+        let elf = Data([0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0xFF, 0xFE])
+        let outcome = AttachmentStaging.stage(data: elf, fallbackName: "Document",
+                                              suggestedName: "notes.txt", existing: [], frugal: .off)
+        XCTAssertEqual(outcome, .rejected(AttachmentStaging.unsupportedMessage))
+        XCTAssertTrue(AttachmentStaging.unsupportedMessage.contains(
+            "images, PDF, Word, PowerPoint, text, CSV or Excel"), AttachmentStaging.unsupportedMessage)
+    }
+
+    func testAPickedCSVIsStagedVerbatimUnderItsOwnNameAndCountsAgainstTheCaps() throws {
+        let csv = try document("cities.csv")
+        var files: [JesseAttachment] = []
+        XCTAssertNil(AttachmentStaging.add(data: csv, fallbackName: "Document",
+                                           suggestedName: "cities.csv", to: &files, frugal: .off))
+        XCTAssertEqual(files.first?.mime, "text/csv")
+        XCTAssertEqual(files.first?.data, csv, "a document is never re-encoded")
+        XCTAssertEqual(files.first?.filename, "cities.csv")
+        XCTAssertTrue(files.first?.isDocument ?? false)
+        // The count cap is the same one an image meets.
+        for _ in 1..<AttachmentLimits.maxCount {
+            XCTAssertNil(AttachmentStaging.add(data: csv, fallbackName: "Document",
+                                               suggestedName: "cities.csv", to: &files, frugal: .off))
+        }
+        XCTAssertEqual(AttachmentStaging.add(data: csv, fallbackName: "Document",
+                                             suggestedName: "cities.csv", to: &files, frugal: .off),
+                       "You can attach at most 4 files.")
+        // And the per-file byte cap.
+        var big = csv
+        big.append(Data(repeating: 0x41, count: AttachmentLimits.maxBytesPerFile))
+        XCTAssertEqual(AttachmentStaging.stage(data: big, fallbackName: "Document",
+                                               suggestedName: "big.csv", existing: [], frugal: .off),
+                       .rejected("“big.csv” is too large (max 10 MB per file)."))
+    }
+
+    func testAZipThatIsNotAnOfficeFileIsNotADocument() throws {
+        // The fixture xlsx with its workbook entry renamed in the central directory only is
+        // too fiddly; a ZIP whose FILE CONTENT names the marker is the case that matters.
+        let zip = try document("budget.xlsx")
+        XCTAssertEqual(AttachmentDocumentTypes.officeOpenXMLMime(zip), AttachmentDocumentTypes.xlsxMime)
+        XCTAssertNil(JesseAttachment.sniffMime(Data("PK\u{03}\u{04}word/document.xml".utf8)),
+                     "the marker as bytes, with no central directory, is not a docx")
+    }
+
+    func testADroppedDocumentFileIsAttachableAndTextOnTheClipboardIsNot() {
+        XCTAssertTrue(AttachmentDocumentTypes.isDocumentFile(.commaSeparatedText))
+        XCTAssertTrue(AttachmentDocumentTypes.isDocumentFile(UTType(filenameExtension: "docx")!))
+        XCTAssertTrue(AttachmentDocumentTypes.isDocumentFile(UTType(filenameExtension: "xlsx")!))
+        XCTAssertFalse(AttachmentDocumentTypes.isDocumentFile(.png))
+        XCTAssertFalse(AttachmentDocumentTypes.isDocumentFile(.pdf), "PDF has its own route")
+        XCTAssertFalse(AttachmentDocumentTypes.isDocumentFile(UTType(filenameExtension: "xls")!))
+        XCTAssertTrue(ComposerPaste.isMediaPaste(hasImages: false, hasPDF: false, hasDocumentFile: true))
+        XCTAssertFalse(ComposerPaste.isMediaPaste(hasImages: false, hasPDF: false))
+    }
+
+    /// A document has no thumbnail, and history still records it: an empty thumbnail the
+    /// row replaces with its icon and name.
+    func testADocumentHasNoThumbnailButStillAppearsInPreviews() async throws {
+        let csv = try document("cities.csv")
+        XCTAssertNil(AttachmentThumbnail.make(data: csv, mime: "text/csv"))
+        let files = [
+            JesseAttachment(filename: "a.png", mime: "image/png", data: try Fixtures.png()),
+            JesseAttachment(filename: "cities.csv", mime: "text/csv", data: csv),
+        ]
+        let previews = await AttachmentThumbnail.previews(for: files)
+        XCTAssertEqual(previews.map(\.filename), ["a.png", "cities.csv"])
+        XCTAssertEqual(previews.last?.thumbnail, Data())
     }
 
     // MARK: - Paste rules

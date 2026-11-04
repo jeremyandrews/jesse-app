@@ -1120,62 +1120,31 @@ pub async fn start_turn(
     // guard (moved into the turn task below) removes it on every exit path.
     let decoded = validate_and_decode_attachments(&st.cfg, &req.attachments)?;
     // Whether this turn carried attachments — the ledger records the raw text with a
-    // `[attachment omitted]` marker rather than the bytes (context carry).
+    // `[attachment omitted]` marker rather than the bytes (context carry). Documents count:
+    // their extracted text rides only in the prompt, never in the ledger.
     let had_attachments = !decoded.is_empty();
     // VISION PATH GATE: a paired text model with at least one RESOLVABLE vision helper
-    // reads attachments through the helper layer instead of the CLI's Read tool. It must
+    // reads IMAGES AND PDFS through the helper layer instead of the CLI's Read tool. It must
     // be resolvable, not merely paired, so a paired-but-broken model falls back to the
     // old path rather than dropping the attachment. Every other model (ambient opus, an
-    // unpaired hosted/local model) is byte-for-byte today's behavior.
-    let vision_on = had_attachments
+    // unpaired hosted/local model) is byte-for-byte today's behavior. Documents never take
+    // this route — they are inlined as text — so only a visual attachment asks the question.
+    let has_visual = decoded.iter().any(|d| !d.is_document());
+    let vision_on = has_visual
         && !active.vision.is_empty()
         && !vision::resolve_partners(&st.cfg, &active.vision).is_empty();
-    // THE TWO ROUTES ARE EXCLUSIVE, and the `match` is what says so. Exactly one arm runs,
-    // so a turn either transcribes through the helper or writes files for the child —
-    // never both, which would send the model the same image twice. See [`AttachmentRoute`].
-    let (prompt, scratch, vision_inputs) = match attachment_route(had_attachments, vision_on) {
-        AttachmentRoute::None => (prompt, None, Vec::new()),
-        AttachmentRoute::VisionHelper => {
-            // Carry the decoded bytes into the turn task (transcribed under the permit); no
-            // scratch file is written and no "read these files" suffix is appended — the text
-            // model can't read images, so the transcription block replaces that path entirely.
-            // NO SCRATCH DIR MEANS NO `attachment_dir` ON THE TURN REQUEST, which is what
-            // makes the child's read grant impossible to hand out on this route.
-            let inputs = VisionInput::from_decoded(&decoded, &req.attachments);
-            (prompt, None, inputs)
-        }
-        AttachmentRoute::ChildReadsFiles => {
-            let scratch = ScratchDir::create(&st.cfg.scratch_base()).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not create attachment scratch dir: {e}"),
-                )
-            })?;
-            let paths = scratch.write_all(&decoded).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("could not write attachment: {e}"),
-                )
-            })?;
-            // CONVERT WHAT THIS HARNESS CANNOT READ, and name its own tool in the prompt.
-            // Both are the serving harness's answer, not the bridge's: HEIC is unreadable on
-            // both harnesses and is transcoded for either, a PDF is native to Claude Code's
-            // `Read` and must be rasterized for Codex, and the sentence naming `Read` would
-            // send a Codex model looking for a tool it does not have. Anything with no route
-            // errors here rather than becoming a turn that silently answers without the file.
-            let support = st.cfg.harnesses.serving(&active).attachment_support();
-            let prepared =
-                prepare_attachments_for_harness(&st.cfg.vision, &scratch.path, &paths, support)?;
-            (
-                format!(
-                    "{prompt}{}",
-                    attachment_prompt_suffix(&prepared, support.instruction)
-                ),
-                Some(scratch),
-                Vec::new(),
-            )
-        }
-    };
+    let RoutedAttachments {
+        prompt,
+        scratch,
+        vision_inputs,
+    } = route_turn_attachments(
+        &st.cfg,
+        prompt,
+        decoded,
+        &req.attachments,
+        vision_on,
+        st.cfg.harnesses.serving(&active).attachment_support(),
+    )?;
 
     // Eviction runs on a periodic background task (`spawn_eviction_task`), NOT
     // here on the request hot path — a sweep that unlinks files must never block

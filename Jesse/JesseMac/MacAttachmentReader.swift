@@ -44,17 +44,19 @@ enum MacPasteboardMedia {
         return type.conforms(to: .image) || type.conforms(to: .pdf)
     }
 
-    /// Whether `pasteboard` carries an image or a PDF, either as data or as a file, and so
-    /// should be staged as attachments rather than pasted as text. The shared
-    /// `ComposerPaste.isMediaPaste` makes the call; this only asks AppKit the two questions.
+    /// Whether `pasteboard` carries an image or a PDF, either as data or as a file, or a
+    /// document as a FILE, and so should be staged as attachments rather than pasted as text.
+    /// The shared `ComposerPaste.isMediaPaste` makes the call; this only asks AppKit.
     static func hasMedia(_ pasteboard: NSPasteboard) -> Bool {
         let items = pasteboard.pasteboardItems ?? []
         var hasImages = false
         var hasPDF = false
+        var hasDocumentFile = false
         for item in items {
             if let url = fileURL(in: item), let type = UTType(filenameExtension: url.pathExtension) {
                 if type.conforms(to: .pdf) { hasPDF = true }
                 if type.conforms(to: .image) { hasImages = true }
+                if AttachmentDocumentTypes.isDocumentFile(type) { hasDocumentFile = true }
                 continue
             }
             for type in item.types {
@@ -63,7 +65,8 @@ enum MacPasteboardMedia {
                 if uti.conforms(to: .image) { hasImages = true }
             }
         }
-        return ComposerPaste.isMediaPaste(hasImages: hasImages, hasPDF: hasPDF)
+        return ComposerPaste.isMediaPaste(hasImages: hasImages, hasPDF: hasPDF,
+                                          hasDocumentFile: hasDocumentFile)
     }
 
     /// Every item on `pasteboard` read for staging, or nil when it carries no media and the
@@ -111,11 +114,14 @@ enum MacPasteboardMedia {
         return url
     }
 
-    /// A file's bytes under its own name, when it is an image or a PDF; unreadable otherwise.
-    /// What a picked, pasted or dropped file all come down to.
+    /// A file's bytes under its own name, when it is an image, a PDF or a document (Word,
+    /// RTF, PowerPoint, Excel, text, CSV, JSON); unreadable otherwise. What a picked, pasted
+    /// or dropped file all come down to. The name carries the extension staging reads the
+    /// text formats' type from.
     static func fileItem(at url: URL) -> MacMediaItem {
         guard let type = UTType(filenameExtension: url.pathExtension),
-              type.conforms(to: .image) || type.conforms(to: .pdf) else {
+              type.conforms(to: .image) || type.conforms(to: .pdf)
+                || AttachmentDocumentTypes.isDocumentFile(type) else {
             return MacMediaItem(data: nil, suggestedName: url.lastPathComponent)
         }
         let scoped = url.startAccessingSecurityScopedResource()

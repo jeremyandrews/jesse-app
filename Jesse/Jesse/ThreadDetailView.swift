@@ -720,7 +720,8 @@ struct ThreadDetailView: View {
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems,
                       maxSelectionCount: AttachmentLimits.maxCount, matching: .images)
         .fileImporter(isPresented: $showFileImporter,
-                      allowedContentTypes: [.pdf], allowsMultipleSelection: true,
+                      allowedContentTypes: AttachmentDocumentTypes.pickerContentTypes,
+                      allowsMultipleSelection: true,
                       onCompletion: handleFileImport)
         // One recording at a time: transcribing an hour of audio is not something to
         // start four of, and the composer holds one transcript.
@@ -873,7 +874,7 @@ struct ThreadDetailView: View {
                 attachError = nil
                 showFileImporter = true
             } label: {
-                Label("PDF Document", systemImage: "doc")
+                Label("Document…", systemImage: "doc")
             }
             // Audio is NOT an attachment: the bridge never sees a byte of it. This
             // transcribes on the device and puts the TEXT in the composer, which is why
@@ -995,8 +996,11 @@ struct ThreadDetailView: View {
                     attachError = "Couldn’t read “\(url.lastPathComponent)”."
                     continue
                 }
+                // The picked file's own type chooses between the text formats, which have
+                // no magic bytes; the bytes are still what decides whether it is text.
                 addAttachment(data: data, fallbackName: "Document",
-                              suggestedName: url.lastPathComponent)
+                              suggestedName: url.lastPathComponent,
+                              contentType: try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)
             }
         case .failure(let error):
             attachError = error.localizedDescription
@@ -1107,9 +1111,11 @@ struct ThreadDetailView: View {
     /// picker, file import, camera), and that function is the one spot both platforms reach,
     /// so the paste/picker divergence that was PR #51's root cause cannot come back as a
     /// phone/Mac one.
-    private func addAttachment(data: Data, fallbackName: String, suggestedName: String? = nil) {
+    private func addAttachment(data: Data, fallbackName: String, suggestedName: String? = nil,
+                               contentType: UTType? = nil) {
         attachError = AttachmentStaging.add(data: data, fallbackName: fallbackName,
-                                            suggestedName: suggestedName, to: &attachments,
+                                            suggestedName: suggestedName,
+                                            contentType: contentType, to: &attachments,
                                             frugal: FrugalSettings.current())
     }
 
@@ -1576,9 +1582,7 @@ private struct TurnAttachmentsView: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.secondary.opacity(0.15))
                     .frame(width: Self.side, height: Self.side)
-                    .overlay(
-                        Image(systemName: att.isPDF ? "doc.text" : "photo")
-                            .foregroundStyle(.secondary))
+                    .overlay(placeholder(att))
             }
             if att.isPDF {
                 Image(systemName: "doc.text.fill")
@@ -1593,8 +1597,29 @@ private struct TurnAttachmentsView: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5))
         .accessibilityElement()
-        .accessibilityLabel(att.isPDF ? "PDF attachment: \(att.filename)"
-                                      : "Image attachment: \(att.filename)")
+        .accessibilityLabel(att.accessibilityDescription)
+    }
+
+    /// What stands in for a thumbnail. A document never has one (the bridge read its text),
+    /// so it shows its kind and its name; an image or PDF whose preview failed shows its kind.
+    @ViewBuilder
+    private func placeholder(_ att: TurnAttachment) -> some View {
+        if att.isDocument {
+            VStack(spacing: 4) {
+                Image(systemName: att.placeholderIcon)
+                    .font(.title3)
+                Text(att.filename)
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 4)
+            }
+            .foregroundStyle(.secondary)
+        } else {
+            Image(systemName: att.placeholderIcon)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

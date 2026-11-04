@@ -1338,6 +1338,11 @@ pub struct Config {
     pub max_attachments: usize,
     pub max_attachment_bytes: usize,
     pub max_attachments_total_bytes: usize,
+    // Document text caps (see `DEFAULT_DOCUMENT_TEXT_CHARS` and
+    // `DEFAULT_DOCUMENT_TEXT_TOTAL_CHARS` in `documents`). Characters of EXTRACTED text,
+    // per document and per turn; a cut is noted in the prompt, never silent.
+    pub document_text_chars: usize,
+    pub document_text_total_chars: usize,
     // PER-TURN artifact caps (see the DEFAULT_MAX_ARTIFACT* consts in `artifacts`):
     // how many files one turn may return, how big any one may be, and how big they may
     // be combined. Three budgets, none of which substitutes for the others. On-disk
@@ -5112,6 +5117,14 @@ impl Config {
                 "JESSE_MAX_ATTACHMENTS_TOTAL_BYTES",
                 DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES,
             ),
+            document_text_chars: env_parse(
+                "JESSE_DOCUMENT_TEXT_CHARS",
+                DEFAULT_DOCUMENT_TEXT_CHARS,
+            ),
+            document_text_total_chars: env_parse(
+                "JESSE_DOCUMENT_TEXT_TOTAL_CHARS",
+                DEFAULT_DOCUMENT_TEXT_TOTAL_CHARS,
+            ),
             max_artifacts: env_parse("JESSE_MAX_ARTIFACTS", DEFAULT_MAX_ARTIFACTS),
             max_artifact_bytes: env_parse("JESSE_MAX_ARTIFACT_BYTES", DEFAULT_MAX_ARTIFACT_BYTES),
             max_artifacts_total_bytes: env_parse(
@@ -7041,6 +7054,8 @@ mod tests {
             "JESSE_MAX_ATTACHMENTS",
             "JESSE_MAX_ATTACHMENT_BYTES",
             "JESSE_MAX_ATTACHMENTS_TOTAL_BYTES",
+            "JESSE_DOCUMENT_TEXT_CHARS",
+            "JESSE_DOCUMENT_TEXT_TOTAL_CHARS",
             "JESSE_SCRATCH_DIR",
         ]
         .iter()
@@ -7090,6 +7105,11 @@ mod tests {
         assert_eq!(
             cfg.max_attachments_total_bytes,
             DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES
+        );
+        assert_eq!(cfg.document_text_chars, DEFAULT_DOCUMENT_TEXT_CHARS);
+        assert_eq!(
+            cfg.document_text_total_chars,
+            DEFAULT_DOCUMENT_TEXT_TOTAL_CHARS
         );
         // No JESSE_SCRATCH_DIR → scratch base falls back to the system temp dir.
         assert_eq!(cfg.scratch_dir, None);

@@ -37,6 +37,8 @@ pub(crate) fn test_config() -> Config {
         max_attachments: DEFAULT_MAX_ATTACHMENTS,
         max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         max_attachments_total_bytes: DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES,
+        document_text_chars: DEFAULT_DOCUMENT_TEXT_CHARS,
+        document_text_total_chars: DEFAULT_DOCUMENT_TEXT_TOTAL_CHARS,
         // Shipped artifact caps in the fixture: the cap tests override the one they
         // exercise, so a default that differs from production would only hide drift.
         max_artifacts: DEFAULT_MAX_ARTIFACTS,

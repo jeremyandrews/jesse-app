@@ -20,8 +20,10 @@ public enum ComposerPaste {
 
     /// Whether the composer should treat a paste as *media* (stage an attachment) rather
     /// than let the text view paste text. True when the clipboard carries an image or a
-    /// PDF; a text-only clipboard pastes as text as usual.
-    public static func isMediaPaste(hasImages: Bool, hasPDF: Bool) -> Bool {
-        hasImages || hasPDF
+    /// PDF, or a document FILE (a Finder copy of a `.docx` or a `.csv`); a text-only
+    /// clipboard pastes as text as usual, even when that text is CSV.
+    public static func isMediaPaste(hasImages: Bool, hasPDF: Bool,
+                                    hasDocumentFile: Bool = false) -> Bool {
+        hasImages || hasPDF || hasDocumentFile
     }
 }

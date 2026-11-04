@@ -34,9 +34,7 @@ struct MacTurnAttachmentsView: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.secondary.opacity(0.15))
                     .frame(width: Self.side, height: Self.side)
-                    .overlay(
-                        Image(systemName: att.isPDF ? "doc.text" : "photo")
-                            .foregroundStyle(.secondary))
+                    .overlay(placeholder(att))
             }
             if att.isPDF {
                 Image(systemName: "doc.text.fill")
@@ -52,8 +50,29 @@ struct MacTurnAttachmentsView: View {
                 .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5))
         .help(att.filename)
         .accessibilityElement()
-        .accessibilityLabel(att.isPDF ? "PDF attachment: \(att.filename)"
-                                      : "Image attachment: \(att.filename)")
+        .accessibilityLabel(att.accessibilityDescription)
+    }
+
+    /// What stands in for a thumbnail. A document never has one (the bridge read its text),
+    /// so it shows its kind and its name; an image or PDF whose preview failed shows its kind.
+    @ViewBuilder
+    private func placeholder(_ att: TurnAttachment) -> some View {
+        if att.isDocument {
+            VStack(spacing: 4) {
+                Image(systemName: att.placeholderIcon)
+                    .font(.title3)
+                Text(att.filename)
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 4)
+            }
+            .foregroundStyle(.secondary)
+        } else {
+            Image(systemName: att.placeholderIcon)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

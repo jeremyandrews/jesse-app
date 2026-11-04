@@ -41,6 +41,8 @@ pub fn test_config() -> Config {
         max_attachments: DEFAULT_MAX_ATTACHMENTS,
         max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         max_attachments_total_bytes: DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES,
+        document_text_chars: DEFAULT_DOCUMENT_TEXT_CHARS,
+        document_text_total_chars: DEFAULT_DOCUMENT_TEXT_TOTAL_CHARS,
         // The shipped artifact caps. `state_dir: None` above is what actually keeps the
         // channel off in the fixture (no store → `ArtifactRoute::None`), so every
         // existing turn assertion is byte-for-byte unaffected; the artifact tests set a

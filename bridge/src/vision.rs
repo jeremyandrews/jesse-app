@@ -64,18 +64,27 @@ pub struct VisionInput {
 }
 
 impl VisionInput {
-    /// Build the vision inputs from the decoded attachments and the original request
-    /// attachments (same order, same length — decoded[i] came from atts[i]). The client
-    /// filename is used ONLY as a sanitized display label; it never touches disk or a URL.
-    pub fn from_decoded(decoded: &[DecodedAttachment], atts: &[Attachment]) -> Vec<VisionInput> {
+    /// Build the vision inputs from the decoded attachments, each paired with its 1-based
+    /// position in the request, and the original request attachments (`atts[n - 1]` is where
+    /// attachment `n` came from). The position is carried rather than re-derived because a
+    /// turn's documents are inlined as text and never reach this function, so the visual
+    /// attachments are not always the first ones. The client filename is used ONLY as a
+    /// sanitized display label; it never touches disk or a URL.
+    pub fn from_numbered(
+        decoded: &[(usize, DecodedAttachment)],
+        atts: &[Attachment],
+    ) -> Vec<VisionInput> {
         decoded
             .iter()
-            .enumerate()
-            .map(|(i, d)| {
-                let raw = atts.get(i).map(|a| a.filename.as_str()).unwrap_or("");
+            .map(|(n, d)| {
+                let raw = n
+                    .checked_sub(1)
+                    .and_then(|i| atts.get(i))
+                    .map(|a| a.filename.as_str())
+                    .unwrap_or("");
                 let source = sanitize_label(raw);
                 let source = if source.is_empty() {
-                    format!("attachment-{}.{}", i + 1, d.ext)
+                    format!("attachment-{n}.{}", d.ext)
                 } else {
                     source
                 };

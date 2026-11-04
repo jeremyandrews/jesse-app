@@ -726,6 +726,31 @@ public final class TurnAttachment {
 
     public var isImage: Bool { mime.hasPrefix("image/") }
     public var isPDF: Bool { mime == "application/pdf" }
+    /// Word, RTF, PowerPoint, Excel or text: the bridge read its text, so history keeps no
+    /// preview, only the name, and the row draws an icon in its place.
+    public var isDocument: Bool { !isImage && !isPDF }
+
+    /// The SF Symbol for a row with no picture to show.
+    public var placeholderIcon: String {
+        if isImage { return "photo" }
+        if isPDF { return "doc.text" }
+        switch mime {
+        case "text/csv", "text/tab-separated-values",
+             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            return "tablecells"
+        case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+            return "rectangle.on.rectangle"
+        case "application/json": return "curlybraces"
+        default: return "doc.text"
+        }
+    }
+
+    /// What VoiceOver says for the row.
+    public var accessibilityDescription: String {
+        if isImage { return "Image attachment: \(filename)" }
+        if isPDF { return "PDF attachment: \(filename)" }
+        return "Document attachment: \(filename)"
+    }
 }
 
 /// One file JESSE returned on a `Turn`, as history holds it.

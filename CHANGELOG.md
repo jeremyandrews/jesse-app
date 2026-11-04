@@ -14,6 +14,76 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.192.0, App 1.0 (200)] - 2026-11-04
+
+**Word, PowerPoint, text, CSV and Excel attachments, from the phone and the Mac, on every
+harness.** The root cause was on both ends: the attachment whitelist was images and PDF in the
+bridge (`sniff_attachment`) and in the clients (`JesseAttachment.sniffMime`,
+`AttachmentLimits.allowedMimes`), and no harness had a route for a document anyway: Claude
+Code's `Read` takes images and PDF, Codex's `view_image` and the direct harness take images
+only. So the bridge now turns a document into text and inlines it into the prompt. Every
+harness gets the same text, with no tool call and no read grant.
+
+- **Accepted:** `.docx`, `.doc`, `.rtf`, `.txt`, `.md`, `.csv`, `.tsv`, `.json`, `.xlsx` and
+  `.pptx`. Legacy `.xls` and `.ppt` are refused with what to save them as. Recognition is from
+  the bytes: an Office file by its ZIP central directory, legacy Word by its OLE header
+  declared as Word, RTF by `{\rtf`, and the text family (which has no magic bytes) by its
+  declared MIME, then the bytes must be UTF-8 (or UTF-16 with a BOM) with no NUL, and JSON
+  must parse. `normalize_mime` folds `application/csv`, `text/comma-separated-values`,
+  `text/x-markdown` and `text/rtf`.
+- **Extraction (`bridge/src/documents.rs`)**, in the bridge process: Word and RTF through
+  `/usr/bin/textutil` over stdin with a 30 second timeout; Excel through `calamine` 0.38.0
+  (pinned, default features off) as CSV per sheet under `## Sheet: <name>`, formulas as their
+  cached values, dates as dates, read through the streaming cell reader so a sparse sheet
+  spanning the grid cannot allocate one cell per position; PowerPoint through the `zip` and
+  `quick-xml` that calamine already brings in, slides in deck order under `## Slide N` with
+  their speaker notes under `Notes:`. Every Office file passes a ZIP bomb guard first (10 times
+  the per-file byte cap, declared sizes and then actual inflation). calamine 0.37.0 was tried
+  first and carries RUSTSEC-2026-0436; 0.38.0 is its fix, and `cargo audit` is clean.
+- **Caps:** documents count against the existing count and byte caps, unchanged. New text caps
+  `JESSE_DOCUMENT_TEXT_CHARS` (200,000 per document) and `JESSE_DOCUMENT_TEXT_TOTAL_CHARS`
+  (400,000 per turn) truncate with a note in the prompt telling the model to tell the user.
+- **Prompt:** one sentence saying the text is user-supplied data, not instructions, then
+  `Attached document N (<kind>, <chars> characters)` and a fence longer than any backtick run
+  inside. The client filename never reaches the prompt; the ledger records
+  `[attachment omitted]`, never the text.
+- **Routing:** decoded attachments are split before `attachment_route`. Only images and PDFs
+  decide the vision or file route and take it; documents always go inline. So a CSV on a
+  text-only model with a vision partner no longer goes to the vision helper, and a
+  documents-only turn creates no scratch dir and no `--add-dir`. The routing moved out of
+  `handlers.rs` into `route_turn_attachments`, and a visual file keeps its request number in its
+  on-disk `NN-` prefix and its error labels when a document precedes it.
+- **Failures are loud:** an unreadable document is a 400 and a converter that cannot run or
+  times out a 500, each naming the attachment number. textutil exits 0 when it cannot read its
+  input, so empty output with anything on stderr counts as a failure.
+- **Unchanged:** images and PDFs on every route, and the inbound channel paths (email,
+  WhatsApp, iMessage), which still call `validate_one_blob` with its image and PDF whitelist.
+  The composer calls the new `validate_one_attachment`, which falls through to
+  `validate_one_blob` for anything visual.
+- **Apps (JesseKit, shared):** `sniffMime` recognises the same types by the same rules (a picked
+  or dropped file's `UTType` chooses the text format, then the bytes must be text);
+  `fileExtension(forMime:)`, `allowedMimes` and the rejection message ("images, PDF, Word,
+  PowerPoint, text, CSV or Excel") follow. `AttachmentThumbnail` makes no preview for a document,
+  and `previews(for:)` keeps it with an empty thumbnail so history still records it.
+- **iOS:** "PDF Document" is now "Document…" and its picker takes PDF, Word, RTF, PowerPoint,
+  plain text, Markdown, CSV, TSV, JSON and xlsx. History draws a document as its icon and name.
+- **Mac:** the same "Document…" picker; a pasted or dropped document file is staged; history
+  draws a document as its icon and name.
+- **Contract:** `bridge/tests/fixtures/attachment-mimes.json` lists every accepted MIME, and both
+  the bridge (`the_attachment_whitelist_matches_the_shared_contract`) and the app
+  (`JesseWireContractTests`) hold their whitelist equal to it.
+- **Tests:** one end-to-end test per type over committed fixtures in
+  `bridge/tests/fixtures/documents/` (with the script that made them), each refused on `main`
+  with "unsupported or unrecognized file type"; refusals for a binary declared as text, a
+  non-Office ZIP, `.xls`, `.ppt`, a docx declared as text, an xlsx ZIP bomb and invalid JSON;
+  the image plus CSV split on a vision-paired model; no `--add-dir` on a documents-only turn;
+  the same CSV prompt across Claude Code, Codex and direct; both truncation notes; and the
+  ledger. JesseKit gains sniff, cap, staging and preview tests, including a binary picked as
+  `.txt` refused client side. The Word and RTF tests are macOS-gated, as textutil is;
+  `docs/platform-dependencies.md` gains textutil's row.
+- **Docs:** `SECURITY.md` documents the two variables and the new parsers on the attachment
+  surface.
+
 ## [bridge 0.191.0] - 2026-11-03
 
 **A bridge turn can run the vault's daily living notes roll.** The strands sweep scheduled job

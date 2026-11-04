@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.191.0"
+version = "0.192.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -255,6 +255,9 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 # k8s-openapi offers and the cluster's own version. Inert unless `[devjob] enabled`.
 kube = { version = "=4.2.0", default-features = false, features = ["client", "rustls-tls", "ring"] }
 k8s-openapi = { version = "=0.28.0", features = ["v1_36"] }
+calamine = { version = "=0.38.0", default-features = false }
+zip = { version = "=9.3.0", default-features = false, features = ["deflate"] }
+quick-xml = "=0.42.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }   # ServiceExt::oneshot

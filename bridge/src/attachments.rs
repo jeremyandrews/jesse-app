@@ -117,6 +117,18 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Every MIME [`sniff_attachment`] can return: the VISUAL whitelist, handed to a model as a
+/// file or through the vision helper. Documents are [`DocumentKind`]'s. Together they are the
+/// composer's whitelist, which `tests/fixtures/attachment-mimes.json` holds equal to the app's.
+pub const VISUAL_ATTACHMENT_MIMES: [&str; 6] = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "application/pdf",
+    "image/webp",
+    "image/heic",
+];
+
 /// Sniff the real content type from leading bytes. Returns `(canonical_mime,
 /// on_disk_extension)` for whitelisted types only, or `None` for anything
 /// unrecognized. This — not the client's declared MIME — decides what a file is.
@@ -150,8 +162,9 @@ pub fn sniff_attachment(b: &[u8]) -> Option<(&'static str, &'static str)> {
 }
 
 /// Normalize a client-declared MIME for comparison: lowercased, parameters
-/// (`; charset=…`) stripped, and the common `image/jpg` spelling folded to the
-/// canonical `image/jpeg`.
+/// (`; charset=…`) stripped, and the common alternative spellings folded to the
+/// canonical one: `image/jpg`, and the CSV, Markdown and RTF aliases different
+/// platforms declare for the same file.
 pub fn normalize_mime(m: &str) -> String {
     let base = m
         .split(';')
@@ -159,11 +172,14 @@ pub fn normalize_mime(m: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if base == "image/jpg" {
-        "image/jpeg".to_string()
-    } else {
-        base
+    match base.as_str() {
+        "image/jpg" => "image/jpeg",
+        "application/csv" | "text/comma-separated-values" | "text/x-csv" => "text/csv",
+        "text/x-markdown" => "text/markdown",
+        "text/rtf" => "application/rtf",
+        _ => return base,
     }
+    .to_string()
 }
 
 /// A decoded, validated attachment ready to write: raw bytes plus the canonical
@@ -172,6 +188,14 @@ pub fn normalize_mime(m: &str) -> String {
 pub struct DecodedAttachment {
     pub bytes: Vec<u8>,
     pub ext: &'static str,
+}
+
+impl DecodedAttachment {
+    /// Whether this is a document (inlined as text) rather than an image or a PDF (handed
+    /// over as a file or through the vision helper).
+    pub fn is_document(&self) -> bool {
+        DocumentKind::from_ext(self.ext).is_some()
+    }
 }
 
 /// THE GATE, for ONE blob of already-decoded bytes: the per-file size cap, the magic-byte
@@ -227,13 +251,38 @@ pub fn validate_one_blob(
     Ok(DecodedAttachment { bytes, ext })
 }
 
+/// THE COMPOSER'S GATE for one blob: [`validate_one_blob`] for an image or a PDF, exactly as
+/// before, and otherwise [`sniff_document`] for Word, RTF, PowerPoint, Excel and the text
+/// family.
+///
+/// A separate function rather than a widening of [`validate_one_blob`] because the inbound
+/// channel resolvers call that one, and documents are a composer feature: a WhatsApp or
+/// email attachment still meets exactly the bar it met before. The size checks and the
+/// mismatch rule are the same on both paths; only the whitelist differs.
+pub fn validate_one_attachment(
+    bytes: Vec<u8>,
+    declared_mime: &str,
+    cap: usize,
+    label: &str,
+) -> Result<DecodedAttachment, ApiError> {
+    if bytes.is_empty() || bytes.len() > cap || sniff_attachment(&bytes).is_some() {
+        return validate_one_blob(bytes, declared_mime, cap, label);
+    }
+    let (kind, bytes) = sniff_document(bytes, declared_mime)
+        .map_err(|why| (StatusCode::BAD_REQUEST, format!("{label}: {why}")))?;
+    Ok(DecodedAttachment {
+        bytes,
+        ext: kind.ext(),
+    })
+}
+
 /// Decode and validate every attachment, enforcing the count / per-file / total
 /// caps and the MIME-whitelist-plus-magic-byte-match rule. Any failure is a
 /// `400` — bad input, never a server fault. Nothing is written to disk here.
 ///
-/// The per-blob half of that is [`validate_one_blob`], which the inbound channel resolvers
-/// share; what stays here is what only a REQUEST has — a count cap, a combined-size cap,
-/// and base64 transport.
+/// The per-blob half of that is [`validate_one_attachment`]; what stays here is what only a
+/// REQUEST has — a count cap, a combined-size cap, and base64 transport. Documents count
+/// against all three caps exactly as images do.
 pub fn validate_and_decode_attachments(
     cfg: &Config,
     atts: &[Attachment],
@@ -266,7 +315,7 @@ pub fn validate_and_decode_attachments(
         }
         let bytes = base64_decode(&a.data_base64)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("attachment {label}: {e}")))?;
-        let d = validate_one_blob(
+        let d = validate_one_attachment(
             bytes,
             &a.mime,
             cfg.max_attachment_bytes,
@@ -382,11 +431,21 @@ impl ScratchDir {
     /// (the client filename is deliberately ignored) and return the on-disk
     /// paths to name in the prompt.
     pub fn write_all(&self, decoded: &[DecodedAttachment]) -> std::io::Result<Vec<PathBuf>> {
-        let mut paths = Vec::with_capacity(decoded.len());
-        for (i, d) in decoded.iter().enumerate() {
-            let p = self
-                .path
-                .join(format!("{:02}-{}.{}", i + 1, random_hex(), d.ext));
+        self.write_numbered(decoded.iter().enumerate().map(|(i, d)| (i + 1, d)))
+    }
+
+    /// [`Self::write_all`] for attachments that carry their own 1-based request position,
+    /// which becomes the name's `NN-` prefix. A turn's documents are never written, so its
+    /// images and PDFs are not always attachments 1, 2, 3; the prefix keeps naming the
+    /// number the user would recognise, and [`prepare_attachments_for_harness`] reads it
+    /// back for its error labels.
+    pub fn write_numbered<'a>(
+        &self,
+        decoded: impl IntoIterator<Item = (usize, &'a DecodedAttachment)>,
+    ) -> std::io::Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for (n, d) in decoded {
+            let p = self.path.join(format!("{n:02}-{}.{}", random_hex(), d.ext));
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -497,7 +556,16 @@ pub fn prepare_attachments_for_harness(
     let mut out = Vec::with_capacity(paths.len());
     let mut notes = Vec::new();
     for (i, p) in paths.iter().enumerate() {
-        let label = i + 1;
+        // The request position from the `NN-` prefix `ScratchDir::write_numbered` gives a
+        // composer attachment, so an error names the attachment the user would count to even
+        // when documents ahead of it were inlined rather than written. A name without one
+        // (an inbound staged file) is labelled by its place in this list, as before.
+        let label = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split_once('-'))
+            .and_then(|(prefix, _)| prefix.parse::<usize>().ok())
+            .unwrap_or(i + 1);
         let ext = p
             .extension()
             .and_then(|e| e.to_str())
@@ -646,6 +714,105 @@ pub fn attachment_prompt_suffix(prepared: &PreparedAttachments, instruction: &st
     s
 }
 
+/// A turn's attachments after routing: the prompt with whatever was inlined or named, the
+/// scratch dir if the child must read files, and the images for the vision helper if it will
+/// read them instead.
+pub struct RoutedAttachments {
+    pub prompt: String,
+    pub scratch: Option<ScratchDir>,
+    pub vision_inputs: Vec<VisionInput>,
+}
+
+/// ROUTE A TURN'S ATTACHMENTS: documents inline, images and PDFs by [`attachment_route`].
+///
+/// The split comes FIRST, and that is the fix for a document on a vision-paired model. The
+/// route decision was made over every attachment, so a text-only model with a vision partner
+/// would have sent a CSV to the vision helper, which reads pictures. Now only the VISUAL
+/// attachments decide the route and take it; documents always become text in the prompt,
+/// identically on every harness. A turn with only documents therefore takes
+/// [`AttachmentRoute::None`] for its files: no scratch dir, no `attachment_dir`, so no
+/// `--add-dir` for one.
+///
+/// `vision_resolves` is whether the active model has a RESOLVABLE vision partner, decided by
+/// the caller; this function applies it only when there is something visual to send.
+/// `support` is the serving harness's, used only for the visual files: the document text does
+/// not depend on it, which is what makes the document prompt the same on every harness.
+pub fn route_turn_attachments(
+    cfg: &Config,
+    prompt: String,
+    decoded: Vec<DecodedAttachment>,
+    atts: &[Attachment],
+    vision_resolves: bool,
+    support: &AttachmentSupport,
+) -> Result<RoutedAttachments, ApiError> {
+    let (documents, visual): (Vec<_>, Vec<_>) = decoded
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| (i + 1, d))
+        .partition(|(_, d)| d.is_document());
+    let documents: Vec<(usize, &DecodedAttachment)> =
+        documents.iter().map(|(n, d)| (*n, d)).collect();
+    let extracted = extract_turn_documents(DocumentCaps::from_config(cfg), &documents)?;
+    let prompt = format!("{prompt}{}", document_prompt_suffix(&extracted));
+    // THE TWO VISUAL ROUTES ARE EXCLUSIVE, and the `match` is what says so. Exactly one arm
+    // runs, so a turn either transcribes through the helper or writes files for the child —
+    // never both, which would send the model the same image twice. See [`AttachmentRoute`].
+    Ok(
+        match attachment_route(!visual.is_empty(), vision_resolves) {
+            AttachmentRoute::None => RoutedAttachments {
+                prompt,
+                scratch: None,
+                vision_inputs: Vec::new(),
+            },
+            AttachmentRoute::VisionHelper => {
+                // Carry the decoded bytes into the turn task (transcribed under the permit); no
+                // scratch file is written and no "read these files" suffix is appended — the
+                // text model can't read images, so the transcription block replaces that path
+                // entirely. NO SCRATCH DIR MEANS NO `attachment_dir` ON THE TURN REQUEST, which
+                // is what makes the child's read grant impossible to hand out on this route.
+                RoutedAttachments {
+                    prompt,
+                    scratch: None,
+                    vision_inputs: VisionInput::from_numbered(&visual, atts),
+                }
+            }
+            AttachmentRoute::ChildReadsFiles => {
+                let scratch = ScratchDir::create(&cfg.scratch_base()).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("could not create attachment scratch dir: {e}"),
+                    )
+                })?;
+                let paths = scratch
+                    .write_numbered(visual.iter().map(|(n, d)| (*n, d)))
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("could not write attachment: {e}"),
+                        )
+                    })?;
+                // CONVERT WHAT THIS HARNESS CANNOT READ, and name its own tool in the prompt.
+                // Both are the serving harness's answer, not the bridge's: HEIC is unreadable
+                // on both harnesses and is transcoded for either, a PDF is native to Claude
+                // Code's `Read` and must be rasterized for Codex, and the sentence naming
+                // `Read` would send a Codex model looking for a tool it does not have. Anything
+                // with no route errors here rather than becoming a turn that silently answers
+                // without the file.
+                let prepared =
+                    prepare_attachments_for_harness(&cfg.vision, &scratch.path, &paths, support)?;
+                RoutedAttachments {
+                    prompt: format!(
+                        "{prompt}{}",
+                        attachment_prompt_suffix(&prepared, support.instruction)
+                    ),
+                    scratch: Some(scratch),
+                    vision_inputs: Vec::new(),
+                }
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,12 +889,47 @@ mod tests {
         assert_eq!(sniff_attachment(WEBP_BYTES), Some(("image/webp", "webp")));
         assert_eq!(sniff_attachment(HEIC_BYTES), Some(("image/heic", "heic")));
     }
+    /// THE CLIENT AND THE BRIDGE ACCEPT THE SAME TYPES. The app's
+    /// `AttachmentLimits.allowedMimes` is checked against the same file by
+    /// `JesseWireContractTests`, so a type added on one side only fails a test on both.
+    #[test]
+    fn the_attachment_whitelist_matches_the_shared_contract() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/attachment-mimes.json"
+        ))
+        .expect("the shared contract fixture");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        let mut contract: Vec<String> = v["mimes"]
+            .as_array()
+            .expect("a mimes array")
+            .iter()
+            .map(|m| m.as_str().expect("a string").to_string())
+            .collect();
+        contract.sort();
+        let mut bridge: Vec<String> = VISUAL_ATTACHMENT_MIMES
+            .iter()
+            .map(|m| m.to_string())
+            .chain(DocumentKind::ALL.iter().map(|k| k.mime().to_string()))
+            .collect();
+        bridge.sort();
+        assert_eq!(bridge, contract);
+        // And the visual list really is what the sniff produces.
+        for bytes in [
+            PNG_BYTES, JPEG_BYTES, GIF_BYTES, PDF_BYTES, WEBP_BYTES, HEIC_BYTES,
+        ] {
+            let (mime, _) = sniff_attachment(bytes).expect("sniffs");
+            assert!(VISUAL_ATTACHMENT_MIMES.contains(&mime), "{mime}");
+        }
+    }
+
     #[test]
     fn sniff_rejects_unknown_and_short_input() {
         assert_eq!(sniff_attachment(b"not a real file"), None);
         assert_eq!(sniff_attachment(b""), None);
         assert_eq!(sniff_attachment(&[0xFF, 0xD8]), None); // too short for JPEG
-                                                           // A ZIP/Office doc is deliberately NOT on the whitelist.
+                                                           // A ZIP/Office doc is not a VISUAL type: documents are
+                                                           // `sniff_document`'s, and are inlined as text.
         assert_eq!(sniff_attachment(b"PK\x03\x04"), None);
     }
     #[test]
@@ -777,13 +979,24 @@ mod tests {
     fn validate_rejects_unknown_type() {
         let cfg = test_config();
         let atts = vec![Attachment {
+            filename: "a.tiff".into(),
+            mime: "image/tiff".into(),
+            data_base64: b64(b"II*\x00 tiff is not on the whitelist"),
+        }];
+        let err = validate_and_decode_attachments(&cfg, &atts).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("unsupported or unrecognized"));
+
+        // A ZIP is now looked inside (an Office file is one), so a ZIP that cannot be read
+        // is refused for what it is rather than as an unknown type. Still a 400.
+        let atts = vec![Attachment {
             filename: "a.bin".into(),
             mime: "application/octet-stream".into(),
             data_base64: b64(b"PK\x03\x04 zip not allowed"),
         }];
         let err = validate_and_decode_attachments(&cfg, &atts).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("unsupported or unrecognized"));
+        assert!(err.1.contains("ZIP archive"), "{}", err.1);
     }
     #[test]
     fn validate_rejects_too_many() {

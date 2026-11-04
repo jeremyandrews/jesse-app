@@ -18,6 +18,32 @@ final class JesseWireContractTests: XCTestCase {
         String(data: try JesseClient.encodeBody(r), encoding: .utf8)!
     }
 
+    // MARK: - The attachment whitelist, held equal to the bridge's
+
+    /// THE APP SENDS EXACTLY WHAT THE BRIDGE ACCEPTS. `bridge/tests/fixtures/attachment-mimes.json`
+    /// is read by the bridge's `the_attachment_whitelist_matches_the_shared_contract` too, so
+    /// a type added on one side only fails a test on both.
+    func testAttachmentWhitelistMatchesTheBridgeContract(file: StaticString = #filePath) throws {
+        // <repo>/Jesse/JesseTests/JesseWireContractTests.swift → up 3 → <repo>.
+        var url = URL(fileURLWithPath: "\(file)")
+        for _ in 0..<3 { url.deleteLastPathComponent() }
+        let data = try Data(contentsOf: url.appendingPathComponent("bridge/tests/fixtures/attachment-mimes.json"))
+        struct Contract: Decodable { let mimes: [String] }
+        let contract = try JSONDecoder().decode(Contract.self, from: data)
+        XCTAssertEqual(AttachmentLimits.allowedMimes, Set(contract.mimes))
+        XCTAssertEqual(contract.mimes.count, Set(contract.mimes).count, "no duplicates")
+    }
+
+    /// A document rides the same wire shape as an image: its sniffed MIME, its name, base64.
+    func testADocumentAttachmentEncodesToExactBytes() throws {
+        let att = JesseAttachment(filename: "c.csv", mime: "text/csv", data: Data("a,b\n".utf8))
+        let r = JesseClient.makeRequest(mode: .ask, text: "sum", sessionId: nil,
+                                        conversationId: nil, voice: false, instructions: nil,
+                                        floorOverride: nil, attachments: [att])
+        XCTAssertEqual(try body(r),
+            #"{"attachments":[{"data_base64":"YSxiCg==","filename":"c.csv","mime":"text/csv"}],"mode":"ask","text":"sum"}"#)
+    }
+
     // MARK: - POST /jesse request bytes (byte-for-byte against a captured body)
 
     /// An ordinary turn carries ONLY mode + text — every optional field omitted,

@@ -1,0 +1,21 @@
+{
+  "_comment": "Every MIME a composer attachment may declare. Read by the bridge (attachments.rs, the_attachment_whitelist_matches_the_shared_contract) and by the app (JesseWireContractTests), so the two whitelists cannot drift apart. Change it only together with sniff_attachment / DocumentKind and AttachmentLimits.allowedMimes.",
+  "mimes": [
+    "application/json",
+    "application/msword",
+    "application/pdf",
+    "application/rtf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "image/gif",
+    "image/heic",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "text/csv",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values"
+  ]
+}

@@ -26,25 +26,32 @@ public nonisolated enum AttachmentThumbnail {
 
     /// A downscaled JPEG preview of `data` (an image or a PDF), or nil if the bytes
     /// can't be rendered. The result is a freshly re-encoded JPEG; the original bytes
-    /// are never returned or held beyond this call.
+    /// are never returned or held beyond this call. A document (Word, Excel, text…) has
+    /// no preview: nil, without trying to decode it as a picture.
     public static func make(data: Data, mime: String) -> Data? {
+        if AttachmentDocumentTypes.mimes.contains(mime) {
+            return nil
+        }
         if mime == "application/pdf" {
             return pdfThumbnail(data)
         }
         return imageThumbnail(data)
     }
 
-    /// One preview per attachment that renders, in order, as `(filename, mime, thumbnail)`.
+    /// One preview per attachment, in order, as `(filename, mime, thumbnail)`.
     ///
     /// Runs on a detached utility task, so the decode and encode never touch the caller's
     /// actor: both coordinators call this right after the user turn is saved and attach the
-    /// results as `TurnAttachment`s when it returns. An attachment that will not render is
-    /// simply absent, since a preview is never critical to the turn.
+    /// results as `TurnAttachment`s when it returns. An image or PDF that will not render is
+    /// simply absent, since a preview is never critical to the turn. A DOCUMENT is always
+    /// present, with an EMPTY thumbnail: it never had one to fail, and dropping it would leave
+    /// history with no trace that a file was sent. The row draws its icon and name instead.
     public static func previews(for attachments: [JesseAttachment]) async
         -> [(filename: String, mime: String, thumbnail: Data)] {
         await Task.detached(priority: .utility) {
             attachments.compactMap { att in
-                make(data: att.data, mime: att.mime).map { (att.filename, att.mime, $0) }
+                if att.isDocument { return (att.filename, att.mime, Data()) }
+                return make(data: att.data, mime: att.mime).map { (att.filename, att.mime, $0) }
             }
         }.value
     }

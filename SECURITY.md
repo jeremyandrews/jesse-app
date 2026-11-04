@@ -3855,7 +3855,11 @@ To keep a single client (or a runaway turn) from exhausting the host:
   (`JESSE_MAX_ATTACHMENTS`, default 4), per-file size (`JESSE_MAX_ATTACHMENT_BYTES`,
   default 10 MB), and combined size (`JESSE_MAX_ATTACHMENTS_TOTAL_BYTES`, default
   20 MB). The request body limit is sized from these (base64-inflated) so an
-  oversized upload is refused before it's buffered.
+  oversized upload is refused before it's buffered. Documents count against all
+  three. A document's EXTRACTED text is capped separately, per document
+  (`JESSE_DOCUMENT_TEXT_CHARS`, default 200,000 characters) and per turn
+  (`JESSE_DOCUMENT_TEXT_TOTAL_CHARS`, default 400,000); a cut is noted in the prompt,
+  never silent. See "Document attachments" under Attachments.
 
 ## Day file (`GET /jesse/today`)
 
@@ -4173,8 +4177,11 @@ Security-relevant properties:
 Files attached to a turn are untrusted input and handled defensively:
 
 - **Type is sniffed, not believed.** Each blob's real type is detected from its
-  magic bytes and must be on the whitelist (PNG, JPEG, GIF, WebP, HEIC, PDF) *and*
-  match the client-declared MIME; an extension/MIME mismatch is rejected (`400`).
+  magic bytes and must be on the whitelist (PNG, JPEG, GIF, WebP, HEIC, PDF, and on
+  the composer path the documents below) *and* match the client-declared MIME; an
+  extension/MIME mismatch is rejected (`400`). The client and bridge whitelists are
+  held equal by `bridge/tests/fixtures/attachment-mimes.json`, which both test
+  suites read.
 - **No client filename touches disk.** Files are written to a per-request scratch
   directory (mode `0700`) under the system temp dir — *not* the vault —
   (override the base with `JESSE_SCRATCH_DIR`, e.g. a sandbox-mounted path) with
@@ -4189,6 +4196,59 @@ Files attached to a turn are untrusted input and handled defensively:
   audio container. Recordings enter by the transcription route below, whose engines run
   inside the bridge. A test holds the two sniffers apart: no byte sequence is admitted by
   both.
+
+### Document attachments (bridge 0.192.0)
+
+The composer accepts Word (`.docx`, `.doc`), RTF, PowerPoint (`.pptx`), Excel (`.xlsx`),
+plain text, Markdown, CSV, TSV and JSON as well as images and PDF. A document is **never
+handed to the child as a file**: the bridge extracts its text and inlines it into the prompt,
+the same for every harness, so a documents-only turn creates no scratch dir and grants no
+`--add-dir`, and the vision helper never sees one. The code-level statement is the module
+documentation of `bridge/src/documents.rs`.
+
+That puts three parsers on the attachment surface. All of them run in the **bridge
+process**, never in the sandboxed child, and nothing new is granted to the child:
+
+- **`/usr/bin/textutil`** (ships with macOS) reads `.docx`, `.doc` and `.rtf`, the same
+  posture `sips` has for HEIC: an absolute path, the bytes over stdin (no temp file), killed
+  after 30 seconds, stdout kept only up to the character cap. textutil exits 0 when it cannot
+  read its input, so empty output with anything on stderr is treated as a failure (`400`).
+- **`calamine` 0.38.0**, pinned exactly with default features off, reads `.xlsx` through its
+  streaming cell reader rather than `worksheet_range`, so a sheet whose used range spans the
+  whole grid cannot allocate one cell per position. 0.37.0 carries RUSTSEC-2026-0436 (a
+  CFB/OLE2 parser panic and unbounded allocation); 0.38.0 is the fixed release. Legacy `.xls`
+  is refused before calamine is reached, so its OLE2 reader is never called.
+- **`zip` 9.3.0 and `quick-xml` 0.42.0**, both already brought in by calamine and pinned to
+  the same versions, read `.pptx`: slide order from `ppt/presentation.xml` and its
+  relationships, each slide's text runs, then its notes slide's body placeholder.
+
+The rest of the posture:
+
+- **ZIP bombs.** An Office Open XML file is refused when its entries expand past **10 ×
+  `JESSE_MAX_ATTACHMENT_BYTES`**. The central directory's declared sizes are summed first,
+  then every entry is actually inflated through a reader that stops one byte past what is
+  left, so an archive that lies about its sizes is caught by what it produces. Both happen
+  before any parser runs.
+- **Recognition is from the bytes.** An Office file is a ZIP whose central directory names
+  `word/document.xml`, `xl/workbook.xml` or `ppt/presentation.xml` (not a substring search,
+  so a ZIP merely containing that string is refused, as is any other archive). Legacy Word
+  is an OLE header declared `application/msword`; `.xls` and `.ppt` are refused with what to
+  save them as. RTF starts with `{\rtf`. The text family has no magic bytes, so the declared
+  MIME picks which one, and the bytes must be UTF-8 (a BOM is dropped, UTF-16 with a BOM is
+  transcoded) with no NUL; JSON must also parse.
+- **Text caps.** `JESSE_DOCUMENT_TEXT_CHARS` and `JESSE_DOCUMENT_TEXT_TOTAL_CHARS` bound what
+  reaches the prompt. A cut carries a note telling the model to tell the user.
+- **Prompt framing.** The text goes in under one sentence saying it is user-supplied data,
+  not instructions, inside a fence longer than any backtick run in it, so a document cannot
+  close its own block and continue as prompt. That sentence is a framing, not a boundary:
+  a document's text is as trusted as the message it came with, and the toolset is what
+  bounds the turn. The client filename never reaches the prompt, and the conversation
+  ledger records `[attachment omitted]`, never the extracted text.
+- **Failures are loud.** An unreadable document is a `400`, and a converter that cannot run
+  or times out a `500`, each naming the attachment number. A turn never runs without a file
+  the user sent.
+- **Scope.** The composer path only. The inbound channel resolvers (email, WhatsApp,
+  iMessage) still call `validate_one_blob`, whose whitelist is images and PDF, unchanged.
 
 ## Recorded audio (`speech`, 0.135.0)
 

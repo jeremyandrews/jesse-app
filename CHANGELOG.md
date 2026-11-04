@@ -14,6 +14,26 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.194.0] - 2026-11-04
+
+**Bridge turns copy a Google Doc template into a folder under a new name.** A turn could fill a
+Doc but not copy a template, so every templated document (a logo header and footer) needed a
+hand copy first, which is slow for a batch of twenty.
+
+- **Granted (1 new, both harnesses):** `copy_drive_file` on `google-sheets`, classed `write`,
+  write turns only. It takes `file_id`, `new_name` and `parent_folder_id` and nothing else, so
+  one call copies, names and places the file; the Docs tools then fill it.
+  `GOOGLE_DRIVE_WRITE_TOOLS` is now `create_drive_file` and `copy_drive_file`.
+- **Still not granted:** `update_drive_file`. It renames and moves, but the same call trashes,
+  changes sharing and replaces content, and the bridge can only check arguments with the
+  gateway on, so there is no guard on every path. Trash, delete, share and permission tools all
+  stay out, on every Google server.
+- **No new scope and no re-consent:** the token already holds `drive`. `google` and
+  `google-perseido` are unchanged.
+- New test that the Drive writes reach the write rows on Claude Code, Codex and direct and no
+  read or basic row, and that no trash or share tool reaches any. All three containment
+  records re-recorded live; golden, argv fixture, capability map and counts move with it.
+
 ## [bridge 0.193.0] - 2026-11-04
 
 **Bridge turns create and edit Google Docs in the work account.** Turns could read Drive but

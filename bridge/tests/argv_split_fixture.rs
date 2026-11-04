@@ -230,6 +230,11 @@
 //! main sites changed their `google-sheets.args` value and the two write sites their
 //! `enabled_tools` digest; no site gained or lost an argument. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.194.0, for `copy_drive_file` on `google-sheets`.** The two write
+//! sites only: Claude Code's `--allowedTools` digest and Codex's `google-sheets`
+//! `enabled_tools` digest moved for the one new grant. No read or basic site moved, and no
+//! site gained or lost an argument.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

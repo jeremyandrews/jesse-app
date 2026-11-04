@@ -3767,13 +3767,15 @@ workflows = "make a Google Sheet: create, fill and format a spreadsheet in the w
 reason = "WRITES: moves rows between tabs of one spreadsheet (not a Drive move)."
 
 # GOOGLE-SHEETS DOCS (0.193.0): the same instance, `--tools sheets docs drive`. Six Docs writes,
-# three Docs reads and ONE Drive tool, `create_drive_file`, the only way to put a new Doc in a
-# named folder. Registered and deliberately NOT granted: `batch_update_doc` and `insert_doc_image`
-# (an image by URI has Google fetch any URL), `manage_document_comment` (a comment can @mention
-# people, and Google mails them), `export_doc_to_pdf`, `update_doc_headers_footers`,
-# `manage_doc_tab`, `search_docs`, `list_docs_in_folder`, `list_document_comments`,
-# `debug_table_structure`, and every other Drive tool: `update_drive_file`, `copy_drive_file`,
-# `manage_drive_access`, `set_drive_file_permissions`, `create_drive_folder`,
+# three Docs reads and ONE Drive tool, `create_drive_file`, the only way to put a new Doc in a named
+# folder. 0.194.0 adds a second, `copy_drive_file`: a template Doc copied into a named folder under
+# a new name (`file_id`, `new_name`, `parent_folder_id`, nothing else). Registered and deliberately
+# NOT granted: `batch_update_doc` and `insert_doc_image` (an image by URI has Google fetch any URL),
+# `manage_document_comment` (a comment can @mention people, and Google mails them),
+# `export_doc_to_pdf`, `update_doc_headers_footers`, `manage_doc_tab`, `search_docs`,
+# `list_docs_in_folder`, `list_document_comments`, `debug_table_structure`, and every other Drive
+# tool: `update_drive_file` (it renames and moves, but the same call trashes, changes sharing and
+# replaces content), `manage_drive_access`, `set_drive_file_permissions`, `create_drive_folder`,
 # `import_to_google_doc`, `import_to_google_sheets`, `import_to_google_slides`,
 # `search_drive_files`, `list_drive_items`, `get_drive_file_content`, `get_drive_file_download_url`,
 # `get_drive_shareable_link`, `get_drive_file_permissions`, `check_drive_file_public_access`.
@@ -3867,6 +3869,15 @@ placement = "upstream-pod"
 dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
 workflows = "make a Google Doc: create a document in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
 reason = "WRITES: creates one new file in a given Drive folder (with the Google Docs MIME type, an empty Doc there to fill); updates, moves, shares and deletes nothing."
+
+[grant."mcp__google-sheets__copy_drive_file"]
+kind = "mcp"
+server = "google-sheets"
+harnesses = ["claude-code", "codex"]
+placement = "upstream-pod"
+dependency = "workspace-mcp-sheets launcher (bridge/launchers): WORKSPACE_MCP_CREDENTIALS_DIR and GOOGLE_MCP_CREDENTIALS_DIR set to its own ~/.config/jesse-google-sheets/creds, WORKSPACE_ATTACHMENT_DIR, optional JESSE_GOOGLE_SHEETS_PORT; GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and USER_GOOGLE_EMAIL forwarded by name (google's client); token scopes spreadsheets, spreadsheets.readonly, documents, documents.readonly, drive, drive.readonly, drive.file (workspace-mcp 1.23.1, --tools sheets docs drive)"
+workflows = "make a Google Doc: create a document, or copy a template Doc, in a named work Drive folder, fill and format it, read it back and return the link (write turns only for the writes)"
+reason = "WRITES: copies an existing file (a template Doc) into a new file with a given name in a given Drive folder, for the Docs tools to fill; the original is untouched, and it renames, moves, shares and deletes nothing."
 
 [grant."mcp__kubernetes-cloud__configuration_view"]
 kind = "mcp"

@@ -3585,7 +3585,7 @@ mod tests {
         );
         assert!(
             flat.contains(
-                r#"mcp_servers.google-sheets.args=["--single-user", "--tools", "sheets", "--tool-tier", "complete"]"#
+                r#"mcp_servers.google-sheets.args=["--single-user", "--tools", "sheets", "docs", "drive", "--tool-tier", "complete"]"#
             ),
             "{args:?}"
         );

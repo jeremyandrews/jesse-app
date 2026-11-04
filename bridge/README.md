@@ -4009,8 +4009,9 @@ permanent rather than transient. This is not hypothetical; see `../SECURITY.md`
 
 ## Google Sheets: the one-time setup (`google-sheets`, 0.182.0)
 
-`google-sheets` is a third `workspace-mcp` instance for the work account: Sheets only, write
-capable, with its own token. `google` and `google-perseido` are untouched and stay read only.
+`google-sheets` is a third `workspace-mcp` instance for the work account: Sheets and, since
+0.193.0, Docs (plus one Drive tool, `create_drive_file`, to put a new Doc in a named folder),
+write capable, with its own token. `google` and `google-perseido` are untouched and stay read only.
 Why it is separate, and exactly what it can reach, is in `../SECURITY.md` § "Google Sheets: the
 one Google server that writes". One host check before deploying and one host step after, both
 on the bridge host, as the bridge's user.
@@ -4042,9 +4043,18 @@ bridge/launchers/consent-google-sheets jeremy@tag1consulting.com
 It reads `JESSE_GOOGLE_CLIENT_ID` and `JESSE_GOOGLE_SECRET` from the bridge's LaunchAgent plist
 (the single `~/Library/LaunchAgents/*.jesse-bridge.plist`, or `JESSE_BRIDGE_PLIST`) without
 printing them, starts the launcher with the bridge's exact arguments, and opens Google's consent
-page in the browser. Sign in as the work account and approve. The scopes asked for are
-`spreadsheets`, `spreadsheets.readonly`, `drive.readonly`, `openid`, `userinfo.email` and
-`userinfo.profile`; anything else on that page means something is wrong, so stop. If the browser
+page in the browser. Sign in as the work account and approve. The scopes asked for (0.193.0)
+are exactly:
+
+- `https://www.googleapis.com/auth/spreadsheets` and `.../auth/spreadsheets.readonly`
+- `https://www.googleapis.com/auth/documents` and `.../auth/documents.readonly`
+- `https://www.googleapis.com/auth/drive`, `.../auth/drive.readonly` and `.../auth/drive.file`
+- `openid`, `https://www.googleapis.com/auth/userinfo.email` and `.../auth/userinfo.profile`
+
+In plain words: spreadsheets, Docs and all of Drive (see, edit, create, delete), plus name and
+email. Anything mentioning Gmail, Calendar, contacts or tasks means something is wrong, so stop. Full `drive` is what `--tools drive` requests;
+the grant, not the token, keeps every Drive tool but `create_drive_file` out of reach
+(`../SECURITY.md`, "Docs join it"). If the browser
 does not open, the URL is printed; open it by hand.
 
 - **Where the token lands:** `~/.config/jesse-google-sheets/creds/jeremy@tag1consulting.com.json`
@@ -4063,6 +4073,19 @@ does not open, the URL is printed; open it by hand.
   only, and only to a port the OAuth client accepts.
 - **Revoking:** delete the token file, and remove the grant in the Google account's third
   party access page. The read only `google` token is a separate grant and survives both.
+
+**3. Re-consent after deploying 0.193.0 (scopes widened).** A token consented before 0.193.0
+holds only the Sheets scopes, and every Docs or Drive call fails on it. Delete it and consent
+again, then confirm:
+
+```bash
+rm ~/.config/jesse-google-sheets/creds/jeremy@tag1consulting.com.json
+bridge/launchers/consent-google-sheets jeremy@tag1consulting.com
+bridge/launchers/consent-google-sheets --verify jeremy@tag1consulting.com
+```
+
+The consent screen must list exactly the scopes in step 2. `--verify` checks with
+`list_spreadsheets`; a Docs call on the first write turn is the end-to-end check.
 
 ## The cloud cluster: `kubernetes-cloud` (0.188.0)
 

@@ -223,6 +223,13 @@
 //! `--mcp-config` digest moved, and no Codex site moved, because a `Bash(...)` grant never
 //! reaches Codex. No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.193.0, for Google Docs on `google-sheets`, on both harnesses' three
+//! main sites only.** The row's arguments became `--tools sheets docs drive`, so Claude Code's
+//! rendered `--mcp-config` digest moved on all three main sites and its two write sites'
+//! `--allowedTools` digest moved for the ten new `mcp__google-sheets__*` grants. Codex's three
+//! main sites changed their `google-sheets.args` value and the two write sites their
+//! `enabled_tools` digest; no site gained or lost an argument. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

@@ -4010,7 +4010,8 @@ permanent rather than transient. This is not hypothetical; see `../SECURITY.md`
 ## Google Sheets: the one-time setup (`google-sheets`, 0.182.0)
 
 `google-sheets` is a third `workspace-mcp` instance for the work account: Sheets and, since
-0.193.0, Docs (plus one Drive tool, `create_drive_file`, to put a new Doc in a named folder),
+0.193.0, Docs (plus two Drive tools: `create_drive_file`, to put a new Doc in a named folder,
+and since 0.194.0 `copy_drive_file`, to copy a template Doc into a named folder under a new name),
 write capable, with its own token. `google` and `google-perseido` are untouched and stay read only.
 Why it is separate, and exactly what it can reach, is in `../SECURITY.md` § "Google Sheets: the
 one Google server that writes". One host check before deploying and one host step after, both
@@ -4053,8 +4054,10 @@ are exactly:
 
 In plain words: spreadsheets, Docs and all of Drive (see, edit, create, delete), plus name and
 email. Anything mentioning Gmail, Calendar, contacts or tasks means something is wrong, so stop. Full `drive` is what `--tools drive` requests;
-the grant, not the token, keeps every Drive tool but `create_drive_file` out of reach
-(`../SECURITY.md`, "Docs join it"). If the browser
+the grant, not the token, keeps every Drive tool but `create_drive_file` and `copy_drive_file`
+out of reach: no rename, move, trash, delete, share or permission tool (`update_drive_file`
+trashes, so it is not granted; `../SECURITY.md`, "Docs join it" and "Copying a template").
+Granting `copy_drive_file` in 0.194.0 needs no re-consent. If the browser
 does not open, the URL is printed; open it by hand.
 
 - **Where the token lands:** `~/.config/jesse-google-sheets/creds/jeremy@tag1consulting.com.json`

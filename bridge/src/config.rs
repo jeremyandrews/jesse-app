@@ -646,8 +646,10 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // DOCS JOIN `google-sheets` (0.193.0). It now loads `--tools sheets docs drive`, so its
 // token adds `documents`, `documents.readonly`, `drive` and `drive.file`, and the grant
 // adds six Docs writes, three Docs reads and ONE Drive tool, `create_drive_file`, the
-// only way to put a new Doc in a named folder (`create_doc` takes no parent). No other
-// Drive tool is granted: no update, move, copy, share, permission, import or trash.
+// only way to put a new Doc in a named folder (`create_doc` takes no parent). In 0.194.0
+// a second, `copy_drive_file`, copies a template Doc into a named folder under a new
+// name. No other Drive tool is granted: no update, rename, move, share, permission,
+// import, trash or delete (`update_drive_file` trashes, so it stays out).
 // `google` and `google-perseido` are untouched. The decided lists are
 // `crate::mcpservers::GOOGLE_DOCS_WRITE_TOOLS`, `GOOGLE_DOCS_READ_TOOLS` and
 // `GOOGLE_DRIVE_WRITE_TOOLS`, with the tools left out on purpose named there.
@@ -1215,6 +1217,7 @@ mcp__google-sheets__inspect_doc_structure,mcp__google-sheets__create_doc,\
 mcp__google-sheets__modify_doc_text,mcp__google-sheets__update_paragraph_style,\
 mcp__google-sheets__insert_doc_elements,mcp__google-sheets__create_table_with_data,\
 mcp__google-sheets__find_and_replace_doc,mcp__google-sheets__create_drive_file,\
+mcp__google-sheets__copy_drive_file,\
 mcp__kubernetes-cloud__configuration_view,mcp__kubernetes-cloud__namespaces_list,\
 mcp__kubernetes-cloud__events_list,mcp__kubernetes-cloud__projects_list,\
 mcp__kubernetes-cloud__nodes_log,mcp__kubernetes-cloud__nodes_top,\
@@ -5816,17 +5819,17 @@ mod tests {
         );
     }
 
-    /// THE GOOGLE-SHEETS GRANT IS EXACTLY THE TWENTY-THREE DECIDED TOOLS, by equality, with no
+    /// THE GOOGLE-SHEETS GRANT IS EXACTLY THE TWENTY-FOUR DECIDED TOOLS, by equality, with no
     /// wildcard and without the registered tools left out on purpose.
     ///
     /// From `workspace-mcp` 1.23.1, `--single-user --tools sheets --tool-tier complete`, on
     /// 2026-10-16: fourteen registered, thirteen granted, `manage_spreadsheet_comment` not
     /// (a comment can @mention people, and Google mails them). With `docs drive` added on
-    /// 2026-11-04: forty-nine registered, twenty-three granted; the Docs and Drive tools left
-    /// out are named on `crate::mcpservers::GOOGLE_DOCS_WRITE_TOOLS` and
-    /// `GOOGLE_DRIVE_WRITE_TOOLS`.
+    /// 2026-11-04: forty-nine registered, twenty-three granted, and twenty-four with
+    /// `copy_drive_file` (0.194.0); the Docs and Drive tools left out are named on
+    /// `crate::mcpservers::GOOGLE_DOCS_WRITE_TOOLS` and `GOOGLE_DRIVE_WRITE_TOOLS`.
     #[test]
-    fn the_google_sheets_grant_is_the_twenty_three_decided_tools() {
+    fn the_google_sheets_grant_is_the_twenty_four_decided_tools() {
         let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
             .split(',')
             .filter(|e| e.starts_with("mcp__google-sheets"))
@@ -5855,7 +5858,6 @@ mod tests {
             "mcp__google-sheets__insert_doc_image",
             "mcp__google-sheets__manage_document_comment",
             "mcp__google-sheets__update_drive_file",
-            "mcp__google-sheets__copy_drive_file",
             "mcp__google-sheets__manage_drive_access",
             "mcp__google-sheets__set_drive_file_permissions",
         ] {
@@ -5875,9 +5877,11 @@ mod tests {
     /// spellings the `message_send_mail_*` probes watch for.
     ///
     /// ONE EXCEPTION, ON ONE SERVER (0.193.0): `google-sheets` is granted `create_drive_file`,
-    /// the only tool that puts a new Doc in a named folder. It creates; it updates, moves,
-    /// shares and trashes nothing. Every other Drive mutation stays forbidden there, and on
-    /// `google` and `google-perseido` `create_drive_file` stays forbidden too.
+    /// the only tool that puts a new Doc in a named folder, and (0.194.0) `copy_drive_file`,
+    /// which copies a template into a named folder under a new name. Both create; neither
+    /// updates, moves, shares or trashes anything. Every other Drive mutation stays forbidden
+    /// there, `update_drive_file` included, and on `google` and `google-perseido` both stay
+    /// forbidden too.
     #[test]
     fn no_google_send_or_calendar_write_is_granted_anywhere() {
         const WRITE_ONLY: [&str; 20] = [
@@ -5919,7 +5923,17 @@ mod tests {
                     assert!(!granted.iter().any(|g| g == t), "{server}::{t} is granted");
                 }
                 for g in &granted {
-                    for word in ["send", "draft", "reply", "forward", "permission", "share"] {
+                    for word in [
+                        "send",
+                        "draft",
+                        "reply",
+                        "forward",
+                        "permission",
+                        "share",
+                        "trash",
+                        "delete",
+                        "owner",
+                    ] {
                         if *g == "get_drive_file_permissions" || *g == "get_drive_shareable_link" {
                             continue; // the two existing reads of a file's sharing state
                         }

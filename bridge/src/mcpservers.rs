@@ -766,7 +766,9 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
     // loaded for ONE tool, `create_drive_file`, which takes a `folder_id` and, given the Docs
     // MIME type, makes an empty Doc in that folder for the Docs tools to fill. The token widens
     // to `documents`, `documents.readonly`, `drive` and `drive.file`. `drive` is the full Drive
-    // scope, so what bounds this server's Drive reach is the grant below, not the token. See
+    // scope, so what bounds this server's Drive reach is the grant below, not the token. A
+    // second Drive tool, `copy_drive_file` (0.194.0), copies a template Doc into a named folder
+    // under a new name; nothing that renames, moves, trashes or shares is granted. See
     // [`GOOGLE_DOCS_WRITE_TOOLS`] and [`GOOGLE_DRIVE_WRITE_TOOLS`] for what is granted and what
     // registers and is deliberately not.
     //
@@ -881,24 +883,42 @@ pub const GOOGLE_DOCS_READ_TOOLS: [&str; 3] = [
     "inspect_doc_structure",
 ];
 
-/// The ONE `google-sheets` Drive tool granted (0.193.0): `create_drive_file`, which creates a
-/// file in a given `folder_id`, so a Doc can be made in a named folder (`create_doc` takes no
-/// parent). Write turns only, classed `write`. Its `fileUrl` argument can fetch a public
+/// The `google-sheets` Drive tools granted, both of which only CREATE a file. Write turns only,
+/// classed `write`.
+///
+/// `create_drive_file` (0.193.0) creates a file in a given `folder_id`, so a Doc can be made in
+/// a named folder (`create_doc` takes no parent). Its `fileUrl` argument can fetch a public
 /// `http(s)` URL into the new file (`workspace-mcp` refuses internal addresses) or read a
 /// `file://` path inside the instance's own attachment directory, nothing else.
 ///
-/// Every other Drive tool `drive` registers is DELIBERATELY UNGRANTED: `update_drive_file`
-/// (renames, moves between folders, trashes), `copy_drive_file`, `manage_drive_access` and
-/// `set_drive_file_permissions` (share and permission changes), `create_drive_folder`,
-/// `import_to_google_doc`, `import_to_google_sheets` and `import_to_google_slides` (conversion
-/// imports), and the reads `search_drive_files`, `list_drive_items`, `get_drive_file_content`,
-/// `get_drive_file_download_url`, `get_drive_shareable_link`, `get_drive_file_permissions` and
+/// `copy_drive_file` (0.194.0) copies an existing file, a template Doc with its logo header and
+/// footer, into a new file. It takes `file_id`, `new_name` (default "Copy of <name>") and
+/// `parent_folder_id` (default `root`), and nothing else, so one call names and places the
+/// copy; the Docs tools then fill it. The original is read and left untouched, and Drive's
+/// copy does not carry the original's sharing: the copy is shared only as its folder is, the
+/// same as a file `create_drive_file` makes there.
+///
+/// Every other Drive tool `drive` registers is DELIBERATELY UNGRANTED. `update_drive_file`
+/// renames and moves (`name`, `add_parents`, `remove_parents`), but the same call trashes
+/// (`trashed`), changes sharing (`writers_can_share`, `copy_requires_writer_permission`) and
+/// replaces a file's content in place (`content`, `file_path`, `file_url`), on ANY file the
+/// token reaches. Only an argument check could keep those out, and the bridge sees a call's
+/// arguments only with `[gateway] enabled`; with the gateway off (the default) a child talks
+/// to this server directly. So there is no place to refuse a trash call on every path, and the
+/// tool is not granted: a copy is named and placed when it is made. Also ungranted:
+/// `manage_drive_access` and `set_drive_file_permissions` (share and permission changes),
+/// `create_drive_folder`, `import_to_google_doc`, `import_to_google_sheets` and
+/// `import_to_google_slides` (conversion imports), and the reads `search_drive_files`,
+/// `list_drive_items`, `get_drive_file_content`, `get_drive_file_download_url`,
+/// `get_drive_shareable_link`, `get_drive_file_permissions` and
 /// `check_drive_file_public_access` (the read-only `google` server already reads Drive).
-pub const GOOGLE_DRIVE_WRITE_TOOLS: [&str; 1] = ["create_drive_file"];
+/// Nothing granted on any Google server trashes, deletes, shares, changes a permission, an
+/// owner or a restriction.
+pub const GOOGLE_DRIVE_WRITE_TOOLS: [&str; 2] = ["create_drive_file", "copy_drive_file"];
 
 /// Every `google-sheets` write: the Sheets, Docs and Drive lists above, in that order, which
 /// `tests::google_sheets_row_writes_are_the_three_lists` holds it to.
-pub const GOOGLE_SHEETS_ROW_WRITE_TOOLS: [&str; 15] = [
+pub const GOOGLE_SHEETS_ROW_WRITE_TOOLS: [&str; 16] = [
     "create_spreadsheet",
     "create_sheet",
     "modify_sheet_values",
@@ -914,6 +934,7 @@ pub const GOOGLE_SHEETS_ROW_WRITE_TOOLS: [&str; 15] = [
     "create_table_with_data",
     "find_and_replace_doc",
     "create_drive_file",
+    "copy_drive_file",
 ];
 
 /// The row for `name`, or `None`.
@@ -1485,7 +1506,7 @@ mod tests {
     /// `google-sheets` LOADS SHEETS, DOCS AND DRIVE AND NOTHING ELSE (0.193.0). `--tools` names
     /// those three, so no Gmail or Calendar tool registers on the one Google instance that can
     /// write, and `--read-only` is absent because writing is the row's whole purpose. Drive is
-    /// loaded for the one tool [`GOOGLE_DRIVE_WRITE_TOOLS`] grants.
+    /// loaded for the two tools [`GOOGLE_DRIVE_WRITE_TOOLS`] grants.
     #[test]
     fn google_sheets_loads_only_sheets_docs_and_drive() {
         let r = row("google-sheets").expect("the google-sheets row");
@@ -1609,10 +1630,11 @@ mod tests {
         assert_eq!(granted, expected);
     }
 
-    /// EVERY `google-sheets` DOCS AND DRIVE TOOL IS DECIDED (0.193.0): the six Docs writes and
-    /// `create_drive_file` are classed `write`, the three Docs reads are not, and the Docs and
-    /// Drive part of the grant is exactly those ten. The tools that register and are left out
-    /// on purpose are never granted.
+    /// EVERY `google-sheets` DOCS AND DRIVE TOOL IS DECIDED (0.193.0): the six Docs writes,
+    /// `create_drive_file` and `copy_drive_file` (0.194.0) are classed `write`, the three Docs
+    /// reads are not, and the Docs and Drive part of the grant is exactly those eleven. The
+    /// tools that register and are left out on purpose, `update_drive_file` (it trashes) and
+    /// every share, permission and import tool among them, are never granted.
     #[test]
     fn google_docs_classes_every_granted_tool() {
         let r = row("google-sheets").unwrap();
@@ -1649,7 +1671,6 @@ mod tests {
             "update_doc_headers_footers",
             "manage_doc_tab",
             "update_drive_file",
-            "copy_drive_file",
             "manage_drive_access",
             "set_drive_file_permissions",
             "create_drive_folder",
@@ -1689,6 +1710,44 @@ mod tests {
                 assert_ne!(r.class_of(&t), ToolClass::Write, "{t} on a read-only turn");
             }
         }
+    }
+
+    /// NO DRIVE WRITE REACHES A READ-ONLY TURN, ON ANY HARNESS, AND NOTHING THAT TRASHES,
+    /// DELETES OR SHARES REACHES ANY TURN (0.194.0). Read against the golden, which
+    /// `capmap::tests` pins to every harness's `capability_args` for every shipped row: the
+    /// two granted Drive writes appear in the three write rows (Claude Code, Codex, direct) and
+    /// in no basic or read row, and `update_drive_file` (it trashes) and the share and
+    /// permission tools appear in none.
+    #[test]
+    fn drive_writes_reach_write_turns_only_on_every_harness() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../golden/capability-args.json")).unwrap();
+        let mut write_rows = 0;
+        for (harness, rows) in golden.as_object().unwrap() {
+            for (key, argv) in rows.as_object().unwrap() {
+                let argv = argv.to_string();
+                let mentions = |t: &str| {
+                    argv.contains(&format!("mcp__google-sheets__{t}"))
+                        || argv.contains(&format!("\\\"{t}\\\""))
+                };
+                for t in [
+                    "update_drive_file",
+                    "manage_drive_access",
+                    "set_drive_file_permissions",
+                ] {
+                    assert!(!mentions(t), "{harness} {key} grants {t}");
+                }
+                for t in GOOGLE_DRIVE_WRITE_TOOLS {
+                    assert_eq!(
+                        mentions(t),
+                        key.starts_with("write/"),
+                        "{harness} {key}: {t}"
+                    );
+                }
+                write_rows += usize::from(key.starts_with("write/"));
+            }
+        }
+        assert_eq!(write_rows, 3, "one write row per harness");
     }
 
     /// `inbound` FETCHES GMAIL ATTACHMENTS WITH `google`'s TOKEN AND NO OTHER. It reads

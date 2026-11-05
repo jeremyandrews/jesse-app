@@ -2532,16 +2532,16 @@ image by URI, which has Google fetch any URL the turn names, and a URL can carry
 `manage_document_comment` (a comment can @mention people, and Google mails them),
 `export_doc_to_pdf`, `update_doc_headers_footers`, `manage_doc_tab`, the Docs reads
 `search_docs`, `list_docs_in_folder`, `list_document_comments`, `debug_table_structure`, and
-every other Drive tool: `update_drive_file` (rename, move, trash), `copy_drive_file`,
-`manage_drive_access`, `set_drive_file_permissions`, `create_drive_folder`, the three
+every other Drive tool: `update_drive_file` (rename, move, trash), `manage_drive_access`, `set_drive_file_permissions`, `create_drive_folder`, the three
 `import_to_google_*`, and the Drive reads (the read-only `google` server already reads Drive).
 
 **The credential no longer bounds Drive.** `--tools drive` requests the full `drive` scope, and
 `workspace-mcp` 1.23.1 has no per-tool scope switch. The token CAN now share, move, trash or
 delete any file the work account can. What stops a turn is the grant: the allowlist on Claude
 Code, `enabled_tools` on Codex, the `--tools` manifest on direct, and the gateway's manifest
-when it is on. Tests hold that no Drive share, permission, move, copy, update or trash tool is
-granted on any Google server, and that `create_drive_file` is granted on `google-sheets` only.
+when it is on. Tests hold that no Drive share, permission, move, update or trash tool is
+granted on any Google server, and that `create_drive_file` (and, since 0.194.0,
+`copy_drive_file`) is granted on `google-sheets` only.
 Gmail and Calendar are still absent at the root: neither service is loaded and the token holds
 neither scope. `google` and `google-perseido` are unchanged.
 
@@ -2554,6 +2554,27 @@ navigation can already do.
 
 **Re-consent.** The widened scopes do not reach the existing token: it must be deleted and
 consented again (bridge README, "Google Sheets: the one-time setup").
+
+### Copying a template (0.194.0)
+
+A turn could fill a Doc but not copy one, so every templated document (a logo header and footer)
+needed a hand copy first. `copy_drive_file` is now granted, classed `write`, on both harnesses.
+Its parameters in `workspace-mcp` 1.23.1 are `file_id`, `new_name` (default "Copy of <name>")
+and `parent_folder_id` (default `root`), and nothing else: one call copies, names and places the
+new file, and the Docs tools fill it. The original is read and left untouched. Drive's copy does
+not carry the original's permissions, so the copy is shared exactly as the folder it lands in
+is, the same as a file `create_drive_file` makes there. No new scope: the token already holds
+`drive`.
+
+**`update_drive_file` stays ungranted.** It is the only tool that renames or moves an existing
+file (`name`, `add_parents`, `remove_parents`), but the same call also takes `trashed`,
+`writers_can_share`, `copy_requires_writer_permission`, `mime_type`, `properties`, `starred`,
+`description`, and a content replacement (`content`, `file_path`, `file_url`), on any file the
+token reaches. Granting it safely needs an argument check before the call reaches the server.
+The gateway is the one layer that sees a call's arguments, and it is off unless `[gateway]
+enabled`; with it off a child talks to `workspace-mcp` directly. A guard that holds on one
+path and not the other is not a boundary, so the tool is left out. Nothing granted on any
+Google server trashes, deletes, shares, or changes a permission, an owner or a restriction.
 
 ### Residual risks, accepted
 

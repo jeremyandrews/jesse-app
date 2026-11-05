@@ -2660,14 +2660,27 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 /// | Opus 5 (09-10, superseded)| 976 / 1,164  | —              | 682 / 1,774*   | —              | 4,974 / 4,095    | (was high, max)     |
 /// | Fable 5.1 (09-10)        | 973 / 3,470   | —              | 3,949 / 2,087* | —              | 5,635 / 5,547    | high, max           |
 /// | Sonnet 5.5 (10-17)       | 1,011 / 947   | 962 / 933*     | 1,169 / 1,162  | 1,256 / 1,306  | 2,211 / 3,353    | medium, high, max   |
-/// | Kimi K3 (09-10)          | 6,039 / 3,035 | —              | —              | —              | 3,575 / 10,694   | none                |
+/// | Kimi K3.1 Pro (11-05)    | 917 / 947     | 1,828 / 1,297  | 1,355 / 1,405* | 4,162 / 3,888  | 3,605 / 4,223    | none (held, below)  |
+/// | Kimi K3 (09-10, superseded)| 6,039 / 3,035 | —            | —              | —              | 3,575 / 10,694   | none                |
 /// | Muse Spark Open (10-15)  | 1,759 / 1,131 | 2,053 / 2,001  | 4,128 / 3,877* | 4,279 / 3,921  | 3,129 / 3,181    | low, medium, high   |
 ///
 /// (Output tokens; dates are 2026. GLM's `medium` measured with its `high`, so it is left out.
 /// Opus 5 and Fable were re-run on a second prompt with the same result: `low` indistinguishable
-/// from the default, `max` two to four times the output.) Kimi declares nothing because `low`
-/// and `max` overlapped completely on two prompts — its vendor documents three levels, and on
-/// this surface they did not do anything a person could see.
+/// from the default, `max` two to four times the output.) Kimi K3 declared nothing because
+/// `low` and `max` overlapped completely on two prompts — its vendor documents three levels,
+/// and on this surface they did not do anything a person could see.
+///
+/// **Kimi K3.1 Pro was measured on 2026-11-05** against Fireworks' `/v1/messages` with
+/// `output_config.effort` set as the CLI sets it, on one prompt (a digit-sum count to 10,000;
+/// every sample finished and all but one `low` answered correctly). Unlike K3, effort moves
+/// it: `low` sat below `high` in both samples, and `xhigh` and `max` ran about three times
+/// `high`, overlapping each other; `medium` straddled `high`. The surface accepts `minimal`,
+/// `low`, `medium`, `high`, `xhigh`, `max`, `none` and `adaptive` (its validation error lists
+/// them), and with no `--effort` the pinned CLI (2.1.318) sends `high` for this slug
+/// (captured against a local listener, nothing sent to a provider). A turn naming no effort
+/// at all on the raw surface ran 2,972 / 2,212. By this table's bar `low`, `high` and `max`
+/// would qualify, but the 0.195.0 move kept the entry's shape and left the scale undeclared;
+/// `JESSE_MODEL_KIMI_EFFORT=low,high,max` declares it from the launch environment.
 ///
 /// **Muse Spark Open was measured on 2026-10-15** against Fireworks' `/v1/messages` with
 /// `output_config.effort` set as the CLI sets it, on two prompts. The row above is the second
@@ -3491,11 +3504,33 @@ fn glm_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) -
     }
 }
 
-/// The `kimi` env-triple entry, ARMED — Fireworks serves Kimi K3 on the Anthropic
-/// `/v1/messages` surface (verified 2026-07-27), so this mirrors [`glm_env_entry`]: the
-/// base_url and slug default to the live Fireworks values and only
-/// `JESSE_MODEL_KIMI_AUTH_TOKEN` must be exported to arm it. Absent that token the entry
-/// still ships UNCONFIGURED and a selection attempt is rejected.
+/// The `kimi` env-triple entry, ARMED — Fireworks serves Moonshot's Kimi K3.1 Pro on the
+/// Anthropic `/v1/messages` surface, so this mirrors [`glm_env_entry`]: the base_url and slug
+/// default to the live Fireworks values and only `JESSE_MODEL_KIMI_AUTH_TOKEN` must be
+/// exported to arm it. Absent that token the entry still ships UNCONFIGURED and a selection
+/// attempt is rejected.
+///
+/// **K3.1 PRO SINCE BRIDGE 0.195.0; K3 BEFORE IT** (K3 was verified on this surface
+/// 2026-07-27). K3.1 Pro is K3 with much more post-training and a 1M context. Only the slug,
+/// the version and the deck moved: the id, harness, level, probe budget, vision and
+/// transcription defaults are K3's, and `JESSE_MODEL_KIMI_MODEL=accounts/fireworks/models/kimi-k3`
+/// with `JESSE_MODEL_KIMI_VERSION=K3` and the K3 deck in `JESSE_MODEL_KIMI_PRICE_*` pins K3
+/// back without a code change. **THE EVIDENCE, all of it measured on 2026-11-05:**
+/// * the slug `accounts/fireworks/models/kimi-k3p1-pro` is in `GET /inference/v1/models`
+///   (`supports_image_input` and `supports_tools` true, `context_length` 1,048,576). That
+///   listing also says `supports_chat: false` for it, and the surface answers it anyway; the
+///   model record reads `supportsServerless: true`. No K3.1 Fast or Highspeed variant is listed;
+/// * `/v1/messages` serves it: a plain turn answered; a turn defining one tool came back with
+///   `stop_reason: tool_use` and a well-formed `tool_use` block; a resumed second turn called
+///   the tool again with a DISTINCT id (`call_<24 hex>` both times), so no cross-turn
+///   collision of the kind K3 once had (below);
+/// * it sees images on that surface: a two-colour PNG was described as red on the left and
+///   blue on the right on three calls of three (one also invented a thin black edge strip);
+/// * effort now moves output, unlike K3's, and is still not declared — see the table above
+///   [`effort_from_env`];
+/// * ten `max_tokens: 1` probes answered in 0.85–1.26 s, well inside
+///   [`REASONING_HEALTH_TIMEOUT_SECS`];
+/// * the deck is the pricing page's (see [`FW_KIMI_K3P1_PRO_IN_PER_M`]).
 ///
 /// **THE ONLY KIMI ENTRY.** K3 used to be registered twice — this one, and `kimi-codex` on the
 /// Codex harness over Fireworks' Responses API, which that entry's doc block called the
@@ -3520,9 +3555,9 @@ fn kimi_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
         env_string("JESSE_MODEL_KIMI_AUTH_TOKEN"),
         env_string("JESSE_MODEL_KIMI_MODEL"),
         Some(FIREWORKS_ANTHROPIC_BASE_URL),
-        Some("accounts/fireworks/models/kimi-k3"),
+        Some("accounts/fireworks/models/kimi-k3p1-pro"),
     );
-    let version = model_version_from_env("JESSE_MODEL_KIMI", Some("K3"));
+    let version = model_version_from_env("JESSE_MODEL_KIMI", Some("K3.1 Pro"));
     RegistryModel {
         family: Some("Kimi".to_string()),
         effort: effort_from_env("JESSE_MODEL_KIMI", "kimi", None),
@@ -3534,7 +3569,7 @@ fn kimi_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
         version,
         // `kimi-k3` from the family rename; `kimi-codex` / `kimi-k3-codex` from the retired
         // Codex-surface twin, so a device that had selected THAT entry is not dropped back
-        // onto the ambient default when it disappears.
+        // onto the ambient default when it disappears. All three now land on K3.1 Pro.
         aliases: vec![
             "kimi-k3".to_string(),
             "kimi-codex".to_string(),
@@ -3552,22 +3587,24 @@ fn kimi_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
         auth_scheme: None,
         quirks: DirectQuirks::default(),
         thinking: None,
-        // Fireworks' published K3 deck (3.00 / 0.30 / 15.00), still overridable from env
-        // via `JESSE_MODEL_KIMI_PRICE_{IN,CACHED,OUT}` if Fireworks reprices.
+        // Fireworks' published K3.1 Pro deck (2.00 / 0.20 / 10.00), still overridable from
+        // env via `JESSE_MODEL_KIMI_PRICE_{IN,CACHED,OUT}` if Fireworks reprices.
         price: model_price_from_env(
             "JESSE_MODEL_KIMI",
             PriceDeck {
-                in_per_m: FW_KIMI_K3_IN_PER_M,
-                cached_per_m: FW_KIMI_K3_CACHED_PER_M,
+                in_per_m: FW_KIMI_K3P1_PRO_IN_PER_M,
+                cached_per_m: FW_KIMI_K3P1_PRO_CACHED_PER_M,
                 cache_write_per_m: None,
-                out_per_m: FW_KIMI_K3_OUT_PER_M,
+                out_per_m: FW_KIMI_K3P1_PRO_OUT_PER_M,
             },
         ),
         health: HealthConfig {
             interval_secs: default_interval_secs,
-            // K3 THINKS before it answers, so even the `max_tokens: 1` probe runs 3–7 s and
-            // the 3 s default would mark a perfectly reachable model unhealthy — i.e. keep it
-            // out of the picker entirely. See [`REASONING_HEALTH_TIMEOUT_SECS`].
+            // Kimi THINKS before it answers, so the `max_tokens: 1` probe has no bound on its
+            // wall clock: K3 ran 3–7 s, which the 3 s default would mark unhealthy — i.e. keep
+            // a perfectly reachable model out of the picker entirely. K3.1 Pro answered ten
+            // probes in 0.85–1.26 s (2026-11-05), but it still reasons, so it keeps the
+            // budget. See [`REASONING_HEALTH_TIMEOUT_SECS`].
             timeout_secs: resolve_health_timeout(
                 None,
                 global_timeout_secs,
@@ -4011,7 +4048,7 @@ fn warn_retired_model_env() {
             eprintln!(
                 "jesse-bridge: WARNING {var} is set, and nothing reads it. The Codex-surface \
                  Kimi entry was retired: `kimi-codex` is now an alias of `kimi`, which runs on \
-                 claude-code and is armed by JESSE_MODEL_KIMI_AUTH_TOKEN. To run K3 on the \
+                 claude-code and is armed by JESSE_MODEL_KIMI_AUTH_TOKEN. To run Kimi on the \
                  codex harness anyway, declare a [[models]] entry with harness = \"codex\" \
                  under an id of its own — NOT `kimi-codex`, which as an alias of `kimi` would \
                  replace it."
@@ -8138,6 +8175,62 @@ mod tests {
         );
     }
 
+    /// THE KIMI ENTRY IS LABELLED FOR WHAT IT RUNS: K3.1 Pro since 0.195.0. With no
+    /// `JESSE_MODEL_KIMI_VERSION` the picker must say "Kimi K3.1 Pro", or a K3.1 Pro reply
+    /// would carry a K3 badge.
+    #[test]
+    fn the_kimi_entry_is_labelled_kimi_k3p1_pro() {
+        let _g = ENV_LOCK.lock_ok();
+        let saved = std::env::var("JESSE_MODEL_KIMI_VERSION").ok();
+        std::env::remove_var("JESSE_MODEL_KIMI_VERSION");
+
+        let m = kimi_env_entry(DEFAULT_HEALTH_INTERVAL_SECS, None);
+        assert_eq!(m.label, "Kimi K3.1 Pro");
+        assert_eq!(m.version.as_deref(), Some("K3.1 Pro"));
+
+        if let Some(v) = saved {
+            std::env::set_var("JESSE_MODEL_KIMI_VERSION", v);
+        }
+    }
+
+    /// A device that stored `kimi-k3` lands on the UPGRADED entry: the alias resolves to
+    /// `kimi`, and `kimi` now runs K3.1 Pro rather than the model the device chose by name.
+    #[test]
+    fn a_stored_kimi_k3_selection_resolves_to_the_k3p1_pro_entry() {
+        let _g = ENV_LOCK.lock_ok();
+        let vars = [
+            "JESSE_CONFIG",
+            "JESSE_MODEL_KIMI_AUTH_TOKEN",
+            "JESSE_MODEL_KIMI_BASE_URL",
+            "JESSE_MODEL_KIMI_MODEL",
+            "JESSE_MODEL_KIMI_VERSION",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            vars.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in vars {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("JESSE_CONFIG", "/nonexistent/jesse.local.toml");
+        std::env::set_var("JESSE_MODEL_KIMI_AUTH_TOKEN", "fw-kimi");
+
+        let registry = ModelRegistry::from_env("");
+        let m = registry.get("kimi-k3").expect("'kimi-k3' resolves");
+        assert_eq!(m.id, "kimi");
+        assert_eq!(registry.canonical_id("kimi-k3"), Some("kimi"));
+        assert_eq!(m.label, "Kimi K3.1 Pro");
+        assert_eq!(
+            m.backend.as_ref().map(|(_, _, slug)| slug.as_str()),
+            Some("accounts/fireworks/models/kimi-k3p1-pro")
+        );
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
     /// An exact id BEATS an alias, so a stale alias can never shadow a real entry and
     /// silently send a turn to another backend.
     #[test]
@@ -8412,8 +8505,8 @@ mod tests {
             (
                 "kimi",
                 "fw-kimi",
-                "accounts/fireworks/models/kimi-k3",
-                "Kimi K3",
+                "accounts/fireworks/models/kimi-k3p1-pro",
+                "Kimi K3.1 Pro",
             ),
             (
                 "qwen",
@@ -8562,7 +8655,7 @@ mod tests {
         let kimi = deck(kimi_env_entry(DEFAULT_HEALTH_INTERVAL_SECS, None));
         let qwen = deck(qwen_env_entry(DEFAULT_HEALTH_INTERVAL_SECS, None));
         assert_eq!(glm, (1.40, 0.26, 4.40), "GLM 5.3");
-        assert_eq!(kimi, (3.00, 0.30, 15.00), "Kimi K3");
+        assert_eq!(kimi, (2.00, 0.20, 10.00), "Kimi K3.1 Pro");
         assert_eq!(qwen, (2.00, 0.25, 6.00), "Qwen 3.8 Max");
         assert_ne!(
             glm.1, FW_GLM_CACHED_PER_M,
@@ -8768,7 +8861,7 @@ mod tests {
 
     #[test]
     fn every_fireworks_model_gets_the_reasoning_probe_budget_and_yields_to_the_override() {
-        // All three Fireworks families think before they answer — Kimi K3 and GLM 5.3 run with
+        // All three Fireworks families think before they answer — Kimi K3.1 Pro and GLM 5.3 run with
         // reasoning always on, and Qwen 3.8 Max returned a thinking block on every live call —
         // and a `max_tokens: 1` probe does not bound thinking time. So each gets the reasoning
         // budget rather than the 3 s default, which would mark a reachable model unhealthy and

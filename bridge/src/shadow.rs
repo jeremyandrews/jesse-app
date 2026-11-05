@@ -39,13 +39,16 @@ pub const FW_GLM_IN_PER_M: f64 = 1.40;
 pub const FW_GLM_CACHED_PER_M: f64 = 0.14;
 pub const FW_GLM_OUT_PER_M: f64 = 4.40;
 
-/// Kimi K3 on Fireworks: $3.00 in / $0.30 cached / $15.00 out (model page, 2026-07-27;
-/// re-read on the pricing page and the model page 2026-09-10, unchanged).
-/// Serves as the DEFAULT deck for the `kimi` registry entry, still overridable via
-/// `JESSE_MODEL_KIMI_PRICE_{IN,CACHED,OUT}`.
-pub const FW_KIMI_K3_IN_PER_M: f64 = 3.00;
-pub const FW_KIMI_K3_CACHED_PER_M: f64 = 0.30;
-pub const FW_KIMI_K3_OUT_PER_M: f64 = 15.00;
+/// Kimi K3.1 Pro on Fireworks: $2.00 in / $0.20 cached / $10.00 out, the serverless standard
+/// tier (https://docs.fireworks.ai/serverless/pricing, read 2026-11-05; the model page,
+/// https://fireworks.ai/models/fireworks/kimi-k3p1-pro, read the same day, agrees). The
+/// priority tier's $3.00 / $0.30 / $15.00 is not what a plain request is billed. Serves as
+/// the DEFAULT deck for the `kimi` registry entry, still overridable via
+/// `JESSE_MODEL_KIMI_PRICE_{IN,CACHED,OUT}`. It replaced K3's $3.00 / $0.30 / $15.00 deck
+/// (model page 2026-07-27, re-read 2026-09-10) in bridge 0.195.0.
+pub const FW_KIMI_K3P1_PRO_IN_PER_M: f64 = 2.00;
+pub const FW_KIMI_K3P1_PRO_CACHED_PER_M: f64 = 0.20;
+pub const FW_KIMI_K3P1_PRO_OUT_PER_M: f64 = 10.00;
 
 /// GLM 5.3 on Fireworks: $1.40 in / $0.26 cached / $4.40 out (pricing page and model page,
 /// 2026-09-10). The DEFAULT deck for the `glm` registry entry, overridable via
@@ -215,7 +218,7 @@ impl ShadowUsage {
 
     /// Dollar cost of this usage vector on the GLM-on-Fireworks price deck. The shadow
     /// audit compares against `fw-glm` specifically, so this deck is GLM's — not "whatever
-    /// Fireworks charges", which varies per model (K3 is 3.00/0.30/15.00).
+    /// Fireworks charges", which varies per model (Kimi K3.1 Pro is 2.00/0.20/10.00).
     pub fn fw_glm_cost(&self) -> f64 {
         self.cost(FW_GLM_IN_PER_M, FW_GLM_CACHED_PER_M, FW_GLM_OUT_PER_M)
     }

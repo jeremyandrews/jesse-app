@@ -356,7 +356,7 @@ Answer the question I asked, not the one you wish I had asked.
 #
 #     id     model                                   version   deck (in / cached / out)
 #     glm    accounts/fireworks/models/glm-5p3       5.3       1.40 / 0.26 / 4.40
-#     kimi   accounts/fireworks/models/kimi-k3       K3        3.00 / 0.30 / 15.00
+#     kimi   accounts/fireworks/models/kimi-k3p1-pro K3.1 Pro  2.00 / 0.20 / 10.00
 #     qwen   accounts/fireworks/models/qwen3p8-max   3.8 Max   2.00 / 0.25 / 6.00
 #
 # Each DEFAULTS its base_url + slug to the live Fireworks values, so each is armed by ONE var
@@ -661,8 +661,9 @@ Answer the question I asked, not the one you wish I had asked.
 #                    glm, qwen ... low, high, max     fable ......... high, max
 #                    opus, sonnet  medium, high, max (their CLI default is `medium`)
 #                    muse ........ low, medium, high
-#                    kimi ........ none — `low` and `max` did not differ measurably on
-#                                  Fireworks, whatever its vendor documents
+#                    kimi ........ none. On K3 `low` and `max` did not differ measurably on
+#                                  Fireworks; K3.1 Pro (2026-11-05) does move with effort,
+#                                  and JESSE_MODEL_KIMI_EFFORT=low,high,max declares it
 #                  Re-declare a built-in from the launch env as JESSE_MODEL_<ID>_EFFORT=low,high,max
 #                  (an EMPTY value removes its control). The default of a built-in is always
 #                  `high`, because that is what the claude CLI sends when a turn names none.
@@ -765,7 +766,8 @@ Answer the question I asked, not the one you wish I had asked.
 #                  passing probe still speaks for the turn.
 #                  A THINKING model needs a wider timeout than 3s — it emits reasoning
 #                  before its first token even at max_tokens 1, and nothing bounds how long
-#                  that takes. Kimi K3 on Fireworks was measured at 1.2–5.4s (2026-08-04).
+#                  that takes. Kimi K3 on Fireworks was measured at 1.2–5.4s (2026-08-04);
+#                  K3.1 Pro, the current `kimi` default, at 0.85–1.26s (2026-11-05).
 #                  The built-in glm, kimi, qwen and muse entries all think, and all set 15.
 #                  A TIMEOUT is confirmed before it counts: the probe is asked once more
 #                  with at least 45s, and only that answer is recorded. A backend queued
@@ -955,7 +957,7 @@ Answer the question I asked, not the one you wish I had asked.
 # backend. That is a real egress of user uploads (consistent with running a hosted text
 # model there). Keep uploads local by pairing a local-only helper alias instead.
 #
-# DO NOT PAIR A NATIVELY-MULTIMODAL MODEL. `kimi` (K3) reads images itself, so leaving it
+# DO NOT PAIR A NATIVELY-MULTIMODAL MODEL. `kimi` (K3.1 Pro) reads images itself, so leaving it
 # UNPAIRED is what gives it vision: attachments take the CLI Read-tool path and the child
 # hands the model the actual image. Pairing it would transcribe the image to text first
 # and hide the pixels from a model that can see them — worse answers AND a second billed

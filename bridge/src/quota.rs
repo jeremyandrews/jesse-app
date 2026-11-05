@@ -2058,26 +2058,26 @@ mod tests {
     fn fireworks_spend_sums_by_registry_id_and_estimates_an_unstamped_bucket() {
         let v: Value = serde_json::from_str(FIREWORKS_FIXTURE).unwrap();
         let kimi_deck = PriceDeck {
-            in_per_m: 3.0,
-            cached_per_m: 0.3,
+            in_per_m: 2.0,
+            cached_per_m: 0.2,
             cache_write_per_m: None,
-            out_per_m: 15.0,
+            out_per_m: 10.0,
         };
         let models = [
             fw_ref("glm", "accounts/fireworks/models/glm-5p3", PriceDeck::ZERO),
             // A bare slug matches the bucket's full model name by its last segment.
-            fw_ref("kimi", "kimi-k3", kimi_deck),
+            fw_ref("kimi", "kimi-k3p1-pro", kimi_deck),
         ];
         let spend = parse_fireworks_usage(&v, &models, 11);
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert!(close(spend.by_model_usd["glm"], 1.052), "{spend:?}");
-        // 100k prompt at 3.00 plus 10k completion at 15.00, per million.
-        assert!(close(spend.by_model_usd["kimi"], 0.45), "{spend:?}");
+        // 100k prompt at 2.00 plus 10k completion at 10.00, per million.
+        assert!(close(spend.by_model_usd["kimi"], 0.30), "{spend:?}");
         assert!(close(
             spend.by_model_usd["accounts/fireworks/models/some-other-model"],
             0.25
         ));
-        assert!(close(spend.month_to_date_usd, 1.752));
+        assert!(close(spend.month_to_date_usd, 1.602));
         assert!(spend.estimated, "the kimi bucket reported no cost");
         assert_eq!(spend.period_start_ms, 11);
         let empty = parse_fireworks_usage(&json!({"serverlessCosts": []}), &models, 0);

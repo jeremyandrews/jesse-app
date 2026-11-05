@@ -13,7 +13,7 @@
       "usageType": "SERVERLESS"
     },
     {
-      "group": { "model_name": "accounts/fireworks/models/kimi-k3" },
+      "group": { "model_name": "accounts/fireworks/models/kimi-k3p1-pro" },
       "promptTokens": "100000",
       "completionTokens": "10000",
       "cachedPromptTokens": "0",

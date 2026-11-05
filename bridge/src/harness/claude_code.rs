@@ -3856,7 +3856,7 @@ mod tests {
         };
         for (id, slug) in [
             ("glm", "accounts/fireworks/models/glm-5p3"),
-            ("kimi", "accounts/fireworks/models/kimi-k3"),
+            ("kimi", "accounts/fireworks/models/kimi-k3p1-pro"),
             ("qwen", "accounts/fireworks/models/qwen3p8-max"),
         ] {
             let entry = registry
@@ -3902,6 +3902,60 @@ mod tests {
                 "{id}: and never on the command line, where `ps` would show it"
             );
         }
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// THE KIMI DEFAULT SLUG IS K3.1 PRO, and it is what a turn's child runs. With only the
+    /// token exported (no `JESSE_MODEL_KIMI_MODEL`), a `kimi` turn must hand the CLI
+    /// `kimi-k3p1-pro` as `ANTHROPIC_MODEL`, not the K3 slug the entry used to default to.
+    #[test]
+    fn the_kimi_default_slug_reaching_the_child_is_k3p1_pro() {
+        let _g = crate::testutil::ENV_LOCK.lock_ok();
+        let vars = [
+            "JESSE_CONFIG",
+            "JESSE_STATE_DIR",
+            "JESSE_MODEL_KIMI_BASE_URL",
+            "JESSE_MODEL_KIMI_AUTH_TOKEN",
+            "JESSE_MODEL_KIMI_MODEL",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            vars.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in vars {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("JESSE_CONFIG", "/nonexistent/jesse.local.toml");
+        std::env::set_var("JESSE_MODEL_KIMI_AUTH_TOKEN", "fw-test");
+
+        let registry = ModelRegistry::from_env("");
+        let cfg = test_config();
+        let Runner::Spawned(harness) = cfg.harnesses.fallback_harness().runner() else {
+            panic!("claude-code is a spawned harness")
+        };
+        let active = ActiveModel::from_registry(registry.get("kimi").expect("kimi registered"));
+        let req = main_turn_request(
+            &cfg,
+            "PROMPT",
+            None,
+            &active,
+            turn_capability(&active),
+            main_mcp_config(&cfg, &ClaudeCode),
+            BUILDER_TURN_ID,
+        );
+        let cmd = harness
+            .build_turn(&cfg, &req)
+            .expect("claude never refuses");
+        assert_eq!(
+            cmd_env_overrides(&cmd)
+                .get("ANTHROPIC_MODEL")
+                .map(String::as_str),
+            Some("accounts/fireworks/models/kimi-k3p1-pro")
+        );
 
         for (k, v) in saved {
             match v {

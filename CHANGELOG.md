@@ -14,6 +14,51 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.195.0] - 2026-11-05
+
+**The Kimi entry runs Kimi K3.1 Pro on Fireworks instead of Kimi K3.** Moonshot's K3.1 Pro is
+K3 with much more post-training and a 1M context, and Fireworks serves it serverless at a lower
+price than K3. The picker entry keeps its id, harness, level, probe budget, vision and
+transcription defaults; only what it runs, what it is called and what it costs move.
+
+- **Changed:** `kimi` defaults its slug to `accounts/fireworks/models/kimi-k3p1-pro`, its
+  version to `K3.1 Pro` (label "Kimi K3.1 Pro"), and its deck to the new
+  `FW_KIMI_K3P1_PRO_{IN,CACHED,OUT}_PER_M` constants: $2.00 in / $0.20 cached / $10.00 out per
+  million tokens, from the Fireworks pricing page (https://docs.fireworks.ai/serverless/pricing)
+  and the model page (https://fireworks.ai/models/fireworks/kimi-k3p1-pro), both read
+  2026-11-05 and in agreement. The K3 constants (3.00 / 0.30 / 15.00) are gone; nothing else
+  used them.
+- **Unchanged:** the aliases `kimi-k3`, `kimi-codex` and `kimi-k3-codex` still resolve to
+  `kimi`, so a device with a stored selection lands on K3.1 Pro. With
+  `JESSE_MODEL_KIMI_AUTH_TOKEN` unset the entry is present, unconfigured and hidden, as
+  before. `JESSE_MODEL_KIMI_MODEL`, `_VERSION` and `_PRICE_*` pin K3 back without a code
+  change. No effort scale is declared, as before.
+- **Measured on 2026-11-05, before any code:**
+  - `GET /inference/v1/models` lists `accounts/fireworks/models/kimi-k3p1-pro` (tools and
+    image input true, context 1,048,576; `supports_chat: false` in the listing, but the model
+    record says `supportsServerless: true` and the Messages surface serves it). No K3.1 Fast
+    or Highspeed variant is listed; `kimi-k3-fast` is still a K3 router.
+  - `/v1/messages`: a plain turn answered; a one-tool turn returned a well-formed `tool_use`
+    block (`stop_reason: tool_use`); a resumed turn called the tool again with a distinct id
+    (`call_<24 hex>` both times), so no cross-turn id collision.
+  - Vision: a red-left / blue-right PNG was described correctly three times of three; one
+    reply also invented a thin black edge strip.
+  - Effort (one digit-sum prompt, two samples, output tokens): `low` 917 / 947, `medium`
+    1,828 / 1,297, `high` 1,355 / 1,405, `xhigh` 4,162 / 3,888, `max` 3,605 / 4,223. The
+    surface accepts `minimal` to `max` plus `none` and `adaptive`; the pinned CLI (2.1.318)
+    sends `high` when a turn names none. Unlike K3, effort moves output now. The table above
+    `effort_from_env` records it, and the scale stays undeclared in this release
+    (`JESSE_MODEL_KIMI_EFFORT=low,high,max` declares it).
+  - Health: ten `max_tokens: 1` probes answered 200 in 0.85 to 1.26 s, inside the 15 s
+    reasoning budget, which stays.
+- **Tests:** the Fireworks slug, label, deck and quota tests now expect K3.1 Pro. New:
+  `the_kimi_default_slug_reaching_the_child_is_k3p1_pro`, `the_kimi_entry_is_labelled_kimi_k3p1_pro`
+  and `a_stored_kimi_k3_selection_resolves_to_the_k3p1_pro_entry`. All three fail with the
+  slug and version reverted to K3 and pass with the change.
+- **Docs:** `jesse.example.toml`'s defaults table, effort note, health note and vision note
+  name K3.1 Pro. Historical K3 notes (the 0.44.0 tool-id defect, dated measurements, the
+  Codex worked example) stay as written.
+
 ## [bridge 0.194.0] - 2026-11-04
 
 **Bridge turns copy a Google Doc template into a folder under a new name.** A turn could fill a

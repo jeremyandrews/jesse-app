@@ -14,6 +14,14 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.196.1] - 2026-11-09
+
+- **Audit:** `bridge/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (`libsqlite3-sys` 0.30.1, the
+  bundled C SQLite; fixed in >=0.39.0, which sqlx 0.8 does not accept). Like the `rsa` entry it
+  is in Cargo.lock only through sqlx's optional SQLite driver, which the bridge never enables, so
+  it is not built: `cargo tree -i libsqlite3-sys --target all` and `cargo tree -i sqlx-sqlite
+  --target all` both print nothing. No code change.
+
 ## [bridge 0.196.0] - 2026-11-09
 
 **Coding agents run on the Studio, with no clock (`[hostrun]`, off by default).** A run starts from
@@ -67,9 +75,6 @@ sends the strand one agent turn. Chat turns keep their run limit: long work is n
   once the run exists; it does not wait for the report.
 - **Docs:** SECURITY.md "Coding agents on the Studio"; three rows in
   `docs/platform-dependencies.md`.
-- **Audit:** `bridge/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (`libsqlite3-sys` 0.30.1),
-  which, like the `rsa` entry, is in Cargo.lock only through sqlx's never-enabled SQLite driver
-  and is not built (`cargo tree -i … --target all` prints nothing).
 - **Measured on the Studio, 2026-11-09:** `claude` 2.1.319 lists `-p`, `--output-format
   stream-json`, `--verbose`, `--session-id`, `--resume`, `--permission-mode` (with
   `bypassPermissions`) and `--model`. A run started through launchd by one test process finished

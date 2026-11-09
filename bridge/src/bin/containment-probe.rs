@@ -12,6 +12,7 @@
 //! cargo run --bin containment-probe            # re-run the battery, compare to the record
 //! cargo run --bin containment-probe -- --write # re-run and RE-RECORD bridge/containment.toml
 //! cargo run --bin containment-probe -- --show  # print the committed record, run nothing
+//! cargo run --bin containment-probe -- --sign  # sign this build and exit (every run signs first)
 //! ```
 //!
 //! The default form is the gate: it fails (exit 1) when a probe drifts from the committed
@@ -63,6 +64,7 @@ fn usage() -> ! {
          \x20 containment-probe                 run the battery and compare it to the record\n\
          \x20 containment-probe --write         run the battery and RE-RECORD the results file\n\
          \x20 containment-probe --show          print the committed record without running\n\
+         \x20 containment-probe --sign          sign this binary (as every run does first) and exit\n\
          \n\
          OPTIONS:\n\
          \x20 --rows <a/b,...>   only these rows (e.g. read/qmd,write/qmd). Never with --write.\n\
@@ -93,6 +95,7 @@ async fn main() {
     let mut opts = BatteryOptions::default();
     let mut write = false;
     let mut show = false;
+    let mut sign_only = false;
     // Resolved AFTER `Config::from_env()` below, because the registry it names lives there.
     let mut model_id: Option<String> = None;
     let mut i = 0;
@@ -100,6 +103,7 @@ async fn main() {
         match args[i].as_str() {
             "--write" => write = true,
             "--show" => show = true,
+            "--sign" => sign_only = true,
             "--keep" => opts.keep_scratch = true,
             "--harness" => {
                 i += 1;
@@ -157,6 +161,15 @@ async fn main() {
     let results_path = results_path(&opts.harness);
     let recorded_text = std::fs::read_to_string(results_path).ok();
 
+    // ONE CODE IDENTITY ACROSS REBUILDS, before any network call: every run but `--show`
+    // (which reads a file and opens nothing). See `jesse_bridge::probesign`.
+    if !show {
+        sign_self();
+        if sign_only {
+            return;
+        }
+    }
+
     if show {
         match recorded_text {
             Some(text) => print_record(&text),
@@ -210,6 +223,7 @@ async fn main() {
             }
         };
         print_record(&render_results(&fresh));
+        report_local_network_denials();
         if !write {
             eprintln!(
                 "\ncontainment-probe: nothing written (add --write to record {})",
@@ -337,6 +351,10 @@ async fn main() {
             String::new()
         }
     );
+
+    // A LAN server macOS refused is a missing grant, not a moved boundary: said FIRST, so the
+    // drift list below is never read as a tool set change.
+    report_local_network_denials();
 
     // The findings, always printed, whatever the mode: a run that scrolled past is a run
     // nobody read.
@@ -475,6 +493,69 @@ async fn main() {
         std::process::exit(1);
     }
     eprintln!("\ncontainment-probe: PASS — hard gates green, baselines match the record.");
+}
+
+/// Sign this executable with the deployment's identity, re-executing once if the signature on
+/// disk was not the expected one. No identity: one line, and the run goes on ad hoc. A
+/// configured identity that cannot sign or verify stops the run here, before any probe.
+fn sign_self() {
+    use jesse_bridge::probesign::{
+        ensure_signed, plan_from_env, SelfSign, SystemCodesign, AD_HOC_NOTE, RESIGNED_ENV,
+    };
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("containment-probe: cannot find my own executable to sign it: {e}");
+            std::process::exit(1);
+        }
+    };
+    let plan = plan_from_env();
+    let reexeced = std::env::var_os(RESIGNED_ENV).is_some();
+    match ensure_signed(&exe, plan.as_ref(), reexeced, &SystemCodesign::default()) {
+        Ok(SelfSign::AdHoc) => eprintln!("{AD_HOC_NOTE}"),
+        Ok(SelfSign::AlreadySigned) => {
+            if let Some(p) = &plan {
+                eprintln!(
+                    "containment-probe: signed as {} ({})",
+                    p.identifier,
+                    exe.display()
+                );
+            }
+        }
+        Ok(SelfSign::Resigned) => {
+            let id = plan.as_ref().map(|p| p.identifier.as_str()).unwrap_or("");
+            eprintln!(
+                "containment-probe: re-signed {} as {id}; re-executing",
+                exe.display()
+            );
+            let e = jesse_bridge::probesign::reexec(&exe);
+            eprintln!("containment-probe: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("containment-probe: signing failed, nothing was probed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Name every LAN MCP server that failed with `os error 65` during this run as a likely Local
+/// Network denial for this binary.
+fn report_local_network_denials() {
+    let failures = jesse_bridge::gateway::take_upstream_failures();
+    let exe = std::env::current_exe()
+        .map(|e| e.display().to_string())
+        .unwrap_or_else(|_| "containment-probe".to_string());
+    let lines = jesse_bridge::probesign::local_network_lines(&failures, &exe);
+    if !lines.is_empty() {
+        eprintln!("\nLOCAL NETWORK DENIED ({}):", lines.len());
+        for l in &lines {
+            eprintln!("  ✗ {l}");
+        }
+    }
 }
 
 fn parse_row(s: &str) -> ContainmentRow {

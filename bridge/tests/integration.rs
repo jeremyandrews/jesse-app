@@ -10457,13 +10457,32 @@ async fn strands_list_serves_the_contract_json() {
         .iter()
         .find(|t| t["slug"] == "Clean-Strand")
         .unwrap();
+    // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served.
     assert_eq!(
         keys(clean),
         vec![
-            "counts", "findings", "group", "next", "now", "parent", "repos", "slug", "state",
-            "title", "updated", "waiting",
+            "counts",
+            "drafts",
+            "findings",
+            "group",
+            "next",
+            "now",
+            "parent",
+            "repos",
+            "runs_active",
+            "slug",
+            "state",
+            "title",
+            "updated",
+            "waiting",
         ]
     );
+    assert_eq!(clean["runs_active"], 0, "[hostrun] is off in the fixture");
+    assert!(clean["drafts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|d| d["studio_runnable"] == false));
     assert!(clean["parent"].is_null(), "a top level strand serves null");
     let tidy = strands.iter().find(|t| t["slug"] == "Tidy-Strand").unwrap();
     assert_eq!(tidy["parent"], "Alpha-Strand");

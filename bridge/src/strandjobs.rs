@@ -59,6 +59,9 @@ pub const IN_FLIGHT: &str = "in flight";
 pub struct Candidate {
     pub step: StrandRef,
     pub spec: DevJobSpec,
+    /// The draft says `devjob-host: studio`: the line runs on the Studio
+    /// ([`crate::hostrun`]), not the cluster.
+    pub studio: bool,
 }
 
 /// One Queue line that was not eligible: its id (or `line N` when it has none) and why.
@@ -85,6 +88,8 @@ pub enum StrandFire {
         step: StrandRef,
         spec: Box<DevJobSpec>,
     },
+    /// The line's draft says `devjob-host: studio`, and a Studio run was created for it.
+    StartedStudio { run_id: String, step: StrandRef },
     /// Nothing eligible: `ran`, no push, no vault write. Carries the full reason.
     Nothing(String),
     /// The note is missing or done, or the cluster could not be asked or refused the start.
@@ -92,7 +97,7 @@ pub enum StrandFire {
 }
 
 /// One front matter scalar, with one pair of surrounding quotes removed.
-fn fm(src: &str, key: &str) -> Option<String> {
+pub fn fm(src: &str, key: &str) -> Option<String> {
     let v = frontmatter_value(src, key)?;
     let unquoted = ['"', '\'']
         .iter()
@@ -181,7 +186,8 @@ pub fn prompt_body(src: &str) -> String {
     }
 }
 
-/// Whether `notes_root/Inbox/` (not its `archive/`) holds a dev job report naming this step.
+/// Whether `notes_root/Inbox/` (not its `archive/`) holds a dev job report naming this step: a
+/// cluster report (`-dev-job-`) or a Studio run's (`-run-`, `host: studio`).
 pub fn inbox_reports_step(notes_root: &Path, note: &str, id: &str) -> bool {
     let inbox = notes_root.join(crate::vaultwrites::INBOX_DIR);
     let Ok(entries) = std::fs::read_dir(&inbox) else {
@@ -189,7 +195,9 @@ pub fn inbox_reports_step(notes_root: &Path, note: &str, id: &str) -> bool {
     };
     entries.flatten().any(|e| {
         let name = e.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".md") || !name.contains("-dev-job-") {
+        let cluster = name.contains("-dev-job-");
+        let studio = name.contains("-run-");
+        if !name.ends_with(".md") || !(cluster || studio) {
             return false;
         }
         if !e.file_type().is_ok_and(|t| t.is_file()) {
@@ -198,7 +206,8 @@ pub fn inbox_reports_step(notes_root: &Path, note: &str, id: &str) -> bool {
         let Ok(text) = std::fs::read_to_string(e.path()) else {
             return false;
         };
-        fm(&text, "strand").as_deref() == Some(note)
+        (cluster || fm(&text, "host").as_deref() == Some("studio"))
+            && fm(&text, "strand").as_deref() == Some(note)
             && fm(&text, "strand-id").as_deref() == Some(id)
     })
 }
@@ -286,6 +295,22 @@ pub fn eligibility(
             "prompt {path}: devjob-repo {repo:?} is not owner/name"
         ));
     }
+    // Where it runs: the cluster unless the draft says `devjob-host: studio`.
+    let studio = match fm(&src, crate::hostrun::HOST_KEY).as_deref() {
+        None | Some("cluster") => false,
+        Some("studio") => {
+            if crate::hostrun::prompt_section(&src).is_none() {
+                return Err(format!("prompt {path} has no ## PROMPT section"));
+            }
+            true
+        }
+        Some(other) => {
+            return Err(format!(
+                "prompt {path}: {} {other:?} is not cluster or studio",
+                crate::hostrun::HOST_KEY
+            ))
+        }
+    };
 
     // The overrides, each checked on its own so the error names its key.
     let base = DevJobArgs {
@@ -358,6 +383,7 @@ pub fn eligibility(
             branch_slug: Some(branch_slug(&t.note, &item.id, yyyymmdd)),
             test_command,
             timeout_minutes,
+            ..DevJobArgs::default()
         },
         default_agent,
     )
@@ -369,6 +395,7 @@ pub fn eligibility(
             prompt: path,
         },
         spec,
+        studio,
     })
 }
 
@@ -422,6 +449,7 @@ pub fn choose(cands: Vec<Result<Candidate, Skip>>, in_flight: impl Fn(&StrandRef
 /// the occurrence's date, for the branch slug; `origin` is `schedule:<id>`.
 pub async fn fire(
     svc: &DevJobs,
+    studio: Option<&Arc<crate::hostrun::HostRuns>>,
     notes_root: &Path,
     t: &StrandTemplate,
     yyyymmdd: &str,
@@ -441,13 +469,43 @@ pub async fn fire(
     } else {
         Vec::new()
     };
+    // In flight also means a Studio run of the step that is queued, running or needs Jeremy.
     let in_flight = |step: &StrandRef| {
         jobs.iter()
             .any(|j| carries_strand_step(j, &step.note, &step.id))
             || inbox_reports_step(notes_root, &step.note, &step.id)
+            || studio.is_some_and(|s| s.live_run_of(&step.note, &step.id).is_some())
     };
     match choose(cands, in_flight) {
         Pick::Nothing(why) => StrandFire::Nothing(format!("{NOTHING_ELIGIBLE}{}: {why}", t.note)),
+        Pick::Run(c) if c.studio => {
+            let Some(s) = studio else {
+                return StrandFire::Failed(format!(
+                    "{}'s draft says {}: studio, and [hostrun] is not enabled on this bridge",
+                    c.step.id,
+                    crate::hostrun::HOST_KEY
+                ));
+            };
+            match s
+                .start(crate::hostrun::StartRequest {
+                    kind: crate::hostrun::StartKind::Item {
+                        strand: c.step.note.clone(),
+                        item_id: c.step.id.clone(),
+                    },
+                    origin: origin.to_string(),
+                    again: false,
+                })
+                .await
+            {
+                Ok(r) => StrandFire::StartedStudio {
+                    run_id: r.run_id,
+                    step: c.step,
+                },
+                Err(e) => {
+                    StrandFire::Failed(format!("the Studio run did not start: {}", e.message()))
+                }
+            }
+        }
         Pick::Run(c) => match svc.start_run(&c.spec, origin, Some(&c.step)).await {
             Ok(started) => StrandFire::Started {
                 started,

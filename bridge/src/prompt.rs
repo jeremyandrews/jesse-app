@@ -975,6 +975,8 @@ pub enum TurnSource<'a> {
     },
     Schedule(&'a str),
     StrandTick,
+    /// A Studio run started or reported ([`crate::hostrun`]).
+    StudioRun,
 }
 
 /// Everything the turn header states beyond the clock: the facts [`clock_header`] turns into
@@ -1054,6 +1056,7 @@ pub fn source_line(source: TurnSource, voice: bool, sent_for: Option<&str>) -> S
         TurnSource::Client { .. } => "SOURCE: app, device not reported".to_string(),
         TurnSource::Schedule(id) => format!("SOURCE: schedule {id}"),
         TurnSource::StrandTick => "SOURCE: strand tick".to_string(),
+        TurnSource::StudioRun => "SOURCE: studio run".to_string(),
     };
     if voice {
         line.push_str(", voice");

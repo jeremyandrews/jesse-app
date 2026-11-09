@@ -274,6 +274,7 @@ impl JesseRequest {
         match self.origin.as_deref() {
             Some(o) if o.starts_with("schedule:") => TurnSource::Schedule(&o["schedule:".len()..]),
             Some(STRAND_TICK_ORIGIN) => TurnSource::StrandTick,
+            Some(crate::hostrun::STUDIO_RUN_ORIGIN) => TurnSource::StudioRun,
             _ => TurnSource::Client {
                 kind: self.client_kind(),
                 device,
@@ -2917,6 +2918,24 @@ pub fn app(state: AppState) -> Router {
         // The Strands board, read only: every status note under `Strands/`, parsed and
         // audited, under the same strong ETag posture as /jesse/today. Keyed by slug, and a
         // slug is a file stem and nothing else. See `strands`.
+        // CODING AGENTS ON THE STUDIO: the same paired device auth as `/jesse/strands`.
+        .route(
+            "/jesse/runs",
+            get(crate::hostrun::jesse_runs).post(crate::hostrun::jesse_runs_start),
+        )
+        .route("/jesse/runs/:run_id", get(crate::hostrun::jesse_run))
+        .route(
+            "/jesse/runs/:run_id/log",
+            get(crate::hostrun::jesse_run_log),
+        )
+        .route(
+            "/jesse/runs/:run_id/reply",
+            post(crate::hostrun::jesse_run_reply),
+        )
+        .route(
+            "/jesse/runs/:run_id/cancel",
+            post(crate::hostrun::jesse_run_cancel),
+        )
         .route("/jesse/strands", get(crate::strands::jesse_strands))
         .route("/jesse/strands/:slug", get(crate::strands::jesse_strand))
         .route(

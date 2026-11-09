@@ -14,6 +14,75 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.196.1] - 2026-11-09
+
+- **Audit:** `bridge/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (`libsqlite3-sys` 0.30.1, the
+  bundled C SQLite; fixed in >=0.39.0, which sqlx 0.8 does not accept). Like the `rsa` entry it
+  is in Cargo.lock only through sqlx's optional SQLite driver, which the bridge never enables, so
+  it is not built: `cargo tree -i libsqlite3-sys --target all` and `cargo tree -i sqlx-sqlite
+  --target all` both print nothing. No code change.
+
+## [bridge 0.196.0] - 2026-11-09
+
+**Coding agents run on the Studio, with no clock (`[hostrun]`, off by default).** A run starts from
+the app (`POST /jesse/runs` with a strand item), from a chat turn (`devjob_start` with
+`host: "studio"`), or from a `kind = "devjob"` strand entry whose draft says `devjob-host: studio`.
+It gets its own worktree of a shared bare clone, its own branch and `CARGO_TARGET_DIR`, and runs
+`claude -p` as its own launchd job, so it outlives the bridge, a deploy and the request that
+started it. The watcher writes each round's report into the Inbox byte for byte, pushes, and
+sends the strand one agent turn. Chat turns keep their run limit: long work is not a chat turn.
+
+- **Added:** `bridge/src/hostrun.rs` (with `git`, `runner`, `stream` and `sys`) and the
+  `jesse-runner` binary, installed beside the bridge (`deploy-bins.toml`). All state is on disk
+  under `[hostrun] root` (default `~/jesse-runs`): `repos/<owner>/<name>.git`,
+  `runs/<run_id>/` (`run.json` written atomically under a `flock` the runner shares, `prompt.md`,
+  `stream.jsonl`, `report.md`, `runner.log`, `exit.json`, `job.plist`, `target/`, `worktree/`) and
+  `locks/<owner>__<name>.lock`, under which every git command on a bare clone runs. A run's
+  launchd label is `<ns>.jesse-run.<run_id>`, `<ns>` taken from the bridge's own label
+  (`XPC_SERVICE_NAME`), so no deployment's namespace is in the source; `[hostrun] label_prefix`
+  overrides it.
+- **Added:** run ids are the Drafts item id, then `b`, `c`, … for later runs of the item (every
+  earlier run directory counts, so an id, a branch, an Inbox file or a launchd label is never
+  reused); a free prompt is `s-<slug>`. A second start of an item that is queued, running or needs
+  Jeremy is refused unless `again: true` ("GD5 is still running. Start GD5b too?").
+- **Added:** the served prompt is the draft's `## PROMPT` section byte for byte, then the
+  generated `### Run ID and report` section. A report whose first line is `NEEDS YOU:` makes the
+  run `needs_you`; `POST /jesse/runs/:id/reply` (and "Continue where you left off.") resumes the
+  same session in the same worktree; `/cancel` is SIGTERM to the agent's process group and
+  SIGKILL after 30 seconds. A quiet run is reported (`stalled_since`, one push), never killed; a
+  run whose label vanished with no exit is `interrupted`, never restarted by itself.
+- **Added:** the queue (`max_concurrent` 3, `max_per_repo` 1 with `[hostrun.repos."owner/name"]`
+  overrides, a `needs_you` run holds no slot) and the disk guard (`min_free_gb` 100,
+  `max_total_gb` 300, a space pass that removes finished runs' artifacts, then finished worktrees,
+  oldest first). Hourly cleanup removes build artifacts (including the Xcode DerivedData folders
+  a run recorded as its own) and worktrees once the pull request is merged or closed or after
+  `keep_days`; `needs_you` and `interrupted` keep their worktrees 30 days. Run directories are
+  never deleted; `stream.jsonl` is gzipped after 7 days. A reconcile at start and daily prunes
+  dead worktrees, boots out a run label only when its plist is under this root, and reports
+  (never deletes) a run directory with no `run.json`.
+- **Added:** `GET /jesse/runs`, `GET /jesse/runs/:id`, `GET /jesse/runs/:id/log?tail=N` (readable
+  lines: the assistant's text and one line per tool call, never raw JSON or tool output), with
+  the paired device auth of `/jesse/strands`. `GET /jesse/strands` gains, additively,
+  `runs_active` per strand and a `drafts` list of its items, each with `studio_runnable`.
+- **Changed:** `DevJobArgs` takes `host` (`cluster`, the default and byte for byte the old path,
+  or `studio`), `strand`, `item_id` and `again`; unknown keys are still refused. With `[hostrun]`
+  attached the `devjob` server also lists `devjob_reply` and `devjob_cancel`, and `devjob_status`
+  and `devjob_list` include Studio runs with `host: "studio"`. The two new tools are **not** in the
+  default allowlist yet: a grant changes every recorded containment row, which needs the live
+  battery re-run.
+- **Changed:** a strand entry treats a Studio run of the step that is queued, running or needs
+  Jeremy, or a Studio report naming it in the Inbox, as in flight. A Studio fire records `ran`
+  once the run exists; it does not wait for the report.
+- **Docs:** SECURITY.md "Coding agents on the Studio"; three rows in
+  `docs/platform-dependencies.md`.
+- **Measured on the Studio, 2026-11-09:** `claude` 2.1.319 lists `-p`, `--output-format
+  stream-json`, `--verbose`, `--session-id`, `--resume`, `--permission-mode` (with
+  `bypassPermissions`) and `--model`. A run started through launchd by one test process finished
+  (exit 0, `report.md` written) after that process exited, and a second process reported it; a
+  stub that ignores SIGTERM was ended by SIGKILL and left no process. A real Claude Code run on a
+  scratch repository wrote a two line report and answered a `--resume` reply in the same
+  session. Not deployed; `[hostrun]` ships off.
+
 ## [bridge 0.195.0] - 2026-11-05
 
 **The Kimi entry runs Kimi K3.1 Pro on Fireworks instead of Kimi K3.** Moonshot's K3.1 Pro is

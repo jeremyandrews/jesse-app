@@ -15,4 +15,11 @@ ignore = [
     # `cargo tree -i sqlx-mysql --target all` both print nothing. Revisit if a MySQL feature
     # is ever enabled, or when sqlx stops pulling the crate into the lock.
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0459, `libsqlite3-sys` 0.30.1 (bundled C SQLite, CVE-2026-119375; fixed in
+    # >=0.39.0, which sqlx 0.8's `sqlx-sqlite` does not accept). The same lockfile-only case as
+    # `rsa` above: it is recorded through sqlx's optional SQLite driver, which the bridge never
+    # enables. `cargo tree -i libsqlite3-sys --target all` and `cargo tree -i sqlx-sqlite
+    # --target all` both print nothing (checked 2026-11-09). Revisit if a SQLite feature is ever
+    # enabled, or when sqlx moves to a fixed libsqlite3-sys.
+    "RUSTSEC-2026-0459",
 ]

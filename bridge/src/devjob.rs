@@ -60,6 +60,12 @@ pub const TOOL_STATUS: &str = "devjob_status";
 pub const TOOL_LIST: &str = "devjob_list";
 /// The three tools, in the order the server lists them.
 pub const DEVJOB_TOOLS: [&str; 3] = [TOOL_START, TOOL_STATUS, TOOL_LIST];
+/// Answer a Studio run (`host: "studio"`): a new round in the same session. Classed `write`.
+pub const TOOL_REPLY: &str = "devjob_reply";
+/// Cancel a queued or running Studio run. Classed `write`.
+pub const TOOL_CANCEL: &str = "devjob_cancel";
+/// The five tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
+pub const STUDIO_TOOLS: [&str; 5] = [TOOL_START, TOOL_STATUS, TOOL_LIST, TOOL_REPLY, TOOL_CANCEL];
 
 /// On every object a run creates: the selector the watcher lists by.
 pub const LABEL_DEVJOB: &str = "jesse.dev/devjob";
@@ -173,6 +179,10 @@ pub struct DevJobSpec {
 /// What a caller hands in: the tool's arguments, or a schedule entry's fields. Unknown keys are
 /// refused, so an argument naming a namespace, an image, a path or a credential is an error
 /// rather than a key that is quietly ignored.
+///
+/// `host` picks where the run goes: absent or `cluster` is the cluster, exactly as before;
+/// `studio` is a [`crate::hostrun`] run on this Mac. `strand`, `item_id` and `again` apply only
+/// to a Studio run ([`plan_start`]). [`DevJobSpec::validate`] reads none of the four.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DevJobArgs {
@@ -183,6 +193,98 @@ pub struct DevJobArgs {
     pub branch_slug: Option<String>,
     pub test_command: Option<String>,
     pub timeout_minutes: Option<u64>,
+    pub host: Option<String>,
+    pub strand: Option<String>,
+    pub item_id: Option<String>,
+    pub again: Option<bool>,
+}
+
+/// Where a `devjob_start` goes, decided from its arguments alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartPlan {
+    /// No `host`, or `cluster`: the cluster, with the spec [`DevJobSpec::validate`] builds.
+    Cluster(DevJobSpec),
+    /// `host: "studio"`: a run on this Mac.
+    Studio {
+        kind: crate::hostrun::StartKind,
+        again: bool,
+    },
+}
+
+/// Decide a start. Without `host` (or with `cluster`) this is [`DevJobSpec::validate`] and
+/// nothing else, so the cluster path is unchanged; `strand`, `item_id` and `again` are refused
+/// there. With `studio`, either a strand item (`strand` and `item_id`; its repository, prompt and
+/// model come from its draft) or a free prompt (`repo`, `prompt`, `branch_slug`, optional
+/// `model`). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
+/// so `agent` may only be `claude`.
+pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, String> {
+    match args.host.as_deref().map(str::trim) {
+        None | Some("cluster") => {
+            if args.strand.is_some() || args.item_id.is_some() || args.again.is_some() {
+                return Err("strand, item_id and again apply only with host \"studio\"".into());
+            }
+            DevJobSpec::validate(args, default_agent).map(StartPlan::Cluster)
+        }
+        Some("studio") => {
+            if args.timeout_minutes.is_some() {
+                return Err(
+                    "timeout_minutes does not apply on the Studio: a Studio run has no clock"
+                        .into(),
+                );
+            }
+            if args.test_command.is_some() {
+                return Err(
+                    "test_command does not apply on the Studio: the prompt names its checks".into(),
+                );
+            }
+            if let Some(a) = args.agent.as_deref() {
+                if Agent::parse(a)? != Agent::Claude {
+                    return Err(format!("agent {a:?}: the Studio runs claude only"));
+                }
+            }
+            let again = args.again.unwrap_or(false);
+            match (args.strand, args.item_id) {
+                (Some(strand), Some(item_id)) => {
+                    if args.repo.is_some()
+                        || args.prompt.is_some()
+                        || args.branch_slug.is_some()
+                        || args.model.is_some()
+                    {
+                        return Err(
+                            "a strand item takes its repository, prompt and model from its \
+                                    draft: pass strand and item_id alone"
+                                .into(),
+                        );
+                    }
+                    Ok(StartPlan::Studio {
+                        kind: crate::hostrun::StartKind::Item {
+                            strand: strand.trim().to_string(),
+                            item_id: item_id.trim().to_string(),
+                        },
+                        again,
+                    })
+                }
+                (None, None) => {
+                    let model = match args.model.as_deref().map(str::trim) {
+                        None | Some("") => None,
+                        Some(m) if valid_model(m) => Some(m.to_string()),
+                        Some(m) => return Err(format!("model {m:?} is not a model id")),
+                    };
+                    Ok(StartPlan::Studio {
+                        kind: crate::hostrun::StartKind::Free {
+                            repo: args.repo.unwrap_or_default().trim().to_string(),
+                            prompt: args.prompt.unwrap_or_default(),
+                            slug: args.branch_slug.unwrap_or_default().trim().to_string(),
+                            model,
+                        },
+                        again,
+                    })
+                }
+                _ => Err("strand and item_id go together".into()),
+            }
+        }
+        Some(other) => Err(format!("host {other:?} is not cluster or studio")),
+    }
 }
 
 /// Whether `repo` is `owner/name` as GitHub spells one.
@@ -1355,6 +1457,8 @@ pub struct DevJobs {
     wake: tokio::sync::Notify,
     /// Serialises every queue decision (a start, a resume) against every other.
     gate: tokio::sync::Mutex<()>,
+    /// Studio runs (`[hostrun]`), when enabled: `host: "studio"` and the two Studio tools.
+    studio: OnceLock<Arc<crate::hostrun::HostRuns>>,
 }
 
 impl std::fmt::Debug for DevJobs {
@@ -1384,7 +1488,14 @@ impl DevJobs {
             tails: Mutex::new(HashMap::new()),
             wake: tokio::sync::Notify::new(),
             gate: tokio::sync::Mutex::new(()),
+            studio: OnceLock::new(),
         })
+    }
+
+    /// Serve Studio runs too: `host: "studio"` on `devjob_start`, Studio runs in
+    /// `devjob_status` and `devjob_list`, and `devjob_reply` and `devjob_cancel`.
+    pub fn attach_studio(&self, studio: Arc<crate::hostrun::HostRuns>) {
+        let _ = self.studio.set(studio);
     }
 
     /// Where reports go. Until this is called the watcher keeps the queue moving but reports
@@ -2048,6 +2159,77 @@ pub fn tool_descriptors() -> Vec<Value> {
     ]
 }
 
+/// The tools once `[hostrun]` is attached: `devjob_start` gains `host`, `strand`, `item_id` and
+/// `again`, and `devjob_reply` and `devjob_cancel` join. [`tool_descriptors`] is unchanged.
+pub fn tool_descriptors_with_studio() -> Vec<Value> {
+    let mut tools = tool_descriptors();
+    if let Some(start) = tools.first_mut() {
+        start["description"] = json!(
+            "Start a coding agent. With no host (or host \"cluster\") it runs on the k3s \
+             cluster against a GitHub repository: it clones the repository, runs the agent on the \
+             prompt and the test command, pushes the branch jesse/<branch_slug> and opens a pull \
+             request if anything changed; it never merges and never pushes to main. Returns the \
+             job name in seconds and whether the run is queued. The bridge watches the run and \
+             writes its report to Inbox/<date>-dev-job-<branch_slug>.md, then pushes a \
+             notification. With host \"studio\" it runs Claude Code on Jeremy's Mac Studio \
+             with no time limit, in its own worktree: pass strand and item_id to run a strand's \
+             Drafts item whose draft says devjob-host: studio (\"run GD5 on the Studio\"), or \
+             repo, prompt and branch_slug for a free prompt. It returns a run_id; the report \
+             lands in Inbox/<date>-run-<run_id>.md. A second start of an item that is still \
+             queued, running or needs Jeremy is refused unless again is true."
+        );
+        if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
+            props.insert(
+                "host".into(),
+                json!({ "type": "string", "enum": ["cluster", "studio"],
+                        "description": "where the run goes; default cluster" }),
+            );
+            props.insert(
+                "strand".into(),
+                json!({ "type": "string", "description": "host studio: the strand note's slug (Strands/<strand>.md)" }),
+            );
+            props.insert(
+                "item_id".into(),
+                json!({ "type": "string", "description": "host studio: the Drafts line's bold id, e.g. GD5" }),
+            );
+            props.insert(
+                "again".into(),
+                json!({ "type": "boolean",
+                        "description": "host studio: start a further run of an item whose run is still live" }),
+            );
+        }
+        start["inputSchema"]["required"] = json!([]);
+    }
+    tools.push(json!({
+        "name": TOOL_REPLY,
+        "description": "Answer a Studio run that needs you, or continue a reported, failed or \
+            interrupted one: a new round in the same worktree and Claude Code session, with the \
+            text as the next message. \"Continue where you left off.\" resumes it.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "text"],
+            "properties": {
+                "run_id": { "type": "string" },
+                "text": { "type": "string", "description": "the reply, at most 64 KiB" },
+            },
+        },
+    }));
+    tools.push(json!({
+        "name": TOOL_CANCEL,
+        "description": "Cancel a Studio run: a queued one simply never starts; a running one is \
+            stopped (SIGTERM, then SIGKILL after 30 seconds) and its report is written from \
+            whatever it has.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id"],
+            "properties": { "run_id": { "type": "string" } },
+        },
+    }));
+    tools
+}
+
 fn text_result(v: &Value, is_error: bool) -> Value {
     json!({
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(v).unwrap_or_default() }],
@@ -2069,9 +2251,77 @@ struct StatusArgs {
 #[serde(deny_unknown_fields)]
 struct ListArgs {}
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyArgs {
+    run_id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelArgs {
+    run_id: String,
+}
+
+/// One Studio run, as `devjob_status` reports it: the record, `host`, and the readable log tail.
+fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) -> Value {
+    let mut v = crate::hostrun::run_json(r);
+    v["log_tail"] = json!(svc
+        .log_lines(&r.run_id, STATUS_LOG_LINES)
+        .unwrap_or_default());
+    v
+}
+
+/// One Studio run, as `devjob_list` names it.
+fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
+    json!({
+        "run_id": r.run_id,
+        "host": "studio",
+        "repo": r.repo,
+        "branch": r.branch,
+        "status": r.status,
+        "waiting_for": r.waiting_for,
+        "strand": r.strand,
+        "item_id": r.item_id,
+        "created_at": r.created_at,
+        "finished_at": r.finished_at,
+        "stalled_since": r.stalled_since,
+        "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
+        "desk_command": r.desk_command,
+    })
+}
+
+impl DevJobs {
+    /// `devjob_start` with `host: "studio"`.
+    async fn start_studio(&self, kind: crate::hostrun::StartKind, again: bool) -> Value {
+        let Some(svc) = self.studio.get() else {
+            return error_result("host \"studio\" needs [hostrun] enabled on this bridge");
+        };
+        match svc
+            .start(crate::hostrun::StartRequest {
+                kind,
+                origin: "turn".into(),
+                again,
+            })
+            .await
+        {
+            Ok(s) => text_result(
+                &json!({ "run_id": s.run_id, "host": "studio", "status": s.status, "waiting_for": s.waiting_for }),
+                false,
+            ),
+            Err(e) => error_result(e.message()),
+        }
+    }
+}
+
 impl crate::gateway::InProcessServer for DevJobs {
     fn tools(&self) -> Vec<Value> {
-        tool_descriptors()
+        if self.studio.get().is_some() {
+            tool_descriptors_with_studio()
+        } else {
+            tool_descriptors()
+        }
     }
 
     fn call<'a>(
@@ -2086,8 +2336,11 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
-                    let spec = match DevJobSpec::validate(args, self.default_agent) {
-                        Ok(s) => s,
+                    let spec = match plan_start(args, self.default_agent) {
+                        Ok(StartPlan::Cluster(s)) => s,
+                        Ok(StartPlan::Studio { kind, again }) => {
+                            return Ok(self.start_studio(kind, again).await)
+                        }
                         Err(e) => return Ok(error_result(&e)),
                     };
                     match self.start(&spec, "turn").await {
@@ -2100,6 +2353,11 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
+                    if let Some(svc) = self.studio.get() {
+                        if let Some(r) = svc.get(args.job_name.trim()) {
+                            return Ok(text_result(&studio_status(svc, &r), false));
+                        }
+                    }
                     match self.run(args.job_name.trim()).await {
                         Ok(Some(r)) => Ok(text_result(&json!(r), false)),
                         Ok(None) => Ok(error_result(&format!(
@@ -2113,9 +2371,68 @@ impl crate::gateway::InProcessServer for DevJobs {
                     if let Err(e) = serde_json::from_value::<ListArgs>(arguments) {
                         return Ok(error_result(&format!("bad arguments: {e}")));
                     }
-                    match self.list().await {
-                        Ok(v) => Ok(text_result(&v, false)),
-                        Err(e) => Ok(error_result(&e)),
+                    let Some(svc) = self.studio.get() else {
+                        return match self.list().await {
+                            Ok(v) => Ok(text_result(&v, false)),
+                            Err(e) => Ok(error_result(&e)),
+                        };
+                    };
+                    // With Studio runs, a cluster that cannot be listed still lists them.
+                    let mut v = match self.list().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            json!({ "running": [], "queued": [], "finished": [], "cluster_error": e })
+                        }
+                    };
+                    let svc = svc.clone();
+                    let runs = tokio::task::spawn_blocking(move || {
+                        let mut runs: Vec<crate::hostrun::RunRecord> =
+                            crate::hostrun::scan_runs(&svc.settings.runs_dir())
+                                .0
+                                .into_iter()
+                                .map(|(_, r)| r)
+                                .collect();
+                        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        runs
+                    })
+                    .await
+                    .unwrap_or_default();
+                    let finished: Vec<Value> = runs
+                        .iter()
+                        .filter(|r| r.status.is_finished())
+                        .take(LIST_FINISHED)
+                        .map(studio_brief)
+                        .collect();
+                    v["studio"] = json!({
+                        "active": runs.iter().filter(|r| !r.status.is_finished()).map(studio_brief).collect::<Vec<_>>(),
+                        "finished": finished,
+                    });
+                    Ok(text_result(&v, false))
+                }
+                TOOL_REPLY => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: ReplyArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    match svc.reply_and_pump(args.run_id.trim(), &args.text).await {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
+                TOOL_CANCEL => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: CancelArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    match svc.cancel_and_wake(args.run_id.trim()).await {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
                     }
                 }
                 other => Err(format!("devjob has no tool {other:?}")),

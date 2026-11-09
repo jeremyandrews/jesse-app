@@ -2904,6 +2904,77 @@ turn can already call directly, and **there is still no repository allowlist (Je
 merges, and every run lands as an Inbox report and a push. The bridge reads the strand note and
 the prompt; it never writes, renames or moves anything under `Strands/` or `Projects/drafts/`.
 
+## Coding agents on the Studio (`hostrun`, 0.196.0; off by default)
+
+`[hostrun] enabled = true` lets a coding agent run on the Mac Studio itself, outside any chat turn
+and with **no time limit** (`bridge/src/hostrun.rs`). It exists for the work the cluster cannot
+do (building and testing the iOS, watchOS and Mac app) and for work longer than a turn.
+
+**Who it runs as.** Every run is Claude Code (`claude -p`) running as `jandrews`, the bridge's
+own user, with `[hostrun] permission_mode` (default `bypassPermissions`). There is no sandbox
+profile and no separate user: a run can do anything `jandrews` can, inside or outside its
+worktree. The generated section of its prompt asks it to keep what it creates inside its working
+directory or the system temporary directory; that is an instruction, not a fence. This is the
+same trust a person gives Claude Code at a desk, and the reason the opt in below is narrow.
+
+**The environment is an allowlist.** The runner (`jesse-runner`) clears the environment and passes
+on only `hostrun::ENV_ALLOWLIST` (`HOME`, `PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
+`LC_CTYPE`, `TMPDIR`, `SHELL`, `TERM`, `TZ`, `SSH_AUTH_SOCK`, `GH_CONFIG_DIR`,
+`GIT_CONFIG_GLOBAL`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `DEVELOPER_DIR`, `SDKROOT`,
+`__CF_USER_TEXT_ENCODING`) plus `JESSE_RUN_ID`, `JESSE_RUN_REPORT` and `CARGO_TARGET_DIR`. The
+same list fills the run's launchd `job.plist`. Every bridge secret is stripped: `JESSE_TOKEN`,
+the APNs key path and ids, the gateway's and every MCP server's credentials, the model and Codex
+tokens, `JESSE_GITHUB_PAT`, the Slack, UniFi, Home Assistant, Google, Runn, Clockify, Rybbit and
+Places keys. What a run can still reach is what `jandrews` reaches without them: the login
+keychain, `~/.claude` (Claude Code's own sign in), `gh`'s stored login and `~/.ssh`. A run pushes
+and opens pull requests with Jeremy's own GitHub identity, exactly as at a desk.
+
+**The opt in is front matter only, from live drafts.** A strand item may run on the Studio only
+when its Drafts line is unchecked and links a draft under `Projects/drafts/` outside `archive/`
+whose front matter names the same `strand` and `strand-id`, has a `devjob-repo`, and says
+`devjob-host: studio`; the prompt is the draft's `## PROMPT` section. The bridge never writes
+those keys, never writes under `Strands/` or `Projects/drafts/`, and its only vault writes are
+the Inbox reports. A free prompt can be started only by a chat turn (below).
+
+**What can start a run.** `POST /jesse/runs` from a paired device (the same bearer token as
+`/jesse/strands`), for a strand item only; `devjob_start` with `host: "studio"` from a write turn
+(the existing `mcp__devjob__devjob_start` grant, so only with `[devjob]` and the gateway on), for
+a strand item or a free prompt; and a `kind = "devjob"` strand schedule entry whose eligible line's
+draft says `devjob-host: studio`. Reply and cancel are `POST /jesse/runs/:id/reply` and
+`/cancel` (paired device), and the `devjob_reply` and `devjob_cancel` tools, which the server
+lists once `[hostrun]` is on. Those two tools are not yet in the default allowlist: adding a grant
+changes every recorded containment row, and the live battery has not been re-run for them, so
+until it is they reach no turn.
+
+**Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
+`<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or
+`[hostrun] label_prefix`; the plist in the run directory, never in `~/Library/LaunchAgents`, so a reboot does not restart it).
+It outlives the bridge, a deploy and the request that started it. Long work killed at an
+arbitrary wall clock loses hours and leaves a half pushed branch; instead a run with no stream
+event for `stall_minutes` is reported once (`stalled_since` and one push), never killed, and
+Jeremy decides. A run whose label disappears with no exit (a reboot, a crash) becomes
+`interrupted` with one push and is never restarted by itself. Chat turns keep their run limit
+(`JESSE_TIMEOUT` under `HARD_TIMEOUT_CEILING`): long work is not a chat turn.
+
+**Cancel.** A queued run simply becomes `cancelled`. A running one gets SIGTERM to the agent's
+own process group, then SIGKILL 30 seconds later from the watcher (which survives a bridge
+restart, because the request is recorded in `run.json`), and its round is reported as cancelled
+from whatever it has.
+
+**Cleanup deletes nothing outside `[hostrun] root`** except the Xcode DerivedData folders a run
+recorded as its own (folders directly under `~/Library/Developer/Xcode/DerivedData` whose
+`info.plist` names a workspace inside that run's worktree), and never a run directory: `run.json`,
+the logs and the reports stay. Build artifacts (`target/`, those DerivedData folders) go once the
+pull request is merged or closed or the branch (seen on origin before) is gone, or after
+`keep_days`; worktrees and their local branches go on the same rule for `reported`, `failed` and
+`cancelled` runs, and after 30 days (with a push first) for `needs_you` and `interrupted` ones.
+The space pass removes artifacts, then finished worktrees, oldest first, when the runs exceed
+`max_total_gb` or free space drops under `min_free_gb`; it never touches a running or queued run.
+The reconcile prunes a worktree git registers whose path is gone, boots out a run label only when
+launchd says its plist is under this root's `runs/` and its run directory is gone, and reports a
+directory with no `run.json` without deleting it. The live checkout `~/devel/tag1/jesse-app` is
+never used: each repository has its own bare clone under `root`, sharing no object store with it.
+
 ## Diet child tool isolation (in-process boundary)
 
 The diet-logging pipeline (see the bridge README) spawns two **stateless,

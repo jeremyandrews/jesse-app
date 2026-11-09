@@ -544,6 +544,10 @@ struct LocalConfig {
     /// gateway in process. See [`crate::devjob`].
     #[serde(default)]
     devjob: Option<crate::devjob::DevJobToml>,
+    /// The optional top-level `[hostrun]` table: coding agents on the Studio. See
+    /// [`crate::hostrun`].
+    #[serde(default)]
+    hostrun: Option<crate::hostrun::HostRunToml>,
 }
 
 /// Resolve the local overlay file, first existing wins:
@@ -811,6 +815,12 @@ pub fn load_gateway_settings(home: &str) -> crate::gateway::GatewaySettings {
 /// is `None`: the server is off.
 pub fn load_devjob_table(home: &str) -> Option<crate::devjob::DevJobToml> {
     load_local_config(home).and_then(|c| c.devjob)
+}
+
+/// Read the `[hostrun]` table from the same overlay file. Absent or malformed file, or no table,
+/// is `None`: Studio runs are off.
+pub fn load_hostrun_table(home: &str) -> Option<crate::hostrun::HostRunToml> {
+    load_local_config(home).and_then(|c| c.hostrun)
 }
 
 /// The overlay file the bridge actually loaded, or `None` when there is none.

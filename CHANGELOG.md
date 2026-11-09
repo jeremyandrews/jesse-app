@@ -14,6 +14,10 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (201)] - 2026-11-09
+
+**Mac composer: measuring its height no longer relays out the text view, so a pasted page in a fence cannot loop SwiftUI layout until AppKit throws.** `ComposerNSTextView.measuredTextHeight`, called from `sizeThatFits` inside `NSHostingView.layout()`, rewrapped the view's own text container at each probe width and back, moving the text view's frame on every question; it now measures on a separate layout manager, and fence tints lay out only the visible lines.
+
 ## [bridge 0.197.0] - 2026-11-09
 
 **Studio runs are ready for days of unattended work, steered from chat.** Any queued strand draft

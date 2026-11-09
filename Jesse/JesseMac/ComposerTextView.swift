@@ -88,7 +88,7 @@ struct ComposerTextView: NSViewRepresentable {
         // After the font, which `font =` sets across the whole storage.
         textView.markdownStyler.restyle()
 
-        let scrollView = NSScrollView()
+        let scrollView = ComposerScrollView()
         scrollView.documentView = textView
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
@@ -231,6 +231,24 @@ nonisolated enum ComposerHeight {
         let floor = lineHeight * CGFloat(max(minLines, 1))
         let ceiling = lineHeight * CGFloat(max(maxLines, max(minLines, 1)))
         return min(max(textHeight, floor), ceiling) + verticalInset
+    }
+}
+
+/// The composer's scroll view. SwiftUI sets its height from `sizeThatFits` after an edit has
+/// already scrolled the caret into view, and AppKit does not scroll again when a scroll view
+/// grows: after a paste the caret was scrolled to against the text view's ESTIMATED height (a
+/// non contiguous layout guesses the height of what it has not laid out) in a one line view,
+/// then the view grew to its ceiling and the caret's line sat below it. So a change of height
+/// brings the caret back into view. Scrolling moves the clip view's bounds only; it changes
+/// nothing SwiftUI measures, so it cannot ask for another layout pass, and asking again with
+/// the caret already in view does nothing.
+final class ComposerScrollView: NSScrollView {
+    override func setFrameSize(_ newSize: NSSize) {
+        let grew = newSize.height != frame.height
+        super.setFrameSize(newSize)
+        guard grew, let textView = documentView as? NSTextView,
+              textView.window?.firstResponder === textView else { return }
+        textView.scrollRangeToVisible(textView.selectedRange())
     }
 }
 
@@ -427,9 +445,21 @@ final class ComposerNSTextView: NSTextView {
         (placeholder as NSString).draw(at: origin, withAttributes: attributes)
     }
 
-    /// How tall the current text lays out at `width`, before clamping, read from this view's
-    /// own layout manager and laid out no further than `ceiling`: once the text is taller than
-    /// that, the answer is "at least the ceiling" and the rest is never typeset for it.
+    /// How tall the current text lays out at `width`, before clamping, laid out no further
+    /// than `ceiling`: once the text is taller than that, the answer is "at least the ceiling"
+    /// and the rest is never typeset for it.
+    ///
+    /// SwiftUI asks this from `sizeThatFits`, inside `NSHostingView.layout()`, at several
+    /// widths per pass (zero, unspecified and infinite all land on `idealWidth`, then the real
+    /// one). So it must not change anything the window lays out. It used to measure on the
+    /// view's OWN layout manager by setting the view's text container to the probe width and
+    /// back: each question discarded the view's layout and resized the text view (the frame
+    /// moved three times per question and settled at a different height, because a non
+    /// contiguous layout estimates the height of what it has not laid out). That is AppKit
+    /// state changed in response to layout, which invalidated layout again on the next pass.
+    /// The measurement now runs on `measuringStack`, a second layout manager on the same
+    /// storage whose container belongs to no view, so asking is free of side effects and the
+    /// same question always gets the same answer.
     ///
     /// `scroller`, when given, is the enclosing scroll view. A text taller than the ceiling
     /// shows a vertical scroller, and a legacy (not overlay) scroller takes its width from the
@@ -438,9 +468,9 @@ final class ComposerNSTextView: NSTextView {
     /// layout passes.
     func measuredTextHeight(forWidth width: CGFloat, upTo ceiling: CGFloat = .greatestFiniteMagnitude,
                             scroller: NSScrollView? = nil) -> CGFloat {
-        guard !string.isEmpty, let manager = layoutManager, let container = textContainer else {
-            return Self.lineHeight
-        }
+        guard !string.isEmpty, let stack = measuringStack() else { return Self.lineHeight }
+        let (manager, container) = stack
+        container.lineFragmentPadding = textContainer?.lineFragmentPadding ?? 0
         let usable = max(width - textContainerInset.width * 2, 1)
         var height = laidOutHeight(manager, container, width: usable, ceiling: ceiling)
         if height >= ceiling, let scroller, scroller.scrollerStyle == .legacy {
@@ -448,14 +478,26 @@ final class ComposerNSTextView: NSTextView {
             height = laidOutHeight(manager, container, width: max(usable - scrollerWidth, 1),
                                    ceiling: ceiling)
         }
-        // The container tracks this view's width only when the frame CHANGES, so a probe at
-        // another width (SwiftUI asks at zero, at infinity and with no proposal at all) would
-        // otherwise leave the text wrapped for a width it is not drawn at.
-        let drawn = frame.width - textContainerInset.width * 2
-        if drawn > 0, container.size.width != drawn {
-            container.size = NSSize(width: drawn, height: CGFloat.greatestFiniteMagnitude)
-        }
         return height
+    }
+
+    /// The layout stack the height is measured on: the view's text storage, a layout manager
+    /// of its own (non contiguous, like the view's) and a container no view tracks. Made on
+    /// the first measurement, once the storage exists.
+    private var measuring: (NSLayoutManager, NSTextContainer)?
+
+    private func measuringStack() -> (NSLayoutManager, NSTextContainer)? {
+        if let measuring { return measuring }
+        guard let storage = textStorage else { return nil }
+        let manager = NSLayoutManager()
+        manager.allowsNonContiguousLayout = true
+        let container = NSTextContainer(
+            size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = false
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        measuring = (manager, container)
+        return measuring
     }
 
     /// The used height of the text at `width`, laid out only down to `ceiling`. The extra line

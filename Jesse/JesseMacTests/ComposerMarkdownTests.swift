@@ -414,4 +414,215 @@ final class ComposerMarkdownTests: XCTestCase {
         pasteboards.append(board)
         return board
     }
+
+    // MARK: - A large paste inside a fence (MT5)
+
+    /// Real code, `MacThreadDetailView.swift` (backticks, asterisks and underscores included),
+    /// repeated or cut to `length` UTF-16 units (less only where that would split a character).
+    static func code(length: Int) throws -> String {
+        let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("JesseMac/MacThreadDetailView.swift")
+        let file = try String(contentsOf: source, encoding: .utf8) as NSString
+        let out = NSMutableString()
+        while out.length < length {
+            out.append(file.substring(to: min(file.length, length - out.length)))
+        }
+        // Never cut inside a composed character: back off to the boundary at or before it.
+        let last = out.rangeOfComposedCharacterSequence(at: length - 1)
+        return out.substring(to: NSMaxRange(last) <= length ? length : last.location)
+    }
+
+    /// A slice of this repository's CHANGELOG that holds fenced blocks of its own.
+    static func changelogWithFences(length: Int) throws -> String {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let log = try String(contentsOf: root.appendingPathComponent("CHANGELOG.md"), encoding: .utf8) as NSString
+        let first = log.range(of: "\n```")
+        let start = first.location == NSNotFound ? 0 : max(first.location - 2_000, 0)
+        let slice = log.substring(with: NSRange(location: start, length: min(length, log.length - start)))
+        return slice
+    }
+
+    /// The composer opened on an empty fence, caret on its middle line.
+    private func emptyFence() throws -> (NSView, ComposerNSTextView, Draft) {
+        let draft = Draft()
+        let host = hosted(Host(draft: draft).background(Color(nsColor: .windowBackgroundColor)),
+                          size: NSSize(width: 1200, height: 400))
+        let view = try composer(in: host)
+        view.insertText("```\n\n```", replacementRange: view.selectedRange())
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        view.breakUndoCoalescing()
+        settle(host)
+        return (host, view, draft)
+    }
+
+    /// One draw of what `view` shows, the way the window draws it.
+    private func draw(_ view: NSView, _ rect: NSRect) {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else {
+            return XCTFail("no bitmap to draw into")
+        }
+        view.cacheDisplay(in: rect, to: rep)
+    }
+
+    private static func ms(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1e15
+    }
+
+    /// Paste into the empty fence, settle, draw the top and the end, type a key, delete it.
+    /// Returns (paste plus settle plus draw, keystroke plus restyle plus draw) in milliseconds.
+    @discardableResult
+    private func pasteIntoFence(_ paste: String, label: String) throws -> (Double, Double) {
+        let (host, view, draft) = try emptyFence()
+        let clock = ContinuousClock()
+        let pasted = clock.measure {
+            XCTAssertTrue(view.readSelection(from: board(paste)), "\(label): the paste was refused")
+            settle(host)
+            draw(view, view.visibleRect)
+        }
+        let expected = "```\n" + paste + "\n```"
+        XCTAssertEqual(Data(view.string.utf8), Data(expected.utf8), "\(label): the text view changed the paste")
+        XCTAssertEqual(Data(draft.text.utf8), Data(expected.utf8), "\(label): the binding changed the paste")
+
+        view.scrollRangeToVisible(NSRange(location: (view.string as NSString).length, length: 0))
+        draw(view, view.visibleRect)
+        view.scrollRangeToVisible(NSRange(location: 4, length: 0))
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        settle(host)
+
+        view.breakUndoCoalescing()
+        let keyed = clock.measure {
+            view.insertText("x", replacementRange: view.selectedRange())
+            host.layoutSubtreeIfNeeded()
+            draw(view, view.visibleRect)
+        }
+        XCTAssertEqual((view.string as NSString).length, (expected as NSString).length + 1)
+        // Taken back with Delete, not Undo: without real events the test host's undo manager
+        // groups the fence, the paste and the key as one step (see `testUndoStepsOverEditsNotStyling`).
+        view.deleteBackward(nil)
+        settle(host)
+        XCTAssertEqual(Data(view.string.utf8), Data(expected.utf8), "\(label): deleting the key did not restore the paste")
+        XCTAssertEqual(Data(draft.text.utf8), Data(expected.utf8), "\(label): the binding did not follow")
+        let result = (Self.ms(pasted), Self.ms(keyed))
+        print("MT5-TIMING \(label): paste+settle+draw \(String(format: "%.1f", result.0)) ms, "
+              + "key+restyle+draw \(String(format: "%.1f", result.1)) ms, styled \(view.markdownStyler.isStyled)")
+        return result
+    }
+
+    /// Every size, inside a fence: paste, draw the top and the end, one key, delete it. Sizes are
+    /// the composer's whole length after the paste, fences included, so 19,999 is styled and
+    /// 20,001 is not.
+    func testALargePasteInsideAFenceStaysWithinBudget() throws {
+        for size in [2_000, 10_000, 19_999, 20_001, 100_000, 1_000_000] {
+            let (paste, key) = try pasteIntoFence(try Self.code(length: size - 8), label: "fence \(size)")
+            switch size {
+            case ...19_999:
+                XCTAssertLessThan(paste, 300, "\(size): paste, settle and draw took \(paste) ms")
+                XCTAssertLessThan(key, 50, "\(size): a keystroke took \(key) ms")
+            default:
+                XCTAssertLessThan(paste, 1_000, "\(size): paste, settle and draw took \(paste) ms")
+            }
+        }
+        // A paste whose own text opens and closes fences.
+        try pasteIntoFence(try Self.changelogWithFences(length: 15_000), label: "changelog 15000")
+    }
+
+    /// A paste that takes the composer past the limit drops the styling; a delete that brings
+    /// it back under restores it.
+    func testCrossingTheLimitAndComingBackRestyles() throws {
+        let (host, view, draft) = try emptyFence()
+        let paste = try Self.code(length: 20_001 - 8)
+        XCTAssertTrue(view.readSelection(from: board(paste)))
+        settle(host)
+        XCTAssertFalse(view.markdownStyler.isStyled)
+        view.setSelectedRange(NSRange(location: 4, length: 2))
+        view.deleteBackward(nil)
+        settle(host)
+        draw(view, view.visibleRect)
+        XCTAssertEqual((view.string as NSString).length, 19_999)
+        XCTAssertEqual(draft.text, view.string)
+        XCTAssertTrue(view.markdownStyler.isStyled, "back under the limit, the fence was not restyled")
+        XCTAssertFalse(view.markdownStyler.fenceBlocks.isEmpty)
+    }
+
+    /// Drawing the fence tint lays out what is on screen, not the whole fence: under the
+    /// limit, one draw of the top used to lay out all 19,999 characters.
+    func testDrawingAFenceLaysOutOnlyWhatIsOnScreen() throws {
+        let (host, view, _) = try emptyFence()
+        XCTAssertTrue(view.readSelection(from: board(try Self.code(length: 19_999 - 8))))
+        settle(host)
+        XCTAssertTrue(view.markdownStyler.isStyled)
+        let manager = try XCTUnwrap(view.layoutManager)
+        let length = (view.string as NSString).length
+        view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        manager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: length),
+                                 actualCharacterRange: nil)
+        draw(view, view.visibleRect)
+        let laid = manager.firstUnlaidCharacterIndex()
+        XCTAssertLessThan(laid, length / 4,
+                          "one draw of the top of the fence laid out \(laid) of \(length) characters")
+    }
+
+    // MARK: - MT5 screenshots
+
+    /// Where the MT5 PNGs land: `build/screenshots/mt5/` at the top of the checkout, written
+    /// only when the run asks (`TEST_RUNNER_MT5_SCREENSHOTS=1`).
+    private func shoot(_ host: NSView, _ name: String) throws {
+        host.layoutSubtreeIfNeeded()
+        host.display()
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: rep)
+        guard ProcessInfo.processInfo.environment["MT5_SCREENSHOTS"] == "1" else { return }
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/screenshots/mt5", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        try png.write(to: directory.appendingPathComponent(name))
+    }
+
+    func testMT5Screenshots() throws {
+        let (host, view, _) = try emptyFence()
+        XCTAssertTrue(view.readSelection(from: board(try Self.code(length: 19_999 - 8))))
+        settle(host)
+        view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        settle(host)
+        try shoot(host, "1-fence-19999-top.png")
+        view.scrollRangeToVisible(NSRange(location: (view.string as NSString).length, length: 0))
+        settle(host)
+        try shoot(host, "2-fence-19999-end.png")
+
+        let (bigHost, bigView, _) = try emptyFence()
+        XCTAssertTrue(bigView.readSelection(from: board(try Self.code(length: 100_000 - 8))))
+        settle(bigHost)
+        bigView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        settle(bigHost)
+        try shoot(bigHost, "3-fence-100000-top.png")
+
+        if previousDrafts == nil { previousDrafts = ComposerDraftStore.shared }
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComposerMarkdownTests.\(UUID().uuidString)")
+        ComposerDraftStore.shared = ComposerDraftStore(writer: ComposerDraftFileWriter(root: scratch))
+        let context = try MacTestFixtures.context()
+        let thread = JesseThread(mode: .ask)
+        context.insert(thread)
+        let block = try Self.code(length: 4_000)
+        let user = Turn(role: .user, text: "Why does this hang when I paste it?\n\n```swift\n" + block + "\n```")
+        user.thread = thread
+        let answer = Turn(role: .jesse, text: try MT3Fixture.reply())
+        answer.thread = thread
+        try context.save()
+        let coordinator = MacCoordinator(configStore: MacTestFixtures.configured(),
+                                         makeClient: { _ in MacFakeBridgeClient() },
+                                         sessionDeletionStore: MacTestFixtures.deletionStore())
+        let detail = hosted(MacThreadDetailView(thread: thread)
+            .environment(coordinator)
+            .modelContext(context)
+            .frame(width: 1200, height: 900)
+            .background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 1200, height: 900))
+        let composer = try composer(in: detail)
+        composer.insertText("Here is the fix, `measuredTextHeight` now **measures off to the side**:\n```swift\nlet height = measuredTextHeight(forWidth: 240)\n```",
+                            replacementRange: composer.selectedRange())
+        for _ in 0..<20 { settle(detail) }
+        try shoot(detail, "4-detail-view.png")
+    }
 }

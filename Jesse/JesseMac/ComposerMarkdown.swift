@@ -444,14 +444,22 @@ final class ComposerMarkdownStyler: NSObject, NSTextStorageDelegate {
         let visible = manager.glyphRange(forBoundingRect: rect.offsetBy(dx: -origin.x, dy: -origin.y),
                                          in: container)
         let visibleCharacters = manager.characterRange(forGlyphRange: visible, actualGlyphRange: nil)
+        // Only the part of each fence and span that is on screen: asking the layout manager
+        // for the lines of a whole fence lays the whole fence out, on every draw (every caret
+        // blink), which defeats the non contiguous layout a large paste relies on. The visible
+        // range is whole line fragments, so a clipped fence or chip draws the same pixels.
         Self.fenceFill.setFill()
-        for fence in fenceBlocks where NSIntersectionRange(fence, visibleCharacters).length > 0 {
-            for line in fenceRects(for: fence) { line.fill() }
+        for fence in fenceBlocks {
+            let shown = NSIntersectionRange(fence, visibleCharacters)
+            guard shown.length > 0 else { continue }
+            for line in fenceRects(for: shown) { line.fill() }
         }
         Self.chipFill.setFill()
         let radius = MarkdownDocument.Metrics.chipCornerRadius
-        for span in codeSpans where NSIntersectionRange(span, visibleCharacters).length > 0 {
-            for chip in chipRects(for: span) {
+        for span in codeSpans {
+            let shown = NSIntersectionRange(span, visibleCharacters)
+            guard shown.length > 0 else { continue }
+            for chip in chipRects(for: shown) {
                 NSBezierPath(roundedRect: chip, xRadius: radius, yRadius: radius).fill()
             }
         }

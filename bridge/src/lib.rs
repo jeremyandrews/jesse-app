@@ -116,6 +116,9 @@ mod harness;
 mod health;
 mod healthdb;
 mod healthquery;
+/// Coding agents on the Studio (`[hostrun]`): long runs outside any turn, with no clock.
+/// Addressed through the module (`crate::hostrun::…`).
+pub mod hostrun;
 mod house;
 mod inbound;
 mod jobstore;

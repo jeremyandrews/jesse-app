@@ -1302,6 +1302,9 @@ pub struct Config {
     /// Coding agents on the cluster (`[devjob]`): off unless the table turns it on, and refused at
     /// boot without the gateway. See [`crate::devjob`].
     pub devjob: crate::devjob::DevJobSettings,
+    /// Coding agents on the Studio (`[hostrun]`): off unless the table turns it on. See
+    /// [`crate::hostrun`].
+    pub hostrun: crate::hostrun::HostRunSettings,
     /// The per-turn run limit in seconds (`JESSE_TIMEOUT`, default
     /// [`DEFAULT_TIMEOUT_SECS`], clamped to `[1, HARD_TIMEOUT_CEILING]`).
     pub timeout_secs: u64,
@@ -5113,6 +5116,13 @@ impl Config {
             gateway: load_gateway_settings(&home),
             // The `[devjob]` table. Off when absent; its service is built in `main`.
             devjob: crate::devjob::DevJobSettings::from_toml(load_devjob_table(&home), &home),
+            // The `[hostrun]` table. Off when absent; its service is built in `main`. Its
+            // `claude` defaults to the binary the bridge runs for its own turns.
+            hostrun: crate::hostrun::HostRunSettings::from_toml(
+                load_hostrun_table(&home),
+                &home,
+                &env_string("JESSE_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
+            ),
             // 90m default; clamped to [1, HARD_TIMEOUT_CEILING].
             timeout_secs: clamp_timeout_secs(env_parse("JESSE_TIMEOUT", DEFAULT_TIMEOUT_SECS)),
             // The cut-off turn's partial-answer ring. Blocks are floored at 1 (a

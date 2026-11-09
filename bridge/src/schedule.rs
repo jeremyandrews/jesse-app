@@ -434,6 +434,7 @@ impl DevJobTemplate {
                 branch_slug: Some(slug),
                 test_command: self.test_command.clone(),
                 timeout_minutes: self.timeout_minutes,
+                ..crate::devjob::DevJobArgs::default()
             },
             self.agent,
         )
@@ -501,6 +502,7 @@ fn validate_strand_keys(t: &ScheduleToml, note: &str) -> Result<StrandTemplate, 
             branch_slug: Some("x".into()),
             test_command: None,
             timeout_minutes: template.timeout_minutes,
+            ..crate::devjob::DevJobArgs::default()
         },
         crate::devjob::Agent::Claude,
     )?;

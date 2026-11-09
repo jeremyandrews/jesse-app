@@ -110,6 +110,7 @@ pub fn test_config() -> Config {
         house: HouseConfig::Absent,
         gateway: jesse_bridge::gateway::GatewaySettings::default(),
         devjob: jesse_bridge::devjob::DevJobSettings::default(),
+        hostrun: jesse_bridge::hostrun::HostRunSettings::default(),
         healthdb: HealthDbConfig::Absent,
         // Speech OFF, as in the unit fixture: no intake or models directory is touched.
         speech: jesse_bridge::speech::SpeechConfig::disabled(),

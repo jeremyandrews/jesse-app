@@ -79,6 +79,7 @@ async fn main() {
     // …and `[devjob]`: on, it needs the gateway (the kubeconfig must stay in this process), a
     // kubeconfig it can read and an image pinned by digest. Off is the default and checks nothing.
     errors.extend(jesse_bridge::devjob::validate_devjob(&cfg));
+    errors.extend(jesse_bridge::hostrun::validate_hostrun(&cfg));
     // The `[concurrency]` table joins the SAME gate. A misspelled model id there is refused by
     // name rather than silently ignored — a config surface that quietly does nothing is the
     // failure mode this project keeps designing against.
@@ -420,6 +421,29 @@ async fn main() {
         None
     };
 
+    // CODING AGENTS ON THE STUDIO. All their state is on disk under `[hostrun] root`; the
+    // service is built here and registered beside the devjob server, so `devjob_start` can take
+    // `host: "studio"`. Runs are launchd jobs of their own and outlive this process.
+    let hostruns = if cfg.hostrun.enabled {
+        let h = std::sync::Arc::new(jesse_bridge::hostrun::HostRuns::production(
+            cfg.hostrun.clone(),
+            jesse_bridge::notes_root(&cfg),
+        ));
+        let _ = cfg.hostrun.service.0.set(h.clone());
+        if let Some(d) = &devjobs {
+            d.attach_studio(h.clone());
+        }
+        eprintln!(
+            "jesse-bridge: hostrun ON (root {}, at most {} at once, {} per repository, no clock)",
+            cfg.hostrun.root.display(),
+            cfg.hostrun.max_concurrent,
+            cfg.hostrun.max_per_repo
+        );
+        Some(h)
+    } else {
+        None
+    };
+
     let addr = format!("{}:{}", cfg.bind, cfg.port);
     let mut state = AppState::new(cfg);
     // Install the APNs client if push is configured (JESSE_APNS_* set and the key
@@ -437,6 +461,20 @@ async fn main() {
             ))),
         });
         d.spawn_watcher();
+    }
+    // The Studio run watcher: reconciles at once, reports every round that finished while the
+    // bridge was down, then follows each run.
+    if let Some(h) = &hostruns {
+        h.attach(jesse_bridge::hostrun::RunSink {
+            broker: state.broker.clone(),
+            notifier: Some(std::sync::Arc::new(jesse_bridge::devjob::AppNotifier::of(
+                &state,
+            ))),
+            turns: Some(std::sync::Arc::new(jesse_bridge::hostrun::AppTurns {
+                st: state.clone(),
+            })),
+        });
+        h.spawn_watcher();
     }
     // THE HEALTH ARCHIVE, only where `[healthdb]` is ready. The pool is LAZY, so a Postgres
     // that is down now costs nothing: the schema task retries in the background and the

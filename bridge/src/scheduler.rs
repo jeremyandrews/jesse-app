@@ -1865,10 +1865,36 @@ async fn run_devjob(
             let date = sched
                 .clock()
                 .expand_tokens("{year}{month}{day}", run.calendar_ms);
-            match crate::strandjobs::fire(&svc, &notes_root(&st.cfg), template, &date, &origin)
-                .await
+            let studio = st.cfg.hostrun.service();
+            match crate::strandjobs::fire(
+                &svc,
+                studio.as_ref(),
+                &notes_root(&st.cfg),
+                template,
+                &date,
+                &origin,
+            )
+            .await
             {
                 crate::strandjobs::StrandFire::Failed(e) => return RunResult::failed(e),
+                // A Studio run has no clock: the entry has done its part once the run exists. The
+                // report reaches the vault through the hostrun watcher, never through this wait.
+                crate::strandjobs::StrandFire::StartedStudio { run_id, step } => {
+                    let reason = format!(
+                        "studio run {run_id} started for {} in Strands/{}",
+                        step.id, step.note
+                    );
+                    eprintln!("jesse-bridge: schedule FIRE id={} {reason}", job.id);
+                    return RunResult {
+                        outcome: Outcome::Ran,
+                        reason,
+                        job_id: None,
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                        reply: None,
+                        conversation_id: None,
+                        transient: false,
+                    };
+                }
                 crate::strandjobs::StrandFire::Nothing(reason) => {
                     eprintln!(
                         "jesse-bridge: schedule FIRE id={} strand={} — {reason}",

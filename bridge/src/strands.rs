@@ -1563,7 +1563,14 @@ pub async fn jesse_strands(
     }
     let (today, generated_at) = zoned_now(&st);
     let snap = snapshot_with_today(&st.cfg, &today);
-    let value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    // Additive: `runs_active` per strand, `drafts` with `studio_runnable` per item.
+    crate::hostrun::annotate_strands(
+        &mut value,
+        &snap,
+        &notes_root(&st.cfg),
+        st.cfg.hostrun.service().as_deref(),
+    );
     Ok(strands_response(&headers, value, &generated_at))
 }
 

@@ -45,6 +45,9 @@ bins = [
     # Studio does not run it; it ships with the bridge so the cluster's pods and the Studio
     # run the same build.
     "jesse-mcp-http-adapter",
+    # The Studio run runner (`[hostrun]`): launchd starts it as each run's own job, from beside
+    # the bridge, so it moves with the bridge that writes the run's `job.plist`.
+    "jesse-runner",
 ]
 
 # THE LAUNCHERS: in-tree scripts a child MCP config names by bare command, installed by the

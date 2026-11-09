@@ -416,7 +416,10 @@ mod tests {
     #[test]
     fn identifier_is_the_sentinel_scheme_under_the_bridge_label() {
         let plan = SigningPlan::new(HASH, "com.example.jesse-bridge");
-        assert_eq!(plan.identifier, "com.example.jesse-bridge.containment-probe");
+        assert_eq!(
+            plan.identifier,
+            "com.example.jesse-bridge.containment-probe"
+        );
         assert_eq!(
             plan.identifier,
             signing_identifier("com.example.jesse-bridge", "containment-probe")

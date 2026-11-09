@@ -54,6 +54,8 @@ use crate::activity::ActivityLedger;
 use crate::mcpservers::{row as table_row, HttpAuthSpec, McpServerRow, Placement, Transport};
 use crate::Capability;
 
+#[cfg(feature = "containment-probe")]
+pub use session::take_upstream_failures;
 pub use session::{InProcessServer, TurnSession};
 pub use token::{Claims, TokenError, TokenKey, TOKEN_GRACE_SECS};
 

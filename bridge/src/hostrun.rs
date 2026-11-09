@@ -3,9 +3,10 @@
 //!
 //! ---- WHAT IT DOES ----------------------------------------------------------------
 //!
-//! A run is started from the app (`POST /jesse/runs` with a strand item), from a chat turn
-//! (`devjob_start` with `host: "studio"`), or from a `kind = "devjob"` strand schedule entry whose
-//! draft says `devjob-host: studio`. All three go through [`HostRuns::create`]. The bridge gives
+//! A run is started from the app (`POST /jesse/runs` with a strand item or a draft path), from a
+//! chat turn (`devjob_start` with `host: "studio"`), or from a `kind = "devjob"` strand schedule
+//! entry whose draft says `devjob-repo` and `devjob-host: studio`. A person's start needs neither
+//! key: asking is the opt in ([`OptIn`]). All three go through [`HostRuns::create`]. The bridge gives
 //! the run its own git worktree of a shared bare clone, its own branch and its own
 //! `CARGO_TARGET_DIR`, then starts `jesse-runner` as **its own launchd job**
 //! (`<ns>.jesse-run.<run_id>`, `<ns>` the bridge's own label's namespace). The runner runs `claude -p` in the worktree and writes the
@@ -15,7 +16,9 @@
 //! The watcher ([`HostRuns::run_watcher`]), a background task owned by no turn, reads every run
 //! directory every [`WATCH_INTERVAL`]: it writes each finished round's report into the Inbox
 //! byte for byte, pushes, sends the strand one agent turn, notices a quiet or an interrupted
-//! run, starts queued runs when the caps and the disk allow, and cleans up.
+//! run (and gives an interrupted one a single automatic round), pauses a run the plan's usage
+//! limit stopped and resumes it at the reset, starts queued runs when the caps, the disk and the
+//! limit allow, and cleans up.
 //!
 //! ---- WHY NOT A CHAT TURN -----------------------------------------------------------
 //!
@@ -64,6 +67,7 @@ pub const DEFAULT_MAX_PER_REPO: usize = 1;
 pub const DEFAULT_STALL_MINUTES: u64 = 60;
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 pub const DEFAULT_KEEP_DAYS: u64 = 7;
+pub const DEFAULT_AUTO_RESUME_INTERRUPTED: bool = true;
 pub const DEFAULT_MIN_FREE_GB: u64 = 100;
 pub const DEFAULT_MAX_TOTAL_GB: u64 = 300;
 /// How long a `needs_you` or `interrupted` run keeps its worktree.
@@ -103,8 +107,21 @@ pub const BRANCH_TEXT_CHARS: usize = 40;
 
 /// The first line of a report that asks for a decision.
 pub const NEEDS_YOU_PREFIX: &str = "NEEDS YOU:";
-/// The reply that resumes a run from the app.
+/// The reply that resumes a run from the app, and the round a run paused for the usage limit
+/// gets at its `resume_at`.
 pub const CONTINUE_TEXT: &str = "Continue where you left off.";
+/// The one automatic round an interrupted run gets (`[hostrun] auto_resume_interrupted`).
+pub const RESTART_TEXT: &str =
+    "Continue where you left off. The machine restarted during your previous round.";
+/// [`Round::auto`] of the round a usage limit pause queues at its `resume_at`.
+pub const AUTO_LIMIT: &str = "limit";
+/// [`Round::auto`] of the one round an interrupted run gets by itself.
+pub const AUTO_RESTART: &str = "restart";
+/// A pause for the usage limit whose event names no reset waits this long, and so does each
+/// retry that meets the limit again with no reset named.
+pub const LIMIT_RETRY_MS: u64 = 60 * 60 * 1000;
+/// The owner whose repositories get `[<run_id>]` on pull request titles by default.
+pub const TITLE_TAG_OWNER: &str = "jeremyandrews";
 /// The front matter key that sends a draft to the Studio.
 pub const HOST_KEY: &str = "devjob-host";
 /// The `origin` of the agent turns this module sends.
@@ -146,6 +163,12 @@ pub const ENV_ALLOWLIST: [&str; 20] = [
 #[serde(deny_unknown_fields)]
 pub struct RepoCapToml {
     pub max_concurrent: Option<usize>,
+    /// `KEY=value` lines added to the agent's environment for this repository's runs. The
+    /// values are read by the runner when a round starts and go nowhere else.
+    pub env_file: Option<PathBuf>,
+    /// Whether the generated section asks for `[<run_id>]` at the start of the pull request
+    /// title. Default: true for [`TITLE_TAG_OWNER`]'s repositories, false otherwise.
+    pub pr_title_tag: Option<bool>,
 }
 
 /// `[hostrun]` in the bridge TOML.
@@ -167,6 +190,8 @@ pub struct HostRunToml {
     pub max_total_gb: Option<u64>,
     /// The launchd label prefix of the runs. Default: from the bridge's own label.
     pub label_prefix: Option<String>,
+    /// An `interrupted` run gets one automatic round. Default true.
+    pub auto_resume_interrupted: Option<bool>,
 }
 
 /// Where the running [`HostRuns`] lives once `main` has built it.
@@ -188,6 +213,13 @@ pub struct HostRunSettings {
     pub max_per_repo: usize,
     /// `owner/name` → its own cap. Keys are checked by [`HostRunSettings::problems`].
     pub repo_caps: BTreeMap<String, usize>,
+    /// `owner/name` → its `env_file`, with `~` expanded.
+    pub repo_env_files: BTreeMap<String, PathBuf>,
+    /// `owner/name` → its `pr_title_tag`, where one is set.
+    pub repo_title_tags: BTreeMap<String, bool>,
+    /// Every key of `[hostrun.repos]`, for [`HostRunSettings::problems`].
+    pub repo_keys: Vec<String>,
+    pub auto_resume_interrupted: bool,
     pub stall_minutes: u64,
     pub permission_mode: String,
     /// The `claude` binary as configured (or the bridge's own `JESSE_CLAUDE_BIN`).
@@ -246,9 +278,27 @@ impl HostRunSettings {
             max_per_repo: t.max_per_repo.unwrap_or(DEFAULT_MAX_PER_REPO),
             repo_caps: t
                 .repos
-                .into_iter()
-                .map(|(k, v)| (k, v.max_concurrent.unwrap_or(DEFAULT_MAX_PER_REPO)))
+                .iter()
+                .filter_map(|(k, v)| v.max_concurrent.map(|c| (k.clone(), c)))
                 .collect(),
+            repo_env_files: t
+                .repos
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.env_file
+                        .as_ref()
+                        .map(|p| (k.clone(), expand_home(p, home)))
+                })
+                .collect(),
+            repo_title_tags: t
+                .repos
+                .iter()
+                .filter_map(|(k, v)| v.pr_title_tag.map(|b| (k.clone(), b)))
+                .collect(),
+            repo_keys: t.repos.keys().cloned().collect(),
+            auto_resume_interrupted: t
+                .auto_resume_interrupted
+                .unwrap_or(DEFAULT_AUTO_RESUME_INTERRUPTED),
             stall_minutes: t.stall_minutes.unwrap_or(DEFAULT_STALL_MINUTES),
             permission_mode: t
                 .permission_mode
@@ -285,6 +335,19 @@ impl HostRunSettings {
             .get(repo)
             .copied()
             .unwrap_or(self.max_per_repo)
+    }
+
+    /// Whether the generated section asks for `[<run_id>]` on the pull request title.
+    pub fn pr_title_tag(&self, repo: &str) -> bool {
+        self.repo_title_tags.get(repo).copied().unwrap_or_else(|| {
+            repo.split_once('/')
+                .is_some_and(|(owner, _)| owner == TITLE_TAG_OWNER)
+        })
+    }
+
+    /// The repository's `env_file`, if it has one.
+    pub fn env_file(&self, repo: &str) -> Option<&Path> {
+        self.repo_env_files.get(repo).map(PathBuf::as_path)
     }
 
     /// The `claude` binary, resolved to a file.
@@ -378,10 +441,12 @@ impl HostRunSettings {
         if self.max_per_repo == 0 {
             out.push("[hostrun] max_per_repo must be at least 1".into());
         }
-        for (repo, cap) in &self.repo_caps {
+        for repo in &self.repo_keys {
             if !valid_repo(repo) {
                 out.push(format!("[hostrun.repos.{repo:?}] is not owner/name"));
             }
+        }
+        for (repo, cap) in &self.repo_caps {
             if *cap == 0 {
                 out.push(format!(
                     "[hostrun.repos.{repo:?}] max_concurrent must be at least 1"
@@ -433,6 +498,8 @@ pub enum RunStatus {
     Failed,
     Cancelled,
     Interrupted,
+    /// The plan's usage limit ended the round; the run continues by itself at `resume_at`.
+    Paused,
 }
 
 impl RunStatus {
@@ -445,6 +512,7 @@ impl RunStatus {
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
             RunStatus::Interrupted => "interrupted",
+            RunStatus::Paused => "paused",
         }
     }
 
@@ -456,11 +524,12 @@ impl RunStatus {
         }
     }
 
-    /// Queued, running or waiting on Jeremy: a second start of the item is refused.
+    /// Queued, running, waiting on Jeremy or paused for the usage limit: a second start of the
+    /// item is refused.
     pub fn is_live(self) -> bool {
         matches!(
             self,
-            RunStatus::Queued | RunStatus::Running | RunStatus::NeedsYou
+            RunStatus::Queued | RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused
         )
     }
 
@@ -472,9 +541,12 @@ impl RunStatus {
         )
     }
 
-    /// Not queued and not running.
+    /// Not queued, not running and not paused (a paused run continues by itself).
     pub fn is_finished(self) -> bool {
-        !matches!(self, RunStatus::Queued | RunStatus::Running)
+        !matches!(
+            self,
+            RunStatus::Queued | RunStatus::Running | RunStatus::Paused
+        )
     }
 }
 
@@ -499,6 +571,9 @@ pub struct Round {
     /// The push and the agent turn for this round's report were sent.
     #[serde(default)]
     pub notified: bool,
+    /// Who queued the round when no person did: [`AUTO_LIMIT`] or [`AUTO_RESTART`].
+    #[serde(default)]
+    pub auto: Option<String>,
 }
 
 /// What cleanup did to a run.
@@ -538,7 +613,7 @@ pub struct RunRecord {
     /// `app`, `turn` or `schedule:<id>`.
     pub origin: String,
     pub status: RunStatus,
-    /// Why a queued run is not running: `slot`, `repo <owner/name>`, `disk`.
+    /// Why a queued run is not running: `slot`, `repo <owner/name>`, `disk`, `limit`.
     pub waiting_for: Option<String>,
     pub created_at: String,
     /// When the current wait in the queue began: the order queued runs start in.
@@ -569,6 +644,18 @@ pub struct RunRecord {
     pub disk_pushed: bool,
     /// Why the run could not start, when it could not.
     pub error: Option<String>,
+    /// While `paused`: when the watcher queues the next round.
+    #[serde(default)]
+    pub resume_at: Option<String>,
+    /// The one push for this usage limit pause was sent; cleared once a round gets past it.
+    #[serde(default)]
+    pub limit_pushed: bool,
+    /// The one automatic round after an interruption was queued; cleared when a round completes.
+    #[serde(default)]
+    pub restart_resumed: bool,
+    /// The repository's `env_file` at creation: its path only, never its contents.
+    #[serde(default)]
+    pub env_file: Option<String>,
 }
 
 impl RunRecord {
@@ -605,6 +692,73 @@ pub const EXIT_JSON: &str = "exit.json";
 pub const JOB_PLIST: &str = "job.plist";
 pub const TARGET_DIR: &str = "target";
 pub const WORKTREE_DIR: &str = "worktree";
+/// Where a run clones any further repository it needs. Removed with the build artifacts.
+pub const EXTRA_DIR: &str = "extra";
+/// The prompt as the caller gave it (a draft's `## PROMPT` section or a free prompt), until
+/// the first round renders `prompt.md` from it.
+pub const SECTION_MD: &str = "section.md";
+
+// ---- THE ENV FILE --------------------------------------------------------------------
+
+/// Whether `k` can name an environment variable.
+fn valid_env_key(k: &str) -> bool {
+    let mut cs = k.chars();
+    cs.next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A repository's `env_file`: `KEY=value` lines; blank lines and `#` comments are skipped, an
+/// `export ` prefix is allowed and one pair of matching quotes around a value is removed. An
+/// error names the file and a line number, NEVER a value.
+pub fn read_env_file(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let text = match std::fs::read(path) {
+        Ok(b) => String::from_utf8(b)
+            .map_err(|_| format!("the env file {} is not UTF-8", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("the env file {} is missing", path.display()))
+        }
+        Err(e) => {
+            return Err(format!(
+                "the env file {} is unreadable: {}",
+                path.display(),
+                e.kind()
+            ))
+        }
+    };
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let t = t.strip_prefix("export ").map(str::trim_start).unwrap_or(t);
+        let Some((k, v)) = t.split_once('=') else {
+            return Err(format!(
+                "the env file {}: line {} is not KEY=value",
+                path.display(),
+                i + 1
+            ));
+        };
+        let k = k.trim();
+        if !valid_env_key(k) {
+            return Err(format!(
+                "the env file {}: line {} does not start with a variable name",
+                path.display(),
+                i + 1
+            ));
+        }
+        let v = v.trim();
+        let v = [('"', '"'), ('\'', '\'')]
+            .iter()
+            .find_map(|(a, b)| {
+                (v.len() >= 2 && v.starts_with(*a) && v.ends_with(*b)).then(|| &v[1..v.len() - 1])
+            })
+            .unwrap_or(v);
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
+}
 
 // ---- TIME ----------------------------------------------------------------------------
 
@@ -804,12 +958,47 @@ pub fn prompt_section(src: &str) -> Option<String> {
     (!section.trim().is_empty()).then(|| section.to_string())
 }
 
-/// The generated section's paragraph, exactly.
-pub fn generated_paragraph(run_id: &str) -> String {
-    let lower = run_id.to_lowercase();
+/// Where the run is, for the generated section: the repository, its branch, the branch it was
+/// cut from, and the run directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunPlace<'a> {
+    pub run_id: &'a str,
+    pub repo: &'a str,
+    pub branch: &'a str,
+    pub default_branch: &'a str,
+    pub run_dir: &'a Path,
+    /// Ask for `[<run_id>]` at the start of the pull request title.
+    pub pr_title_tag: bool,
+}
+
+/// The generated section's first paragraph, exactly: where the run is, and that this replaces
+/// whatever machine or directory the prompt names.
+pub fn place_paragraph(p: &RunPlace) -> String {
     format!(
-        "This run is {run_id}. Start every branch name with {lower}- and put [{run_id}] at the \
-         start of the pull request title. Other runs and people work on this repository at the \
+        "You are running on the Mac Studio as a Studio run, in a fresh worktree of {} on branch \
+         {}, cut from origin/{}. Wherever the prompt above names another machine, host, user or \
+         directory to work in, this worktree replaces it: do not change machines, do not stop \
+         because the host differs, and do not work in any other checkout of this repository. If \
+         the work needs another repository, clone it under {}/{EXTRA_DIR}/ and work there.",
+        p.repo,
+        p.branch,
+        p.default_branch,
+        p.run_dir.display()
+    )
+}
+
+/// The generated section's second paragraph, exactly. The pull request title sentence only
+/// when `pr_title_tag`.
+pub fn generated_paragraph(run_id: &str, pr_title_tag: bool) -> String {
+    let lower = run_id.to_lowercase();
+    let title = if pr_title_tag {
+        format!(" and put [{run_id}] at the start of the pull request title")
+    } else {
+        String::new()
+    };
+    format!(
+        "This run is {run_id}. Start every branch name with {lower}-{title}. Other runs and \
+         people work on this repository at the \
          same time: before your final verification, and again right before any merge, fetch \
          the latest default branch, merge or rebase it into your branch, resolve any conflicts, \
          and re-run your checks. Keep everything you create inside your working directory or \
@@ -822,8 +1011,8 @@ pub fn generated_paragraph(run_id: &str) -> String {
 }
 
 /// The prompt a run is served: the section byte for byte, a blank line, then the generated
-/// section and nothing else.
-pub fn served_prompt(section: &str, run_id: &str) -> String {
+/// section (where the run is, then the run's rules) and nothing else.
+pub fn served_prompt(section: &str, place: &RunPlace) -> String {
     let mut s = section.to_string();
     if !s.ends_with('\n') {
         s.push('\n');
@@ -832,7 +1021,9 @@ pub fn served_prompt(section: &str, run_id: &str) -> String {
         s.push('\n');
     }
     s.push_str("### Run ID and report\n\n");
-    s.push_str(&generated_paragraph(run_id));
+    s.push_str(&place_paragraph(place));
+    s.push_str("\n\n");
+    s.push_str(&generated_paragraph(place.run_id, place.pr_title_tag));
     s.push('\n');
     s
 }
@@ -857,11 +1048,80 @@ pub fn draft_is_studio(src: &str) -> bool {
     fm(src, HOST_KEY).as_deref() == Some("studio")
 }
 
+/// How a strand item came to be started, which decides how its repository is found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptIn<'a> {
+    /// A `kind = "devjob"` strand schedule entry: the draft must say `devjob-repo` and
+    /// `devjob-host: studio`, exactly as before.
+    Schedule,
+    /// A person asked (`POST /jesse/runs`, `devjob_start` with `host: "studio"`): asking is the
+    /// opt in. The repository is the draft's `devjob-repo`, else `repo`, else the strand's one
+    /// `repos:` entry.
+    Request { repo: Option<&'a str> },
+}
+
+/// A model id a draft's `devjob-model` may name.
+fn check_model(path: &str, model: &Option<String>) -> Result<(), String> {
+    if let Some(m) = model {
+        if m.is_empty()
+            || m.len() > 200
+            || !m.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '@')
+            })
+        {
+            return Err(format!("{path}: devjob-model {m:?} is not a model id"));
+        }
+    }
+    Ok(())
+}
+
+/// The repository a requested run of a draft goes to: the draft's `devjob-repo`, else the
+/// caller's `repo`, else the strand's `repos:` when it lists exactly one.
+fn request_repo(
+    path: &str,
+    src: &str,
+    repo: Option<&str>,
+    strand: Option<(&str, &[String])>,
+) -> Result<String, String> {
+    if let Some(r) = fm(src, "devjob-repo") {
+        if !valid_repo(&r) {
+            return Err(format!("{path}: devjob-repo {r:?} is not owner/name"));
+        }
+        return Ok(r);
+    }
+    if let Some(r) = repo {
+        if !valid_repo(r) {
+            return Err(format!("repo {r:?} is not owner/name"));
+        }
+        return Ok(r.to_string());
+    }
+    let Some((slug, repos)) = strand else {
+        return Err(format!("{path} has no devjob-repo: pass repo"));
+    };
+    match repos {
+        [one] if valid_repo(one) => Ok(one.clone()),
+        [one] => Err(format!(
+            "{path} has no devjob-repo and strand {slug}'s repos entry {one:?} is not owner/name: pass repo"
+        )),
+        [] => Err(format!(
+            "{path} has no devjob-repo and strand {slug} lists no repos: pass repo"
+        )),
+        many => Err(format!(
+            "{path} has no devjob-repo and strand {slug} lists several repositories ({}): pass \
+             repo with the one to use",
+            many.join(", ")
+        )),
+    }
+}
+
 /// Step 8's checks for one item of a parsed note. `Err` is the reason it may not run.
+/// `strand_repos` is the note's `repos:` front matter.
 pub fn studio_item_of(
     notes_root: &Path,
     slug: &str,
     item: &crate::strands::StrandItem,
+    strand_repos: &[String],
+    opt_in: OptIn,
 ) -> Result<StudioItem, String> {
     if item.id.is_empty() {
         return Err("the line has no id".into());
@@ -896,26 +1156,23 @@ pub fn studio_item_of(
         Some(s) => return Err(format!("{path} is step {s}, not {}", item.id)),
         None => return Err(format!("{path} has no strand-id")),
     }
-    let Some(repo) = fm(&src, "devjob-repo") else {
-        return Err(format!("{path} has no devjob-repo"));
-    };
-    if !valid_repo(&repo) {
-        return Err(format!("{path}: devjob-repo {repo:?} is not owner/name"));
-    }
-    if !draft_is_studio(&src) {
-        return Err(format!("{path} does not say {HOST_KEY}: studio"));
-    }
-    let model = fm(&src, "devjob-model");
-    if let Some(m) = &model {
-        if m.is_empty()
-            || m.len() > 200
-            || !m.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '@')
-            })
-        {
-            return Err(format!("{path}: devjob-model {m:?} is not a model id"));
+    let repo = match opt_in {
+        OptIn::Schedule => {
+            let Some(repo) = fm(&src, "devjob-repo") else {
+                return Err(format!("{path} has no devjob-repo"));
+            };
+            if !valid_repo(&repo) {
+                return Err(format!("{path}: devjob-repo {repo:?} is not owner/name"));
+            }
+            if !draft_is_studio(&src) {
+                return Err(format!("{path} does not say {HOST_KEY}: studio"));
+            }
+            repo
         }
-    }
+        OptIn::Request { repo } => request_repo(&path, &src, repo, Some((slug, strand_repos)))?,
+    };
+    let model = fm(&src, "devjob-model");
+    check_model(&path, &model)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -931,7 +1188,12 @@ pub fn studio_item_of(
 }
 
 /// Step 8's checks for the line `item_id` of `Strands/<slug>.md`.
-pub fn studio_item(notes_root: &Path, slug: &str, item_id: &str) -> Result<StudioItem, String> {
+pub fn studio_item(
+    notes_root: &Path,
+    slug: &str,
+    item_id: &str,
+    opt_in: OptIn,
+) -> Result<StudioItem, String> {
     if !crate::strands::is_safe_slug(slug) {
         return Err(format!("no strand {slug:?}"));
     }
@@ -945,7 +1207,65 @@ pub fn studio_item(notes_root: &Path, slug: &str, item_id: &str) -> Result<Studi
     let Some(item) = strand.items.iter().find(|i| i.id == item_id) else {
         return Err(format!("{slug} has no line {item_id}"));
     };
-    studio_item_of(notes_root, slug, item)
+    studio_item_of(notes_root, slug, item, &strand.repos, opt_in)
+}
+
+/// A draft started by its path, outside any strand line: a free run named after the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudioDraft {
+    pub prompt_path: String,
+    pub repo: String,
+    pub model: Option<String>,
+    pub section: String,
+    /// The file's stem as a branch slug: the run is `s-<slug>`.
+    pub slug: String,
+}
+
+/// The checks for a draft named by its path (`Projects/drafts/x.md`, or a wiki target that
+/// resolves to one): under `Projects/drafts/` outside `archive`, with a `## PROMPT` section.
+/// Its strand and strand id are not consulted.
+pub fn studio_draft(
+    notes_root: &Path,
+    draft: &str,
+    repo: Option<&str>,
+) -> Result<StudioDraft, String> {
+    let target = draft.trim();
+    let Some(path) = resolve_target(notes_root, target) else {
+        return Err(format!("the draft {target:?} does not resolve to a file"));
+    };
+    if path.split('/').any(|seg| seg == "..") {
+        return Err(format!("the draft {target:?} does not resolve to a file"));
+    }
+    if !path.starts_with(&format!("{DRAFTS_DIR}/")) {
+        return Err(format!("{path} is not under {DRAFTS_DIR}/"));
+    }
+    if path.split('/').any(|seg| seg == ARCHIVE_SEGMENT) {
+        return Err(format!("{path} is archived"));
+    }
+    let src = std::fs::read_to_string(notes_root.join(&path))
+        .map_err(|e| format!("{path} is unreadable: {e}"))?;
+    let repo = request_repo(&path, &src, repo, None)?;
+    let model = fm(&src, "devjob-model");
+    check_model(&path, &model)?;
+    let Some(section) = prompt_section(&src) else {
+        return Err(format!("{path} has no ## PROMPT section"));
+    };
+    let stem = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&path)
+        .trim_end_matches(".md");
+    let slug = slugify(stem, BRANCH_TEXT_CHARS);
+    if !valid_slug(&slug) {
+        return Err(format!("{path}: its name makes no branch slug"));
+    }
+    Ok(StudioDraft {
+        prompt_path: path,
+        repo,
+        model,
+        section,
+        slug,
+    })
 }
 
 // ---- WHERE REPORTS GO -----------------------------------------------------------------
@@ -1176,8 +1496,17 @@ async fn write_report(
 /// How a run is asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartKind {
-    /// A strand's Drafts item.
-    Item { strand: String, item_id: String },
+    /// A strand's Drafts item. `scheduled` is a strand schedule entry, whose draft must opt in
+    /// with `devjob-repo` and `devjob-host: studio`; otherwise a person asked, and `repo` is the
+    /// repository they named, used when the draft names none ([`OptIn::Request`]).
+    Item {
+        strand: String,
+        item_id: String,
+        repo: Option<String>,
+        scheduled: bool,
+    },
+    /// A draft by its path, with no strand line: a free run `s-<file stem>`.
+    Draft { draft: String, repo: Option<String> },
     /// A free prompt from a chat turn: `s-<slug>`.
     Free {
         repo: String,
@@ -1350,13 +1679,16 @@ impl HostRuns {
             .rfind(|r| r.step() == Some((strand, item_id)) && r.status.is_live())
     }
 
-    /// Runs of a strand that are running or need Jeremy.
+    /// Runs of a strand that are running, need Jeremy or are paused for the usage limit.
     pub fn active_count(&self, strand: &str) -> u32 {
         self.runs()
             .iter()
             .filter(|(_, r)| {
                 r.strand.as_deref() == Some(strand)
-                    && matches!(r.status, RunStatus::Running | RunStatus::NeedsYou)
+                    && matches!(
+                        r.status,
+                        RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused
+                    )
             })
             .count() as u32
     }
@@ -1370,9 +1702,21 @@ impl HostRuns {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.settings.claude.clone());
         let (base, repo, prompt_for, branch_text, model, step, prompt_path) = match &req.kind {
-            StartKind::Item { strand, item_id } => {
-                let item =
-                    studio_item(&self.notes_root, strand, item_id).map_err(Refusal::Invalid)?;
+            StartKind::Item {
+                strand,
+                item_id,
+                repo,
+                scheduled,
+            } => {
+                let opt_in = if *scheduled {
+                    OptIn::Schedule
+                } else {
+                    OptIn::Request {
+                        repo: repo.as_deref(),
+                    }
+                };
+                let item = studio_item(&self.notes_root, strand, item_id, opt_in)
+                    .map_err(Refusal::Invalid)?;
                 (
                     item.item_id.clone(),
                     item.repo.clone(),
@@ -1381,6 +1725,19 @@ impl HostRuns {
                     item.model.clone(),
                     Some((item.strand.clone(), item.item_id.clone())),
                     Some(item.prompt_path.clone()),
+                )
+            }
+            StartKind::Draft { draft, repo } => {
+                let d = studio_draft(&self.notes_root, draft, repo.as_deref())
+                    .map_err(Refusal::Invalid)?;
+                (
+                    format!("s-{}", d.slug),
+                    d.repo,
+                    d.section,
+                    None,
+                    d.model,
+                    None,
+                    Some(d.prompt_path),
                 )
             }
             StartKind::Free {
@@ -1418,6 +1775,12 @@ impl HostRuns {
                 )
             }
         };
+        // The repository's env file must be readable now; the runner reads it again at each
+        // round. Its contents are dropped here: only the path is recorded.
+        let env_file = self.settings.env_file(&repo).map(Path::to_path_buf);
+        if let Some(p) = &env_file {
+            read_env_file(p).map_err(|e| Refusal::Invalid(format!("{repo}: {e}")))?;
+        }
         let _gate = lock(&self.gate);
         if let Some((strand, item_id)) = &step {
             if let Some(live) = self.live_run_of(strand, item_id) {
@@ -1459,11 +1822,13 @@ impl HostRuns {
                 kept: true,
                 ..Cleanup::default()
             },
+            env_file: env_file.map(|p| p.to_string_lossy().into_owned()),
             ..RunRecord::default()
         };
-        let served = served_prompt(&prompt_for, &run_id);
-        if let Err(e) = write_atomic(&dir.join(PROMPT_MD), served.as_bytes())
-            .map_err(|e| format!("could not write prompt.md: {e}"))
+        // `prompt.md` is rendered when the first round starts, once the worktree names the
+        // branch it was cut from ([`HostRuns::launch`]).
+        if let Err(e) = write_atomic(&dir.join(SECTION_MD), prompt_for.as_bytes())
+            .map_err(|e| format!("could not write section.md: {e}"))
             .and_then(|_| write_run(&dir, &rec))
         {
             return Err(Refusal::Internal(e));
@@ -1574,14 +1939,27 @@ impl HostRuns {
             .iter()
             .filter(|(_, r)| r.status == RunStatus::Queued)
             .collect();
+        // The watcher's own rounds (a run that was running when the usage limit or a restart
+        // stopped it) go first, so it gets its slot back before new work takes it; then the
+        // order of the wait.
+        let resumed = |r: &RunRecord| r.round().is_some_and(|x| x.auto.is_some());
         queued.sort_by(|a, b| {
             let qa = a.1.queued_at.as_deref().unwrap_or(&a.1.created_at);
             let qb = b.1.queued_at.as_deref().unwrap_or(&b.1.created_at);
-            qa.cmp(qb).then(a.1.run_id.cmp(&b.1.run_id))
+            resumed(&b.1)
+                .cmp(&resumed(&a.1))
+                .then(qa.cmp(qb))
+                .then(a.1.run_id.cmp(&b.1.run_id))
         });
+        // While any run is paused for the usage limit, nothing new starts: only the paused runs'
+        // own rounds, which find out whether the limit has passed.
+        let limit_hold = runs.iter().any(|(_, r)| r.status == RunStatus::Paused);
         let mut disk_checked: Option<bool> = None;
         for (dir, r) in queued {
-            let waiting = if running_total >= self.settings.max_concurrent {
+            let probe = r.round().and_then(|x| x.auto.as_deref()) == Some(AUTO_LIMIT);
+            let waiting = if limit_hold && !probe {
+                Some("limit".to_string())
+            } else if running_total >= self.settings.max_concurrent {
                 Some("slot".to_string())
             } else if per_repo.get(&r.repo).copied().unwrap_or(0) >= self.settings.repo_cap(&r.repo)
             {
@@ -1667,6 +2045,28 @@ impl HostRuns {
             }
             std::fs::create_dir_all(dir.join(TARGET_DIR))
                 .map_err(|e| format!("could not create target/: {e}"))?;
+            if round.n == 1 && !dir.join(PROMPT_MD).exists() {
+                let section = std::fs::read_to_string(dir.join(SECTION_MD))
+                    .map_err(|e| format!("could not read section.md: {e}"))?;
+                let default_branch = base
+                    .as_ref()
+                    .map(|b| b.default_branch.clone())
+                    .or_else(|| rec.default_branch.clone())
+                    .unwrap_or_else(|| "main".to_string());
+                let served = served_prompt(
+                    &section,
+                    &RunPlace {
+                        run_id: &rec.run_id,
+                        repo: &rec.repo,
+                        branch: &rec.branch,
+                        default_branch: &default_branch,
+                        run_dir: dir,
+                        pr_title_tag: self.settings.pr_title_tag(&rec.repo),
+                    },
+                );
+                write_atomic(&dir.join(PROMPT_MD), served.as_bytes())
+                    .map_err(|e| format!("could not write prompt.md: {e}"))?;
+            }
             if round.n > 1 {
                 let prev = round.n - 1;
                 for (from, to) in [
@@ -1761,15 +2161,31 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
+        self.queue_round_locked(run_id, text, None)
+    }
+
+    /// Queue a new round on a finished or paused run. The caller holds the gate. `auto` names
+    /// the watcher's own rounds ([`AUTO_LIMIT`], [`AUTO_RESTART`]); a person's reply is `None`.
+    fn queue_round_locked(
+        &self,
+        run_id: &str,
+        text: &str,
+        auto: Option<&str>,
+    ) -> Result<RunRecord, Refusal> {
         let rec = self
             .get(run_id)
             .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
         if !matches!(
             rec.status,
-            RunStatus::NeedsYou | RunStatus::Reported | RunStatus::Failed | RunStatus::Interrupted
+            RunStatus::NeedsYou
+                | RunStatus::Reported
+                | RunStatus::Failed
+                | RunStatus::Interrupted
+                | RunStatus::Paused
         ) {
             return Err(Refusal::State(format!(
-                "{run_id} is {}; a reply needs it to be needs_you, reported, failed or interrupted",
+                "{run_id} is {}; a reply needs it to be needs_you, reported, failed, interrupted \
+                 or paused",
                 rec.status.label()
             )));
         }
@@ -1790,6 +2206,7 @@ impl HostRuns {
                 n,
                 text: Some(text.to_string()),
                 queued_at: now.clone(),
+                auto: auto.map(str::to_string),
                 ..Round::default()
             });
             r.status = RunStatus::Queued;
@@ -1797,13 +2214,44 @@ impl HostRuns {
             r.waiting_for = None;
             r.stalled_since = None;
             r.disk_pushed = false;
+            r.resume_at = None;
+            if auto == Some(AUTO_RESTART) {
+                r.restart_resumed = true;
+            }
         })
         .map_err(Refusal::Internal)?;
         eprintln!(
-            "jesse-bridge: hostrun REPLY {run_id} round {}",
+            "jesse-bridge: hostrun {} {run_id} round {}",
+            match auto {
+                Some(a) => format!("AUTO ROUND ({a})"),
+                None => "REPLY".to_string(),
+            },
             rec.rounds.len()
         );
         Ok(rec)
+    }
+
+    /// Queue the watcher's round on every run paused for the usage limit whose `resume_at` has
+    /// come.
+    pub fn resume_due(&self, now: u64) {
+        let _gate = lock(&self.gate);
+        for (_, r) in self.runs() {
+            if r.status != RunStatus::Paused || ms_opt(&r.resume_at).is_some_and(|t| t > now) {
+                continue;
+            }
+            if let Err(e) = self.queue_round_locked(&r.run_id, CONTINUE_TEXT, Some(AUTO_LIMIT)) {
+                eprintln!(
+                    "jesse-bridge: hostrun {}: the usage limit round could not be queued: {}",
+                    r.run_id,
+                    e.message()
+                );
+                // Try again in an hour rather than at every pass.
+                let at = rfc(now.saturating_add(LIMIT_RETRY_MS));
+                let _ = update_run(&self.settings.run_dir(&r.run_id), |x| {
+                    x.resume_at = Some(at.clone())
+                });
+            }
+        }
     }
 
     /// Reply, then start what the queue allows.
@@ -1835,9 +2283,10 @@ impl HostRuns {
         let dir = self.settings.run_dir(run_id);
         let now = rfc(now_ms());
         match rec.status {
-            RunStatus::Queued => update_run(&dir, |r| {
+            RunStatus::Queued | RunStatus::Paused => update_run(&dir, |r| {
                 r.status = RunStatus::Cancelled;
                 r.waiting_for = None;
+                r.resume_at = None;
                 r.finished_at = Some(now.clone());
                 if let Some(cur) = r.round_mut() {
                     cur.outcome = Some(RunStatus::Cancelled);
@@ -1869,7 +2318,7 @@ impl HostRuns {
                 Ok(updated)
             }
             other => Err(Refusal::State(format!(
-                "{run_id} is {}; only a queued or running run can be cancelled",
+                "{run_id} is {}; only a queued, running or paused run can be cancelled",
                 other.label()
             ))),
         }
@@ -1960,12 +2409,35 @@ impl HostRuns {
                     "jesse-bridge: hostrun {}: INTERRUPTED (no runner, no exit)",
                     r.run_id
                 );
+                // One automatic round, unless this run already had one since its last
+                // completed round: a second interruption waits for a person.
+                let resumed = self.settings.auto_resume_interrupted && !r.restart_resumed && {
+                    let _gate = lock(&self.gate);
+                    match self.queue_round_locked(&r.run_id, RESTART_TEXT, Some(AUTO_RESTART)) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!(
+                                "jesse-bridge: hostrun {}: not resumed: {}",
+                                r.run_id,
+                                e.message()
+                            );
+                            false
+                        }
+                    }
+                };
                 effects.push(Effect::Push {
                     title: "Run interrupted".into(),
-                    body: format!(
-                        "{} stopped with no exit (a reboot or a crash). Reply to resume it.",
-                        r.run_id
-                    ),
+                    body: if resumed {
+                        format!(
+                            "{} stopped with no exit (a reboot or a crash). Resuming it once.",
+                            r.run_id
+                        )
+                    } else {
+                        format!(
+                            "{} stopped with no exit (a reboot or a crash). Reply to resume it.",
+                            r.run_id
+                        )
+                    },
                     run_id: r.run_id.clone(),
                 });
                 continue;
@@ -2006,6 +2478,12 @@ impl HostRuns {
         let Some(exit) = read_exit(&dir).filter(|e| e.round == round.n) else {
             return Ok(());
         };
+        if round.cancel_requested_at.is_none() {
+            let events = stream::read_stream_from(&dir, round.stream_offset);
+            if let Some(hit) = stream::usage_limit(&events) {
+                return self.pause_for_limit(&dir, &rec, &exit, hit, &sink).await;
+            }
+        }
         let report = round_report(&dir, &round);
         let status = round_status(&round, &exit, &report);
         let rel = match round
@@ -2041,6 +2519,11 @@ impl HostRuns {
             r.stalled_since = None;
             r.pgid = None;
             r.disk_bytes = Some(bytes);
+            // A completed round: the next interruption may resume by itself again, and this
+            // round got past any usage limit.
+            r.restart_resumed = false;
+            r.limit_pushed = false;
+            r.resume_at = None;
             for d in &derived {
                 let d = d.to_string_lossy().into_owned();
                 if !r.derived_data.contains(&d) {
@@ -2055,6 +2538,9 @@ impl HostRuns {
                 cur.signal = exit.signal;
             }
         })?;
+        if matches!(status, RunStatus::Reported | RunStatus::NeedsYou) {
+            self.lift_limit(now_ms());
+        }
         if rec.round().is_some_and(|r| r.notified) {
             return Ok(());
         }
@@ -2074,6 +2560,81 @@ impl HostRuns {
         Ok(())
     }
 
+    /// A round ended on the plan's usage limit: the run is `paused` until the reset the event
+    /// names (else an hour from now), with one push for the whole pause and no Inbox report.
+    async fn pause_for_limit(
+        &self,
+        dir: &Path,
+        rec: &RunRecord,
+        exit: &ExitInfo,
+        hit: stream::UsageLimit,
+        sink: &RunSink,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        let resume = hit
+            .resets_at_ms
+            .filter(|&t| t > now)
+            .unwrap_or(now.saturating_add(LIMIT_RETRY_MS));
+        let resume_at = rfc(resume);
+        let at = exit.ended_at.clone();
+        let (code, signal) = (exit.code, exit.signal);
+        let updated = update_run(dir, |r| {
+            r.status = RunStatus::Paused;
+            r.resume_at = Some(resume_at.clone());
+            r.finished_at = Some(at.clone());
+            r.waiting_for = None;
+            r.stalled_since = None;
+            r.pgid = None;
+            r.restart_resumed = false;
+            if let Some(cur) = r.round_mut() {
+                cur.finished_at = Some(at.clone());
+                cur.outcome = Some(RunStatus::Paused);
+                cur.exit_code = code;
+                cur.signal = signal;
+                cur.notified = true;
+            }
+        })?;
+        eprintln!(
+            "jesse-bridge: hostrun {} PAUSED for the usage limit until {resume_at}",
+            rec.run_id
+        );
+        if !updated.limit_pushed {
+            update_run(dir, |r| r.limit_pushed = true)?;
+            if let Some(n) = &sink.notifier {
+                n.notify(
+                    "Run paused".into(),
+                    format!(
+                        "{} paused for usage limit until {}",
+                        rec.run_id,
+                        local_clock(resume, now)
+                    ),
+                    rec.run_id.clone(),
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// A round got past the usage limit: every run paused for it resumes at the next pass.
+    fn lift_limit(&self, now: u64) {
+        let _gate = lock(&self.gate);
+        let mut any = false;
+        for (dir, r) in self.runs() {
+            if r.status == RunStatus::Paused && ms_opt(&r.resume_at).is_some_and(|t| t > now) {
+                let at = rfc(now);
+                let _ = update_run(&dir, |x| x.resume_at = Some(at.clone()));
+                any = true;
+            }
+        }
+        if any {
+            eprintln!(
+                "jesse-bridge: hostrun a round got past the usage limit; resuming paused runs"
+            );
+            self.wake.notify_one();
+        }
+    }
+
     /// One watcher pass at `now`.
     pub async fn pass(self: &Arc<Self>, now: u64) {
         let this = self.clone();
@@ -2086,6 +2647,8 @@ impl HostRuns {
                 eprintln!("jesse-bridge: hostrun {id}: report not written yet: {e}");
             }
         }
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;
         self.send_effects(effects).await;
         let (cleanup_due, reconcile_due) = {
@@ -2127,17 +2690,24 @@ impl HostRuns {
 
     // ---- CLEANUP ---------------------------------------------------------------------
 
-    /// Remove a run's build artifacts: `target/` and the DerivedData folders it recorded.
+    /// Remove a run's build artifacts: `target/`, the DerivedData folders it recorded and, once
+    /// the run is no longer live, `extra/` (the further repositories it cloned).
     fn remove_artifacts(&self, dir: &Path, rec: &RunRecord, now: u64) -> u64 {
         let mut freed = 0;
-        let target = dir.join(TARGET_DIR);
-        if target.exists() {
-            freed += sys::tree_bytes(&target);
-            if let Err(e) = sys::remove_tree(&target) {
-                eprintln!(
-                    "jesse-bridge: hostrun {}: could not remove target/: {e}",
-                    rec.run_id
-                );
+        let mut tiers = vec![TARGET_DIR];
+        if !rec.status.is_live() {
+            tiers.push(EXTRA_DIR);
+        }
+        for tier in tiers {
+            let p = dir.join(tier);
+            if p.exists() {
+                freed += sys::tree_bytes(&p);
+                if let Err(e) = sys::remove_tree(&p) {
+                    eprintln!(
+                        "jesse-bridge: hostrun {}: could not remove {tier}/: {e}",
+                        rec.run_id
+                    );
+                }
             }
         }
         for d in &rec.derived_data {
@@ -2164,6 +2734,7 @@ impl HostRuns {
 
     fn has_artifacts(&self, dir: &Path, rec: &RunRecord) -> bool {
         dir.join(TARGET_DIR).exists()
+            || (!rec.status.is_live() && dir.join(EXTRA_DIR).exists())
             || rec.derived_data.iter().any(|d| {
                 Path::new(d).parent() == Some(self.settings.derived_data_root.as_path())
                     && Path::new(d).exists()
@@ -2400,6 +2971,7 @@ impl HostRuns {
             "running": count(RunStatus::Running),
             "queued": count(RunStatus::Queued),
             "needs_you": count(RunStatus::NeedsYou),
+            "paused": count(RunStatus::Paused),
         });
         let h = lock(&self.house);
         json!({
@@ -2452,6 +3024,18 @@ pub fn run_json(r: &RunRecord) -> Value {
     v
 }
 
+/// `18:00` in local time, or `Nov 10 18:00` when not today.
+pub fn local_clock(ms: u64, now: u64) -> String {
+    use chrono::TimeZone;
+    let at = chrono::Local.timestamp_millis_opt(ms as i64).single();
+    let today = chrono::Local.timestamp_millis_opt(now as i64).single();
+    match (at, today) {
+        (Some(a), Some(t)) if a.date_naive() == t.date_naive() => a.format("%H:%M").to_string(),
+        (Some(a), _) => a.format("%b %-d %H:%M").to_string(),
+        _ => rfc(ms),
+    }
+}
+
 /// `12.3 GB`.
 pub fn human_bytes(b: u64) -> String {
     format!("{:.1} GB", b as f64 / GB as f64)
@@ -2459,8 +3043,9 @@ pub fn human_bytes(b: u64) -> String {
 
 // ---- THE STRANDS SNAPSHOT ------------------------------------------------------------------
 
-/// Add the Studio fields to `GET /jesse/strands`: each strand's `runs_active` (its running and
-/// needs-you runs), and `drafts`, its items each with `studio_runnable`. Additive only.
+/// Add the Studio fields to `GET /jesse/strands`: each strand's `runs_active` (its running,
+/// needs-you and paused runs), and `drafts`, its items each with `studio_runnable` (whether a
+/// person's start with no `repo` would be accepted). Additive only.
 pub fn annotate_strands(
     value: &mut Value,
     snap: &crate::strands::StrandsSnapshot,
@@ -2481,12 +3066,23 @@ pub fn annotate_strands(
             .iter()
             .filter(|r| {
                 r.strand.as_deref() == Some(strand.slug.as_str())
-                    && matches!(r.status, RunStatus::Running | RunStatus::NeedsYou)
+                    && matches!(
+                        r.status,
+                        RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused
+                    )
             })
             .count();
         obj.insert("runs_active".into(), json!(active as u32));
         let runnable = |item: &crate::strands::StrandItem| {
-            service.is_some() && studio_item_of(notes_root, &strand.slug, item).is_ok()
+            service.is_some()
+                && studio_item_of(
+                    notes_root,
+                    &strand.slug,
+                    item,
+                    &strand.repos,
+                    OptIn::Request { repo: None },
+                )
+                .is_ok()
         };
         let drafts: Vec<Value> = strand
             .items
@@ -2534,13 +3130,39 @@ fn refusal(r: Refusal) -> ApiError {
     (r.status(), r.message().to_string())
 }
 
+/// `POST /jesse/runs`: a strand item (`strand` and `item_id`), or a draft by its path
+/// (`draft`). `repo` names the repository when the draft does not.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartBody {
-    pub strand: String,
-    pub item_id: String,
+    pub strand: Option<String>,
+    pub item_id: Option<String>,
+    pub draft: Option<String>,
+    pub repo: Option<String>,
     #[serde(default)]
     pub again: bool,
+}
+
+impl StartBody {
+    /// What the body asks for, or why it is not well formed.
+    pub fn kind(self) -> Result<StartKind, String> {
+        let repo = match self.repo.as_deref().map(str::trim) {
+            None => None,
+            Some(r) if valid_repo(r) => Some(r.to_string()),
+            Some(r) => return Err(format!("repo {r:?} is not owner/name")),
+        };
+        match (self.strand, self.item_id, self.draft) {
+            (Some(strand), Some(item_id), None) => Ok(StartKind::Item {
+                strand: strand.trim().to_string(),
+                item_id: item_id.trim().to_string(),
+                repo,
+                scheduled: false,
+            }),
+            (None, None, Some(draft)) => Ok(StartKind::Draft { draft, repo }),
+            (_, _, Some(_)) => Err("draft goes alone, without strand and item_id".into()),
+            _ => Err("pass strand and item_id, or draft".into()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2566,21 +3188,20 @@ pub async fn jesse_runs(
     Ok(Json(v).into_response())
 }
 
-/// `POST /jesse/runs` with `{ strand, item_id, again? }`.
+/// `POST /jesse/runs` with `{ strand, item_id, repo?, again? }` or `{ draft, repo?, again? }`.
 pub async fn jesse_runs_start(
     State(st): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<StartBody>,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    let again = body.again;
+    let kind = body.kind().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let started = svc
         .start(StartRequest {
-            kind: StartKind::Item {
-                strand: body.strand,
-                item_id: body.item_id,
-            },
+            kind,
             origin: "app".into(),
-            again: body.again,
+            again,
         })
         .await
         .map_err(refusal)?;

@@ -269,6 +269,8 @@ fn item(id: &str) -> StartRequest {
         kind: StartKind::Item {
             strand: "Gd".into(),
             item_id: id.into(),
+            repo: None,
+            scheduled: false,
         },
         origin: "app".into(),
         again: false,
@@ -409,11 +411,12 @@ fn eligibility_refuses_each_thing_by_name() {
     let s = Scratch::new();
     vault_fixture(&s);
     let n = s.notes();
-    let ok = studio_item(&n, "Gd", "GD5").unwrap();
+    // A strand schedule entry: the draft must still say devjob-repo and devjob-host: studio.
+    let ok = studio_item(&n, "Gd", "GD5", OptIn::Schedule).unwrap();
     assert_eq!(ok.repo, "o/n");
     assert_eq!(ok.prompt_path, "Projects/drafts/gd5-prompt.md");
     assert_eq!(ok.section, SECTION);
-    let why = |id: &str| studio_item(&n, "Gd", id).unwrap_err();
+    let why = |id: &str| studio_item(&n, "Gd", id, OptIn::Schedule).unwrap_err();
     assert!(why("GD6").contains("checked"), "{}", why("GD6"));
     assert!(why("GD7").contains("archived"), "{}", why("GD7"));
     assert!(why("GD8").contains("no ## PROMPT"), "{}", why("GD8"));
@@ -434,15 +437,35 @@ fn eligibility_refuses_each_thing_by_name() {
         why("GD12")
     );
     assert!(why("GD404").contains("no line GD404"));
-    assert!(studio_item(&n, "../etc", "GD5").is_err());
+    assert!(studio_item(&n, "../etc", "GD5", OptIn::Schedule).is_err());
+    // A person's start keeps every other check.
+    let asked =
+        |id: &str| studio_item(&n, "Gd", id, OptIn::Request { repo: Some("o/n") }).unwrap_err();
+    assert!(asked("GD6").contains("checked"), "{}", asked("GD6"));
+    assert!(asked("GD7").contains("archived"), "{}", asked("GD7"));
+    assert!(asked("GD8").contains("no ## PROMPT"), "{}", asked("GD8"));
+    assert!(
+        asked("GD11").contains("is step GD99, not GD11"),
+        "{}",
+        asked("GD11")
+    );
+    assert!(asked("GD404").contains("no line GD404"));
 }
 
 #[test]
 fn the_served_prompt_is_the_section_then_the_generated_section_exactly() {
+    let place = RunPlace {
+        run_id: "GD5b",
+        repo: "jeremyandrews/jesse-app",
+        branch: "gd5b-run-the-thing",
+        default_branch: "main",
+        run_dir: Path::new("/Users/j/jesse-runs/runs/GD5b"),
+        pr_title_tag: true,
+    };
     let expected = format!(
-        "{SECTION}### Run ID and report\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n"
+        "{SECTION}### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of jeremyandrews/jesse-app on branch gd5b-run-the-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/GD5b/extra/ and work there.\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n"
     );
-    assert_eq!(served_prompt(SECTION, "GD5b"), expected);
+    assert_eq!(served_prompt(SECTION, &place), expected);
     // The section is taken byte for byte, up to the rule before the archive checkboxes.
     let src = format!("---\na: b\n---\n# T\n\n## PROMPT\n{SECTION}---\n- [ ] x\n");
     assert_eq!(prompt_section(&src).as_deref(), Some(SECTION));
@@ -460,11 +483,21 @@ async fn the_run_gets_the_served_prompt_on_disk() {
     let r = rig(&s);
     r.svc.start(item("GD5")).await.unwrap();
     let dir = r.svc.settings.run_dir("GD5");
+    let rec = read_run(&dir).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join(PROMPT_MD)).unwrap(),
-        served_prompt(SECTION, "GD5")
+        served_prompt(
+            SECTION,
+            &RunPlace {
+                run_id: "GD5",
+                repo: "o/n",
+                branch: "gd5-run-the-thing-on-the-studio",
+                default_branch: "main",
+                run_dir: &dir,
+                pr_title_tag: false,
+            }
+        )
     );
-    let rec = read_run(&dir).unwrap();
     assert_eq!(rec.branch, "gd5-run-the-thing-on-the-studio");
     assert_eq!(rec.origin, "app");
     assert_eq!(
@@ -540,7 +573,9 @@ fn devjob_args_keep_refusing_unknown_keys_and_without_host_build_the_same_cluste
         devjob::StartPlan::Studio {
             kind: StartKind::Item {
                 strand: "Gd".into(),
-                item_id: "GD5".into()
+                item_id: "GD5".into(),
+                repo: None,
+                scheduled: false,
             },
             again: true
         }
@@ -768,12 +803,20 @@ async fn a_quiet_run_is_marked_stalled_once_and_never_killed() {
     assert_eq!(r.svc.get("GD5").unwrap().stalled_since, None);
 }
 
+/// Settings with `auto_resume_interrupted = false`.
+fn no_auto_resume(s: &Scratch) -> HostRunSettings {
+    let mut st = settings(s);
+    st.auto_resume_interrupted = false;
+    st
+}
+
 #[tokio::test]
 async fn a_run_whose_label_is_gone_without_an_exit_is_interrupted() {
     let s = Scratch::new();
     vault_fixture(&s);
     remote_fixture(&s);
-    let r = rig(&s);
+    // With `auto_resume_interrupted = false`, exactly as before it existed.
+    let r = rig_with(&s, no_auto_resume(&s));
     r.svc.start(item("GD5")).await.unwrap();
     r.launcher.gone("GD5");
     // Not straight after the start.
@@ -1089,7 +1132,7 @@ async fn an_interrupted_run_keeps_its_worktree() {
     let s = Scratch::new();
     vault_fixture(&s);
     remote_fixture(&s);
-    let r = rig(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
     r.svc.start(item("GD5")).await.unwrap();
     r.launcher.gone("GD5");
     r.svc.scan(now_ms() + 11_000);
@@ -1220,7 +1263,9 @@ async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
         .filter(|d| d["studio_runnable"] == true)
         .map(|d| d["id"].as_str().unwrap())
         .collect();
-    assert_eq!(runnable, vec!["GD5"]);
+    // A person's start is the opt in: GD10 (no devjob-host) and GD12 (devjob-host: cluster) run
+    // on request too. GD9 names no repository and the strand lists none, so it needs one passed.
+    assert_eq!(runnable, vec!["GD5", "GD10", "GD12"]);
     r.svc.start(item("GD5")).await.unwrap();
     let mut v = serde_json::to_value(&snap).unwrap();
     annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
@@ -1478,4 +1523,817 @@ fn the_run_label_prefix_comes_from_the_bridges_own_label() {
         sys::label_prefix_from(Some("jesse-bridge")),
         sys::DEFAULT_LABEL_PREFIX
     );
+}
+
+// ---- 6. ROAD READY: ANY DRAFT ON REQUEST, LIMITS, REBOOTS, ENV FILES ---------------------------
+
+/// A draft with no Studio keys at all, for strand `slug` and line `id`.
+fn bare_draft(slug: &str, id: &str) -> String {
+    format!(
+        "---\nstrand: {slug}\nstrand-id: {id}\n---\n# {id}\n\nContext.\n\n## PROMPT\n{SECTION}---\n- [ ] archived\n"
+    )
+}
+
+/// Strands `One` (repos: [o/n]) and `Many` (repos: [o/n, o/m]) and `None` (no repos), each with
+/// one line whose draft carries no `devjob-repo` and no `devjob-host`, plus a loose draft.
+fn bare_fixture(s: &Scratch) {
+    let n = s.notes();
+    std::fs::create_dir_all(n.join("Strands")).unwrap();
+    std::fs::create_dir_all(n.join("Projects/drafts/archive")).unwrap();
+    for (slug, repos, id) in [
+        ("One", "repos: [o/n]\n", "ON1"),
+        ("Many", "repos: [o/n, o/m]\n", "MA1"),
+        ("None", "", "NO1"),
+    ] {
+        std::fs::write(
+            n.join(format!("Strands/{slug}.md")),
+            format!(
+                "---\ngroup: tag1\nstate: active\n{repos}updated: 2026-11-09\n---\n# {slug}\n\n## Drafts\n\
+                 - [ ] **{id}** Bare draft. [[todo-list/Projects/drafts/{}-prompt]]\n### Done\n",
+                id.to_lowercase()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            n.join(format!("Projects/drafts/{}-prompt.md", id.to_lowercase())),
+            bare_draft(slug, id),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        n.join("Projects/drafts/loose-fix-prompt.md"),
+        "---\nstrand: Elsewhere\nstrand-id: ZZ9\n---\n# Loose\n\n## PROMPT\nFix it.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        n.join("Projects/drafts/archive/old-prompt.md"),
+        "---\n---\n## PROMPT\nOld.\n",
+    )
+    .unwrap();
+}
+
+fn asked(strand: &str, id: &str, repo: Option<&str>) -> StartRequest {
+    StartRequest {
+        kind: StartKind::Item {
+            strand: strand.into(),
+            item_id: id.into(),
+            repo: repo.map(str::to_string),
+            scheduled: false,
+        },
+        origin: "turn".into(),
+        again: false,
+    }
+}
+
+#[tokio::test]
+async fn a_person_launches_any_queued_draft_and_the_repository_resolves_in_order() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    // No front matter keys, the caller's repo: it runs.
+    let a = r
+        .svc
+        .start(asked("None", "NO1", Some("o/n")))
+        .await
+        .unwrap();
+    assert_eq!(a.run_id, "NO1");
+    assert_eq!(r.svc.get("NO1").unwrap().repo, "o/n");
+    // No repo passed, a one repository strand: that one.
+    let b = r.svc.start(asked("One", "ON1", None)).await.unwrap();
+    assert_eq!(b.run_id, "ON1");
+    assert_eq!(r.svc.get("ON1").unwrap().repo, "o/n");
+    // No repo passed, several: refused, naming them.
+    let e = r.svc.start(asked("Many", "MA1", None)).await.unwrap_err();
+    assert!(matches!(e, Refusal::Invalid(_)), "{e:?}");
+    assert!(e.message().contains("o/n, o/m"), "{}", e.message());
+    assert!(e.message().contains("pass repo"), "{}", e.message());
+    // With one picked, it runs.
+    let c = r
+        .svc
+        .start(asked("Many", "MA1", Some("o/n")))
+        .await
+        .unwrap();
+    assert_eq!(c.run_id, "MA1");
+    // None at all: refused.
+    let n = s.notes();
+    let e = studio_item(&n, "None", "NO1", OptIn::Request { repo: None }).unwrap_err();
+    assert!(e.contains("lists no repos"), "{e}");
+    // A bad repo is refused by pattern.
+    let e = studio_item(&n, "None", "NO1", OptIn::Request { repo: Some("nope") }).unwrap_err();
+    assert!(e.contains("not owner/name"), "{e}");
+    // The draft's own devjob-repo wins over the caller's.
+    vault_fixture(&s);
+    let gd = studio_item(&n, "Gd", "GD10", OptIn::Request { repo: Some("x/y") }).unwrap();
+    assert_eq!(gd.repo, "o/n");
+}
+
+#[tokio::test]
+async fn a_strand_schedule_entry_still_needs_both_keys() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let e = r
+        .svc
+        .start(StartRequest {
+            kind: StartKind::Item {
+                strand: "One".into(),
+                item_id: "ON1".into(),
+                repo: Some("o/n".into()),
+                scheduled: true,
+            },
+            origin: "schedule:x".into(),
+            again: false,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        e.message().contains("has no devjob-repo"),
+        "{}",
+        e.message()
+    );
+    // And a draft with devjob-repo but no devjob-host: studio, as before.
+    vault_fixture(&s);
+    let e = studio_item(&s.notes(), "Gd", "GD10", OptIn::Schedule).unwrap_err();
+    assert!(e.contains("devjob-host: studio"), "{e}");
+    assert!(r.svc.get("ON1").is_none());
+}
+
+#[tokio::test]
+async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let started = r
+        .svc
+        .start(StartRequest {
+            kind: StartKind::Draft {
+                draft: "Projects/drafts/loose-fix-prompt.md".into(),
+                repo: Some("o/n".into()),
+            },
+            origin: "turn".into(),
+            again: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.run_id, "s-loose-fix-prompt");
+    let rec = r.svc.get("s-loose-fix-prompt").unwrap();
+    assert_eq!(rec.strand, None);
+    assert_eq!(
+        rec.prompt_path.as_deref(),
+        Some("Projects/drafts/loose-fix-prompt.md")
+    );
+    let dir = r.svc.settings.run_dir("s-loose-fix-prompt");
+    assert!(std::fs::read_to_string(dir.join(PROMPT_MD))
+        .unwrap()
+        .starts_with("Fix it.\n\n### Run ID and report\n\n"));
+    // A wiki target resolves too; an archived draft, a path outside the drafts and a missing
+    // repository are refused.
+    let n = s.notes();
+    assert!(studio_draft(
+        &n,
+        "todo-list/Projects/drafts/loose-fix-prompt",
+        Some("o/n")
+    )
+    .is_ok());
+    assert!(
+        studio_draft(&n, "Projects/drafts/archive/old-prompt.md", Some("o/n"))
+            .unwrap_err()
+            .contains("archived")
+    );
+    assert!(studio_draft(&n, "Strands/One.md", Some("o/n"))
+        .unwrap_err()
+        .contains("not under"));
+    assert!(
+        studio_draft(&n, "Projects/drafts/loose-fix-prompt.md", None)
+            .unwrap_err()
+            .contains("pass repo")
+    );
+    // The route body and the tool's arguments name the same three ways.
+    let body = |v: Value| serde_json::from_value::<StartBody>(v).unwrap().kind();
+    assert_eq!(
+        body(json!({ "draft": "Projects/drafts/x.md", "repo": "o/n" })).unwrap(),
+        StartKind::Draft {
+            draft: "Projects/drafts/x.md".into(),
+            repo: Some("o/n".into())
+        }
+    );
+    assert_eq!(
+        body(json!({ "strand": "Gd", "item_id": "GD5", "repo": "o/n" })).unwrap(),
+        StartKind::Item {
+            strand: "Gd".into(),
+            item_id: "GD5".into(),
+            repo: Some("o/n".into()),
+            scheduled: false
+        }
+    );
+    assert!(body(json!({ "strand": "Gd", "item_id": "GD5", "repo": "bad" })).is_err());
+    assert!(body(json!({ "strand": "Gd" })).is_err());
+    assert!(serde_json::from_value::<StartBody>(
+        json!({ "strand": "Gd", "item_id": "GD5", "x": 1 })
+    )
+    .is_err());
+    let plan =
+        |v: Value| devjob::plan_start(serde_json::from_value(v).unwrap(), devjob::Agent::Claude);
+    assert_eq!(
+        plan(json!({ "host": "studio", "draft": "Projects/drafts/x.md", "repo": "o/n" })).unwrap(),
+        devjob::StartPlan::Studio {
+            kind: StartKind::Draft {
+                draft: "Projects/drafts/x.md".into(),
+                repo: Some("o/n".into())
+            },
+            again: false
+        }
+    );
+    assert_eq!(
+        plan(json!({ "host": "studio", "strand": "Gd", "item_id": "GD5", "repo": "o/n" })).unwrap(),
+        devjob::StartPlan::Studio {
+            kind: StartKind::Item {
+                strand: "Gd".into(),
+                item_id: "GD5".into(),
+                repo: Some("o/n".into()),
+                scheduled: false
+            },
+            again: false
+        }
+    );
+    assert!(plan(json!({ "host": "studio", "draft": "x", "prompt": "p" })).is_err());
+    assert!(
+        plan(json!({ "draft": "x", "repo": "a/b", "prompt": "p", "branch_slug": "s" }))
+            .unwrap_err()
+            .contains("host \"studio\"")
+    );
+}
+
+#[test]
+fn the_generated_section_tags_the_title_only_where_pr_title_tag_says() {
+    let dir = Path::new("/Users/j/jesse-runs/runs/AB1");
+    let place = |repo: &'static str, tag: bool| RunPlace {
+        run_id: "AB1",
+        repo,
+        branch: "ab1-thing",
+        default_branch: "main",
+        run_dir: dir,
+        pr_title_tag: tag,
+    };
+    let where_ = |repo: &str| {
+        format!(
+            "### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of {repo} on branch ab1-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/AB1/extra/ and work there.\n\n"
+        )
+    };
+    let rest = "Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
+    let with = |repo: &str| {
+        format!(
+            "Do it.\n\n{}This run is AB1. Start every branch name with ab1- and put [AB1] at the start of the pull request title. {rest}",
+            where_(repo)
+        )
+    };
+    let without = |repo: &str| {
+        format!(
+            "Do it.\n\n{}This run is AB1. Start every branch name with ab1-. {rest}",
+            where_(repo)
+        )
+    };
+    // The defaults: jeremyandrews tagged, tag1consulting not.
+    let st = HostRunSettings::default();
+    assert!(st.pr_title_tag("jeremyandrews/jesse-app"));
+    assert!(!st.pr_title_tag("tag1consulting/goose"));
+    assert_eq!(
+        served_prompt("Do it.\n", &place("jeremyandrews/jesse-app", true)),
+        with("jeremyandrews/jesse-app")
+    );
+    assert_eq!(
+        served_prompt("Do it.\n", &place("tag1consulting/goose", false)),
+        without("tag1consulting/goose")
+    );
+    // Overridden each way.
+    let t: HostRunToml = toml::from_str(
+        "enabled = true\n[repos.\"jeremyandrews/quiet\"]\npr_title_tag = false\n\
+         [repos.\"tag1consulting/goose\"]\npr_title_tag = true\n",
+    )
+    .unwrap();
+    let st = HostRunSettings::from_toml(Some(t), "/Users/j", "claude");
+    assert!(!st.pr_title_tag("jeremyandrews/quiet"));
+    assert!(st.pr_title_tag("tag1consulting/goose"));
+    assert!(st.pr_title_tag("jeremyandrews/other"));
+    // A repos table with no max_concurrent keeps the global per repository cap.
+    assert_eq!(st.repo_cap("jeremyandrews/quiet"), st.max_per_repo);
+}
+
+#[tokio::test]
+async fn the_rendered_prompt_follows_the_repositorys_pr_title_tag() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let mut st = settings(&s);
+    st.repo_title_tags.insert("o/n".into(), true);
+    let r = rig_with(&s, st);
+    r.svc.start(item("GD5")).await.unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    let prompt = std::fs::read_to_string(dir.join(PROMPT_MD)).unwrap();
+    assert!(prompt.contains("put [GD5] at the start of the pull request title"));
+    assert!(prompt.contains("in a fresh worktree of o/n on branch gd5-run-the-thing-on-the-studio, cut from origin/main."));
+    assert!(prompt.contains(&format!("clone it under {}/extra/", dir.display())));
+}
+
+// -- Grants --------------------------------------------------------------------------------
+
+#[test]
+fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
+    use crate::harness::direct_gateway_mcp_names;
+    use jesse_agent::tools::Level;
+    let cfg = crate::testutil::test_config();
+    let names = ["devjob_start", "devjob_reply", "devjob_cancel"];
+    let row = crate::mcpservers::row(devjob::DEVJOB_SERVER).unwrap();
+    for t in names {
+        assert_eq!(
+            row.class_of(t),
+            row.class_of("devjob_start"),
+            "{t} is classed as devjob_start is"
+        );
+    }
+    // Claude Code: the write grant names all three; the read grant names none.
+    let main = main_mcp_config(&cfg, &ClaudeCode);
+    let set = McpSet::from_config(main).unwrap_or(McpSet::None);
+    let write = row_allowed_tools(&cfg, Capability::Write, set);
+    let read = row_allowed_tools(&cfg, Capability::Read, set);
+    for t in names {
+        let g = format!("mcp__devjob__{t}");
+        assert!(write.split(',').any(|x| x == g), "write turns get {g}");
+        assert!(!read.split(',').any(|x| x == g), "read turns never get {g}");
+    }
+    // Codex: the server's enabled_tools.
+    let granted = row.granted_tools(&cfg.allowed_tools);
+    for t in names {
+        assert!(granted.iter().any(|x| x == t), "{t}");
+    }
+    // Direct: through the gateway, at write and not at read.
+    let w = direct_gateway_mcp_names(&cfg, Level::Write);
+    let r = direct_gateway_mcp_names(&cfg, Level::Read);
+    for t in names {
+        let g = format!("mcp__devjob__{t}");
+        assert!(w.contains(&g), "direct write gets {g}");
+        assert!(!r.contains(&g), "direct read never gets {g}");
+    }
+}
+
+// -- The usage limit ------------------------------------------------------------------------
+
+const LIMIT_FIXTURE: &str = include_str!("../../tests/fixtures/hostrun/usage-limit.jsonl");
+const LIMIT_NO_RESET_FIXTURE: &str =
+    include_str!("../../tests/fixtures/hostrun/usage-limit-no-reset.jsonl");
+/// The reset the fixture names: 2026-11-09T17:00:00Z.
+const FIXTURE_RESET_SECS: u64 = 1_794_243_600;
+
+#[test]
+fn the_usage_limit_is_read_from_the_structured_fields() {
+    assert_eq!(
+        stream::usage_limit(LIMIT_FIXTURE),
+        Some(stream::UsageLimit {
+            resets_at_ms: Some(FIXTURE_RESET_SECS * 1000)
+        })
+    );
+    assert_eq!(
+        stream::usage_limit(LIMIT_NO_RESET_FIXTURE),
+        Some(stream::UsageLimit { resets_at_ms: None })
+    );
+    // A clean finish, a failure that is not the limit, and prose alone are not the limit.
+    assert_eq!(stream::usage_limit(STREAM_TEXT), None);
+    let other = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":500,"result":"API Error: 500"}"#;
+    assert_eq!(stream::usage_limit(other), None);
+    let prose = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your limit · resets 6pm"}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your limit · resets 6pm"}"#;
+    assert_eq!(stream::usage_limit(prose), None);
+    // A throttle that shares error rate_limit but is not the account's limit.
+    let throttle = r#"{"type":"assistant","message":{"content":[]},"error":"rate_limit","is_api_error_message":true}
+{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"Rate limited"}"#;
+    assert_eq!(stream::usage_limit(throttle), None);
+    // The result's own api_error alone is enough; the reset then comes from a rejected
+    // rate_limit_event.
+    let result_only = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1794243600}}
+{"type":"result","subtype":"success","is_error":true,"api_error":"usage_limit_reached","result":"x"}"#;
+    assert_eq!(
+        stream::usage_limit(result_only),
+        Some(stream::UsageLimit {
+            resets_at_ms: Some(FIXTURE_RESET_SECS * 1000)
+        })
+    );
+    // A limit that a later round got past is not this round's: only the last result counts.
+    let past = format!("{LIMIT_FIXTURE}{STREAM_TEXT}");
+    assert_eq!(stream::usage_limit(&past), None);
+}
+
+#[tokio::test]
+async fn a_round_on_the_usage_limit_pauses_until_the_reset_with_one_push_and_holds_the_queue() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    r.svc.start(free("after")).await.unwrap();
+    assert_eq!(
+        r.svc.get("s-after").unwrap().waiting_for.as_deref(),
+        Some("repo o/n")
+    );
+    let reset_secs = now_ms() / 1000 + 2 * 3600;
+    let stream = LIMIT_FIXTURE.replace(&FIXTURE_RESET_SECS.to_string(), &reset_secs.to_string());
+    finish_round(&r, "GD5", 1, None, &stream);
+    r.svc.pass(now_ms()).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Paused);
+    assert_eq!(rec.resume_at, Some(rfc(reset_secs * 1000)));
+    assert_eq!(rec.round().unwrap().outcome, Some(RunStatus::Paused));
+    assert!(rec.limit_pushed);
+    // One push, exactly; no Inbox report and no strand turn for a pause.
+    let pushes = lock(&r.rec.pushes).clone();
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert_eq!(pushes[0].0, "Run paused");
+    assert_eq!(
+        pushes[0].1,
+        format!(
+            "GD5 paused for usage limit until {}",
+            local_clock(reset_secs * 1000, now_ms())
+        )
+    );
+    assert!(inbox_files(&s).is_empty(), "{:?}", inbox_files(&s));
+    assert_eq!(lock(&r.rec.turns).len(), 1, "only the start turn");
+    // The queue waits for the limit, and a paused run holds no slot.
+    let q = r.svc.get("s-after").unwrap();
+    assert_eq!(q.status, RunStatus::Queued);
+    assert_eq!(q.waiting_for.as_deref(), Some("limit"));
+    assert_eq!(r.svc.list_json()["counts"]["paused"], 1);
+    assert!(
+        r.svc.live_run_of("Gd", "GD5").is_some(),
+        "a paused run is live"
+    );
+    // Before the reset nothing happens.
+    r.svc.pass(now_ms() + 3_600_000).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Paused);
+    assert_eq!(lock(&r.launcher.bootstrapped).len(), 1);
+    // At the reset: one round, "Continue where you left off.", through the queue.
+    let at = reset_secs * 1000 + 1000;
+    r.svc.pass(at).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(rec.rounds.len(), 2);
+    assert_eq!(rec.round().unwrap().text.as_deref(), Some(CONTINUE_TEXT));
+    assert_eq!(rec.round().unwrap().auto.as_deref(), Some(AUTO_LIMIT));
+    assert_eq!(rec.resume_at, None);
+    // Later passes queue nothing more (the launch stamped the real clock, so this asks the
+    // two steps directly rather than a whole pass two simulated hours on).
+    r.svc.resume_due(at + 60_000);
+    r.svc.pump(now_ms());
+    assert_eq!(
+        r.svc.get("GD5").unwrap().rounds.len(),
+        2,
+        "one round, not one a pass"
+    );
+    assert_eq!(
+        lock(&r.launcher.bootstrapped)
+            .iter()
+            .filter(|l| l.ends_with(".GD5"))
+            .count(),
+        2
+    );
+    // No longer paused: the queue moves on its usual rules (the repository's one slot).
+    assert_eq!(
+        r.svc.get("s-after").unwrap().waiting_for.as_deref(),
+        Some("repo o/n")
+    );
+    let pushes = lock(&r.rec.pushes).clone();
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+}
+
+#[tokio::test]
+async fn with_no_reset_named_it_retries_hourly_with_no_further_push() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    let before = now_ms();
+    finish_round(&r, "GD5", 1, None, LIMIT_NO_RESET_FIXTURE);
+    r.svc.pass(now_ms()).await;
+    let after = now_ms();
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Paused);
+    let resume = ms_of(rec.resume_at.as_deref().unwrap()).unwrap();
+    assert!(resume >= before + LIMIT_RETRY_MS && resume <= after + LIMIT_RETRY_MS);
+    assert_eq!(lock(&r.rec.pushes).len(), 1);
+    // Each hour: a round; it meets the limit again; paused again, an hour on, no push.
+    for hour in 1..=3u64 {
+        r.svc.pass(now_ms() + hour * LIMIT_RETRY_MS + 1000).await;
+        let rec = r.svc.get("GD5").unwrap();
+        assert_eq!(rec.status, RunStatus::Running, "hour {hour}");
+        assert_eq!(rec.rounds.len() as u64, 1 + hour);
+        let before = now_ms();
+        finish_round(&r, "GD5", 1, None, LIMIT_NO_RESET_FIXTURE);
+        r.svc.pass(now_ms()).await;
+        let rec = r.svc.get("GD5").unwrap();
+        assert_eq!(rec.status, RunStatus::Paused, "hour {hour}");
+        let resume = ms_of(rec.resume_at.as_deref().unwrap()).unwrap();
+        assert!(resume >= before + LIMIT_RETRY_MS, "hour {hour}");
+        assert_eq!(lock(&r.rec.pushes).len(), 1, "no push per retry");
+    }
+    // A round that gets past the limit reports as usual and clears the pause's push.
+    r.svc.pass(now_ms() + 5 * LIMIT_RETRY_MS).await;
+    finish_round(&r, "GD5", 0, Some("Done.\n"), STREAM_TEXT);
+    r.svc.pass(now_ms()).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Reported);
+    assert!(!rec.limit_pushed);
+    assert_eq!(rec.resume_at, None);
+    assert_eq!(lock(&r.rec.pushes).len(), 2);
+}
+
+#[tokio::test]
+async fn a_round_past_the_limit_resumes_every_other_paused_run_and_paused_runs_cancel() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let mut st = settings(&s);
+    st.max_per_repo = 3;
+    let r = rig_with(&s, st);
+    r.svc.start(item("GD5")).await.unwrap();
+    r.svc.start(free("one")).await.unwrap();
+    r.svc.start(free("two")).await.unwrap();
+    finish_round(&r, "GD5", 1, None, LIMIT_NO_RESET_FIXTURE);
+    finish_round(&r, "s-one", 1, None, LIMIT_NO_RESET_FIXTURE);
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Paused);
+    assert_eq!(r.svc.get("s-one").unwrap().status, RunStatus::Paused);
+    assert_eq!(lock(&r.rec.pushes).len(), 2, "one per run that pauses");
+    // s-two was already running and gets past it: the others resume at the next pass.
+    finish_round(&r, "s-two", 0, Some("ok\n"), STREAM_TEXT);
+    r.svc.pass(now_ms()).await;
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Running);
+    assert_eq!(r.svc.get("s-one").unwrap().status, RunStatus::Running);
+    // A paused run can be cancelled and answered.
+    finish_round(&r, "s-one", 1, None, LIMIT_NO_RESET_FIXTURE);
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("s-one").unwrap().status, RunStatus::Paused);
+    let c = r.svc.cancel("s-one").unwrap();
+    assert_eq!(c.status, RunStatus::Cancelled);
+    assert_eq!(c.resume_at, None);
+    finish_round(&r, "GD5", 1, None, LIMIT_NO_RESET_FIXTURE);
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Paused);
+    let replied = r.svc.reply("GD5", "Try now.").unwrap();
+    assert_eq!(replied.status, RunStatus::Queued);
+    assert_eq!(replied.round().unwrap().auto, None);
+}
+
+// -- Reboots ------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_interrupted_run_gets_one_automatic_round_and_a_second_interruption_waits() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    assert!(r.svc.settings.auto_resume_interrupted, "on by default");
+    r.svc.start(item("GD5")).await.unwrap();
+    r.launcher.gone("GD5");
+    let (fx, _) = r.svc.scan(now_ms() + 11_000);
+    assert_eq!(fx.len(), 1, "one push");
+    let Effect::Push { body, .. } = &fx[0];
+    assert!(body.contains("Resuming it once"), "{body}");
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Queued);
+    assert!(rec.restart_resumed);
+    assert_eq!(rec.rounds.len(), 2);
+    assert_eq!(rec.rounds[0].outcome, Some(RunStatus::Interrupted));
+    assert_eq!(rec.round().unwrap().text.as_deref(), Some(RESTART_TEXT));
+    assert_eq!(rec.round().unwrap().auto.as_deref(), Some(AUTO_RESTART));
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Running);
+    assert_eq!(lock(&r.launcher.bootstrapped).len(), 2);
+    // Interrupted again with no completed round between: it waits for a person.
+    r.launcher.gone("GD5");
+    let (fx, _) = r.svc.scan(now_ms() + 11_000);
+    assert_eq!(fx.len(), 1);
+    let Effect::Push { body, .. } = &fx[0];
+    assert!(body.contains("Reply to resume it"), "{body}");
+    r.svc.pass(now_ms() + 12_000).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Interrupted);
+    assert_eq!(rec.rounds.len(), 2);
+    assert_eq!(lock(&r.launcher.bootstrapped).len(), 2);
+    // A person resumes it; that round completes; the next interruption is resumed again.
+    r.svc.reply_and_pump("GD5", CONTINUE_TEXT).await.unwrap();
+    finish_round(&r, "GD5", 0, Some("done\n"), "");
+    r.svc.pass(now_ms()).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Reported);
+    assert!(!rec.restart_resumed);
+    r.svc.reply_and_pump("GD5", "More.").await.unwrap();
+    r.launcher.gone("GD5");
+    r.svc.scan(now_ms() + 11_000);
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Queued);
+}
+
+#[test]
+fn auto_resume_interrupted_parses_and_defaults_on() {
+    let t: HostRunToml =
+        toml::from_str("enabled = true\nauto_resume_interrupted = false\n").unwrap();
+    assert!(!HostRunSettings::from_toml(Some(t), "/h", "claude").auto_resume_interrupted);
+    assert!(HostRunSettings::from_toml(None, "/h", "claude").auto_resume_interrupted);
+}
+
+// -- Env files ---------------------------------------------------------------------------------
+
+const ENV_SECRET: &str = "s3cr3t-env-value-7f19";
+const ENV_PLAIN: &str = "plain-env-value-c2d4";
+
+#[test]
+fn an_env_file_parses_and_its_errors_name_no_value() {
+    let s = Scratch::new();
+    let p = s.base.join("o-n.env");
+    std::fs::write(
+        &p,
+        format!("# a comment\n\nexport FOO_TOKEN=\"{ENV_SECRET}\"\nBAR = {ENV_PLAIN}\nEMPTY=\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        read_env_file(&p).unwrap(),
+        vec![
+            ("FOO_TOKEN".to_string(), ENV_SECRET.to_string()),
+            ("BAR".to_string(), ENV_PLAIN.to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]
+    );
+    std::fs::write(&p, format!("GOOD=1\n{ENV_SECRET}\n")).unwrap();
+    let e = read_env_file(&p).unwrap_err();
+    assert!(e.contains("line 2"), "{e}");
+    assert!(!e.contains(ENV_SECRET), "{e}");
+    std::fs::write(&p, format!("9BAD={ENV_SECRET}\n")).unwrap();
+    let e = read_env_file(&p).unwrap_err();
+    assert!(!e.contains(ENV_SECRET), "{e}");
+    let e = read_env_file(&s.base.join("missing.env")).unwrap_err();
+    assert!(e.contains("is missing"), "{e}");
+    // The runner's three always win over the file.
+    let env = runner::agent_env_with(
+        Path::new("/r/runs/X"),
+        "X",
+        |_| None,
+        vec![
+            ("JESSE_RUN_ID".into(), "forged".into()),
+            ("FOO_TOKEN".into(), ENV_SECRET.into()),
+        ],
+    );
+    let last = |k: &str| {
+        env.iter()
+            .rev()
+            .find(|(x, _)| x == k)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(last("JESSE_RUN_ID").as_deref(), Some("X"));
+    assert_eq!(last("FOO_TOKEN").as_deref(), Some(ENV_SECRET));
+}
+
+#[tokio::test]
+async fn an_env_file_is_recorded_by_path_only_and_a_missing_one_refuses_the_start() {
+    use crate::gateway::InProcessServer;
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let envf = s.base.join("o-n.env");
+    std::fs::write(
+        &envf,
+        format!("FOO_TOKEN={ENV_SECRET}\nBAR='{ENV_PLAIN}'\n"),
+    )
+    .unwrap();
+    // A missing file refuses the start, and leaves no run behind.
+    let mut st = settings(&s);
+    st.repo_env_files
+        .insert("o/n".into(), s.base.join("nowhere.env"));
+    let r = rig_with(&s, st);
+    let e = r.svc.start(free("envless")).await.unwrap_err();
+    assert!(matches!(e, Refusal::Invalid(_)), "{e:?}");
+    assert!(e.message().contains("is missing"), "{}", e.message());
+    assert!(r.svc.get("s-envless").is_none());
+    drop(r);
+
+    let mut st = settings(&s);
+    st.repo_env_files.insert("o/n".into(), envf.clone());
+    let r = rig_with(&s, st);
+    r.svc.start(item("GD5")).await.unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.env_file.as_deref(), Some(envf.to_str().unwrap()));
+    finish_round(&r, "GD5", 0, Some("Done.\n"), STREAM_TEXT);
+    r.svc.pass(now_ms()).await;
+    // Every file the bridge writes, every route body and every tool's output.
+    let kc = s.base.join("kc.yaml");
+    std::fs::write(
+        &kc,
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\n\
+         contexts:\n- name: x\n  context:\n    cluster: c\n    user: u\ncurrent-context: x\n\
+         users:\n- name: u\n  user:\n    token: not-a-real-token\n",
+    )
+    .unwrap();
+    let dj = devjob::DevJobs::connect(devjob::DevJobSettings::from_toml(
+        Some(devjob::DevJobToml {
+            enabled: true,
+            kubeconfig: Some(kc),
+            ..devjob::DevJobToml::default()
+        }),
+        "/home/u",
+    ))
+    .await
+    .unwrap();
+    dj.attach_studio(r.svc.clone());
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for f in [RUN_JSON, JOB_PLIST, PROMPT_MD, SECTION_MD, REPORT_MD] {
+        seen.push((
+            f.to_string(),
+            std::fs::read_to_string(dir.join(f)).unwrap_or_default(),
+        ));
+    }
+    for f in inbox_files(&s) {
+        seen.push((
+            f.clone(),
+            std::fs::read_to_string(s.notes().join("Inbox").join(&f)).unwrap(),
+        ));
+    }
+    seen.push(("run_json".into(), run_json(&rec).to_string()));
+    seen.push(("list_json".into(), r.svc.list_json().to_string()));
+    seen.push((
+        "log".into(),
+        r.svc.log_lines("GD5", LOG_MAX).unwrap().join("\n"),
+    ));
+    for (tool, args) in [
+        (devjob::TOOL_STATUS, json!({ "job_name": "GD5" })),
+        (devjob::TOOL_LIST, json!({})),
+        (
+            devjob::TOOL_REPLY,
+            json!({ "run_id": "GD5", "text": "More." }),
+        ),
+        (devjob::TOOL_CANCEL, json!({ "run_id": "GD5" })),
+    ] {
+        seen.push((
+            tool.to_string(),
+            dj.call(tool, args).await.unwrap().to_string(),
+        ));
+    }
+    seen.push((
+        "pushes".into(),
+        format!("{:?}{:?}", lock(&r.rec.pushes), lock(&r.rec.turns)),
+    ));
+    for (what, text) in &seen {
+        assert!(!text.is_empty() || what == REPORT_MD, "{what} was read");
+        for v in [ENV_SECRET, ENV_PLAIN] {
+            assert!(!text.contains(v), "{what} carries an env file value");
+        }
+    }
+}
+
+// -- extra/ ------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extra_goes_with_the_artifacts_and_never_while_the_run_is_live() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let day = 24 * 3_600_000;
+    r.svc.start(item("GD5")).await.unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    std::fs::create_dir_all(dir.join("extra/o-m/.git")).unwrap();
+    std::fs::write(dir.join("extra/o-m/work.txt"), "unpushed").unwrap();
+    // Running: neither the cleanup nor the space pass touches it.
+    r.svc.cleanup(now_ms() + 30 * day);
+    let mut st = r.svc.settings.clone();
+    st.max_total_bytes = 0;
+    let tight = HostRuns::new(st, s.notes(), r.launcher.clone(), r.forge.clone());
+    tight.space_pass(now_ms());
+    assert!(dir.join("extra/o-m/work.txt").is_file());
+    // Paused for the usage limit: still kept, past keep_days and under a space pass.
+    finish_round(&r, "GD5", 1, None, LIMIT_NO_RESET_FIXTURE);
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Paused);
+    r.svc.cleanup(now_ms() + 30 * day);
+    tight.space_pass(now_ms() + 30 * day);
+    assert!(dir.join("extra/o-m/work.txt").is_file());
+    // Needs you, past keep_days: target/ goes, extra/ stays (the run is still live).
+    update_run(&dir, |x| {
+        x.status = RunStatus::NeedsYou;
+        x.finished_at = Some(rfc(now_ms()));
+    })
+    .unwrap();
+    r.svc.cleanup(now_ms() + 8 * day);
+    assert!(!dir.join(TARGET_DIR).exists());
+    assert!(dir.join("extra/o-m/work.txt").is_file());
+    // Reported and merged: extra/ goes with the artifacts; the record stays.
+    std::fs::create_dir_all(dir.join(TARGET_DIR)).unwrap();
+    update_run(&dir, |x| x.status = RunStatus::Reported).unwrap();
+    let rec = r.svc.get("GD5").unwrap();
+    lock(&r.forge.states).insert(rec.branch.clone(), PrState::Merged);
+    r.svc.cleanup(now_ms());
+    assert!(!dir.join(EXTRA_DIR).exists());
+    assert!(!dir.join(TARGET_DIR).exists());
+    assert!(dir.join(RUN_JSON).is_file());
 }

@@ -4,7 +4,8 @@
 //! the prompt (round 1) or the reply (later rounds) on stdin, every stream event appended to
 //! `stream.jsonl`. It has **no timeout**. When the agent exits it writes `exit.json` and boots its
 //! own launchd label out. The environment is an allowlist ([`super::ENV_ALLOWLIST`]), so no
-//! bridge secret reaches the agent.
+//! bridge secret reaches the agent, plus the repository's `env_file` when the run records one:
+//! the runner reads it at each round and hands its variables to the agent and nothing else.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
@@ -12,8 +13,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use super::{
-    now_ms, read_run, rfc, update_run, write_exit, ExitInfo, RunRecord, ENV_ALLOWLIST, PROMPT_MD,
-    REPORT_MD, STREAM, TARGET_DIR, WORKTREE_DIR,
+    now_ms, read_env_file, read_run, rfc, update_run, write_exit, ExitInfo, RunRecord,
+    ENV_ALLOWLIST, PROMPT_MD, REPORT_MD, STREAM, TARGET_DIR, WORKTREE_DIR,
 };
 
 /// `last_event_at` is written at most this often.
@@ -49,10 +50,22 @@ pub fn agent_env(
     run_id: &str,
     from: impl Fn(&str) -> Option<String>,
 ) -> Vec<(String, String)> {
+    agent_env_with(dir, run_id, from, Vec::new())
+}
+
+/// [`agent_env`] with the repository's env file variables after the allowlist, so they may
+/// override it; the run's own three come last and are never overridden.
+pub fn agent_env_with(
+    dir: &Path,
+    run_id: &str,
+    from: impl Fn(&str) -> Option<String>,
+    env_file: Vec<(String, String)>,
+) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = ENV_ALLOWLIST
         .iter()
         .filter_map(|k| from(k).map(|v| (k.to_string(), v)))
         .collect();
+    env.extend(env_file);
     env.push(("JESSE_RUN_ID".into(), run_id.to_string()));
     env.push((
         "JESSE_RUN_REPORT".into(),
@@ -176,6 +189,10 @@ fn run_round(dir: &Path) -> Result<ExitInfo, String> {
     if !worktree.is_dir() {
         return Err(format!("the worktree {} is missing", worktree.display()));
     }
+    let file_env = match &rec.env_file {
+        Some(p) => read_env_file(Path::new(p))?,
+        None => Vec::new(),
+    };
     let args = claude_args(&rec, first, &session);
     eprintln!(
         "jesse-runner: {} round {}: {} {}",
@@ -188,7 +205,12 @@ fn run_round(dir: &Path) -> Result<ExitInfo, String> {
     cmd.args(&args)
         .current_dir(&worktree)
         .env_clear()
-        .envs(agent_env(dir, &rec.run_id, |k| std::env::var(k).ok()))
+        .envs(agent_env_with(
+            dir,
+            &rec.run_id,
+            |k| std::env::var(k).ok(),
+            file_env,
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

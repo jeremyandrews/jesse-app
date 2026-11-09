@@ -4090,3 +4090,23 @@ dependency = "[devjob] kubeconfig, read only by the bridge process; [gateway] en
 workflows = "which dev jobs are running, queued or finished"
 reason = "Lists the running, queued and last twenty finished dev jobs."
 note = "in_process: with [gateway] enabled and [devjob] enabled, codex and direct take it too."
+
+[grant."mcp__devjob__devjob_reply"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only by the bridge process; [devjob] enabled; [gateway] enabled"
+workflows = "answering a Studio run that needs Jeremy, or continuing a reported, failed, interrupted or paused one, from chat"
+reason = "Queues a new round of a Studio coding agent run in its own worktree and Claude Code session, with the text as the next message; the run can push a branch and open a pull request."
+note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_start (0.197.0), so it reaches exactly the turns devjob_start reaches: write turns only."
+
+[grant."mcp__devjob__devjob_cancel"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only by the bridge process; [devjob] enabled; [gateway] enabled"
+workflows = "stopping a queued, paused or running Studio run from chat"
+reason = "Cancels a Studio run: a queued or paused one never starts again; a running one gets SIGTERM to its process group, then SIGKILL after 30 seconds."
+note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_start (0.197.0), so it reaches exactly the turns devjob_start reaches: write turns only."

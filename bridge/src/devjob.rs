@@ -196,6 +196,8 @@ pub struct DevJobArgs {
     pub host: Option<String>,
     pub strand: Option<String>,
     pub item_id: Option<String>,
+    /// `host: "studio"`: a draft by its path, run as a free run `s-<file stem>`.
+    pub draft: Option<String>,
     pub again: Option<bool>,
 }
 
@@ -213,15 +215,22 @@ pub enum StartPlan {
 
 /// Decide a start. Without `host` (or with `cluster`) this is [`DevJobSpec::validate`] and
 /// nothing else, so the cluster path is unchanged; `strand`, `item_id` and `again` are refused
-/// there. With `studio`, either a strand item (`strand` and `item_id`; its repository, prompt and
-/// model come from its draft) or a free prompt (`repo`, `prompt`, `branch_slug`, optional
-/// `model`). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
+/// there. With `studio`, a strand item (`strand` and `item_id`, optional `repo`; its prompt and
+/// model come from its draft, its repository from the draft, else `repo`, else the strand's one
+/// `repos:` entry), a draft by its path (`draft`, optional `repo`), or a free prompt (`repo`,
+/// `prompt`, `branch_slug`, optional `model`). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
 /// so `agent` may only be `claude`.
 pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, String> {
     match args.host.as_deref().map(str::trim) {
         None | Some("cluster") => {
-            if args.strand.is_some() || args.item_id.is_some() || args.again.is_some() {
-                return Err("strand, item_id and again apply only with host \"studio\"".into());
+            if args.strand.is_some()
+                || args.item_id.is_some()
+                || args.draft.is_some()
+                || args.again.is_some()
+            {
+                return Err(
+                    "strand, item_id, draft and again apply only with host \"studio\"".into(),
+                );
             }
             DevJobSpec::validate(args, default_agent).map(StartPlan::Cluster)
         }
@@ -243,16 +252,38 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 }
             }
             let again = args.again.unwrap_or(false);
+            let repo = match args.repo.as_deref().map(str::trim) {
+                None => None,
+                Some(r) if valid_repo(r) => Some(r.to_string()),
+                Some(r) => return Err(format!("repo {r:?} is not owner/name")),
+            };
+            if let Some(draft) = args.draft {
+                if args.strand.is_some()
+                    || args.item_id.is_some()
+                    || args.prompt.is_some()
+                    || args.branch_slug.is_some()
+                    || args.model.is_some()
+                {
+                    return Err(
+                        "a draft takes its prompt and model from the file: pass draft \
+                                alone, and repo if it names none"
+                            .into(),
+                    );
+                }
+                return Ok(StartPlan::Studio {
+                    kind: crate::hostrun::StartKind::Draft {
+                        draft: draft.trim().to_string(),
+                        repo,
+                    },
+                    again,
+                });
+            }
             match (args.strand, args.item_id) {
                 (Some(strand), Some(item_id)) => {
-                    if args.repo.is_some()
-                        || args.prompt.is_some()
-                        || args.branch_slug.is_some()
-                        || args.model.is_some()
-                    {
+                    if args.prompt.is_some() || args.branch_slug.is_some() || args.model.is_some() {
                         return Err(
-                            "a strand item takes its repository, prompt and model from its \
-                                    draft: pass strand and item_id alone"
+                            "a strand item takes its prompt and model from its draft: pass \
+                             strand and item_id, and repo if its draft names none"
                                 .into(),
                         );
                     }
@@ -260,6 +291,8 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                         kind: crate::hostrun::StartKind::Item {
                             strand: strand.trim().to_string(),
                             item_id: item_id.trim().to_string(),
+                            repo,
+                            scheduled: false,
                         },
                         again,
                     })
@@ -2172,11 +2205,14 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              job name in seconds and whether the run is queued. The bridge watches the run and \
              writes its report to Inbox/<date>-dev-job-<branch_slug>.md, then pushes a \
              notification. With host \"studio\" it runs Claude Code on Jeremy's Mac Studio \
-             with no time limit, in its own worktree: pass strand and item_id to run a strand's \
-             Drafts item whose draft says devjob-host: studio (\"run GD5 on the Studio\"), or \
-             repo, prompt and branch_slug for a free prompt. It returns a run_id; the report \
-             lands in Inbox/<date>-run-<run_id>.md. A second start of an item that is still \
-             queued, running or needs Jeremy is refused unless again is true."
+             with no time limit, in its own worktree: pass strand and item_id to run any \
+             unchecked Drafts item of a strand (\"run GD5 on the Studio\"); its repository is \
+             the draft's devjob-repo, else repo, else the strand's one repos entry (a strand with \
+             several needs repo). Or pass draft (a path under Projects/drafts/) and repo to run \
+             a draft outside any strand line, or repo, prompt and branch_slug for a free prompt. \
+             It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A second \
+             start of an item that is still queued, running, paused or needs Jeremy is refused \
+             unless again is true."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
             props.insert(
@@ -2193,6 +2229,11 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
                 json!({ "type": "string", "description": "host studio: the Drafts line's bold id, e.g. GD5" }),
             );
             props.insert(
+                "draft".into(),
+                json!({ "type": "string",
+                        "description": "host studio: a draft's path under Projects/drafts/, run outside any strand line" }),
+            );
+            props.insert(
                 "again".into(),
                 json!({ "type": "boolean",
                         "description": "host studio: start a further run of an item whose run is still live" }),
@@ -2202,8 +2243,8 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
     }
     tools.push(json!({
         "name": TOOL_REPLY,
-        "description": "Answer a Studio run that needs you, or continue a reported, failed or \
-            interrupted one: a new round in the same worktree and Claude Code session, with the \
+        "description": "Answer a Studio run that needs you, or continue a reported, failed, \
+            interrupted or paused one: a new round in the same worktree and Claude Code session, with the \
             text as the next message. \"Continue where you left off.\" resumes it.",
         "inputSchema": {
             "type": "object",
@@ -2217,7 +2258,7 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
     }));
     tools.push(json!({
         "name": TOOL_CANCEL,
-        "description": "Cancel a Studio run: a queued one simply never starts; a running one is \
+        "description": "Cancel a Studio run: a queued or paused one simply never starts again; a running one is \
             stopped (SIGTERM, then SIGKILL after 30 seconds) and its report is written from \
             whatever it has.",
         "inputSchema": {
@@ -2287,6 +2328,7 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "created_at": r.created_at,
         "finished_at": r.finished_at,
         "stalled_since": r.stalled_since,
+        "resume_at": r.resume_at,
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
     })
@@ -2441,15 +2483,16 @@ impl crate::gateway::InProcessServer for DevJobs {
     }
 }
 
-/// The containment battery's `devjob`: the same three tools, listed exactly as the real server
-/// lists them, and every call refused. Only in a `containment-probe` build.
+/// The containment battery's `devjob`: the five tools, listed exactly as the real server lists
+/// them on the Studio (with `[hostrun]` attached), and every call refused. Only in a
+/// `containment-probe` build.
 #[cfg(feature = "containment-probe")]
 pub struct BatteryStandIn;
 
 #[cfg(feature = "containment-probe")]
 impl crate::gateway::InProcessServer for BatteryStandIn {
     fn tools(&self) -> Vec<Value> {
-        tool_descriptors()
+        tool_descriptors_with_studio()
     }
 
     fn call<'a>(

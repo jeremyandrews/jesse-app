@@ -2826,7 +2826,8 @@ one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 
 `[devjob] enabled = true` (off by default) adds the `devjob` server to the main set: three tools,
-`devjob_start`, `devjob_status` and `devjob_list`, served **inside the bridge process**
+`devjob_start`, `devjob_status` and `devjob_list` (five with `[hostrun]` on: `devjob_reply` and
+`devjob_cancel` steer Studio runs, below), served **inside the bridge process**
 (`Transport::InProcess`, `bridge/src/devjob.rs`). A main turn hands it a repository, a prompt and
 an agent; the bridge creates one ConfigMap and one Job in the cluster's `jesse-dev` namespace from
 a copy of `apps/jesse-dev/job-template.yaml` in the k3s repository, watches the run to its end
@@ -2841,7 +2842,7 @@ pushes a notification. A `kind = "devjob"` schedule entry does the same unattend
 | The container holds | the Secret `jesse-dev-agent-keys`: the three agents' API keys and **a GitHub credential (`GH_TOKEN`) that can push branches and open pull requests on any repository that credential reaches** |
 | The container does | clone the repository, run the agent and the test command, push `jesse/<slug>`, open a pull request against `main`. It never merges and never pushes to `main`; that is the entrypoint's rule, on the cluster side |
 | The bridge does | create the ConfigMap and the Job (both labelled `jesse.dev/devjob=true`), resume queued Jobs, read the pod's log, annotate the Job, delete the ConfigMap, write one vault note under the write lock |
-| Classes | `devjob_start` is `write` (write turns only); `devjob_status` and `devjob_list` are reads |
+| Classes | `devjob_start`, `devjob_reply` and `devjob_cancel` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
 
 **The tool cannot choose a file path, a namespace, an image or a credential.** Its arguments are
 `repo`, `prompt`, `agent`, `model`, `branch_slug`, `test_command` and `timeout_minutes`, and any
@@ -2921,30 +2922,64 @@ same trust a person gives Claude Code at a desk, and the reason the opt in below
 on only `hostrun::ENV_ALLOWLIST` (`HOME`, `PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 `LC_CTYPE`, `TMPDIR`, `SHELL`, `TERM`, `TZ`, `SSH_AUTH_SOCK`, `GH_CONFIG_DIR`,
 `GIT_CONFIG_GLOBAL`, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `DEVELOPER_DIR`, `SDKROOT`,
-`__CF_USER_TEXT_ENCODING`) plus `JESSE_RUN_ID`, `JESSE_RUN_REPORT` and `CARGO_TARGET_DIR`. The
-same list fills the run's launchd `job.plist`. Every bridge secret is stripped: `JESSE_TOKEN`,
+`__CF_USER_TEXT_ENCODING`) plus `JESSE_RUN_ID`, `JESSE_RUN_REPORT` and `CARGO_TARGET_DIR`, plus,
+for a repository that has one, the variables of its **env file** (below). The allowlist alone
+fills the run's launchd `job.plist`. Every bridge secret is stripped: `JESSE_TOKEN`,
 the APNs key path and ids, the gateway's and every MCP server's credentials, the model and Codex
 tokens, `JESSE_GITHUB_PAT`, the Slack, UniFi, Home Assistant, Google, Runn, Clockify, Rybbit and
 Places keys. What a run can still reach is what `jandrews` reaches without them: the login
 keychain, `~/.claude` (Claude Code's own sign in), `gh`'s stored login and `~/.ssh`. A run pushes
 and opens pull requests with Jeremy's own GitHub identity, exactly as at a desk.
 
-**The opt in is front matter only, from live drafts.** A strand item may run on the Studio only
-when its Drafts line is unchecked and links a draft under `Projects/drafts/` outside `archive/`
-whose front matter names the same `strand` and `strand-id`, has a `devjob-repo`, and says
-`devjob-host: studio`; the prompt is the draft's `## PROMPT` section. The bridge never writes
-those keys, never writes under `Strands/` or `Projects/drafts/`, and its only vault writes are
-the Inbox reports. A free prompt can be started only by a chat turn (below).
+**An env file's contents reach the agent (0.197.0).** `[hostrun.repos."owner/name"] env_file =
+"<path>"` names a file of `KEY=value` lines (blank lines and `#` comments skipped, `export `
+allowed, one pair of quotes removed) for the variables that repository's tests need. The runner
+reads it at the start of every round and adds its variables to the agent's environment, after the
+allowlist (so it may override one) and before the run's own three (which it never overrides).
+**Everything in it is handed to the agent**, which runs as `jandrews` with
+`bypassPermissions`: treat it as given to that repository's prompts, and put in it only what those
+runs may hold. Its values are never logged, never returned by any route or tool, and never written
+to `run.json`, `job.plist`, `prompt.md`, a report or a push; `run.json` records the file's path
+only. A parse error names the file and a line number, never a value. A missing or unreadable file
+refuses the start with that reason (and fails a later round the same way, from the runner). The
+file is the owner's: the bridge never writes it, and a run's agent could read it anyway as
+`jandrews`, so it is a convenience, not a secret boundary. `bridge/tests/hostrun_env_file.rs`
+runs the real runner against a stub agent and checks the values reach the agent and none of the
+above, the bridge's own stderr included.
+
+**`pr_title_tag` (0.197.0).** `[hostrun.repos."owner/name"] pr_title_tag = true | false` decides
+whether the generated section asks for `[<run_id>]` at the start of the pull request title.
+Default: true for `jeremyandrews/*` repositories, false for every other owner, so repositories
+other teams review do not get the tag.
+
+**The opt in: a person asking, or front matter for the schedule.** A strand item may run on the
+Studio only when its Drafts line is unchecked and links a draft under `Projects/drafts/` outside
+`archive/` whose front matter names the same `strand` and `strand-id` and that has a `## PROMPT`
+section (the prompt). For an **unattended** start (a `kind = "devjob"` strand schedule entry) the
+draft must also have a `devjob-repo` and say `devjob-host: studio`, exactly as in 0.196.0. For a
+start **a person asked for** (`POST /jesse/runs`, `devjob_start` with `host: "studio"`, 0.197.0)
+the asking is the opt in: `devjob-host` is not read, and the repository is the draft's
+`devjob-repo`, else the `repo` the caller passes (checked as `owner/name`), else the strand note's
+`repos:` when it lists exactly one; a strand with several and no `repo` is refused with their
+names. A person may also start a draft by its path (`draft`, under `Projects/drafts/` outside
+`archive/`, with a `## PROMPT`) with no strand line, as a free run `s-<file stem>`. The bridge
+never writes those keys, never writes under `Strands/` or `Projects/drafts/`, and its only vault
+writes are the Inbox reports. **So anything able to write the vault can now put a prompt in front
+of a person's "run it" with any repository the strand lists**: the same exposure the schedule
+entry already had, now behind a person's request rather than front matter; nothing merges, and
+every round lands as an Inbox report and a push.
 
 **What can start a run.** `POST /jesse/runs` from a paired device (the same bearer token as
-`/jesse/strands`), for a strand item only; `devjob_start` with `host: "studio"` from a write turn
-(the existing `mcp__devjob__devjob_start` grant, so only with `[devjob]` and the gateway on), for
-a strand item or a free prompt; and a `kind = "devjob"` strand schedule entry whose eligible line's
-draft says `devjob-host: studio`. Reply and cancel are `POST /jesse/runs/:id/reply` and
-`/cancel` (paired device), and the `devjob_reply` and `devjob_cancel` tools, which the server
-lists once `[hostrun]` is on. Those two tools are not yet in the default allowlist: adding a grant
-changes every recorded containment row, and the live battery has not been re-run for them, so
-until it is they reach no turn.
+`/jesse/strands`), for a strand item or a draft path; `devjob_start` with `host: "studio"` from a
+write turn (the `mcp__devjob__devjob_start` grant, so only with `[devjob]` and the gateway on), for
+a strand item, a draft path or a free prompt; and a `kind = "devjob"` strand schedule entry whose
+eligible line's draft says `devjob-repo` and `devjob-host: studio`. Reply and cancel are `POST
+/jesse/runs/:id/reply` and `/cancel` (paired device), and the `devjob_reply` and `devjob_cancel`
+tools, which the server lists once `[hostrun]` is on. **Since 0.197.0 both tools are in the
+default allowlist, classed `write`**, so they reach exactly the turns `devjob_start` reaches (write
+turns, on every harness that renders it) and no read turn. The containment battery's `devjob`
+stand-in lists all five tools, as the real server does on the Studio, and the claude-code and
+direct records were re-recorded with them: only the write rows moved, by these two tools.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or
@@ -2953,8 +2988,23 @@ It outlives the bridge, a deploy and the request that started it. Long work kill
 arbitrary wall clock loses hours and leaves a half pushed branch; instead a run with no stream
 event for `stall_minutes` is reported once (`stalled_since` and one push), never killed, and
 Jeremy decides. A run whose label disappears with no exit (a reboot, a crash) becomes
-`interrupted` with one push and is never restarted by itself. Chat turns keep their run limit
+`interrupted` with one push. With `[hostrun] auto_resume_interrupted` (default true, 0.197.0) it
+then gets **one** automatic round, `Continue where you left off. The machine restarted during your
+previous round.`, through the normal queue; a second interruption of the same run with no completed
+round in between stays `interrupted` for a person. Chat turns keep their run limit
 (`JESSE_TIMEOUT` under `HARD_TIMEOUT_CEILING`): long work is not a chat turn.
+
+**The plan's usage limit pauses, never fails (0.197.0).** A round whose `claude -p` session ended
+on the account's usage limit (matched on the structured `api_error: "usage_limit_reached"` that
+Claude Code 2.1.319 writes on the error event and the result, never on prose) becomes `paused`
+with `resume_at`: the reset its `rate_limit_info.resetsAt` names, else an hour later, and every
+hour after that until a round gets past the limit. No Inbox report is written for such a round.
+One push when the run pauses, none per retry. At `resume_at` the watcher queues one round,
+`Continue where you left off.`, through the normal queue. While any run is paused, queued runs do
+not start (`waiting_for: "limit"`); the paused runs' own rounds do, first, since they find out
+whether the limit has passed, and a round that reports or needs Jeremy resumes every other paused
+run at the next pass. A paused run holds no slot, is live (a second start of its item is refused),
+takes a reply and can be cancelled.
 
 **Cancel.** A queued run simply becomes `cancelled`. A running one gets SIGTERM to the agent's
 own process group, then SIGKILL 30 seconds later from the watcher (which survives a bridge
@@ -2966,10 +3016,13 @@ recorded as its own (folders directly under `~/Library/Developer/Xcode/DerivedDa
 `info.plist` names a workspace inside that run's worktree), and never a run directory: `run.json`,
 the logs and the reports stay. Build artifacts (`target/`, those DerivedData folders) go once the
 pull request is merged or closed or the branch (seen on origin before) is gone, or after
-`keep_days`; worktrees and their local branches go on the same rule for `reported`, `failed` and
+`keep_days`; `<run dir>/extra/` (where a run clones any further repository it needs) goes with the
+build artifacts under the same rules, but never while the run is live (queued, running, needs you
+or paused); worktrees and their local branches go on the same rule for `reported`, `failed` and
 `cancelled` runs, and after 30 days (with a push first) for `needs_you` and `interrupted` ones.
+A `paused` run is not finished: nothing of it is cleaned up.
 The space pass removes artifacts, then finished worktrees, oldest first, when the runs exceed
-`max_total_gb` or free space drops under `min_free_gb`; it never touches a running or queued run.
+`max_total_gb` or free space drops under `min_free_gb`; it never touches a running, queued or paused run.
 The reconcile prunes a worktree git registers whose path is gone, boots out a run label only when
 launchd says its plist is under this root's `runs/` and its run directory is gone, and reports a
 directory with no `run.json` without deleting it. The live checkout `~/devel/tag1/jesse-app` is

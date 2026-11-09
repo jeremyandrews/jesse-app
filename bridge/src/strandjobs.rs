@@ -491,6 +491,8 @@ pub async fn fire(
                     kind: crate::hostrun::StartKind::Item {
                         strand: c.step.note.clone(),
                         item_id: c.step.id.clone(),
+                        repo: None,
+                        scheduled: true,
                     },
                     origin: origin.to_string(),
                     again: false,

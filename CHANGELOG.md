@@ -67,6 +67,9 @@ sends the strand one agent turn. Chat turns keep their run limit: long work is n
   once the run exists; it does not wait for the report.
 - **Docs:** SECURITY.md "Coding agents on the Studio"; three rows in
   `docs/platform-dependencies.md`.
+- **Audit:** `bridge/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (`libsqlite3-sys` 0.30.1),
+  which, like the `rsa` entry, is in Cargo.lock only through sqlx's never-enabled SQLite driver
+  and is not built (`cargo tree -i … --target all` prints nothing).
 - **Measured on the Studio, 2026-11-09:** `claude` 2.1.319 lists `-p`, `--output-format
   stream-json`, `--verbose`, `--session-id`, `--resume`, `--permission-mode` (with
   `bypassPermissions`) and `--model`. A run started through launchd by one test process finished

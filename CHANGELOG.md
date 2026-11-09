@@ -14,6 +14,61 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.197.0] - 2026-11-09
+
+**Studio runs are ready for days of unattended work, steered from chat.** Any queued strand draft
+launches on request, chat can answer and cancel runs, a usage limit pauses a run instead of
+failing it, a reboot resumes it once, and each repository can get the environment its tests need.
+
+- **Changed: a person's start needs no Studio front matter.** `POST /jesse/runs` and
+  `devjob_start` with `host: "studio"` no longer require `devjob-host: studio`; the repository is
+  the draft's `devjob-repo`, else the new optional `repo` (route body and `DevJobArgs`, checked as
+  `owner/name`), else the strand note's `repos:` when it lists exactly one, else the start is
+  refused naming the strand's repositories. Every other check stays (unchecked line, draft under
+  `Projects/drafts/` outside `archive`, matching `strand` and `strand-id`, a `## PROMPT`). Strand
+  schedule entries keep requiring `devjob-repo` and `devjob-host: studio`. `studio_runnable` in
+  `GET /jesse/strands` follows the person's rule. New: a draft by its path (`draft`, with `repo`
+  when it names none) runs as a free run `s-<file stem>`.
+- **Changed: the generated section says where the run is.** It now opens with: the run is on the
+  Mac Studio in a fresh worktree of `<owner/name>` on its branch, cut from `origin/<default
+  branch>`; this worktree replaces any machine, host, user or directory the prompt names; another
+  repository is cloned under `<run dir>/extra/`. `prompt.md` is rendered when the first round
+  starts (the default branch is known then); the caller's prompt waits in `section.md`.
+- **Added: `pr_title_tag`** under `[hostrun.repos."owner/name"]` (default true for
+  `jeremyandrews/*`, false otherwise). The pull request title sentence is in the generated section
+  only when it is true.
+- **Added: `env_file`** under `[hostrun.repos."owner/name"]`: its `KEY=value` lines are added to
+  the agent's environment for that repository's runs, read by the runner at each round. Values are
+  never logged, returned by a route or tool, or written to `run.json` (which records the path); a
+  missing or unreadable file refuses the start. A `[hostrun.repos]` table without
+  `max_concurrent` now keeps `max_per_repo` rather than a cap of one.
+- **Changed (grant): `devjob_reply` and `devjob_cancel` are in the default allowlist**, classed
+  `write` in the `devjob` row, so they reach exactly the turns `devjob_start` reaches. The
+  containment battery's `devjob` stand-in lists the five tools the server lists with `[hostrun]`
+  on. Re-recorded: `containment.toml` (claude-code; only `write/…` moved, its `toolset_args` and
+  `root_tools` by the two tools) and `containment-direct.toml` (only the write row's tool set
+  moved). Golden capability args and the capability map move with it.
+- **Added: `paused`.** A round that ended on the plan's usage limit (Claude Code 2.1.319's
+  structured `api_error: "usage_limit_reached"` on the error event and the result; fixture
+  `tests/fixtures/hostrun/usage-limit.jsonl`) becomes `paused` with `resume_at`: the reset
+  `rate_limit_info.resetsAt` names, else an hour later, and hourly after that until a round gets
+  past the limit. One push (`GD5 paused for usage limit until 18:00`), none per retry, no Inbox
+  report. At `resume_at` the watcher queues `Continue where you left off.` through the queue;
+  while any run is paused, queued runs wait with `limit`. A paused run holds no slot, is live,
+  takes a reply and can be cancelled. `paused` is in `counts`, `devjob_list`, `runs_active` and
+  every status list; `resume_at` is in the run's JSON.
+- **Added: `[hostrun] auto_resume_interrupted`** (default true): an interrupted run gets one
+  automatic round (`Continue where you left off. The machine restarted during your previous
+  round.`) through the queue, with one push; a second interruption without a completed round in
+  between stays `interrupted`. The watcher's own rounds go to the front of the queue.
+- **Changed: cleanup** removes `<run dir>/extra/` with the build artifacts, never while the run is
+  live.
+- **Tests:** launch resolution, the generated section's exact text each way, the grants on every
+  harness, the usage limit with and without a reset, reboots, `extra/`, and
+  `tests/hostrun_env_file.rs` (no harness), which runs the real `jesse-runner` against a stub
+  agent and checks the env file's values reach it and appear in no file, route, tool output,
+  push or log, the bridge's stderr included.
+
 ## [bridge 0.196.1] - 2026-11-09
 
 - **Audit:** `bridge/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (`libsqlite3-sys` 0.30.1, the

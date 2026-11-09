@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.196.1"
+version = "0.197.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -54,6 +54,12 @@ required-features = ["containment-probe"]
 [[test]]
 name = "devjob_live"
 required-features = ["devjob-live"]
+
+# A Studio run's env file reaches the agent and no log: no harness, so the bridge's own
+# `eprintln!` reaches the process's stderr, which the test points at a file and reads back.
+[[test]]
+name = "hostrun_env_file"
+harness = false
 
 # THE SENTINEL. Declared so the artifact is `jesse-sentinel` — the name the launchd plist,
 # the installer and `~/.local/bin` all use — rather than `sentinel`, which is what

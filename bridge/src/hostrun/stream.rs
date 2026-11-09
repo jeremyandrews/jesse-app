@@ -144,3 +144,81 @@ pub fn tail_readable(stream: &str, n: usize) -> Vec<String> {
     let lines = readable_lines(stream);
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
+
+/// What [`usage_limit`] found: the round ended on the plan's usage limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageLimit {
+    /// When the limit resets, in epoch milliseconds, if the event says.
+    pub resets_at_ms: Option<u64>,
+}
+
+/// The value marking a refusal by the account's own usage limit, on Claude Code 2.1.319.
+pub const USAGE_LIMIT_REACHED: &str = "usage_limit_reached";
+
+/// `resetsAt` is epoch seconds in `rate_limit_info`; a value already in milliseconds is kept.
+fn resets_ms(info: &Value) -> Option<u64> {
+    let t = info.get("resetsAt").and_then(Value::as_u64)?;
+    Some(if t >= 100_000_000_000 { t } else { t * 1000 })
+}
+
+/// Whether one round's stream ended on the plan's usage limit, and when it resets.
+///
+/// Matched on the structured fields Claude Code 2.1.319 writes in `--output-format
+/// stream-json`, never on the prose: when the account's usage limit refuses a request, the
+/// round's last `assistant` event carries `"error": "rate_limit"`, `"is_api_error_message":
+/// true`, `"api_error": "usage_limit_reached"` and `"api_error_params": {"rate_limit_info":
+/// {"status": "rejected", "resetsAt": <epoch seconds>, "rateLimitType": …}}`, and the session
+/// ends with a `result` event whose `is_error` is true (carrying `api_error` too when the CLI
+/// copies it). The CLI's own schema documents `usage_limit_reached` as the one kind for "the
+/// account's own usage limit, a plan limit (session, weekly or per-model) or a spend cap", and
+/// says the other refusals that share `error: "rate_limit"` (a server throttle, a policy) never
+/// carry it. The fixture is `tests/fixtures/hostrun/usage-limit.jsonl`.
+///
+/// The reset is the error event's `rate_limit_info.resetsAt`, else the last `rate_limit_event`
+/// of the round whose status is `rejected`, else unknown.
+pub fn usage_limit(stream: &str) -> Option<UsageLimit> {
+    let events: Vec<Value> = stream
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect();
+    let kind = |v: &Value| v.get("type").and_then(Value::as_str).map(str::to_string);
+    let result = events
+        .iter()
+        .rev()
+        .find(|v| kind(v).as_deref() == Some("result"))?;
+    if result.get("is_error").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let is_limit =
+        |v: &Value| v.get("api_error").and_then(Value::as_str) == Some(USAGE_LIMIT_REACHED);
+    let error_event = events
+        .iter()
+        .rev()
+        .find(|v| kind(v).as_deref() == Some("assistant") && is_limit(v));
+    if !is_limit(result) && error_event.is_none() {
+        return None;
+    }
+    let from_error = [error_event, Some(result)]
+        .into_iter()
+        .flatten()
+        .find_map(|v| {
+            v.get("api_error_params")
+                .and_then(|p| p.get("rate_limit_info"))
+                .and_then(resets_ms)
+        });
+    let from_event = || {
+        events.iter().rev().find_map(|v| {
+            if kind(v).as_deref() != Some("rate_limit_event") {
+                return None;
+            }
+            let info = v.get("rate_limit_info")?;
+            if info.get("status").and_then(Value::as_str) != Some("rejected") {
+                return None;
+            }
+            resets_ms(info)
+        })
+    };
+    Some(UsageLimit {
+        resets_at_ms: from_error.or_else(from_event),
+    })
+}

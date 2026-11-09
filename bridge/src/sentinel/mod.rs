@@ -8,6 +8,10 @@ use chrono::{Local, SecondsFormat};
 
 mod deploy;
 mod http;
+
+// Shared with the containment battery (`src/probesign.rs`), which signs its own executable the
+// way a deploy signs a staged one, under an identifier from the same scheme.
+pub use deploy::{signing_identifier, CODESIGN_TIMEOUT};
 mod probes;
 mod state;
 mod verbs;
@@ -400,8 +404,7 @@ impl SentinelConfig {
         let state_dir = env_string("JESSE_SENTINEL_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".jesse-sentinel"));
-        let codesign_identity = env_string("JESSE_SENTINEL_CODESIGN_IDENTITY")
-            .or_else(|| read_codesign_identity(&state_dir.join("codesign-identity")));
+        let codesign_identity = configured_codesign_identity(&state_dir);
 
         Ok(SentinelConfig {
             bind: env_string("JESSE_SENTINEL_BIND").unwrap_or_else(|| "127.0.0.1".to_string()),
@@ -446,6 +449,15 @@ impl SentinelConfig {
             codesign_identity,
         })
     }
+}
+
+/// The signing identity this deployment is configured with: `JESSE_SENTINEL_CODESIGN_IDENTITY`,
+/// else the first line of `<state_dir>/codesign-identity`. `None` means sign nothing.
+///
+/// Shared with the containment battery, which reads the same identity to sign itself.
+pub fn configured_codesign_identity(state_dir: &Path) -> Option<String> {
+    env_string("JESSE_SENTINEL_CODESIGN_IDENTITY")
+        .or_else(|| read_codesign_identity(&state_dir.join("codesign-identity")))
 }
 
 /// The first non-blank, non-`#` line of the identity file, trimmed. A missing or empty file

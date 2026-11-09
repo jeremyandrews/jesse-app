@@ -14,6 +14,31 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.196.2] - 2026-11-09
+
+**The containment battery signs itself, so a Local Network grant survives a rebuild.**
+
+- **Root cause:** the linker gives every build of `containment-probe` a new ad hoc signature
+  (identifier `containment_probe-<hash>`), and macOS keys Local Network grants to the code
+  identity, so each rebuild was a new app to the OS. With `[gateway] enabled` the battery's LAN
+  MCP calls are made by the gateway inside `containment-probe` itself, so on 2026-11-09 the write
+  row lost every `house` tool (`https://house.pozza/mcp`, 10.20.250.1) to `No route to host (os
+  error 65)` while `curl` from the same shell reached the host.
+- **Fix:** every run but `--show` checks its own executable first and, when it is not signed as
+  expected, signs a copy with the sentinel's identity (`JESSE_SENTINEL_CODESIGN_IDENTITY`, else
+  `~/.jesse-sentinel/codesign-identity`) under `signing_identifier(<bridge label>,
+  "containment-probe")`, verifies it, moves it over itself and cargo's `deps/` original, and
+  re-executes once (`src/probesign.rs`, `containment-probe` feature only). `--sign` does just
+  that. No identity: one line, and the run goes on ad hoc. A failed sign or verify, or a sign
+  over 60 s, stops the run before any probe.
+- **Summary:** a gateway upstream that fails with `os error 65` during a run is printed under
+  `LOCAL NETWORK DENIED` as a likely Local Network denial for this binary, not a tool set change.
+- **Shared, not copied:** the sentinel re-exports `signing_identifier` and `CODESIGN_TIMEOUT`,
+  and its identity lookup moves into `configured_codesign_identity`; deploy behaviour is
+  unchanged. The serving binary gains nothing.
+- One time step: approve the `containment-probe` row in System Settings → Privacy & Security →
+  Local Network; later rebuilds keep it.
+
 ## [bridge 0.196.1] - 2026-11-09
 
 - **Audit:** `bridge/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (`libsqlite3-sys` 0.30.1, the

@@ -411,6 +411,8 @@ impl TurnSession {
                         "gateway: upstream '{server}' did not start for job {}: {e}",
                         self.job_id
                     );
+                    #[cfg(feature = "containment-probe")]
+                    record_upstream_failure(server, &e);
                     Upstream::Failed
                 }
             }
@@ -574,4 +576,25 @@ fn error(id: Option<Value>, code: i64, message: &str) -> Value {
         "id": id.unwrap_or(Value::Null),
         "error": {"code": code, "message": message},
     })
+}
+
+/// Every upstream that failed to start in this process, `(server, error)`, in order. The
+/// containment battery reads it after a run so a LAN server refused by macOS Local Network
+/// (`os error 65`) is named in its summary instead of reading as a tool set change. Only in a
+/// `containment-probe` build: the serving bridge records nothing here.
+#[cfg(feature = "containment-probe")]
+static UPSTREAM_FAILURES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "containment-probe")]
+fn record_upstream_failure(server: &str, error: &str) {
+    UPSTREAM_FAILURES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push((server.to_string(), error.to_string()));
+}
+
+/// Drain [`UPSTREAM_FAILURES`].
+#[cfg(feature = "containment-probe")]
+pub fn take_upstream_failures() -> Vec<(String, String)> {
+    std::mem::take(&mut *UPSTREAM_FAILURES.lock().unwrap_or_else(|p| p.into_inner()))
 }

@@ -141,6 +141,9 @@ mod places_google;
 // `containment` and are always compiled — the startup gate reads them.
 #[cfg(feature = "containment-probe")]
 mod probe;
+// The battery signs its own executable with the deployment's identity (see the module).
+#[cfg(feature = "containment-probe")]
+pub mod probesign;
 mod profile;
 mod prompt;
 mod queue;

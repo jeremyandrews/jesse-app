@@ -3952,6 +3952,37 @@ cargo test $F --test containment -- --ignored --nocapture   # the live gate
 cargo build --release                                   # the serving binary, with none of it
 ```
 
+**The battery signs itself (0.196.2).** macOS keys Local Network grants to a binary's code
+identity, and the linker gives every build a fresh ad hoc one, so each rebuild of
+`containment-probe` used to be a new app to the OS: its first connection to a LAN host failed
+with `No route to host (os error 65)` until someone approved it at the screen. With
+`[gateway] enabled`, the LAN MCP servers a row loads (`house` at `house.pozza`, among others)
+are called by the gateway inside `containment-probe` itself, not by `claude` or the
+`jesse-gateway-mcp` stub (which only relays over a unix socket), so that one binary is the one
+that needs a stable identity.
+
+Every run but `--show` therefore starts by checking its own executable against the
+deployment's signing identity, the sentinel's: `JESSE_SENTINEL_CODESIGN_IDENTITY`, else the
+first line of `~/.jesse-sentinel/codesign-identity`. The identifier is the sentinel's scheme
+for a non-bridge binary, `<bridge launchd label>.containment-probe` (the label from
+`JESSE_SENTINEL_LABEL_BRIDGE`, else from the sentinel's LaunchAgent plist), e.g.
+`com.example.jesse-bridge.containment-probe`, so it never shares the bridge's own grant. If
+the binary is not already signed that way, the probe signs a copy, verifies it (`codesign
+-v`), moves it over itself (and over cargo's `deps/` original, so the next `cargo run` stays
+signed) and re-executes once. `cargo run $F --bin containment-probe -- --sign` does only this
+step and exits.
+
+- **No identity configured:** one line says the battery runs ad hoc and LAN MCP servers may
+  fail Local Network; the run goes on as before.
+- **An identity that fails to sign or verify, or a `codesign` that takes over 60 s** (a
+  keychain waiting on a prompt): the run stops with that error before any probe.
+- **One time approval:** the first signed run that reaches a LAN host makes macOS ask. Approve
+  the `containment-probe` row in System Settings → Privacy & Security → Local Network. Later
+  rebuilds carry the same identity and identifier, so they keep the grant.
+- **If it is denied anyway,** the run's summary prints `LOCAL NETWORK DENIED`, naming each
+  server that failed with `os error 65` as a likely Local Network denial for this binary,
+  before any drift, so a lost server's tools are never read as a tool set change.
+
 Four rows, because a capability alone under-specifies a spawn: `basic/none` (the diet
 children and the title one-shot), `read/none` (the vault-QA and shadow children),
 `read/qmd` (a main turn on a read-only model) and `write/qmd` (a main turn on a

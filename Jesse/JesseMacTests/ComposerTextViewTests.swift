@@ -320,6 +320,71 @@ final class ComposerTextViewTests: XCTestCase {
     /// `NSTextView` has no placeholder, so the composer draws its own. Counting painted pixels is
     /// crude but it is the only thing that actually proves something is on screen: the old
     /// `TextField` got its placeholder for free, and losing it silently would be easy.
+    /// THE LAYOUT LOOP (MT5). SwiftUI asks the composer for its size from inside
+    /// `NSHostingView.layout()`, at several widths per pass. Answering used to set the VIEW's
+    /// text container to the probe width and back, which discarded the view's layout and moved
+    /// the text view's frame three times per question, settling at a different height than it
+    /// started (a non contiguous layout estimates what it has not laid out). Changing the
+    /// window's views in response to layout asked for layout again, pass after pass, until
+    /// AppKit's update constraints limit threw. A measurement must leave the view exactly as
+    /// it found it, and give the same answer every time it is asked the same question.
+    func testMeasuringTheHeightLeavesTheViewsLayoutAlone() throws {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 200))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        // Legacy, so the measurement's second width (text beside a scroller) is exercised too.
+        scroll.scrollerStyle = .legacy
+        let view = ComposerNSTextView(frame: NSRect(x: 0, y: 0, width: 900, height: 200))
+        view.font = ComposerNSTextView.composerFont
+        view.isRichText = false
+        view.isVerticallyResizable = true
+        view.autoresizingMask = [.width]
+        view.textContainer?.lineFragmentPadding = 0
+        view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                              height: CGFloat.greatestFiniteMagnitude)
+        scroll.documentView = view
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered,
+                              defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = scroll
+        windows.append(window)
+
+        // A page of terminal scrollback in a fence: symbols from fallback fonts, long lines.
+        let line = "⏺ Bash(cargo test --workspace) ⎿ running 12 tests ── ok ✓ │ `code` **bold** _x_\n"
+        view.insertText("```\n" + String(repeating: line, count: 60) + "```\n",
+                        replacementRange: view.selectedRange())
+        let manager = try XCTUnwrap(view.layoutManager)
+        let container = try XCTUnwrap(view.textContainer)
+        manager.ensureLayout(forBoundingRect: view.visibleRect, in: container)
+        view.display()
+
+        let frame = view.frame
+        let containerSize = container.size
+        let laid = manager.firstUnlaidCharacterIndex()
+        var moves = 0
+        view.postsFrameChangedNotifications = true
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: view, queue: nil) { _ in moves += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let ceiling = ComposerNSTextView.lineHeight * 8
+        for scroller in [scroll, nil] {
+            for width in [240, 900, 120, 2_000] as [CGFloat] {
+                let first = view.measuredTextHeight(forWidth: width, upTo: ceiling, scroller: scroller)
+                let again = view.measuredTextHeight(forWidth: width, upTo: ceiling, scroller: scroller)
+                XCTAssertEqual(first, again, "the same question got two answers at \(width)")
+                let unbounded = view.measuredTextHeight(forWidth: width)
+                XCTAssertEqual(unbounded, view.measuredTextHeight(forWidth: width),
+                               "the full height changed between two asks at \(width)")
+            }
+        }
+        XCTAssertEqual(moves, 0, "measuring moved the text view's frame \(moves) times")
+        XCTAssertEqual(view.frame, frame, "measuring left the text view at another size")
+        XCTAssertEqual(container.size, containerSize, "measuring rewrapped the view's own text")
+        XCTAssertEqual(manager.firstUnlaidCharacterIndex(), laid,
+                       "measuring discarded the view's layout")
+    }
+
     func testThePlaceholderIsDrawnWhenEmptyAndNotWhenThereIsText() {
         func paintedPixels(_ view: NSView) -> Int {
             guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return -1 }

@@ -87,10 +87,17 @@ struct MetricSeriesPoint: Equatable, Sendable {
 enum MetricSeriesFormatter {
     /// The header + one value line per point. Empty series → a single "no data" line
     /// so a granted-but-empty request still tells the agent it looked and found none.
+    ///
+    /// The header names the window that was REQUESTED (`windowDays`), not the number of
+    /// points: a workouts series has one point per workout, so a 31-day request with 62
+    /// workouts used to read "last 62 days". When no window is given the point count
+    /// stands in, which is right only for a one-point-per-day series.
     static func lines(for metric: RequestableMetric,
                       series: [MetricSeriesPoint],
+                      windowDays: Int? = nil,
                       timeZone: TimeZone = .current) -> [String] {
-        let header = "\(label(metric)) (last \(series.count) day\(series.count == 1 ? "" : "s")):"
+        let days = windowDays ?? series.count
+        let header = "\(label(metric)) (last \(days) day\(days == 1 ? "" : "s")):"
         guard !series.isEmpty else { return ["\(label(metric)): no data in the requested window"] }
         let sorted = series.sorted { $0.date > $1.date }   // newest first
         let body = sorted.map { "  \(day($0.date, timeZone)): \(format(metric, $0.value))" }
@@ -170,6 +177,7 @@ enum HealthRequestFulfiller {
         for m in request.metrics {
             let lines = MetricSeriesFormatter.lines(for: m.metric,
                                                     series: series[m.metric] ?? [],
+                                                    windowDays: m.windowDays,
                                                     timeZone: timeZone)
             parts.append(lines.joined(separator: "\n"))
         }

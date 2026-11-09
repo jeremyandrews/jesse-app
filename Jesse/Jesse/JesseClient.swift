@@ -305,7 +305,11 @@ struct JesseClient: JesseClientProtocol {
                                        mealCorrectionsAck: mealCorrectionsAck(),
                                        requestId: requestId,
                                        model: model, effort: effort,
-                                       sentFor: sentFor)
+                                       sentFor: sentFor,
+                                       // Data beside the block, never prompt text: the
+                                       // bridge writes them to its workout ledger.
+                                       workoutRecords: resolved.block != nil
+                                           ? resolved.workoutRecords : nil)
         return try await bridge.sendPrepared(request)
     }
 
@@ -410,7 +414,8 @@ struct JesseClient: JesseClientProtocol {
             locationContextUnavailableReason: channel == .location
                 ? outgoing.unavailableReason : nil,
             mealCorrectionsAck: mealCorrectionsAck(),
-            model: model, effort: effort)
+            model: model, effort: effort,
+            workoutRecords: channel == .health ? outgoing.workoutRecords : nil)
         return try await bridge.sendPrepared(request)
     }
 
@@ -520,7 +525,8 @@ struct JesseClient: JesseClientProtocol {
                             requestId: UUID? = nil,
                             model: String? = nil,
                             effort: String? = nil,
-                            sentFor: String? = nil) -> JesseRequest {
+                            sentFor: String? = nil,
+                            workoutRecords: [WorkoutRecord]? = nil) -> JesseRequest {
         JesseBridgeClient.makeRequest(
             mode: mode, text: text, sessionId: sessionId,
             conversationId: conversationId, voice: voice,
@@ -539,7 +545,8 @@ struct JesseClient: JesseClientProtocol {
             requestId: requestId?.uuidString,
             // The per-turn model selection; nil/blank drops the field (bridge uses default).
             model: model, effort: effort,
-            sentFor: sentFor)
+            sentFor: sentFor,
+            workoutRecords: workoutRecords)
     }
 
     // MARK: - Pure encode/decode forwards (the wire-contract test surface)

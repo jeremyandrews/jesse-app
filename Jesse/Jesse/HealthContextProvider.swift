@@ -320,7 +320,8 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
     /// a failed, denied or empty read leaves its field nil and the formatter omits
     /// it, exactly as the running dynamics have always degraded. The reads inside
     /// one workout run concurrently too.
-    private static func enrich(_ base: WorkoutSummary, workout w: HKWorkout) async -> WorkoutSummary {
+    private static func enrich(_ base: WorkoutSummary, workout w: HKWorkout,
+                               routeBound: Duration = routeReadBound) async -> WorkoutSummary {
         let isSwim = base.swim != nil
         let needsStrokes = isSwim && base.swim?.strokeCount == nil
         let onFoot = base.isFootDistance
@@ -350,7 +351,7 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         async let splits: [Double]? = when(onFoot) { try await perKmSplits(for: w) }
         async let route: RouteElevation? = needsRoute
             ? await routeCache.elevation(for: w.uuid, workoutEnd: w.endDate,
-                                         within: routeReadBound) { await readRoute(w) }
+                                         within: routeBound) { await readRoute(w) }
             : nil
 
         var s = await dynamics ?? base
@@ -364,6 +365,60 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
         if let splits = await splits, !splits.isEmpty { s.splitSecondsPerKm = splits }
         s.routeElevation = await route
         return s
+    }
+
+    // MARK: Workout detail backfill
+
+    /// How long the backfill waits for one route. There is no turn deadline on a backfill;
+    /// this is only a ceiling against a read that never answers.
+    static let backfillRouteBound: Duration = .seconds(60)
+
+    /// Every workout that started on or after `since`, oldest first, reduced and enriched
+    /// with EXACTLY the per-workout reads the feed uses (`summary(for:)` and `enrich`: route
+    /// elevation through the same cache and reducer, splits, laps, swim detail, effort,
+    /// running dynamics), with no turn deadline. Delivered in pages of `pageSize`
+    /// summaries, so the caller can post each page as it is read; `onPage` gets the page,
+    /// how many workouts have been read so far, and the total.
+    static func backfillWorkouts(
+        since: Date, pageSize: Int,
+        onPage: @Sendable ([WorkoutSummary], Int, Int) async throws -> Void
+    ) async throws {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        let store = HKHealthStore()
+        let predicate = HKQuery.predicateForSamples(withStart: since, end: nil, options: [])
+        let sort = [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
+        let workouts: [HKWorkout] = try await withCheckedThrowingContinuation { cont in
+            let q = HKSampleQuery(sampleType: .workoutType(), predicate: predicate,
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: sort) { _, samples, error in
+                if let error { cont.resume(throwing: error); return }
+                cont.resume(returning: (samples as? [HKWorkout]) ?? [])
+            }
+            store.execute(q)
+        }
+        let total = workouts.count
+        var read = 0
+        let size = max(1, pageSize)
+        for pageStart in stride(from: 0, to: total, by: size) {
+            let page = Array(workouts[pageStart..<min(total, pageStart + size)])
+            // A page's workouts are enriched concurrently, as the feed does, and put
+            // back in order.
+            var enriched: [(Int, WorkoutSummary)] = await withTaskGroup(
+                of: (Int, WorkoutSummary).self
+            ) { group in
+                for (i, w) in page.enumerated() {
+                    group.addTask {
+                        (i, await enrich(summary(for: w), workout: w,
+                                         routeBound: backfillRouteBound))
+                    }
+                }
+                var acc: [(Int, WorkoutSummary)] = []
+                for await pair in group { acc.append(pair) }
+                return acc
+            }
+            enriched.sort { $0.0 < $1.0 }
+            read += page.count
+            try await onPage(enriched.map(\.1), read, total)
+        }
     }
 
     /// How long one gather waits for a route that is not cached yet. A read that
@@ -554,7 +609,13 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
             // A run's laps (manual, or a coach app's intervals) are the same `.lap`
             // events a swim carries; swims keep their own roll-up in `swimDetail`.
             lapCount: onFoot ? lapEventCount(w) : nil,
-            swim: swimDetail(for: w))
+            swim: swimDetail(for: w),
+            // Identity for the structured record only; none of it reaches the line. The
+            // zone is the IANA name the recorder stamped, kept only when it parses.
+            workoutUUID: w.uuid.uuidString,
+            timeZoneIdentifier: (w.metadata?[HKMetadataKeyTimeZone] as? String)
+                .flatMap { TimeZone(identifier: $0)?.identifier },
+            sourceBundle: w.sourceRevision.source.bundleIdentifier)
     }
 
     /// The swim aggregates that need no query: pool length and location from the

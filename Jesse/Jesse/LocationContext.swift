@@ -1,4 +1,5 @@
 import Foundation
+import JesseNetworking
 
 // The Foundation-only half of the location channel: the provider seam, the resolver the
 // send path attaches through, and the shared device-context fulfilment protocol both
@@ -137,6 +138,8 @@ nonisolated enum DeviceContextReadiness: Sendable, Equatable {
 nonisolated struct DeviceContextOutcome: Sendable, Equatable {
     var block: String?
     var reason: String?
+    /// The workouts a health block describes, as structured records. Empty otherwise.
+    var workoutRecords: [WorkoutRecord] = []
 
     static func gathered(_ block: String) -> Self {
         DeviceContextOutcome(block: block, reason: nil)
@@ -163,7 +166,7 @@ func fulfillDeviceContext<F: DeviceContextFulfilling>(
     guard let block = outcome.block, !block.isEmpty else {
         return .unavailable(reason: outcome.reason)
     }
-    return .fulfilled(block)
+    return .fulfilled(block, workoutRecords: outcome.workoutRecords)
 }
 
 // MARK: - The two concrete channels
@@ -194,9 +197,16 @@ nonisolated struct HealthChannel: DeviceContextFulfilling {
         for m in request.metrics {
             series[m.metric] = await provider.series(for: m.metric, windowDays: m.windowDays)
         }
+        let now = Date()
         let block = HealthRequestFulfiller.block(request: request, snapshot: snapshot,
-                                                 series: series, now: Date())
-        return DeviceContextOutcome(block: block, reason: nil)
+                                                 series: series, now: now)
+        // The workouts section, when it is attached, rides with its structured records.
+        let records = block != nil && request.sections.contains(.workouts)
+            ? WorkoutRecordBuilder.records(
+                for: Array(snapshot.workouts.prefix(WorkoutContextFormatter.maxWorkouts)),
+                capturedAt: now)
+            : []
+        return DeviceContextOutcome(block: block, reason: nil, workoutRecords: records)
     }
 }
 

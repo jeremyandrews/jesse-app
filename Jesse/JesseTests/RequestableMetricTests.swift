@@ -86,6 +86,39 @@ final class RequestableMetricTests: XCTestCase {
         XCTAssertEqual(lines[3], "  2026-07-01: 58 bpm")
     }
 
+    /// The header names the window that was REQUESTED, not the number of points: a
+    /// 31-day workouts request with 62 workouts used to read "last 62 days".
+    func testWorkoutsHeaderStatesTheRequestedWindow() {
+        let series = (0..<62).map {
+            MetricSeriesPoint(date: day("2026-07-01").addingTimeInterval(Double($0) * 12 * 3600),
+                              value: 45)
+        }
+        let lines = MetricSeriesFormatter.lines(for: .workouts, series: series, windowDays: 31,
+                                                timeZone: TimeZone(identifier: "UTC")!)
+        XCTAssertEqual(lines.first, "Workouts (last 31 days):")
+        XCTAssertEqual(lines.count, 63)
+        let one = MetricSeriesFormatter.lines(for: .workouts, series: Array(series.prefix(3)),
+                                              windowDays: 1)
+        XCTAssertEqual(one.first, "Workouts (last 1 day):")
+    }
+
+    /// The fulfiller passes each metric's own requested window to the header.
+    func testFulfillerHeaderUsesEachMetricsWindow() throws {
+        let request = try XCTUnwrap(NeedsHealthRequest.validated(
+            sections: [], metrics: [(metric: "workouts", windowDays: 31)]))
+        let series: [RequestableMetric: [MetricSeriesPoint]] = [
+            .workouts: (0..<62).map {
+                MetricSeriesPoint(date: day("2026-07-01").addingTimeInterval(Double($0) * 12 * 3600),
+                                  value: 45)
+            },
+        ]
+        let block = try XCTUnwrap(HealthRequestFulfiller.block(
+            request: request, snapshot: .empty, series: series, now: day("2026-08-01"),
+            timeZone: TimeZone(identifier: "UTC")!))
+        XCTAssertTrue(block.hasPrefix("Workouts (last 31 days):"), block)
+        XCTAssertFalse(block.contains("last 62 days"))
+    }
+
     func testSeriesFormatterEmptyReportsNoData() {
         let lines = MetricSeriesFormatter.lines(for: .stepCount, series: [])
         XCTAssertEqual(lines.count, 1)

@@ -1,4 +1,5 @@
 import Foundation
+import JesseNetworking
 
 // Recent-workouts rendering — the workouts SUBSECTION of the two-section health
 // context (see `HealthContext.swift` for the daily-summary subsection and the
@@ -375,6 +376,15 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
     /// Swim aggregates (swims only).
     var swim: SwimDetail?
 
+    // Identity — carried into the structured `WorkoutRecord`, never rendered in the line.
+    /// The HealthKit workout's UUID string, the key of the bridge's workout detail row.
+    var workoutUUID: String?
+    /// The IANA zone the workout was recorded in (`HKMetadataKeyTimeZone`), or nil when
+    /// the recorder wrote none (the record then uses the phone's zone).
+    var timeZoneIdentifier: String?
+    /// The recording app's bundle identifier.
+    var sourceBundle: String?
+
     init(activityName: String, start: Date, duration: TimeInterval,
          elapsed: TimeInterval? = nil,
          distanceMeters: Double? = nil, activeEnergyKcal: Double? = nil,
@@ -389,7 +399,9 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
          weatherHumidityPercent: Double? = nil, weatherConditionRawValue: Int? = nil,
          lapCount: Int? = nil, routeElevation: RouteElevation? = nil,
          splitSecondsPerKm: [Double]? = nil,
-         swim: SwimDetail? = nil) {
+         swim: SwimDetail? = nil,
+         workoutUUID: String? = nil, timeZoneIdentifier: String? = nil,
+         sourceBundle: String? = nil) {
         self.activityName = activityName
         self.start = start
         self.duration = duration
@@ -419,6 +431,9 @@ nonisolated struct WorkoutSummary: Equatable, Sendable {
         self.routeElevation = routeElevation
         self.splitSecondsPerKm = splitSecondsPerKm
         self.swim = swim
+        self.workoutUUID = workoutUUID
+        self.timeZoneIdentifier = timeZoneIdentifier
+        self.sourceBundle = sourceBundle
     }
 
     /// When the workout ended: start plus the elapsed time when known, else plus
@@ -713,5 +728,129 @@ nonisolated enum WorkoutContextFormatter {
 
     private static func bpmString(_ bpm: Double) -> String {
         String(format: "%.0f", bpm)
+    }
+}
+
+// MARK: - Structured record (the same summary, as data)
+
+/// Builds the structured `WorkoutRecord` for a summary — the SAME value the feed line is
+/// rendered from, so the line and the record can never disagree. Every figure the line
+/// renders has a field here; the record also carries what the line drops (all splits, not
+/// just the first `maxSplits`; the elapsed time even without a pause).
+///
+/// Derived values follow the formatter's arithmetic exactly and carry a basis marker:
+/// pace and cadence `computed`, swim pace `computed_swim_time` or `computed`, elevation
+/// `metadata` or `route`, effort `rated` or `estimated`.
+nonisolated enum WorkoutRecordBuilder {
+    /// The record for `s`, or nil when the summary carries no workout UUID (nothing to key
+    /// a row on). `timeZone` is the fallback when the workout names no zone of its own.
+    static func record(for s: WorkoutSummary, timeZone: TimeZone = .current,
+                       capturedAt: Date = Date()) -> WorkoutRecord? {
+        guard let uuid = s.workoutUUID, !uuid.isEmpty else { return nil }
+        let zone = s.timeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? timeZone
+        var r = WorkoutRecord(workoutUUID: uuid, start: rfc3339(s.start, zone),
+                              activity: s.activityName, durationSeconds: s.duration)
+        r.timeZone = zone.identifier
+        r.capturedAt = rfc3339(capturedAt, zone)
+        r.workoutName = nonBlank(s.brandName)
+        r.sourceName = nonBlank(s.source)
+        r.sourceBundle = nonBlank(s.sourceBundle)
+        r.deviceProductType = nonBlank(s.productType)
+        r.indoor = s.isIndoor
+        r.elapsedSeconds = s.elapsed
+        r.distanceMetres = s.distanceMeters
+        r.activeEnergyKcal = s.activeEnergyKcal
+        r.avgHeartRateBpm = s.averageHeartRateBPM
+        r.maxHeartRateBpm = s.maxHeartRateBPM
+
+        r.avgRunningPowerWatts = s.averageRunningPowerW
+        r.groundContactTimeMs = s.groundContactTimeMs
+        r.verticalOscillationCm = s.verticalOscillationCm
+        r.strideLengthMetres = s.strideLengthM
+
+        r.avgMETs = s.averageMETs
+        if let e = s.effortScore {
+            r.effortScore = e
+            r.effortBasis = s.effortScoreIsUserRated == true ? "rated" : "estimated"
+        }
+        r.weatherTemperatureC = s.weatherTemperatureC
+        r.weatherHumidityPercent = s.weatherHumidityPercent
+        r.weatherCondition = s.weatherConditionRawValue
+            .flatMap(WorkoutContextFormatter.weatherConditionName)
+
+        // Foot activities: the formatter's pace and cadence arithmetic, marked computed.
+        r.stepCount = s.stepCount
+        if s.isFootDistance {
+            if let meters = s.distanceMeters, meters > 0, s.duration > 0 {
+                r.paceSecondsPerKm = s.duration / (meters / 1000)
+                r.paceBasis = "computed"
+            }
+            if let steps = s.stepCount, s.duration > 0 {
+                r.cadenceSpm = steps / (s.duration / 60)
+                r.cadenceBasis = "computed"
+            }
+        }
+        if let laps = s.lapCount, laps > 0 { r.lapCount = laps }
+
+        // Elevation: metadata wins per value; the route fills a gap and says so.
+        let route = s.routeElevation
+        if let up = s.elevationAscendedM {
+            r.ascentMetres = up; r.ascentBasis = "metadata"
+        } else if let up = route?.ascentM {
+            r.ascentMetres = up; r.ascentBasis = "route"
+        }
+        if let down = s.elevationDescendedM {
+            r.descentMetres = down; r.descentBasis = "metadata"
+        } else if let down = route?.descentM {
+            r.descentMetres = down; r.descentBasis = "route"
+        }
+        r.routeAltitudeMinMetres = route?.minAltitudeM
+        r.routeAltitudeMaxMetres = route?.maxAltitudeM
+
+        if let sw = s.swim {
+            r.swimLocation = sw.location.map { $0 == .pool ? "pool" : "open_water" }
+            r.swimPoolLengthMetres = sw.lapLengthM
+            r.swimLapCount = sw.lapCount
+            r.swimStrokeCount = sw.strokeCount
+            r.swimTimeSeconds = sw.swimSeconds
+            if let meters = s.distanceMeters, meters > 0 {
+                let basis = sw.swimSeconds ?? s.duration
+                if basis > 0 {
+                    r.swimPaceSecondsPer100m = basis / (meters / 100)
+                    r.swimPaceBasis = sw.swimSeconds != nil ? "computed_swim_time" : "computed"
+                }
+            }
+            r.swimAvgSWOLF = sw.averageSWOLF
+            r.swimWaterTemperatureC = sw.waterTemperatureC
+            r.swimStrokeStyles = sw.lapsByStroke.isEmpty ? nil : sw.lapsByStroke
+        }
+
+        if let splits = s.splitSecondsPerKm, !splits.isEmpty {
+            r.splits = splits.enumerated().map {
+                WorkoutRecord.Split(kind: "km", index: $0.offset + 1,
+                                    distanceMetres: SplitReducer.metersPerKm,
+                                    durationSeconds: $0.element)
+            }
+        }
+        return r
+    }
+
+    /// The records for every summary that has a UUID, in order.
+    static func records(for summaries: [WorkoutSummary], timeZone: TimeZone = .current,
+                        capturedAt: Date = Date()) -> [WorkoutRecord] {
+        summaries.compactMap { record(for: $0, timeZone: timeZone, capturedAt: capturedAt) }
+    }
+
+    private static func nonBlank(_ s: String?) -> String? {
+        guard let t = s?.trimmingCharacters(in: .whitespaces), !t.isEmpty else { return nil }
+        return t
+    }
+
+    /// RFC 3339 with `zone`'s offset, to the second.
+    static func rfc3339(_ date: Date, _ zone: TimeZone) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        f.timeZone = zone
+        return f.string(from: date)
     }
 }

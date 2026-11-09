@@ -761,6 +761,8 @@ struct SettingsView: View {
 
                 HealthArchiveSettingsSection()
 
+                WorkoutDetailBackfillSection()
+
                 Section {
                     Toggle("Attach location context", isOn: $attachLocationContext)
                         .disabled(connectingLocation)

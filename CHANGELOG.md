@@ -14,6 +14,70 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.198.0] - 2026-11-09
+
+**Every workout figure lands in its own CSV column, written by the bridge from structured data,
+with a history backfill.** Root cause: workout figures reached the bridge only as prose inside
+`health_context`, so a language model copied a handful of them into the calorie ledger
+(`exercise-log.csv`) and pasted the rest into its free-text `Notes`, where no query could use
+them (a Runna run on 2026-10-07 carried about thirty figures; seven reached real columns), and
+history beyond 48 hours carried only minutes.
+
+- **Added: two sidecar ledgers** in `diet-logs/`, written by the bridge (`workoutdetail`):
+  `workout-detail.csv`, one row per workout keyed by `Workout_UUID` with one column per scalar
+  figure of the app's `WorkoutRecord` plus `Date` (the diet day: start in the record's zone minus
+  four hours, `diet_day_of`), `Start_Time` (`HH:MM`), `TZ`, `Captured_At` and `Schema_Version`;
+  and `workout-splits.csv` (`Workout_UUID,Kind,Index,Distance_m,Duration_s`, `Kind` `km`). Both
+  headers are fixed constants registered in `canonical_header`; a later column is appended,
+  never inserted. A blank cell is not reported, never 0. They join to `exercise-log.csv` on
+  `Date` plus `Start_Time`. `exercise-log.csv`, `food-log.csv`, `weight-log.csv` and every
+  reader of them are unchanged.
+- **Upsert, only when something changed.** A known UUID's row is merged (a non-blank new cell
+  overwrites, a blank one keeps the file's value, so a late route elevation fills a blank and a
+  missed route read erases nothing) and rewritten only when a figure other than `Captured_At`
+  differs; untouched rows keep their bytes, and a request that changes nothing leaves both files
+  byte-identical. Splits are replaced per workout and kind only when they differ. RFC 4180
+  quoting (`csv_field`), LF line endings, written under the broker's per-file locks and git lock
+  and committed through `commit_diet_logs`.
+- **Added: `workout_records` on `POST /jesse`**, an optional JSON array. DATA, NEVER PROMPT
+  TEXT: it is validated and written before the model runs and nothing builds a prompt from it.
+  Absent (older apps) changes nothing; a malformed or oversized value (over 50 records or
+  512 KiB, a bad UUID or instant, a negative or non-finite figure, a basis outside its
+  vocabulary, a repeated UUID) is rejected with a logged reason and the turn runs. Unknown keys
+  are dropped, so no coordinate can reach a file.
+- **Added: `POST /jesse/diet/workouts`**, the backfill: `{"records": [...]}`, at most 50 per
+  page, bearer auth, upserted exactly as a turn's records; starts no model turn. Returns
+  `written`, `unchanged`, `added`, `replaced`, `splits_written`. `400` for a page that does not
+  validate (nothing written).
+
+## [App 1.0 (202)] - 2026-11-09
+
+**Workouts travel as structured records beside the feed line, and history can be backfilled.**
+Same root cause as bridge 0.198.0.
+
+- **Added: `WorkoutRecord`** (JesseKit, `Codable`, `Sendable`): every figure `WorkoutSummary`
+  holds, units in the field names, a basis marker wherever the app computes rather than reads
+  (pace and cadence `computed`, swim pace `computed_swim_time` or `computed`, effort `rated` or
+  `estimated`, ascent and descent `metadata` or `route`), the HealthKit UUID, start with its
+  offset, the IANA zone (`HKMetadataKeyTimeZone`, else the phone's), the recorder's name,
+  bundle and workout name (`HKMetadataKeyWorkoutBrandName`), the device product type, indoor,
+  the per-km splits as an array, swim detail, and `schema_version` 1. No coordinates and no raw
+  series.
+- **Built beside the line.** `WorkoutRecordBuilder` builds the record from the same summary the
+  line is rendered from; `HealthContextFormatter.rendered` reports which workouts' lines made it
+  into the block, and exactly those ride as `workout_records` whenever the block is attached
+  (ordinary turns and `JESSE_NEEDS_HEALTH` retries that carry the workouts section). The prose
+  line is unchanged.
+- **Added: Settings › Health › "Backfill workout details"** with a start date (default 365 days
+  ago). Reads every workout from that date with the feed's own per-workout reads (route
+  elevation through the same cache and reducer with a 60 s ceiling instead of the turn's 900 ms,
+  splits, laps, swim detail), no turn deadline, and posts pages of at most 50 to
+  `POST /jesse/diet/workouts`. Shows progress and a final count (sent, written, unchanged). Safe
+  to run twice.
+- **Fixed: the requestable `workouts` metric header states the window requested.** It printed
+  the point count as days, so a 31-day request with 62 workouts read "last 62 days";
+  `MetricSeriesFormatter.lines` now takes the request's `windowDays`.
+
 ## [App 1.0 (201)] - 2026-11-09
 
 **Mac composer: measuring its height no longer relays out the text view, so a pasted page in a fence cannot loop SwiftUI layout until AppKit throws.** `ComposerNSTextView.measuredTextHeight`, called from `sizeThatFits` inside `NSHostingView.layout()`, rewrapped the view's own text container at each probe width and back, moving the text view's frame on every question; it now measures on a separate layout manager, and fence tints lay out only the visible lines.

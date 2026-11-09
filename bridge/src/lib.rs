@@ -212,6 +212,7 @@ mod vaultqagate;
 pub mod vaultwrites;
 mod vision;
 mod vitals;
+mod workoutdetail;
 mod writelock;
 
 // Flat internal namespace: every module's items reachable crate-wide by bare
@@ -292,6 +293,7 @@ pub use vaultqa::*;
 pub use vaultqagate::*;
 pub use vision::*;
 pub use vitals::*;
+pub use workoutdetail::*;
 pub use writelock::*;
 
 #[cfg(test)]

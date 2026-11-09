@@ -45,9 +45,13 @@ failing it, a reboot resumes it once, and each repository can get the environmen
 - **Changed (grant): `devjob_reply` and `devjob_cancel` are in the default allowlist**, classed
   `write` in the `devjob` row, so they reach exactly the turns `devjob_start` reaches. The
   containment battery's `devjob` stand-in lists the five tools the server lists with `[hostrun]`
-  on. Re-recorded: `containment.toml` (claude-code; only `write/…` moved, its `toolset_args` and
-  `root_tools` by the two tools) and `containment-direct.toml` (only the write row's tool set
-  moved). Golden capability args and the capability map move with it.
+  on. Re-recorded live: `containment.toml` (claude-code, now against 2.1.319; gate pass, no
+  verdict moved; only `write/…`'s `toolset_args` moved, by the two tools. Its observed
+  `root_tools` gained the two tools and, by gateway startup timing, got back the clockify-rs,
+  google-sheets, homeassistant, runn-rs, rybbit and slack tools the 0.194.0 recording had
+  missed; `imcp` timed out at startup this time and is absent from two rows' observed roots) and
+  `containment-direct.toml` (only the write row's tool set moved). Golden capability args, the
+  argv fixture and the capability map move with it.
 - **Added: `paused`.** A round that ended on the plan's usage limit (Claude Code 2.1.319's
   structured `api_error: "usage_limit_reached"` on the error event and the result; fixture
   `tests/fixtures/hostrun/usage-limit.jsonl`) becomes `paused` with `resume_at`: the reset

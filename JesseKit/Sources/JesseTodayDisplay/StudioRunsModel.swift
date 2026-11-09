@@ -190,7 +190,12 @@ public enum StudioRunSemantics {
         guard let active, active > 0 else { return nil }
         let waiting = max(0, min(needsYou ?? 0, active))
         let runs = active == 1 ? "1 Studio run" : "\(active) Studio runs"
-        let spoken = waiting > 0 ? "\(runs), \(waiting) needs you" : runs
+        let spoken: String
+        switch waiting {
+        case 0: spoken = runs
+        case 1: spoken = "\(runs), 1 needs you"
+        default: spoken = "\(runs), \(waiting) need you"
+        }
         return StudioRunBadge(text: "\(active)", needsYou: waiting > 0, accessibilityLabel: spoken)
     }
 

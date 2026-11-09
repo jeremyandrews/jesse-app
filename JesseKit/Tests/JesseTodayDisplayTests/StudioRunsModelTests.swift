@@ -98,6 +98,8 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertEqual(one, StudioRunBadge(text: "1", needsYou: false,
                                            accessibilityLabel: "1 Studio run"))
         XCTAssertEqual(StudioRunSemantics.badge(active: 3, needsYou: nil)?.needsYou, false)
+        XCTAssertEqual(StudioRunSemantics.badge(active: 2, needsYou: 2)?.accessibilityLabel,
+                       "2 Studio runs, 2 need you")
         let strand = Strand(slug: "Gd", runsActive: 2, runsNeedsYou: 1)
         XCTAssertEqual(StudioRunSemantics.badge(for: strand)?.accessibilityLabel,
                        "2 Studio runs, 1 needs you")

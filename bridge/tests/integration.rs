@@ -10457,7 +10457,8 @@ async fn strands_list_serves_the_contract_json() {
         .iter()
         .find(|t| t["slug"] == "Clean-Strand")
         .unwrap();
-    // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served.
+    // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served;
+    // `runs_needs_you` joined them in 0.198.0.
     assert_eq!(
         keys(clean),
         vec![
@@ -10470,6 +10471,7 @@ async fn strands_list_serves_the_contract_json() {
             "parent",
             "repos",
             "runs_active",
+            "runs_needs_you",
             "slug",
             "state",
             "title",
@@ -10478,6 +10480,7 @@ async fn strands_list_serves_the_contract_json() {
         ]
     );
     assert_eq!(clean["runs_active"], 0, "[hostrun] is off in the fixture");
+    assert_eq!(clean["runs_needs_you"], 0);
     assert!(clean["drafts"]
         .as_array()
         .unwrap()

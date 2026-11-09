@@ -1257,6 +1257,7 @@ async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
     let gd = &v["strands"][0];
     assert_eq!(gd["runs_active"], 0);
+    assert_eq!(gd["runs_needs_you"], 0);
     let drafts = gd["drafts"].as_array().unwrap();
     let runnable: Vec<&str> = drafts
         .iter()
@@ -2336,4 +2337,122 @@ async fn extra_goes_with_the_artifacts_and_never_while_the_run_is_live() {
     assert!(!dir.join(EXTRA_DIR).exists());
     assert!(!dir.join(TARGET_DIR).exists());
     assert!(dir.join(RUN_JSON).is_file());
+}
+
+// ---- 6. THE APP'S WIRE FIXTURES ---------------------------------------------------------------
+
+/// Every key path in `v`, with an array's elements folded into `[]`, so two documents with the
+/// same shape and different values compare equal.
+fn key_paths(v: &Value, at: &str, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                let p = format!("{at}.{k}");
+                out.insert(p.clone());
+                key_paths(x, &p, out);
+            }
+        }
+        Value::Array(a) => {
+            for x in a {
+                key_paths(x, &format!("{at}[]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The app decodes the run routes from JSON these serializers wrote: `run_json`, `list_json`,
+/// `started_json`, `log_json` and `annotate_strands`, over a scratch vault and real rounds driven
+/// to `needs_you`, `reported`, `paused` and `queued`. The files live in JesseKit's
+/// test fixtures. `JESSE_RUN_FIXTURE_WRITE=1 cargo test the_app_wire_fixtures` rewrites them;
+/// otherwise this fails when a serializer gains or loses a key the committed files do not have,
+/// which is the moment the app's decoding has to be looked at again.
+#[tokio::test]
+async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    // GD5: a round that ends asking a question.
+    r.svc.start(item("GD5")).await.unwrap();
+    finish_round(
+        &r,
+        "GD5",
+        0,
+        Some("NEEDS YOU: main or release?\nThe branch is pushed.\n"),
+        STREAM_TEXT,
+    );
+    r.svc.pass(now_ms()).await;
+    // A free run that reports.
+    r.svc.start(free("done")).await.unwrap();
+    finish_round(&r, "s-done", 0, Some("Merged.\n"), STREAM_TEXT);
+    r.svc.pass(now_ms()).await;
+    // GD10: a round on the usage limit, paused until the reset.
+    r.svc.start(item("GD10")).await.unwrap();
+    let reset_secs = now_ms() / 1000 + 2 * 3600;
+    let limit = LIMIT_FIXTURE.replace(&FIXTURE_RESET_SECS.to_string(), &reset_secs.to_string());
+    finish_round(&r, "GD10", 1, None, &limit);
+    r.svc.pass(now_ms()).await;
+    // GD12 is queued behind the limit.
+    let started = r.svc.start(item("GD12")).await.unwrap();
+
+    let status = |id: &str| r.svc.get(id).unwrap().status;
+    assert_eq!(status("GD5"), RunStatus::NeedsYou);
+    assert_eq!(status("GD10"), RunStatus::Paused);
+    assert_eq!(status("s-done"), RunStatus::Reported);
+    assert_eq!(status("GD12"), RunStatus::Queued);
+    assert_eq!(started.waiting_for.as_deref(), Some("limit"));
+
+    let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+    let plain = serde_json::to_value(&snap).unwrap();
+    let mut annotated = plain.clone();
+    annotate_strands(&mut annotated, &snap, &s.notes(), Some(&r.svc));
+    // Needs you and paused; a queued run is not counted. One of the two needs Jeremy.
+    assert_eq!(annotated["strands"][0]["runs_active"], 2);
+    assert_eq!(annotated["strands"][0]["runs_needs_you"], 1);
+    let log = log_json("GD5", r.svc.log_lines("GD5", LOG_DEFAULT).unwrap());
+    assert!(!log["lines"].as_array().unwrap().is_empty());
+
+    let base = s.base.to_string_lossy().into_owned();
+    let files: Vec<(&str, Value)> = vec![
+        ("studio-runs-list.json", r.svc.list_json()),
+        (
+            "studio-run-needs-you.json",
+            run_json(&r.svc.get("GD5").unwrap()),
+        ),
+        (
+            "studio-run-paused.json",
+            run_json(&r.svc.get("GD10").unwrap()),
+        ),
+        ("studio-run-started.json", started_json(&started)),
+        ("studio-run-log.json", log),
+        ("strands-annotated.json", annotated),
+        ("strands-before-runs.json", plain),
+    ];
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../JesseKit/Tests/JesseNetworkingTests/Fixtures");
+    for (name, v) in files {
+        // The scratch folder's path is this machine's and this run's; the app never reads it.
+        let text = serde_json::to_string_pretty(&v)
+            .unwrap()
+            .replace(&base, "/scratch")
+            + "\n";
+        let path = dir.join(name);
+        if std::env::var("JESSE_RUN_FIXTURE_WRITE").is_ok() {
+            std::fs::write(&path, text).unwrap();
+            continue;
+        }
+        let committed: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        )
+        .unwrap();
+        let (mut want, mut have) = (Default::default(), Default::default());
+        key_paths(&committed, "", &mut want);
+        key_paths(&v, "", &mut have);
+        assert_eq!(
+            want, have,
+            "{name}: the serializer's keys moved; regenerate with JESSE_RUN_FIXTURE_WRITE=1 and \
+             check the app's decoding"
+        );
+    }
 }

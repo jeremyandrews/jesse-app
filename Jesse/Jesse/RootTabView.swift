@@ -119,6 +119,13 @@ struct RootTabView: View {
     /// AT CONSTRUCTION: see `makeStrandsModel`.
     @State private var strandsModel = RootTabView.makeStrandsModel()
 
+    /// **The Studio runs**: the Strands segment's Runs list, a strand's `Run on Studio` and a
+    /// run's detail all read this one model, so a start made from a strand is in the list the
+    /// moment the list opens. Owned here for `strandsModel`'s reason.
+    @State private var runsModel = StudioRunsModel(makeClient: {
+        JesseBridgeClient(config: ConfigStore.load())
+    })
+
     /// The strand board's model with this phone's remembered lens already on it.
     ///
     /// The lens is loaded HERE, before the model has ever been read by a view, rather
@@ -358,6 +365,13 @@ struct RootTabView: View {
     /// is about to read has to be the one on display when it changes underneath them. The
     /// entry point answers false for a slug no note carries, in which case the tab is shown
     /// as it was rather than narrowed to nothing.
+    /// **Open one note in the Vault tab**: a Studio run's Inbox report. The tab first, then
+    /// the push, so the screen that changes is the one on display.
+    private func openVaultNote(_ path: String) {
+        selection = .vault
+        vaultModel.openNote(path)
+    }
+
     private func showStrandRecord(_ slug: String, section: VaultStrandSection) {
         selection = .vault
         vaultModel.showStrand(slug, section: section)
@@ -462,7 +476,9 @@ struct RootTabView: View {
         case .today:
             TodayTabView(isActive: selection == .today, model: todayModel,
                          strands: strandsModel,
-                         onReplay: replayNow)
+                         runs: runsModel,
+                         onReplay: replayNow,
+                         onOpenVaultNote: openVaultNote)
                 .equatable()
         case .vault:
             // Hosted rather than rendered bare: the host is where a strand discussion

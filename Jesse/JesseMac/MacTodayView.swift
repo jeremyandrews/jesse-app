@@ -46,6 +46,14 @@ struct MacTodayView: View {
     /// remembered one, applied in `init` before the board's first frame.
     @State private var strands: StrandsModel
 
+    /// The Studio runs: the Strands segment's Runs list, a strand's `Run on Studio` and every
+    /// run detail read this one model.
+    @State private var runs: StudioRunsModel
+
+    /// Put the Vault tab on screen with one note open: a Studio run's report. The shell's,
+    /// because only the shell selects a tab; this screen closes its own sheets first.
+    var onOpenVaultNote: (String) -> Void = { _ in }
+
     /// **The one strand opener** for this tab, as on the iPhone: a row's strand chip, the
     /// item detail's and a board row all open through it, into the one sheet attached
     /// below. The note on THIS Mac when it holds one, the bridge's copy when it does not.
@@ -102,8 +110,12 @@ struct MacTodayView: View {
     /// same shared `BridgeReachabilityModel` the phone drives.
     private let reachability = BridgeReachabilityModel.shared
 
-    init(configStore: MacConfigStore) {
+    init(configStore: MacConfigStore, onOpenVaultNote: @escaping (String) -> Void = { _ in }) {
         self.configStore = configStore
+        self.onOpenVaultNote = onOpenVaultNote
+        _runs = State(initialValue: StudioRunsModel(makeClient: {
+            JesseBridgeClient(config: configStore.config)
+        }))
         // The client CARRIES the on-disk cache (it holds the bridge's own bytes) and the
         // model READS it at launch, so a Mac opened with the Studio asleep still draws
         // the last day it was given. See `SnapshotCache`.
@@ -149,7 +161,8 @@ struct MacTodayView: View {
                           onProcessUpdates: processUpdates,
                           onOpenLocalDayFile: Self.hasVaultFolder ? { openedDayFile = true } : nil,
                           strands: strands,
-                          strandOpener: strandOpener)
+                          strandOpener: strandOpener,
+                          runs: runs)
                 // DECLARATION ORDER IS LEFT-TO-RIGHT, ordered by clicks per day: Settings
                 // is opened least often, Refresh far more, so Refresh sits to its right.
                 // These two are the shell's half of this screen's toolbar and always
@@ -184,10 +197,18 @@ struct MacTodayView: View {
         }
         // A strand's note, with the open items that name it above it. A line there
         // selects that item and opens its detail, once the sheet has gone.
-        .strandNoteSheet(strandOpener, day: model.snapshot, onOpenLink: openLink) { item in
+        .strandNoteSheet(strandOpener, day: model.snapshot, strands: strands, runs: runs,
+                         onOpenLink: openLink) { item in
             selection = item.id
             openedItem = item
         }
+        // A Studio run's report, from a run detail in either sheet: close both, then the shell
+        // puts the Vault tab up with the note open.
+        .environment(\.studioRunReport, StudioRunReportAction { path in
+            runs.presentsList = false
+            strandOpener.openedNote = nil
+            onOpenVaultNote(path)
+        })
         // `Discuss this strand`, for the board's rows. Injected HERE rather than on the tab
         // shell because it opens a conversation, and the thread that conversation needs
         // while its sheet is up is held by this screen. It reaches the same staging and the

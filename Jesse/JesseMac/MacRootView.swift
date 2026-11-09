@@ -67,7 +67,7 @@ struct MacShellView: View {
                 }
                 .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
                 .tag(Tab.chats)
-            MacTodayView(configStore: coordinator.configStore)
+            MacTodayView(configStore: coordinator.configStore, onOpenVaultNote: openVaultNote)
                 // The profile the day is derived in, above the day itself — the same shared
                 // banner the phone shows, from the same model.
                 .safeAreaInset(edge: .top, spacing: 0) {
@@ -114,6 +114,12 @@ struct MacShellView: View {
 
     /// **Show one strand's record in the Vault tab**, optionally at one section. The tab
     /// first, then the narrowing, so the screen that changes is the one on display.
+    /// **Open one note in the Vault tab**: a Studio run's Inbox report.
+    private func openVaultNote(_ path: String) {
+        tab = .vault
+        vaultModel.openNote(path)
+    }
+
     private func showStrandRecord(_ slug: String, section: VaultStrandSection) {
         tab = .vault
         vaultModel.showStrand(slug, section: section)

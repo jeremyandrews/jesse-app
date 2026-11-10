@@ -12,6 +12,10 @@
 # Usage:
 #     scripts/local-ci-macos.sh
 #
+# The iPhone tests run on the newest standard "iPhone NN Pro" (scripts/simulator-pick.jq).
+# To test on another model, name its device type (from `xcrun simctl list devicetypes`):
+#     JESSE_CI_IPHONE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-17 scripts/local-ci-macos.sh
+#
 # It is also wired as a pre-push hook — install once per clone with:
 #     scripts/install-hooks.sh
 # after which every `git push` that touches Jesse/ or JesseKit/ runs it and is
@@ -222,43 +226,57 @@ jessekit_ios_tests_build() {
       CODE_SIGNING_ALLOWED=NO )
 }
 
-# Simulator resolution mirrors the workflow's jq query exactly: newest available
-# runtime for the platform, and a device type that runtime itself declares it
-# supports. The one deliberate difference from CI is REUSE — CI creates a throwaway
-# device per run because its runner is throwaway; creating a new simulator on every
-# push here would leak devices and re-pay first-boot cost each time.
+# Simulator resolution is scripts/simulator-pick.jq, the same file ios-ci.yml reads, so
+# the gate and the nightly pick the same runtime and model. For an iPhone that is the
+# newest standard "iPhone NN Pro" (JESSE_CI_IPHONE_TYPE, a device type identifier,
+# overrides it); the watch keeps the newest runtime's last Apple Watch. The file says why.
+# The one deliberate difference from CI is REUSE — CI creates a throwaway device per
+# run because its runner is throwaway; creating a new simulator on every push here
+# would leak devices and re-pay first-boot cost each time.
 resolve_sim() {
   platform="$1"; family="$2"; sim_name="$3"
+  override=""
+  if [ "$family" = "iPhone" ]; then override="${JESSE_CI_IPHONE_TYPE:-}"; fi
 
   read -r RUNTIME_ID RUNTIME_VER DEVTYPE DEV_NAME < <(
     xcrun simctl list runtimes --json | jq -r \
-      --arg platform "$platform" --arg family "$family" '
-      .runtimes
-      | map(select(.platform == $platform and .isAvailable))
-      | map({
-          id: .identifier,
-          ver: .version,
-          dt: (.supportedDeviceTypes | map(select(.productFamily == $family)) | last)
-        })
-      | map(select(.dt != null))
-      | sort_by(.ver | split(".") | map(tonumber))
-      | last
-      | "\(.id) \(.ver) \(.dt.identifier) \(.dt.name)"
-    '
+      --arg platform "$platform" --arg family "$family" --arg override "$override" \
+      -f "$ROOT/scripts/simulator-pick.jq"
   )
   if [ -z "${RUNTIME_ID:-}" ] || [ "$RUNTIME_ID" = "null" ] || [ -z "${DEVTYPE:-}" ]; then
-    echo "No available ${platform} runtime with a ${family} device type." >&2
-    echo "  Install one via Xcode > Settings > Components." >&2
+    if [ -n "$override" ]; then
+      echo "No available ${platform} runtime supports JESSE_CI_IPHONE_TYPE=${override}." >&2
+      echo "  It must be a device type identifier: xcrun simctl list devicetypes" >&2
+    else
+      echo "No available ${platform} runtime with a ${family} device type." >&2
+      echo "  Install one via Xcode > Settings > Components." >&2
+    fi
     return 1
   fi
+  echo "Device type: ${DEV_NAME} (${DEVTYPE})${override:+, from JESSE_CI_IPHONE_TYPE}"
+  echo "Runtime:     ${platform} ${RUNTIME_VER} (${RUNTIME_ID})"
+
+  # Reuse is by name AND device type. A simulator of this name made by an older rule
+  # (an iPhone Duo, an iPhone 11) is deleted, not reused: reusing by name alone would
+  # keep testing on the model the rule was changed to stop picking.
+  stale="$(
+    xcrun simctl list devices --json \
+      | jq -r --arg rt "$RUNTIME_ID" --arg n "$sim_name" --arg dt "$DEVTYPE" \
+        '(.devices[$rt] // []) | map(select(.name == $n and .deviceTypeIdentifier != $dt)) | .[].udid'
+  )"
+  for old in $stale; do
+    echo "Replacing ${sim_name} ${old}: wrong device type for this rule."
+    xcrun simctl shutdown "$old" >/dev/null 2>&1 || true
+    xcrun simctl delete "$old" || return 1
+  done
 
   UDID="$(
     xcrun simctl list devices --json \
-      | jq -r --arg rt "$RUNTIME_ID" --arg n "$sim_name" \
-        '(.devices[$rt] // []) | map(select(.name == $n and .isAvailable)) | last | .udid // empty'
+      | jq -r --arg rt "$RUNTIME_ID" --arg n "$sim_name" --arg dt "$DEVTYPE" \
+        '(.devices[$rt] // []) | map(select(.name == $n and .deviceTypeIdentifier == $dt and .isAvailable)) | last | .udid // empty'
   )"
   if [ -z "$UDID" ]; then
-    UDID="$(xcrun simctl create "$sim_name" "$DEVTYPE" "$RUNTIME_ID")"
+    UDID="$(xcrun simctl create "$sim_name" "$DEVTYPE" "$RUNTIME_ID")" || return 1
   fi
   xcrun simctl boot "$UDID" >/dev/null 2>&1 || true
   xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || true

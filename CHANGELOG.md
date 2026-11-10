@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [Gate simulator: a standard iPhone Pro] - 2026-11-10
+
+**The local gate ran every iPhone UI test on an iPhone Duo, and 38 of them failed on code
+nobody had touched.** `scripts/local-ci-macos.sh` on the Mac Studio went red at `iOS test` on
+a clean `main`, every time, with each failure a timeout waiting for the `Chats` or `Today`
+tab button.
+
+**Root cause: the simulator rule took whatever Xcode listed last.** Both gates picked the
+newest iOS runtime and the last iPhone device type it supports. Xcode 27 ships two iOS 27.2
+runtimes: the general one and `iOS-27-2-iPhone19-4`, which supports only iPhone Duo. They
+share a version, the sort is stable, the Duo runtime is listed second, and so the Duo won.
+On iPhone Duo, iOS draws the app's `TabView` as a vertical rail beside the content rather
+than a bottom tab bar, so there is no `TabBar` element for `app.tabBars.buttons[...]` to
+find. The tabs are there and work; the tests, written for a phone with a tab bar, cannot
+see them. On the same `main`, iPhone 18 Pro on iOS 27.2 passes 38 of those UI tests and the
+Duo passes 2. Before the Duo runtime arrived the same rule picked an iPhone 11, on this
+Studio and on the hosted runner.
+
+### Changed
+
+- **`scripts/simulator-pick.jq` is the rule, and both gates read it.** For an iPhone: the
+  device type in `JESSE_CI_IPHONE_TYPE` if set (and nothing at all if no runtime supports
+  it), else the highest numbered `iPhone NN Pro`, else the highest numbered `iPhone NN`, else
+  the old last-listed fallback. Pro Max, Plus, mini, `e`, SE, Air, Duo and folds are never
+  picked automatically. The best tier any runtime offers wins, then the newest runtime in
+  it, so a single-device runtime loses to the general one. On this Studio: iPhone 18 Pro,
+  iOS 27.2. The Apple Watch keeps the old rule (Apple Watch SE 3 (40mm), watchOS 27.2), which
+  is an ordinary watch.
+- **`ios-ci.yml` uses the same file**, for the iPhone and the watch, so the nightly picks
+  the model the local gate picks. Its gate also wakes for a change to the rule. Its resolve
+  step also names `scripts/ios-deployment-target.sh` from the workspace root: the job runs
+  in `Jesse/`, and since 2026-09-24 every nightly that reached the step failed there with exit
+  127 (`No such file or directory`).
+- **The local gate reuses a simulator by name and device type.** A `jesse-local-ci-iphone`
+  or `jesse-local-ci-watch` of another model under the chosen runtime is deleted and made
+  again, not reused. The gate prints the device type and runtime it chose.
+
+### Added
+
+- **`scripts/test-simulator-pick.sh`**, run on Linux by `ci.yml`, pins the rule against
+  runtime lists in `simctl`'s shape, including this Studio's two 27.2 runtimes.
+
+### Not changed
+
+- No test is skipped, weakened or deleted, and no app code changes. Whether the UI tests
+  should also find tabs drawn as a rail is a separate question.
+
 ## [App 1.0 (202)] - 2026-11-10
 
 **Studio runs can be started, watched and steered from the app, without a chat turn.** Five

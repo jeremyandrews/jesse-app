@@ -20,6 +20,8 @@ struct JesseMacApp: App {
     @State private var configStore: MacConfigStore
     @State private var coordinator: MacCoordinator
     @State private var notifier = MacNotifier()
+    /// Registers this Mac's APNs token with the bridge at every launch (`MacPush.swift`).
+    @NSApplicationDelegateAdaptor(MacPushRegistrar.self) private var pushRegistrar
     /// The note a citation link in an offline answer asked for, shown as a sheet.
     @State private var citedNote: VaultNoteRoute?
     /// A `[[wiki link]]` tapped in a reply. Its own object because it has a step the
@@ -46,6 +48,11 @@ struct JesseMacApp: App {
         // Notes open from the Studio first and every write to one is sent there, the
         // phone's rule and the phone's reason; see `VaultNoteOpener` and `VaultWriteOutbox`.
         VaultBridgeWiring.install { JesseBridgeClient(config: cfg.config) }
+
+        // Push registration reads the pairing when the token arrives, and never runs in a
+        // unit-test host.
+        MacPushRegistrar.config = { cfg.config }
+        MacPushRegistrar.isEnabled = !Self.isUnitTestHost
     }
 
     /// Whether this launch is the host of a unit test bundle (`xcodebuild test`), which loads

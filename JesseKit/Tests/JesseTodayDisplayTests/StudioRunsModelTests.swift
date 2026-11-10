@@ -206,6 +206,27 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertEqual(model.runs(strand: "Gd").count, 2)
         XCTAssertEqual(model.runs(strand: "Other").count, 0)
     }
+
+    func testTheListShowsEveryRunInEveryStatusAndEachOpensWithItsReport() async throws {
+        let fake = FakeRuns()
+        let statuses = Self.all
+        fake.list = StudioRunList(runs: statuses.enumerated().map { i, status in
+            StudioRun(runID: "R\(i)", strand: i % 2 == 0 ? "Gd" : nil, status: status,
+                      createdAt: "2026-11-09T1\(i):00:00.000Z",
+                      reportPaths: ["Inbox/2026-11-09-run-R\(i).md"])
+        })
+        let model = StudioRunsModel(makeClient: { fake })
+        await model.load()
+        XCTAssertEqual(model.runs(strand: nil).count, statuses.count, "no run is dropped")
+        XCTAssertEqual(Set(model.runs(strand: nil).map(\.status)), Set(statuses))
+        for i in statuses.indices {
+            let detail = model.detailModel(for: "R\(i)")
+            XCTAssertEqual(detail.run?.latestReportPath, "Inbox/2026-11-09-run-R\(i).md")
+            await detail.refresh()
+            XCTAssertNil(detail.loadError)
+            XCTAssertEqual(detail.run?.latestReportPath, "Inbox/2026-11-09-run-R\(i).md")
+        }
+    }
 }
 
 /// The six calls, faked.

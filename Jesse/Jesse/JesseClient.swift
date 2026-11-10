@@ -106,6 +106,9 @@ protocol JesseClientProtocol: FlagSyncing, Sendable {
     func stream(jobId: String) -> AsyncThrowingStream<JesseStreamEvent, Error>
     /// Register (idempotent upsert) this phone's APNs device token with the bridge.
     func registerDevice(token: String) async throws
+    /// The same, naming this device, its platform and its topic, so the bridge keeps it
+    /// beside the Mac rather than in its place.
+    func registerDevice(_ registration: JesseDeviceRegistration) async throws
     /// Ask the bridge to push when `jobId` completes. Best-effort and idempotent.
     func notifyOnComplete(jobId: String) async throws
     /// Ask the bridge to mint a short conversation title from `digest`, persisting it under
@@ -145,6 +148,7 @@ extension JesseClientProtocol {
     // Default no-ops so existing conformers (the test fakes) need not implement the push
     // methods; only the production `JesseClient` does the real calls.
     func registerDevice(token: String) async throws {}
+    func registerDevice(_ registration: JesseDeviceRegistration) async throws {}
     func notifyOnComplete(jobId: String) async throws {}
     // Default no-op so fakes that don't exercise remote deletion behave like a bridge that
     // always succeeds.
@@ -456,6 +460,10 @@ struct JesseClient: JesseClientProtocol {
 
     func registerDevice(token: String) async throws {
         try await bridge.registerDevice(token: token)
+    }
+
+    func registerDevice(_ registration: JesseDeviceRegistration) async throws {
+        try await bridge.registerDevice(registration)
     }
 
     func notifyOnComplete(jobId: String) async throws {

@@ -50,6 +50,32 @@ history beyond 48 hours carried only minutes.
   `written`, `unchanged`, `added`, `replaced`, `splits_written`. `400` for a page that does not
   validate (nothing written).
 
+## [App 1.0 (207)] - 2026-11-10
+
+**The on-device answerer no longer passes off a copied template as an answer.** On
+2026-10-01, with the bridge unreachable, "What's the connection to Tailscale into my studio
+at home?" was answered on the device with a `tailscale ping` recovery command whose target
+was the literal text `<macbook-ip>`, citing a Tailscale recovery runbook and the remote access
+note whose first content line holds the Studio's address. Root cause: nothing in
+`VaultAnswerer.validate` looked for an unfilled slot. The answer was not abstained, both
+citations were real supplied paths, and `isGrounded` found `ping`, `tsmp` and `macbook` in the
+cited runbook extract, so all three checks passed an answer that stated no fact.
+
+- **Added: `VaultAnswerer.hasUnfilledSlot`** (JesseKit, `JesseVault`). An answer holding an
+  angle-bracketed run of letters, digits, hyphens or underscores with no space in it
+  (`<macbook-ip>`, `<PID>`, `<file>`) becomes `.unanswered(.abstained)`, checked in `validate`
+  after the grounding check. The shape is the rule; there is no list of slot names. A
+  comparison (`< 600`) and a bracketed address (`<jeremy@example.com>`) are not slots.
+- **The instructions say it too:** "Give the value, never a placeholder." (58 of the 60-word
+  budget.)
+- **Retrieval, reported, not changed.** Reproduced against the real vault with the app's
+  indexer, the shipped budget and owner name `Jeremy`: the runbook's "If the git verb is
+  blocked" section ranks 4th, inside the four chunks supplied, and the remote access note's
+  address chunk ranks 7th, outside them. The ranking is left for its own change.
+- The lookup gate, the time limit, `isGrounded`, the retriever and the `Inbox/` exclusion are
+  unchanged. Tests: `testACopiedCommandWithAnUnfilledSlotIsAnAbstain` (fails before, passes
+  after) and `testAComparisonOrABracketedAddressIsNotASlot` (passes both).
+
 ## [App 1.0 (206)] - 2026-11-10
 
 **On iPhone and iPad, tapping the Today tab bar item while the Today tab is up and its Strands

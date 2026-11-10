@@ -271,3 +271,9 @@ jobs:
 
       - name: Helper unit tests
         run: bash scripts/test-ios-deployment-target.sh
+
+      # The simulator rule both Mac gates share (scripts/simulator-pick.jq): which
+      # runtime and iPhone they test on. A wrong pick still builds and runs, on a
+      # model nobody chose; an iPhone Duo listed last turned 38 UI tests red.
+      - name: Simulator pick rule
+        run: bash scripts/test-simulator-pick.sh

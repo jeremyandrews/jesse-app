@@ -158,6 +158,8 @@ struct TodayPendingRow: View {
         case .startNewDay: return "sun.horizon"
         case .processUpdates: return "arrow.up.forward.square"
         case .logWorkouts: return "figure.run"
+        case .reminderDone: return "bell.badge"
+        case .reminderSnooze: return "bell.and.waves.left.and.right"
         }
     }
 

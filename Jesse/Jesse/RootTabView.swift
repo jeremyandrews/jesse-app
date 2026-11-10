@@ -396,7 +396,9 @@ struct RootTabView: View {
                                             snapshotCache: SnapshotCache.shared) },
             tell: CoordinatorTellSender(coordinator: coordinator,
                                         context: AppModelContextProvider()),
-            dietDay: { healthModel.captureDay })
+            dietDay: { healthModel.captureDay },
+            // A Done or Snooze pressed on a reminder while the bridge was out of reach.
+            reminders: { JesseBridgeClient(config: ConfigStore.load()) })
         replayer = built
         replayerBox.adopt(built)
     }

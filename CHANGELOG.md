@@ -14,6 +14,27 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (203)] - 2026-11-10
+
+**A timed reminder can be finished or snoozed from the notification, without opening the app.**
+The bridge pushes a reminder when it falls due; its notification now carries two buttons.
+
+- **Done** and **Snooze 10 min** (category `JESSE_REMINDER`). Neither opens the app: each posts
+  `POST /jesse/reminders/{id}/done` or `/snooze` with `{"minutes": 10}` in the background, and
+  the notification's completion is reported only once the press has landed or been queued.
+- **Offline.** A press the bridge cannot be reached for (no network, a timeout, a 5xx, a refused
+  pairing) waits on the offline capture queue and is sent on the next recovery, alongside held
+  check-offs and quick logs. A `404` (a reminder the bridge no longer has) is final: the press is
+  dropped, never retried. Reminder presses are not shown on the Today or Health pending lists.
+- **Tapping the reminder itself** opens the app and does nothing else; it is never routed to a
+  conversation.
+- **Time Sensitive.** The app now carries the time-sensitive notifications entitlement, so a
+  reminder (`interruption-level: time-sensitive`) can break through a Focus. The App ID needs
+  the capability too; automatic signing adds it on the next signed build.
+- JesseKit: `reminderDone(id:)` and `reminderSnooze(id:minutes:)` on `JesseBridgeClient` behind
+  `ReminderActing`, and `PendingIntentKind.reminderDone` / `.reminderSnooze` with
+  `PendingIntentPayload.reminderId` and `.minutes`.
+
 ## [bridge 0.199.0] - 2026-11-10
 
 **Timed reminders: a turn can set a push for a chosen minute, one off or repeating.** "Remind me

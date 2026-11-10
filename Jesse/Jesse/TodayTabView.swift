@@ -35,6 +35,12 @@ struct TodayTabView: View {
     /// no `Run on Studio`.
     var runs: StudioRunsModel?
 
+    /// How many times the tab bar has asked this tab to return to the day: a tap on the
+    /// Today tab bar item with this tab already up and the Strands segment showing (the
+    /// decision is `TodayTabRetap`'s, made by `RootTabView`). Only its CHANGES mean
+    /// anything; part of `==` below, which is how a new count gets past `.equatable()`.
+    var retaps: Int = 0
+
     /// Put the Vault tab on screen with one note open. The root's, because only the root
     /// selects a tab; this tab closes its own sheets first.
     var onOpenVaultNote: (String) -> Void = { _ in }
@@ -53,12 +59,14 @@ struct TodayTabView: View {
 
     init(isActive: Bool, model: TodayDashboardModel, strands: StrandsModel? = nil,
          runs: StudioRunsModel? = nil,
+         retaps: Int = 0,
          onReplay: @escaping () -> Void = {},
          onOpenVaultNote: @escaping (String) -> Void = { _ in }) {
         self.isActive = isActive
         _model = Bindable(model)
         self.strands = strands
         self.runs = runs
+        self.retaps = retaps
         self.onReplay = onReplay
         self.onOpenVaultNote = onOpenVaultNote
         _strandOpener = State(initialValue: StrandOpener(localNotes: VaultLocalNoteProvider(),
@@ -80,6 +88,10 @@ struct TodayTabView: View {
     /// which view of the day a device is showing is nobody else's business, and a
     /// filter that followed the user to the Mac would be a view choice made for them.
     @State private var viewPreferences = TodayViewPreferences()
+
+    /// Which segment is showing: the same key, and so the same fact, the segmented picker in
+    /// `TodayListView` writes. Written here only by a re-tap of the tab bar item.
+    @AppStorage(TodayViewPreferences.segmentKey) private var storedSegment = TodaySegment.today.rawValue
 
     /// The note behind whichever item is open, if any.
     ///
@@ -250,6 +262,15 @@ struct TodayTabView: View {
         // for the view sort, so the shell is where the preference becomes durable.
         .task { model.isBadgeFilterOn = viewPreferences.isBadgeFilterOn }
         .onChange(of: model.isBadgeFilterOn) { _, on in viewPreferences.isBadgeFilterOn = on }
+        // A re-tap of the Today tab bar item with Strands showing: back to the day, at the
+        // top of this tab's stack. The pushed item is cleared too, so the tap cannot end on
+        // a detail left over the board. Sheets are left alone. With the day already
+        // showing the shell sends nothing, and whatever the system does on a re-tap is all
+        // that happens.
+        .onChange(of: retaps) { _, _ in
+            storedSegment = TodaySegment.today.rawValue
+            openedItem = nil
+        }
         .onChange(of: isActive) { _, active in
             guard active else { return }
             probe()
@@ -391,12 +412,13 @@ struct TodayTabView: View {
 
 /// The Today tab's half of the same rule `HealthTabView`'s conformance states: two values
 /// are the same screen when they show the same day model and agree on whether this is the
-/// selected tab, and the `onReplay` closure — fresh on every build of the shell, and never
+/// selected tab (and on the re-tap count, the one value from the tab bar this screen acts
+/// on), and the `onReplay` closure — fresh on every build of the shell, and never
 /// something this screen renders — is excluded so that a shell rebuild does not rebuild the
 /// day.
 extension TodayTabView: Equatable {
     static func == (lhs: TodayTabView, rhs: TodayTabView) -> Bool {
-        lhs.isActive == rhs.isActive && lhs.model === rhs.model
+        lhs.isActive == rhs.isActive && lhs.retaps == rhs.retaps && lhs.model === rhs.model
             && lhs.strands === rhs.strands && lhs.runs === rhs.runs
     }
 }

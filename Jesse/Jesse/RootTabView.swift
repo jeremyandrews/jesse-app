@@ -84,6 +84,12 @@ struct RootTabView: View {
     /// ordinary launch; see `ThreadLandingUITestSeam`.
     @State private var selection: Tab = ThreadLandingUITestSeam.startTab ?? RootTabView.defaultTab
 
+    /// How many times a tap on the Today tab bar item, with that tab already up and its
+    /// Strands segment showing, has asked the tab to return to the day. A counter rather
+    /// than a model object (this view holds none: see `UnreadBadgeShellTests`), and the one
+    /// thing `TodayTabView` learns about the tab bar. See `tabBarSelection`.
+    @State private var todayRetaps = 0
+
     /// Read twice below: to repaint the icon badge on the way to the background, and to
     /// settle a workout burst whose window ran out while the app was suspended.
     @Environment(\.scenePhase) private var scenePhase
@@ -214,7 +220,7 @@ struct RootTabView: View {
 
     var body: some View {
         let _ = RenderProbe.body("RootTabView")
-        TabView(selection: $selection) {
+        TabView(selection: tabBarSelection) {
             ForEach(Tab.allCases) { tab in
                 view(for: tab)
                     .tabItem { Label(tab.title, systemImage: tab.systemImage) }
@@ -359,6 +365,32 @@ struct RootTabView: View {
                          sentFor: PromptSender.annotationReview)
     }
 
+    /// **The tab bar's own binding**, which is the one place a RE-TAP is visible.
+    ///
+    /// The bar writes the tapped tab through this setter on EVERY tap, including a tap on
+    /// the tab that is already up, so a write that carries the value already selected is a
+    /// re-tap. Nothing else writes through it: `openVaultNote`, `showStrandRecord`, the Chats
+    /// landing binding handed to `ContentView` and the UI test seams all write `selection`
+    /// directly, so a programmatic selection is never mistaken for a tap, and a launch
+    /// writes nothing at all.
+    ///
+    /// The DECISION is `TodayTabRetap`'s, in the package where it is tested without a tab
+    /// bar; the shell only counts the answer and hands the count to the Today tab, which
+    /// does the switching. Before this the shell had no notion of a re-tap, so the Today
+    /// tab's segment could only change from its own picker.
+    private var tabBarSelection: Binding<Tab> {
+        Binding(
+            get: { selection },
+            set: { tapped in
+                let showing = TodayViewPreferences().segment
+                if TodayTabRetap.segment(selected: selection, tapped: tapped,
+                                         todayTab: Tab.today, showing: showing) != nil {
+                    todayRetaps += 1
+                }
+                selection = tapped
+            })
+    }
+
     /// **Show one strand's record in the Vault tab**, optionally at one section.
     ///
     /// THE TAB FIRST, then the narrowing, for `ThreadLanding`'s reason: the screen the user
@@ -477,6 +509,7 @@ struct RootTabView: View {
             TodayTabView(isActive: selection == .today, model: todayModel,
                          strands: strandsModel,
                          runs: runsModel,
+                         retaps: todayRetaps,
                          onReplay: replayNow,
                          onOpenVaultNote: openVaultNote)
                 .equatable()

@@ -824,8 +824,8 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
     // on ([`render_in_process_entry`]), so a gateway-off child never sees it, and only when
     // `[devjob] enabled` registered the server. `devjob_start` creates a Job (or a Studio run)
     // that can push a branch and open a pull request, so it is a write; `devjob_reply` and
-    // `devjob_cancel` steer a Studio run, so they are writes beside it (0.197.0); the other two
-    // only read.
+    // `devjob_cancel` steer a Studio run, so they are writes beside it (0.197.0), and so is
+    // `devjob_close` (0.200.0); the other two only read.
     McpServerRow {
         transport: Transport::InProcess,
         ..writes(
@@ -834,6 +834,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
                 crate::devjob::TOOL_START,
                 crate::devjob::TOOL_REPLY,
                 crate::devjob::TOOL_CANCEL,
+                crate::devjob::TOOL_CLOSE,
             ],
         )
     },

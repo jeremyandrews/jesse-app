@@ -14,6 +14,61 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.200.0] - 2026-11-10
+
+**A Studio run waiting on Jeremy closes by itself once its question is settled, so `needs_you`
+always means something he still has to answer.**
+
+- **Root cause:** `needs_you` was live with no exit but a reply. `cancel` refused it (and
+  `interrupted`), a further run of the same item with `again` left the earlier one as it was,
+  and neither ticking the item's Drafts line nor archiving its report reached the run record.
+  So every stale one kept counting in `runs_active` and `runs_needs_you`, refused a plain start
+  of its item (`live_run_of`) and held its worktree for the 30 days a waiting run keeps it. Seen
+  on 2026-11-09: MT5 and MT5b stayed `needs_you` after MT5c superseded them, and
+  `s-ho1c-road-ready` after its work merged and its line was ticked.
+- **Added: the status `closed`.** Terminal, not live, not counted active, not a `needs_you`.
+  `run.json` gains `closed_reason` and `closed_at` (RFC 3339), both optional and written only
+  on a closed run, so a record from before reads unchanged and an unclosed one serializes the
+  same keys as before. A closed run's worktree and artifacts follow the terminal retention
+  (`keep_days`, or as soon as its branch is merged or gone). A reply to a closed run is taken
+  exactly as a reply to a `reported` one, and opens it again.
+- **Added: three automatic closes,** each silent (no chat turn, no push) and logged as
+  `jesse-bridge: hostrun <id>: closed (<reason>)`. None ever touches a queued, running or
+  paused run.
+  - **Superseded:** a start with `again` closes every earlier `needs_you` or `interrupted` run
+    of the same strand item, `superseded by <new run id>`, under the same queue lock as the
+    create. A plain start is unchanged.
+  - **Item ticked:** each watcher pass closes a `needs_you` or `interrupted` run whose Drafts
+    line, read through the strands parser, is checked or sits under `### Done`. A note or a
+    line that can no longer be found closes nothing.
+  - **Report archived:** each watcher pass closes a `needs_you` run when every one of its Inbox
+    reports is gone and at least one is in `Inbox/archive/` under the same name. A report that
+    is simply missing closes nothing.
+- **Added: `POST /jesse/runs/:run_id/close`** with an optional `{ "reason": "..." }` (default
+  `closed by Jeremy`; one line, at most 500 bytes), paired device auth as `cancel`. Accepted
+  for `needs_you`, `interrupted` and `failed`; any other status is a 409 naming it.
+- **Added: the MCP tool `devjob_close { run_id, reason? }`,** listed with `[hostrun]` on and
+  classed `write` beside `devjob_start`, `devjob_reply` and `devjob_cancel`, so it reaches
+  exactly the turns they reach: in `DEFAULT_ALLOWED_TOOLS`, the `devjob` row's writes, Codex's
+  `enabled_tools`, the direct harness's gateway grants, the capability map and the containment
+  battery's stand-in. `devjob_list` files a closed run among the finished, and its entries gain
+  `closed_reason`.
+- **Re-recorded live:** `containment.toml` (claude-code, now against 2.1.322; gate pass, no
+  verdict moved; the two known-open write baselines unchanged) and `containment-direct.toml`.
+  The only posture change in either is the write row's `toolset_args` gaining
+  `mcp__devjob__devjob_close`; the claude-code record's observed `root_tools` also list the
+  already granted `imcp` `messages_fetch` and `maps_search`, which the server listed this time.
+  Both records were taken by a build stamped 0.199.0, before PD1 took that number; they
+  carry `bridge_version = "0.199.0"` for that reason, and PD1 moves no toolset they certify.
+- **Not changed:** how a round decides `needs_you`, replies, cancels, the usage limit pause,
+  every other route and the app (which decodes `closed` as an unknown status).
+- **Tests:** `again` closes an earlier `needs_you` and an earlier `interrupted` run and leaves
+  running, queued and paused ones; a ticked or Done line closes and an unticked, missing or
+  vanished one does not; an archived report closes and a deleted or merely copied one does not;
+  the close route and tool accept and refuse by status; a closed run is not live, not active,
+  no longer blocks a plain start and follows the terminal retention; a record from before
+  reads and a closed record round trips.
+
 ## [PD1: pushes reach every paired device; run reports open after the Inbox is processed] - Bridge 0.199.0, App 1.0 (203) - 2026-11-10
 
 **Every push the bridge sends now goes to every paired device, and a Studio run's report opens

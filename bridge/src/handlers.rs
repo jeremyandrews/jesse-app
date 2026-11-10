@@ -2981,6 +2981,10 @@ pub fn app(state: AppState) -> Router {
             "/jesse/runs/:run_id/cancel",
             post(crate::hostrun::jesse_run_cancel),
         )
+        .route(
+            "/jesse/runs/:run_id/close",
+            post(crate::hostrun::jesse_run_close),
+        )
         .route("/jesse/strands", get(crate::strands::jesse_strands))
         .route("/jesse/strands/:slug", get(crate::strands::jesse_strand))
         .route(

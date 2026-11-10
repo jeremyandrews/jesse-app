@@ -14,6 +14,37 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [PE1: containment-probe loads the bridge's plist environment] - Bridge 0.200.1 - 2026-11-10
+
+**`containment-probe` now always runs with the environment the live bridge runs with, with
+nothing sourced by hand first.**
+
+### Root cause
+
+- **The battery used whatever environment its shell had.** The bridge's real environment, PATH
+  included, lives in its launchd plist's `EnvironmentVariables`, which an interactive shell
+  does not have. The plist PATH leads with the nvm node bin and `~/.local/bin`, where `qmd`,
+  `node`, `npx` and `uvx` live; without them qmd, github, google, google-perseido, imcp,
+  proxmox, routeros, unifi and whatsapp started with zero tools, the battery still finished,
+  and `--write` recorded a posture the bridge never runs. The only safeguard was a hand step
+  exporting the plist's variables first.
+
+### Changed
+
+- **`containment-probe` loads the bridge's LaunchAgent plist by default**
+  (`~/Library/LaunchAgents/<bridge label>.plist`, the label resolved as the battery's signing
+  resolves it, else the one `*.jesse-bridge.plist` there), before any harness or server
+  starts. The plist wins for every variable; PATH is the plist's PATH followed by any shell
+  entries it lacks. `--env-plist <path>` overrides the
+  path, `--no-env-plist` turns it off (CI and tests). A missing or unreadable plist makes
+  `--write` refuse to start; a run without `--write` warns and goes on. One line names the
+  plist, the number of variables taken and PATH's first three entries, and no other value.
+- **A pre-flight** starts every MCP server the chosen rows load, through the gateway's own
+  start path with no ledger and no socket, and stops the run before any model turn, naming
+  every server that registered zero tools or did not start.
+- **`load_plist_env` moved** from `jesse-transcribe` to the shared `plistenv` module;
+  `jesse-transcribe --env-plist` behaves as before (it fills only unset variables).
+- `bridge/README.md` and `SECURITY.md` give the one command for a full battery.
 ## [bridge 0.200.0] - 2026-11-10
 
 **A Studio run waiting on Jeremy closes by itself once its question is settled, so `needs_you`

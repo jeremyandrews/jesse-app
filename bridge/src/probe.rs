@@ -3281,6 +3281,137 @@ pub async fn run_battery(base: &Config, opts: &BatteryOptions) -> Result<RunOutc
     })
 }
 
+// ---- The pre-flight: every server the battery will exercise has tools -------
+
+/// Every MCP server the rows load, once each, in first-seen order.
+pub fn preflight_servers(rows: &[ContainmentRow]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for row in rows {
+        for name in row.mcp.server_names() {
+            if !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Start each of `servers` once, exactly as the gateway starts an upstream (its row's
+/// command and environment column, read from THIS process's environment, or its URL and
+/// credential), and count the tools it advertises before any grant narrows them.
+///
+/// Every server goes through the gateway's start path, whether or not the deployment has the
+/// gateway on and wherever the server is placed: the question is whether, in this
+/// environment, it starts at all, and a server that cannot find `npx` on PATH or its token
+/// in the environment fails the same way from either side. An `in_process` server nothing
+/// registered is skipped: no child would be offered it.
+///
+/// Nothing is written: the turn binds no socket, writes no token file, and its gateway has
+/// no activity ledger. Dropping the turn kills every upstream it started.
+pub async fn count_server_tools(
+    cfg: &Config,
+    servers: &[String],
+) -> Vec<(String, Result<usize, String>)> {
+    use crate::gateway::{resolve_row, Admitted, Gateway, TurnSpec};
+    use crate::mcpservers::Transport;
+
+    let mut settings = cfg.gateway.clone();
+    settings.child_url = None;
+    settings.socket_dir = None;
+    let mut pcfg = cfg.clone();
+    pcfg.gateway = settings.clone();
+    let scratch = std::env::temp_dir().join(format!("jesse-preflight-{}", std::process::id()));
+    let gw = Arc::new(Gateway::from_config_without_ledger(&pcfg, &scratch));
+
+    let mut out: Vec<(String, Result<usize, String>)> = Vec::new();
+    let mut admitted = Vec::new();
+    for name in servers {
+        match resolve_row(name, &settings) {
+            Ok(r)
+                if r.transport == Transport::InProcess
+                    && !settings.in_process.0.contains_key(name) => {}
+            Ok(r) => admitted.push(Admitted {
+                server: r,
+                tools: Vec::new(),
+            }),
+            Err(e) => out.push((name.clone(), Err(e))),
+        }
+    }
+    let names: Vec<String> = admitted.iter().map(|a| a.server.name.clone()).collect();
+    let guard = match gw
+        .open_turn(TurnSpec {
+            job_id: format!("preflight-{}", std::process::id()),
+            capability: Capability::Write,
+            servers: admitted,
+            harness_env_value: None,
+            deadline: Duration::from_secs(300),
+            bind_sockets: false,
+            env_overlay: std::collections::BTreeMap::new(),
+        })
+        .await
+    {
+        Ok(g) => g,
+        Err(e) => {
+            out.extend(names.into_iter().map(|n| (n, Err(e.clone()))));
+            return out;
+        }
+    };
+    let mut set = tokio::task::JoinSet::new();
+    for (i, name) in names.iter().enumerate() {
+        let session = guard.session().clone();
+        let name = name.clone();
+        set.spawn(async move { (i, session.advertised(&name).await.map(|t| t.len())) });
+    }
+    let mut counted: Vec<(usize, Result<usize, String>)> = Vec::new();
+    while let Some(r) = set.join_next().await {
+        match r {
+            Ok(x) => counted.push(x),
+            Err(e) => return vec![("(pre-flight)".to_string(), Err(e.to_string()))],
+        }
+    }
+    drop(guard);
+    // A server that would not start is only `did not start` to the session; WHY is what the
+    // gateway recorded for this binary's run. Taken here so the verdict names the cause, and
+    // so a pre-flight failure is not reported a second time as a battery one.
+    let why = crate::gateway::take_upstream_failures();
+    counted.sort_by_key(|(i, _)| *i);
+    out.extend(counted.into_iter().map(|(i, r)| {
+        let name = names[i].clone();
+        let r = r.map_err(|e| {
+            why.iter()
+                .find(|(s, _)| *s == name)
+                .map(|(_, w)| w.clone())
+                .unwrap_or(e)
+        });
+        (name, r)
+    }));
+    out
+}
+
+/// The pre-flight's verdict on what [`count_server_tools`] found. `Err` names every server
+/// that registered zero tools or did not start, so the battery stops before a model turn is
+/// spent probing a set the child would never really have loaded.
+pub fn preflight_verdict(counts: &[(String, Result<usize, String>)]) -> Result<(), String> {
+    let bad: Vec<String> = counts
+        .iter()
+        .filter_map(|(name, r)| match r {
+            Ok(0) => Some(format!("{name} (zero tools)")),
+            Ok(_) => None,
+            Err(e) => Some(format!("{name} ({e})")),
+        })
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "pre-flight: {} MCP server(s) registered no tools, so the battery would vouch for a \
+         set the child never loaded: {}. Nothing was probed. Is the bridge's environment \
+         loaded (PATH, credentials)?",
+        bad.len(),
+        bad.join("; ")
+    ))
+}
+
 // ---- The DIRECT harness's battery -------------------------------------------
 
 /// Turn the agent crate's structural battery into this bridge's committed record.
@@ -3718,6 +3849,103 @@ fn today_utc() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- The pre-flight ----------------------------------------------------------------
+
+    /// A stand-in in-process upstream that lists `n` tools.
+    struct Lists(usize);
+
+    impl crate::gateway::InProcessServer for Lists {
+        fn tools(&self) -> Vec<serde_json::Value> {
+            (0..self.0)
+                .map(|i| serde_json::json!({"name": format!("t{i}"), "inputSchema": {}}))
+                .collect()
+        }
+        fn call<'a>(
+            &'a self,
+            _tool: &'a str,
+            _arguments: serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+        > {
+            Box::pin(async { Err("the pre-flight never calls a tool".to_string()) })
+        }
+    }
+
+    fn cfg_with_inproc(tools: Option<usize>) -> Config {
+        let mut cfg = crate::testutil::test_config();
+        if let Some(n) = tools {
+            cfg.gateway
+                .in_process
+                .0
+                .insert("gwprobe-inproc".to_string(), Arc::new(Lists(n)));
+        }
+        cfg
+    }
+
+    #[tokio::test]
+    async fn the_preflight_stops_on_a_server_that_registers_zero_tools() {
+        let cfg = cfg_with_inproc(Some(0));
+        let counts = count_server_tools(&cfg, &["gwprobe-inproc".to_string()]).await;
+        assert_eq!(counts, vec![("gwprobe-inproc".to_string(), Ok(0))]);
+        let e = preflight_verdict(&counts).expect_err("zero tools must stop the run");
+        assert!(e.contains("gwprobe-inproc (zero tools)"), "{e}");
+        assert!(e.contains("Nothing was probed"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn the_preflight_passes_a_server_that_registers_tools() {
+        let cfg = cfg_with_inproc(Some(2));
+        let counts = count_server_tools(&cfg, &["gwprobe-inproc".to_string()]).await;
+        assert_eq!(counts, vec![("gwprobe-inproc".to_string(), Ok(2))]);
+        assert_eq!(preflight_verdict(&counts), Ok(()));
+    }
+
+    /// A server that does not start at all is named as well, with its reason, beside one that
+    /// came up fine.
+    #[tokio::test]
+    async fn the_preflight_names_a_server_that_did_not_start() {
+        let cfg = cfg_with_inproc(Some(1));
+        let counts = count_server_tools(
+            &cfg,
+            &["gwprobe-inproc".to_string(), "gwprobe-http".to_string()],
+        )
+        .await;
+        assert_eq!(counts[0], ("gwprobe-inproc".to_string(), Ok(1)));
+        assert_eq!(counts[1].0, "gwprobe-http");
+        assert!(counts[1].1.is_err(), "{counts:?}");
+        let e = preflight_verdict(&counts).expect_err("a dead server must stop the run");
+        assert!(e.contains("gwprobe-http ("), "{e}");
+        assert!(!e.contains("gwprobe-inproc"), "{e}");
+    }
+
+    /// An `in_process` server nothing registered is offered to no child, so it is not counted.
+    #[tokio::test]
+    async fn the_preflight_skips_an_unregistered_in_process_server() {
+        let cfg = cfg_with_inproc(None);
+        let counts = count_server_tools(&cfg, &["gwprobe-inproc".to_string()]).await;
+        assert!(counts.is_empty(), "{counts:?}");
+        assert_eq!(preflight_verdict(&counts), Ok(()));
+    }
+
+    #[test]
+    fn the_preflight_counts_each_server_once_across_rows() {
+        let rows = [
+            ContainmentRow {
+                capability: Capability::Read,
+                mcp: McpSet::Qmd,
+            },
+            ContainmentRow {
+                capability: Capability::Write,
+                mcp: McpSet::QmdSlack,
+            },
+            ContainmentRow {
+                capability: Capability::Basic,
+                mcp: McpSet::None,
+            },
+        ];
+        assert_eq!(preflight_servers(&rows), vec!["qmd", "slack"]);
+    }
 
     fn probe(id: &str) -> &'static Probe {
         PROBES

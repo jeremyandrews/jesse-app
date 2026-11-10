@@ -136,6 +136,9 @@ mod patterns;
 mod persona;
 mod places;
 mod places_google;
+/// The bridge's launch environment, read from its launchd plist (`containment-probe`,
+/// `jesse-transcribe`). Addressed through the module, `crate::plistenv::…`.
+pub mod plistenv;
 // The LIVE battery only (`containment-probe` feature): probe prompts, the runner and its
 // loopback listener. The record it produces, and the rules for reading one, are in
 // `containment` and are always compiled — the startup gate reads them.

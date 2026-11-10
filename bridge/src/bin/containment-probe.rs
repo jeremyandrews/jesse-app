@@ -15,6 +15,14 @@
 //! cargo run --bin containment-probe -- --sign  # sign this build and exit (every run signs first)
 //! ```
 //!
+//! Every form but `--show` first takes the LIVE BRIDGE'S ENVIRONMENT from its launchd plist
+//! (`~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`, `EnvironmentVariables`): the plist
+//! wins for every variable, and PATH is the plist's followed by any shell entries it lacks.
+//! `--env-plist <path>` names another plist; `--no-env-plist` keeps the shell's environment
+//! (CI and tests). `--write` refuses to start when the plist cannot be read. Before any model
+//! turn, a pre-flight starts every MCP server the chosen rows load and stops the run, naming
+//! them, if any registers zero tools. See [`jesse_bridge::plistenv`].
+//!
 //! The default form is the gate: it fails (exit 1) when a probe drifts from the committed
 //! record in EITHER direction, when a hard gate is not met, or when a probe could not be
 //! concluded from. `--write` is the deliberate human act of re-recording a drift on purpose —
@@ -27,9 +35,10 @@
 //! that is proven rather than assumed.
 
 use jesse_bridge::{
-    compare_results, export_mcp_server_env, parse_results, render_results, run_battery,
+    compare_results, export_mcp_server_env, parse_results, plistenv, render_results, run_battery,
     BatteryOptions, Config, ContainmentRow, McpSet,
 };
+use std::path::PathBuf;
 
 /// The committed record. Resolved against the crate root at COMPILE time so the binary always
 /// means this repo's file no matter where it is run from — and so the next step (embedding the
@@ -72,22 +81,103 @@ fn usage() -> ! {
          \x20 --timeout <secs>   per-probe timeout (default 300)\n\
          \x20 --keep             keep the scratch trees for inspection\n\
          \x20 --harness <id>     which harness to probe (claude-code | codex | direct)\n\
-         \x20 --model <id>       probe AS this registry model (default: the ambient one)\n"
+         \x20 --model <id>       probe AS this registry model (default: the ambient one)\n\
+         \x20 --env-plist <path> take the environment from this launchd plist (default: the\n\
+         \x20                    live bridge's own LaunchAgent plist)\n\
+         \x20 --no-env-plist     keep this shell's environment as is (CI and tests)\n"
     );
     std::process::exit(2)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // THE BRIDGE'S OWN ENVIRONMENT, FROM ITS PLIST, BEFORE ANYTHING ELSE RUNS. The live bridge
+    // runs with its launchd plist's `EnvironmentVariables`, PATH included; an interactive
+    // shell has none of it. Without the plist's PATH (the nvm node bin, `~/.local/bin`) qmd,
+    // github, google, google-perseido, imcp, proxmox, routeros, unifi and whatsapp cannot find
+    // `qmd`, `node`, `npx` or `uvx`, start with ZERO tools, and the battery still finishes and
+    // writes a record vouching for a posture the bridge never runs. Loaded here, in a plain
+    // `main` before the runtime exists, so no other thread can be reading the environment.
+    let source = match take_env_source(&mut args) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("containment-probe: {e}");
+            usage()
+        }
+    };
+    let write = args.iter().any(|a| a == "--write");
+    // `--show` reads a committed file and starts nothing, so it needs no environment.
+    if !args.iter().any(|a| a == "--show") {
+        let plan =
+            plistenv::bridge_env_plan(&source, plistenv::read_plist_env, |k| std::env::var(k).ok());
+        match plan.verdict(write) {
+            Ok(warning) => {
+                if let Some(w) = warning {
+                    eprintln!("containment-probe: {w}");
+                }
+            }
+            Err(refusal) => {
+                eprintln!("containment-probe: {refusal}");
+                std::process::exit(2);
+            }
+        }
+        plan.apply();
+        eprintln!("containment-probe: {}", plan.summary());
+    }
+
     // THE BATTERY MUST SPAWN CHILDREN IN THE SAME ENVIRONMENT THE BRIDGE DOES, or it records
     // a posture that was never actually probed. Without this the MCP servers that read a
     // credential — Google, GitHub, Fastmail, UniFi — start, find nothing, and register ZERO
     // tools; the run then looks clean while proving nothing about the servers it names, and
     // the resulting record would vouch for a set the child never really loaded. Same call,
-    // same reason, as `main.rs`.
+    // same reason, as `main.rs`. AFTER the plist, whose `JESSE_*` names it maps.
     export_mcp_server_env();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a tokio runtime");
+    rt.block_on(run(args));
+}
+
+/// `--env-plist <path>` and `--no-env-plist`, removed from `args`. Default: the live bridge's
+/// plist under `$HOME`.
+fn take_env_source(args: &mut Vec<String>) -> Result<plistenv::EnvSource, String> {
+    let mut explicit: Option<PathBuf> = None;
+    let mut off = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--no-env-plist" => {
+                off = true;
+                args.remove(i);
+            }
+            "--env-plist" => {
+                args.remove(i);
+                if i >= args.len() {
+                    return Err("--env-plist needs a path".into());
+                }
+                explicit = Some(PathBuf::from(args.remove(i)));
+            }
+            _ => i += 1,
+        }
+    }
+    match (off, explicit) {
+        (true, Some(_)) => Err("--env-plist and --no-env-plist contradict each other".into()),
+        (true, None) => Ok(plistenv::EnvSource::Off),
+        (false, Some(p)) => Ok(plistenv::EnvSource::Plist(p)),
+        (false, None) => plistenv::default_bridge_plist()
+            .map(plistenv::EnvSource::Plist)
+            .ok_or_else(|| {
+                "HOME is unset, so the bridge's plist cannot be found; name it with \
+                 --env-plist <path>, or pass --no-env-plist"
+                    .to_string()
+            }),
+    }
+}
+
+async fn run(args: Vec<String>) {
     // `--rows`, if it was given. APPLIED AFTER PARSING, not during: the rows depend on
     // `--harness`, and a flag must not mean different things depending on which side of
     // another flag it was written.
@@ -332,6 +422,28 @@ async fn main() {
             .map(|m| m.id.as_str())
             .unwrap_or("the ambient default"),
     );
+
+    // THE PRE-FLIGHT: every server these rows load must come up with at least one tool, in
+    // this environment, before a single model turn is spent. A server that cannot find its
+    // binary or its credential registers zero tools, and a battery run over it proves nothing
+    // about the set it names.
+    let servers = jesse_bridge::preflight_servers(&opts.rows);
+    if !servers.is_empty() {
+        let counts = jesse_bridge::count_server_tools(&cfg, &servers).await;
+        if let Err(e) = jesse_bridge::preflight_verdict(&counts) {
+            eprintln!("containment-probe: {e}");
+            std::process::exit(1);
+        }
+        let listed: Vec<String> = counts
+            .iter()
+            .map(|(n, r)| format!("{n} {}", r.as_ref().map(|c| *c).unwrap_or(0)))
+            .collect();
+        eprintln!(
+            "containment-probe: pre-flight passed, {} MCP server(s) registered tools: {}",
+            counts.len(),
+            listed.join(", ")
+        );
+    }
 
     let outcome = match run_battery(&cfg, &opts).await {
         Ok(o) => o,

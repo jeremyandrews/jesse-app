@@ -3952,6 +3952,28 @@ cargo test $F --test containment -- --ignored --nocapture   # the live gate
 cargo build --release                                   # the serving binary, with none of it
 ```
 
+**It runs in the bridge's own environment, with nothing sourced first (0.199.1).** Every run
+but `--show` reads the live bridge's `~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`
+`EnvironmentVariables` before any harness or server starts, so a full battery from a plain
+shell, in `bridge/`, is one command:
+
+```bash
+cargo run --features containment-probe --bin containment-probe -- --write
+```
+
+The plist wins for every variable. PATH is the plist's PATH (the nvm node bin and
+`~/.local/bin`, where `qmd`, `node`, `npx` and `uvx` live) followed by any shell entries it
+lacks, so `~/.cargo/bin` still resolves. `--env-plist <path>` reads another plist;
+`--no-env-plist` keeps the shell's environment as is (CI and tests). If the plist is missing or
+unreadable, `--write` refuses to start and a run without it warns and goes on. One line names
+the plist, how many variables it took and PATH's first three entries; no other value is
+printed. Then a **pre-flight** starts every MCP server the chosen rows load, the way the gateway
+starts it, and stops the run before any model turn, naming them, if any registers zero tools.
+Before this, the battery used whatever environment its shell had: without the plist's PATH,
+qmd, github, google, google-perseido, imcp, proxmox, routeros, unifi and whatsapp started with
+zero tools, the run still finished, and `--write` recorded a posture the bridge never runs.
+No hand step exporting the plist's variables is needed, or wanted.
+
 **The battery signs itself (0.196.2).** macOS keys Local Network grants to a binary's code
 identity, and the linker gives every build a fresh ad hoc one, so each rebuild of
 `containment-probe` used to be a new app to the OS: its first connection to a LAN host failed

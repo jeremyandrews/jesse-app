@@ -3363,6 +3363,17 @@ cargo run --bin containment-probe -- --write # re-run and RE-RECORD (a deliberat
 cargo run --bin containment-probe -- --show  # print the record, run nothing
 ```
 
+(All three need `--features containment-probe`, run from `bridge/`.) **The battery takes the
+bridge's environment itself.** Every run but `--show` loads the live bridge's launchd plist
+`EnvironmentVariables` (`~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`; `--env-plist
+<path>` for another, `--no-env-plist` for none) before anything starts: the plist wins for every
+variable, and PATH is the plist's followed by any shell entries it lacks. A `--write` whose
+plist cannot be read refuses to start, and a pre-flight stops any run, before a model turn, if
+a server the rows load registers zero tools. Nothing is sourced by hand first. Before 0.199.1 a
+battery run from an interactive shell started nine servers (those that need `node`, `npx`,
+`uvx` or `qmd` from the plist's PATH) with zero tools and could still record a passing gate
+for them.
+
 **The probe world mirrors the real vault's project settings.** The child's cwd is a
 disposable stand-in vault, so Claude Code performs project-scope settings discovery against
 *that* directory — which means a battery whose scratch tree has no `.claude/` is structurally

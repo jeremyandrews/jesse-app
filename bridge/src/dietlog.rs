@@ -720,6 +720,10 @@ pub fn canonical_header(file_name: &str) -> Option<&'static str> {
         "food-log.csv" => Some(food_log_header()),
         "exercise-log.csv" => Some(EXERCISE_LOG_HEADER),
         "weight-log.csv" => Some(WEIGHT_LOG_HEADER),
+        // The workout detail sidecars (`workoutdetail`): written by the bridge from the
+        // phone's structured records, never by the diet pipeline.
+        WORKOUT_DETAIL_LOG => Some(WORKOUT_DETAIL_HEADER),
+        WORKOUT_SPLITS_LOG => Some(WORKOUT_SPLITS_HEADER),
         _ => None,
     }
 }

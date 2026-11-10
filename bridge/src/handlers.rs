@@ -184,6 +184,14 @@ pub struct JesseRequest {
     /// cannot claim to be a schedule or a strand tick.
     #[serde(skip)]
     origin: Option<String>,
+    // The workouts the attached health block describes, as STRUCTURED DATA (the app's
+    // `WorkoutRecord`). DATA, NEVER PROMPT TEXT: it is read by `workoutdetail` alone, which
+    // writes it into `diet-logs/workout-detail.csv` and `workout-splits.csv` before the
+    // model runs, and nothing builds a prompt from it. Kept as a raw `Value` so a malformed
+    // one cannot fail the whole request: it is validated on its own, rejected with a logged
+    // reason, and the turn runs. Absent (every older app build) changes nothing.
+    #[serde(default)]
+    workout_records: Option<Value>,
 }
 
 impl JesseRequest {
@@ -256,6 +264,7 @@ impl JesseRequest {
             request_id: None,
             sent_for: None,
             origin: None,
+            workout_records: None,
         }
     }
 
@@ -1302,6 +1311,9 @@ pub async fn start_turn(
     // sending one to a second model would spend the most sensitive field on a prompt
     // that cannot use it.
     let health_context = req.health_context.clone();
+    // The structured workout records, validated now (a rejection is logged and the turn
+    // runs without them) and written inside the task before the model starts.
+    let workout_records = turn_workout_records(req.workout_records.as_ref());
     // Push machinery for the completion notification (no-ops when push is off).
     let apns = st.apns.clone();
     let devices = st.devices.clone();
@@ -1452,6 +1464,10 @@ pub async fn start_turn(
         // Read from the model's level, so a read-level turn never touches the broker at all
         // and never pays for a lock it cannot need.
         let write_lock = build_write_lock_child(&cfg, &hook_helper, &active, &jid, &cid);
+        // THE WORKOUT LEDGER, before the model runs: the phone's structured records upserted
+        // into the two sidecar CSVs under this turn's own write locks (per-file, then git,
+        // the order above). Best-effort: a failure is logged and the turn goes on.
+        ingest_turn_workout_records(Path::new(&cfg.vault), &broker, &jid, &workout_records).await;
 
         // Turn wall clock starts here (after the permit — queued time doesn't count).
         let turn_start = Instant::now();
@@ -2934,6 +2950,11 @@ pub fn app(state: AppState) -> Router {
         // Health measured into `diet-logs/vitals-log.csv`, one row per date, replaced in
         // place on a resend. Never touches the diet CSVs. See `vitals`.
         .route("/jesse/diet/vitals", post(jesse_diet_vitals))
+        // THE WORKOUT DETAIL LEDGER's backfill: pages of at most 50 structured workout
+        // records upserted into `diet-logs/workout-detail.csv` and `workout-splits.csv`
+        // exactly as a turn's `workout_records` are. Starts no model turn. See
+        // `workoutdetail`.
+        .route("/jesse/diet/workouts", post(jesse_diet_workouts))
         // THE HEALTH ARCHIVE's one writer: batches of HealthKit samples upserted into Postgres
         // by UUID in one transaction, `200` only after commit. Reads its own body under its
         // own 16 MiB cap (a route of 100000 points), after auth. `503 not_configured` without
@@ -3081,6 +3102,23 @@ mod tests {
 
     fn wire(json: &str) -> JesseRequest {
         serde_json::from_str(json).expect("a valid request body")
+    }
+
+    /// `workout_records` is optional data: absent on an older build, and a malformed value
+    /// never fails the body (it is validated on its own and the turn runs).
+    #[test]
+    fn workout_records_are_optional_and_never_fail_the_body() {
+        let old = wire(r#"{"mode":"ask","text":"hi"}"#);
+        assert!(old.workout_records.is_none());
+        assert!(turn_workout_records(old.workout_records.as_ref()).is_empty());
+        let bad = wire(r#"{"mode":"ask","text":"hi","workout_records":"nonsense"}"#);
+        assert!(turn_workout_records(bad.workout_records.as_ref()).is_empty());
+        let good = wire(
+            r#"{"mode":"ask","text":"log my run","workout_records":[{"schema_version":1,
+            "workout_uuid":"6F1C2A4E-0000-4000-8000-000000000001",
+            "start":"2026-10-07T07:12:03+02:00","activity":"Run","duration_s":2894}]}"#,
+        );
+        assert_eq!(turn_workout_records(good.workout_records.as_ref()).len(), 1);
     }
 
     fn source_of(req: &JesseRequest) -> String {

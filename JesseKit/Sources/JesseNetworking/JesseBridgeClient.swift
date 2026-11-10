@@ -875,7 +875,8 @@ public struct JesseBridgeClient: BridgeClientProtocol {
                                    requestId: String? = nil,
                                    model: String? = nil,
                                    effort: String? = nil,
-                                   sentFor: String? = nil) -> JesseRequest {
+                                   sentFor: String? = nil,
+                                   workoutRecords: [WorkoutRecord]? = nil) -> JesseRequest {
         func nonBlank(_ s: String?) -> String? {
             guard let s, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return s
@@ -921,6 +922,8 @@ public struct JesseBridgeClient: BridgeClientProtocol {
             effort: nonBlank(effort))
         // Who sent this turn when the owner did not type it; blank collapses to nil (typed).
         request.sentFor = nonBlank(sentFor)
+        // Structured workout records ride only with a health block; empty drops the key.
+        request.workoutRecords = (workoutRecords?.isEmpty ?? true) ? nil : workoutRecords
         return request
     }
 

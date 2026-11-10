@@ -1356,6 +1356,32 @@ one is a failed HealthKit read, and writing it would blank a measured night). A 
 header is not the ledger's is never rewritten (`500`). Writes are atomic and serialized
 in-process. The diet CSVs are never touched.
 
+### Workout detail ledger (`workout_records` on `POST /jesse`, and `POST /jesse/diet/workouts`)
+
+The phone sends each workout its health block describes as a structured record
+(`workout_records`, a JSON array beside `health_context`; data, never prompt text). Before
+the model runs, the bridge upserts them into `$JESSE_VAULT/diet-logs/workout-detail.csv`
+(one row per workout, keyed by `Workout_UUID`, one column per figure; header
+`WORKOUT_DETAIL_HEADER` in `src/workoutdetail.rs`) and `workout-splits.csv`
+(`Workout_UUID,Kind,Index,Distance_m,Duration_s`). `Date` is the diet day (the start in
+the record's zone minus four hours) and joins to `exercise-log.csv` with `Start_Time`. A
+known workout's row is rewritten only when a figure changed, and a blank never erases a
+value; a request that changes nothing leaves both files byte-identical. A malformed or
+oversized `workout_records` is logged and ignored; the turn runs.
+
+The backfill posts the same records in pages of at most 50, starting no model turn:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/jesse/diet/workouts \
+  -H "Authorization: Bearer $JESSE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"records":[{"schema_version":1,"workout_uuid":"6F1C2A4E-0000-4000-8000-000000000001",
+       "start":"2026-10-07T07:12:03+02:00","time_zone":"Europe/Rome","activity":"Run",
+       "duration_s":2894,"distance_m":7500,"avg_hr_bpm":150}]}'
+# {"status":"ok","written":1,"unchanged":0,"added":1,"replaced":0,"splits_written":0}
+```
+
+`400` and nothing written for a page that does not validate. The diet CSVs are never touched.
+
 ### Patterns (`patterns` on the live snapshot)
 
 The live `GET /jesse/diet` response (not a `date=` one) carries `patterns`, computed once

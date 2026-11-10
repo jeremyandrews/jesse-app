@@ -1,4 +1,5 @@
 import Foundation
+import JesseNetworking
 
 // Health context — the pure, Foundation-only core of "attach my recent Apple
 // Health to every turn." Two labeled subsections in one block: a DAILY SUMMARY
@@ -569,6 +570,25 @@ nonisolated enum HealthContextFormatter {
                       workouts: [WorkoutSummary],
                       now: Date,
                       timeZone: TimeZone = .current) -> String? {
+        rendered(daily: daily, workouts: workouts, now: now, timeZone: timeZone).block
+    }
+
+    /// The block for a gathered snapshot plus the workouts whose lines it carries, in
+    /// line order — the exact set the turn's `workout_records` describe. Locked: none.
+    static func rendered(snapshot: HealthSnapshot, now: Date,
+                         timeZone: TimeZone = .current)
+        -> (block: String?, workouts: [WorkoutSummary]) {
+        guard !snapshot.protectedDataUnavailable else { return (lockedLine, []) }
+        return rendered(daily: snapshot.daily, workouts: snapshot.workouts,
+                        now: now, timeZone: timeZone)
+    }
+
+    /// `block(daily:workouts:now:timeZone:)` plus the workouts whose lines made it in.
+    static func rendered(daily: DailySummary,
+                         workouts: [WorkoutSummary],
+                         now: Date,
+                         timeZone: TimeZone = .current)
+        -> (block: String?, workouts: [WorkoutSummary]) {
         // Daily subsection (mandatory when present — never shed by the byte cap).
         let dailyLines = DailySummaryFormatter.lines(from: daily, now: now, timeZone: timeZone)
         var sections: [[String]] = []
@@ -595,6 +615,7 @@ nonisolated enum HealthContextFormatter {
 
         let headerReserve = WorkoutContextFormatter.header(count: candidates.count).utf8.count + 1
         var workoutLines: [String] = []
+        var included: [WorkoutSummary] = []
         var workoutUsed = headerReserve
         for w in candidates {
             let base = WorkoutContextFormatter.baseLine(for: w, timeZone: timeZone)
@@ -608,16 +629,17 @@ nonisolated enum HealthContextFormatter {
                 break // this and every older workout are dropped
             }
             workoutLines.append(fitted)
+            included.append(w)
             workoutUsed += cost(fitted)
         }
         if !workoutLines.isEmpty {
             sections.append([WorkoutContextFormatter.header(count: workoutLines.count)] + workoutLines)
         }
 
-        guard !sections.isEmpty else { return nil }
+        guard !sections.isEmpty else { return (nil, []) }
         // Subsections separated by a blank line; when only the workouts subsection is
         // present this is byte-identical to the pre-daily-summary block.
-        return sections.map { $0.joined(separator: "\n") }.joined(separator: "\n\n")
+        return (sections.map { $0.joined(separator: "\n") }.joined(separator: "\n\n"), included)
     }
 }
 
@@ -646,6 +668,9 @@ nonisolated enum HealthContextResolver {
     struct Resolution: Equatable, Sendable {
         var block: String?
         var locked: Bool
+        /// The workouts the block's lines describe, as structured records (sent as
+        /// `workout_records`). Empty when no block is attached.
+        var workoutRecords: [WorkoutRecord] = []
     }
 
     static func resolve(enabled: Bool,
@@ -661,10 +686,15 @@ nonisolated enum HealthContextResolver {
                            timeZone: TimeZone = .current) async -> Resolution {
         guard enabled else { return Resolution(block: nil, locked: false) }
         let snap = await provider.snapshot()
-        let block = HealthContextFormatter.block(snapshot: snap, now: now, timeZone: timeZone)
+        let rendered = HealthContextFormatter.rendered(snapshot: snap, now: now, timeZone: timeZone)
+        let attach = HealthContextPolicy.shouldAttach(enabled: enabled, block: rendered.block)
         return Resolution(
-            block: HealthContextPolicy.shouldAttach(enabled: enabled, block: block) ? block : nil,
-            locked: snap.protectedDataUnavailable)
+            block: attach ? rendered.block : nil,
+            locked: snap.protectedDataUnavailable,
+            workoutRecords: attach
+                ? WorkoutRecordBuilder.records(for: rendered.workouts, timeZone: timeZone,
+                                               capturedAt: now)
+                : [])
     }
 }
 

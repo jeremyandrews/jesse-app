@@ -2826,8 +2826,8 @@ one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 
 `[devjob] enabled = true` (off by default) adds the `devjob` server to the main set: three tools,
-`devjob_start`, `devjob_status` and `devjob_list` (five with `[hostrun]` on: `devjob_reply` and
-`devjob_cancel` steer Studio runs, below), served **inside the bridge process**
+`devjob_start`, `devjob_status` and `devjob_list` (six with `[hostrun]` on: `devjob_reply`,
+`devjob_cancel` and `devjob_close` steer Studio runs, below), served **inside the bridge process**
 (`Transport::InProcess`, `bridge/src/devjob.rs`). A main turn hands it a repository, a prompt and
 an agent; the bridge creates one ConfigMap and one Job in the cluster's `jesse-dev` namespace from
 a copy of `apps/jesse-dev/job-template.yaml` in the k3s repository, watches the run to its end
@@ -2842,7 +2842,7 @@ pushes a notification. A `kind = "devjob"` schedule entry does the same unattend
 | The container holds | the Secret `jesse-dev-agent-keys`: the three agents' API keys and **a GitHub credential (`GH_TOKEN`) that can push branches and open pull requests on any repository that credential reaches** |
 | The container does | clone the repository, run the agent and the test command, push `jesse/<slug>`, open a pull request against `main`. It never merges and never pushes to `main`; that is the entrypoint's rule, on the cluster side |
 | The bridge does | create the ConfigMap and the Job (both labelled `jesse.dev/devjob=true`), resume queued Jobs, read the pod's log, annotate the Job, delete the ConfigMap, write one vault note under the write lock |
-| Classes | `devjob_start`, `devjob_reply` and `devjob_cancel` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
+| Classes | `devjob_start`, `devjob_reply`, `devjob_cancel` and `devjob_close` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
 
 **The tool cannot choose a file path, a namespace, an image or a credential.** Its arguments are
 `repo`, `prompt`, `agent`, `model`, `branch_slug`, `test_command` and `timeout_minutes`, and any
@@ -2980,6 +2980,13 @@ default allowlist, classed `write`**, so they reach exactly the turns `devjob_st
 turns, on every harness that renders it) and no read turn. The containment battery's `devjob`
 stand-in lists all five tools, as the real server does on the Studio, and the claude-code and
 direct records were re-recorded with them: only the write rows moved, by these two tools.
+**Since 0.200.0, `POST /jesse/runs/:id/close` (paired device) and `devjob_close` join them**,
+classed and granted exactly as `devjob_cancel`; the battery's stand-in lists six tools and both
+records were re-recorded again, moving only the write rows' grants, by that one tool. A close stops
+nothing and deletes nothing: it marks a `needs_you`, `interrupted` or `failed` run `closed`. The
+watcher closes a waiting run by itself only when a further run of its item supersedes it, its
+Drafts line is ticked, or its report has moved to `Inbox/archive/`, and never a queued, running
+or paused one.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or
@@ -3369,7 +3376,7 @@ bridge's environment itself.** Every run but `--show` loads the live bridge's la
 <path>` for another, `--no-env-plist` for none) before anything starts: the plist wins for every
 variable, and PATH is the plist's followed by any shell entries it lacks. A `--write` whose
 plist cannot be read refuses to start, and a pre-flight stops any run, before a model turn, if
-a server the rows load registers zero tools. Nothing is sourced by hand first. Before 0.199.1 a
+a server the rows load registers zero tools. Nothing is sourced by hand first. Before 0.200.1 a
 battery run from an interactive shell started nine servers (those that need `node`, `npx`,
 `uvx` or `qmd` from the plist's PATH) with zero tools and could still record a passing gate
 for them.

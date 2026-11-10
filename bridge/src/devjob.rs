@@ -64,8 +64,17 @@ pub const DEVJOB_TOOLS: [&str; 3] = [TOOL_START, TOOL_STATUS, TOOL_LIST];
 pub const TOOL_REPLY: &str = "devjob_reply";
 /// Cancel a queued or running Studio run. Classed `write`.
 pub const TOOL_CANCEL: &str = "devjob_cancel";
-/// The five tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
-pub const STUDIO_TOOLS: [&str; 5] = [TOOL_START, TOOL_STATUS, TOOL_LIST, TOOL_REPLY, TOOL_CANCEL];
+/// Close a Studio run that needs you, was interrupted or failed. Classed `write`.
+pub const TOOL_CLOSE: &str = "devjob_close";
+/// The six tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
+pub const STUDIO_TOOLS: [&str; 6] = [
+    TOOL_START,
+    TOOL_STATUS,
+    TOOL_LIST,
+    TOOL_REPLY,
+    TOOL_CANCEL,
+    TOOL_CLOSE,
+];
 
 /// On every object a run creates: the selector the watcher lists by.
 pub const LABEL_DEVJOB: &str = "jesse.dev/devjob";
@@ -1520,7 +1529,8 @@ impl DevJobs {
     }
 
     /// Serve Studio runs too: `host: "studio"` on `devjob_start`, Studio runs in
-    /// `devjob_status` and `devjob_list`, and `devjob_reply` and `devjob_cancel`.
+    /// `devjob_status` and `devjob_list`, and `devjob_reply`, `devjob_cancel` and
+    /// `devjob_close`.
     pub fn attach_studio(&self, studio: Arc<crate::hostrun::HostRuns>) {
         let _ = self.studio.set(studio);
     }
@@ -2187,7 +2197,8 @@ pub fn tool_descriptors() -> Vec<Value> {
 }
 
 /// The tools once `[hostrun]` is attached: `devjob_start` gains `host`, `strand`, `item_id` and
-/// `again`, and `devjob_reply` and `devjob_cancel` join. [`tool_descriptors`] is unchanged.
+/// `again`, and `devjob_reply`, `devjob_cancel` and `devjob_close` join. [`tool_descriptors`] is
+/// unchanged.
 pub fn tool_descriptors_with_studio() -> Vec<Value> {
     let mut tools = tool_descriptors();
     if let Some(start) = tools.first_mut() {
@@ -2262,6 +2273,22 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             "properties": { "run_id": { "type": "string" } },
         },
     }));
+    tools.push(json!({
+        "name": TOOL_CLOSE,
+        "description": "Close a Studio run whose question is settled, so it no longer counts as \
+            needing Jeremy: a run that needs you, was interrupted or failed. Nothing is stopped and \
+            nothing is deleted; a reply still continues it. Queued, running and paused runs are \
+            refused (cancel those).",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id"],
+            "properties": {
+                "run_id": { "type": "string" },
+                "reason": { "type": "string", "description": "why; default \"closed by Jeremy\"" },
+            },
+        },
+    }));
     tools
 }
 
@@ -2299,6 +2326,13 @@ struct CancelArgs {
     run_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseArgs {
+    run_id: String,
+    reason: Option<String>,
+}
+
 /// One Studio run, as `devjob_status` reports it: the record, `host`, and the readable log tail.
 fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) -> Value {
     let mut v = crate::hostrun::run_json_located(r, svc.notes_root());
@@ -2323,6 +2357,7 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "finished_at": r.finished_at,
         "stalled_since": r.stalled_since,
         "resume_at": r.resume_at,
+        "closed_reason": r.closed_reason,
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
     })
@@ -2471,13 +2506,26 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Err(e) => Ok(error_result(e.message())),
                     }
                 }
+                TOOL_CLOSE => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: CloseArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    match svc.close_blocking(args.run_id.trim(), args.reason).await {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
                 other => Err(format!("devjob has no tool {other:?}")),
             }
         })
     }
 }
 
-/// The containment battery's `devjob`: the five tools, listed exactly as the real server lists
+/// The containment battery's `devjob`: the six tools, listed exactly as the real server lists
 /// them on the Studio (with `[hostrun]` attached), and every call refused. Only in a
 /// `containment-probe` build.
 #[cfg(feature = "containment-probe")]

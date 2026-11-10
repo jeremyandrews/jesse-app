@@ -1846,7 +1846,12 @@ fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
     use crate::harness::direct_gateway_mcp_names;
     use jesse_agent::tools::Level;
     let cfg = crate::testutil::test_config();
-    let names = ["devjob_start", "devjob_reply", "devjob_cancel"];
+    let names = [
+        "devjob_start",
+        "devjob_reply",
+        "devjob_cancel",
+        "devjob_close",
+    ];
     let row = crate::mcpservers::row(devjob::DEVJOB_SERVER).unwrap();
     for t in names {
         assert_eq!(
@@ -1855,7 +1860,7 @@ fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
             "{t} is classed as devjob_start is"
         );
     }
-    // Claude Code: the write grant names all three; the read grant names none.
+    // Claude Code: the write grant names all four; the read grant names none.
     let main = main_mcp_config(&cfg, &ClaudeCode);
     let set = McpSet::from_config(main).unwrap_or(McpSet::None);
     let write = row_allowed_tools(&cfg, Capability::Write, set);
@@ -2455,6 +2460,538 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
              check the app's decoding"
         );
     }
+}
+
+// ---- SETTLED RUNS CLOSE THEMSELVES (0.200.0) ---------------------------------------------
+
+/// Drive `id`'s current round to `needs_you`.
+async fn to_needs_you(r: &Rig, id: &str) {
+    finish_round(r, id, 0, Some("NEEDS YOU: which one?\n"), "");
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get(id).unwrap().status, RunStatus::NeedsYou);
+}
+
+/// Drive `id`'s current round to `interrupted` (with `auto_resume_interrupted` off).
+fn to_interrupted(r: &Rig, id: &str) {
+    r.launcher.gone(id);
+    r.svc.scan(now_ms() + 11_000);
+    assert_eq!(r.svc.get(id).unwrap().status, RunStatus::Interrupted);
+}
+
+fn again(id: &str) -> StartRequest {
+    StartRequest {
+        again: true,
+        ..item(id)
+    }
+}
+
+fn closed_reason(r: &Rig, id: &str) -> Option<String> {
+    let rec = r.svc.get(id).unwrap();
+    assert_eq!(
+        rec.status == RunStatus::Closed,
+        rec.closed_reason.is_some(),
+        "{id}: closed_reason is set exactly while closed"
+    );
+    rec.closed_reason
+}
+
+#[test]
+fn closed_is_terminal_not_live_and_serializes_as_closed() {
+    let c = RunStatus::Closed;
+    assert_eq!(c.label(), "closed");
+    assert_eq!(c.outcome(), "closed");
+    assert!(c.is_terminal() && c.is_finished() && !c.is_live() && !c.is_settleable());
+    assert_eq!(serde_json::to_value(c).unwrap(), json!("closed"));
+    assert_eq!(
+        serde_json::from_value::<RunStatus>(json!("closed")).unwrap(),
+        c
+    );
+    // Only the two waiting statuses are settled by the automatic paths.
+    for s in [
+        RunStatus::Queued,
+        RunStatus::Running,
+        RunStatus::Paused,
+        RunStatus::Reported,
+        RunStatus::Failed,
+        RunStatus::Cancelled,
+    ] {
+        assert!(!s.is_settleable(), "{s:?}");
+    }
+    assert!(RunStatus::NeedsYou.is_settleable() && RunStatus::Interrupted.is_settleable());
+}
+
+#[test]
+fn a_record_from_before_closed_still_reads_and_a_closed_one_round_trips() {
+    // Written by bridge 0.198.0: no closed_* keys.
+    let old = include_str!(
+        "../../../JesseKit/Tests/JesseNetworkingTests/Fixtures/studio-run-needs-you.json"
+    );
+    let rec: RunRecord = serde_json::from_str(old).unwrap();
+    assert_eq!(rec.status, RunStatus::NeedsYou);
+    assert_eq!((rec.closed_reason, rec.closed_at), (None, None));
+    // A record that is not closed serializes exactly the keys it did before.
+    let v = serde_json::to_value(RunRecord::default()).unwrap();
+    assert!(v.get("closed_reason").is_none() && v.get("closed_at").is_none());
+    // A closed one round trips through run.json.
+    let s = Scratch::new();
+    let st = settings(&s);
+    fake_run(&st, "GD5", RunStatus::Closed, Some(1_000), 1);
+    let dir = st.run_dir("GD5");
+    update_run(&dir, |r| {
+        r.closed_reason = Some("superseded by GD5b".into());
+        r.closed_at = Some(rfc(2_000));
+    })
+    .unwrap();
+    let back = read_run(&dir).unwrap();
+    assert_eq!(back.status, RunStatus::Closed);
+    assert_eq!(back.closed_reason.as_deref(), Some("superseded by GD5b"));
+    assert_eq!(back.closed_at, Some(rfc(2_000)));
+    let text = std::fs::read_to_string(dir.join(RUN_JSON)).unwrap();
+    assert!(text.contains("\"status\": \"closed\""), "{text}");
+    assert_eq!(serde_json::from_str::<RunRecord>(&text).unwrap(), back);
+}
+
+#[tokio::test]
+async fn again_closes_the_earlier_waiting_runs_of_the_item_and_leaves_live_ones() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    // GD5 asks a question; GD5b supersedes it.
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    let pushes = lock(&r.rec.pushes).len();
+    let turns = lock(&r.rec.turns).len();
+    assert_eq!(r.svc.start(again("GD5")).await.unwrap().run_id, "GD5b");
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some("superseded by GD5b")
+    );
+    assert!(r.svc.get("GD5").unwrap().closed_at.is_some());
+    // GD5b is interrupted; GD5c supersedes it.
+    to_interrupted(&r, "GD5b");
+    assert_eq!(r.svc.start(again("GD5")).await.unwrap().run_id, "GD5c");
+    assert_eq!(r.svc.get("GD5c").unwrap().status, RunStatus::Running);
+    assert_eq!(
+        closed_reason(&r, "GD5b").as_deref(),
+        Some("superseded by GD5c")
+    );
+    // GD5d waits for the repository behind GD5c; GD5e touches neither.
+    let d = r.svc.start(again("GD5")).await.unwrap();
+    assert_eq!((d.run_id.as_str(), d.status), ("GD5d", RunStatus::Queued));
+    r.svc.start(again("GD5")).await.unwrap();
+    assert_eq!(r.svc.get("GD5c").unwrap().status, RunStatus::Running);
+    assert_eq!(r.svc.get("GD5d").unwrap().status, RunStatus::Queued);
+    assert_eq!(closed_reason(&r, "GD5c"), None);
+    assert_eq!(closed_reason(&r, "GD5d"), None);
+    // Closing is silent: the only new turns are the start turns, and no push at all.
+    assert_eq!(lock(&r.rec.pushes).len(), pushes);
+    let new_turns: Vec<String> = lock(&r.rec.turns)[turns..].to_vec();
+    assert!(
+        new_turns.iter().all(|t| t.starts_with("Run GD5")),
+        "{new_turns:?}"
+    );
+    assert_eq!(new_turns.len(), 4);
+}
+
+#[tokio::test]
+async fn a_plain_start_does_not_supersede_and_a_paused_run_is_never_closed_by_again() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    // An interrupted run is not live, so a plain start goes ahead, and leaves it as it was.
+    r.svc.start(item("GD5")).await.unwrap();
+    to_interrupted(&r, "GD5");
+    assert_eq!(r.svc.start(item("GD5")).await.unwrap().run_id, "GD5b");
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Interrupted);
+    // GD5b pauses for the usage limit; a further start with again leaves it paused.
+    let reset_secs = now_ms() / 1000 + 2 * 3600;
+    let limit = LIMIT_FIXTURE.replace(&FIXTURE_RESET_SECS.to_string(), &reset_secs.to_string());
+    finish_round(&r, "GD5b", 1, None, &limit);
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5b").unwrap().status, RunStatus::Paused);
+    r.svc.start(again("GD5")).await.unwrap();
+    assert_eq!(r.svc.get("GD5b").unwrap().status, RunStatus::Paused);
+    assert_eq!(closed_reason(&r, "GD5b"), None);
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some("superseded by GD5c")
+    );
+}
+
+#[tokio::test]
+async fn a_closed_run_is_not_live_not_active_and_no_longer_blocks_a_start() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+    let annotated = |r: &Rig| {
+        let mut v = serde_json::to_value(&snap).unwrap();
+        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+        (
+            v["strands"][0]["runs_active"].clone(),
+            v["strands"][0]["runs_needs_you"].clone(),
+        )
+    };
+    assert_eq!(annotated(&r), (json!(1), json!(1)));
+    assert_eq!(r.svc.active_count("Gd"), 1);
+    assert!(r.svc.live_run_of("Gd", "GD5").is_some());
+    assert!(matches!(
+        r.svc.start(item("GD5")).await,
+        Err(Refusal::Live(_))
+    ));
+    let closed = r.svc.close("GD5", None).unwrap();
+    assert_eq!(closed.status, RunStatus::Closed);
+    assert_eq!(closed.closed_reason.as_deref(), Some(CLOSED_BY_JEREMY));
+    assert_eq!(annotated(&r), (json!(0), json!(0)));
+    assert_eq!(r.svc.active_count("Gd"), 0);
+    assert!(r.svc.live_run_of("Gd", "GD5").is_none());
+    let counts = &r.svc.list_json()["counts"];
+    assert_eq!(counts["needs_you"], 0);
+    // A plain start of the item goes ahead.
+    assert_eq!(r.svc.start(item("GD5")).await.unwrap().run_id, "GD5b");
+}
+
+#[tokio::test]
+async fn a_ticked_line_closes_a_waiting_run_and_an_unticked_one_does_not() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.start(item("GD10")).await.unwrap();
+    to_interrupted(&r, "GD10");
+    r.svc.start(item("GD12")).await.unwrap();
+    assert_eq!(r.svc.get("GD12").unwrap().status, RunStatus::Running);
+    let pushes = lock(&r.rec.pushes).len();
+    let turns = lock(&r.rec.turns).len();
+    // Nothing ticked: nothing closes.
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::NeedsYou);
+    // A note that can no longer be found closes nothing.
+    let note = s.notes().join("Strands/Gd.md");
+    std::fs::rename(&note, s.notes().join("Strands/Gd.md.away")).unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    // Nor does a line that is gone from the note.
+    std::fs::write(
+        &note,
+        NOTE.replace(
+            "- [ ] **GD5** Run the thing on the Studio. [[todo-list/Projects/drafts/gd5-prompt]]\n",
+            "",
+        ),
+    )
+    .unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    // GD5 ticked, GD10 moved under ### Done unchecked, GD12 (running) ticked.
+    let ticked = NOTE
+        .replace("- [ ] **GD5**", "- [x] **GD5**")
+        .replace("- [ ] **GD12**", "- [x] **GD12**")
+        .replace(
+            "- [ ] **GD10** No host. [[todo-list/Projects/drafts/gd10-prompt]]\n",
+            "",
+        )
+        + "- [ ] **GD10** No host. [[todo-list/Projects/drafts/gd10-prompt]]\n";
+    std::fs::write(&note, ticked).unwrap();
+    let parsed = parse_strand("Gd", &std::fs::read_to_string(&note).unwrap());
+    let gd10 = parsed.items.iter().find(|i| i.id == "GD10").unwrap();
+    assert_eq!((gd10.section, gd10.checked), (StrandSection::Done, false));
+    r.svc.pass(now_ms()).await;
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some(CLOSED_ITEM_TICKED)
+    );
+    assert_eq!(
+        closed_reason(&r, "GD10").as_deref(),
+        Some(CLOSED_ITEM_TICKED)
+    );
+    // Never a running run.
+    assert_eq!(r.svc.get("GD12").unwrap().status, RunStatus::Running);
+    // Silent.
+    assert_eq!(lock(&r.rec.pushes).len(), pushes);
+    assert_eq!(lock(&r.rec.turns).len(), turns);
+    // Once.
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+}
+
+#[tokio::test]
+async fn an_archived_report_closes_a_needs_you_run_and_a_deleted_one_does_not() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.start(free("other")).await.unwrap();
+    to_needs_you(&r, "s-other").await;
+    let rel = |id: &str| {
+        r.svc
+            .get(id)
+            .unwrap()
+            .round()
+            .unwrap()
+            .report_path
+            .clone()
+            .unwrap()
+    };
+    let (gd5, other) = (rel("GD5"), rel("s-other"));
+    let archive = s.notes().join(INBOX_ARCHIVE_DIR);
+    std::fs::create_dir_all(&archive).unwrap();
+    let name = |p: &str| p.rsplit('/').next().unwrap().to_string();
+    // A copy in the archive while the report is still in the Inbox: not settled.
+    std::fs::copy(s.notes().join(&gd5), archive.join(name(&gd5))).unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    // Moved: settled. Deleted: not.
+    std::fs::remove_file(s.notes().join(&gd5)).unwrap();
+    std::fs::remove_file(s.notes().join(&other)).unwrap();
+    r.svc.pass(now_ms()).await;
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some(CLOSED_REPORT_ARCHIVED)
+    );
+    assert_eq!(r.svc.get("s-other").unwrap().status, RunStatus::NeedsYou);
+    // A second round's report counts too: both have to be gone.
+    r.svc.reply_and_pump("s-other", "go on").await.unwrap();
+    to_needs_you(&r, "s-other").await;
+    let rounds: Vec<String> = r
+        .svc
+        .get("s-other")
+        .unwrap()
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.clone())
+        .collect();
+    assert_eq!(rounds.len(), 2);
+    // Round 1's is deleted; round 2's still in the Inbox.
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    std::fs::rename(s.notes().join(&rounds[1]), archive.join(name(&rounds[1]))).unwrap();
+    assert_eq!(
+        r.svc.close_settled(now_ms()),
+        vec![("s-other".to_string(), CLOSED_REPORT_ARCHIVED.to_string())]
+    );
+}
+
+#[tokio::test]
+async fn an_archived_report_does_not_close_an_interrupted_or_reported_run() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    r.svc.start(free("done")).await.unwrap();
+    finish_round(&r, "s-done", 0, Some("Merged.\n"), "");
+    r.svc.pass(now_ms()).await;
+    // An interrupted round after a reported one: its only report is round 1's.
+    r.svc.reply_and_pump("s-done", "more").await.unwrap();
+    to_interrupted(&r, "s-done");
+    let rel = r.svc.get("s-done").unwrap().rounds[0]
+        .report_path
+        .clone()
+        .unwrap();
+    let archive = s.notes().join(INBOX_ARCHIVE_DIR);
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::rename(
+        s.notes().join(&rel),
+        archive.join(rel.rsplit('/').next().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    assert_eq!(r.svc.get("s-done").unwrap().status, RunStatus::Interrupted);
+}
+
+#[tokio::test]
+async fn close_accepts_needs_you_interrupted_and_failed_and_refuses_the_rest() {
+    let s = Scratch::new();
+    let st = settings(&s);
+    let r = rig_with(&s, st.clone());
+    for (id, status) in [
+        ("n", RunStatus::NeedsYou),
+        ("i", RunStatus::Interrupted),
+        ("f", RunStatus::Failed),
+        ("q", RunStatus::Queued),
+        ("r", RunStatus::Running),
+        ("p", RunStatus::Paused),
+        ("d", RunStatus::Reported),
+        ("c", RunStatus::Cancelled),
+        ("x", RunStatus::Closed),
+    ] {
+        fake_run(&st, id, status, Some(1_000), 1);
+    }
+    let ok = r.svc.close("n", None).unwrap();
+    assert_eq!(ok.closed_reason.as_deref(), Some("closed by Jeremy"));
+    assert_eq!(
+        r.svc
+            .close("i", Some("  done by hand  "))
+            .unwrap()
+            .closed_reason
+            .as_deref(),
+        Some("done by hand")
+    );
+    assert_eq!(
+        r.svc.close("f", Some("")).unwrap().closed_reason.as_deref(),
+        Some(CLOSED_BY_JEREMY)
+    );
+    for (id, label) in [
+        ("q", "queued"),
+        ("r", "running"),
+        ("p", "paused"),
+        ("d", "reported"),
+        ("c", "cancelled"),
+        ("x", "closed"),
+    ] {
+        let e = r.svc.close(id, None).unwrap_err();
+        assert_eq!(e.status(), StatusCode::CONFLICT, "{id}");
+        assert_eq!(
+            e.message(),
+            format!("{id} is {label}; only a needs_you, interrupted or failed run can be closed")
+        );
+    }
+    // The refused ones are exactly as they were.
+    assert_eq!(r.svc.get("r").unwrap().status, RunStatus::Running);
+    assert_eq!(r.svc.get("q").unwrap().status, RunStatus::Queued);
+    assert_eq!(r.svc.get("p").unwrap().status, RunStatus::Paused);
+    assert_eq!(
+        r.svc.close("nope", None).unwrap_err().status(),
+        StatusCode::NOT_FOUND
+    );
+    let long = "x".repeat(MAX_CLOSE_REASON_BYTES + 1);
+    fake_run(&st, "n2", RunStatus::NeedsYou, Some(1_000), 1);
+    assert_eq!(
+        r.svc.close("n2", Some(&long)).unwrap_err().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        r.svc.close("n2", Some("two\nlines")).unwrap_err().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(r.svc.get("n2").unwrap().status, RunStatus::NeedsYou);
+    // The route's body: empty, or the object with only `reason`.
+    assert_eq!(CloseBody::parse(b"").unwrap().reason, None);
+    assert_eq!(CloseBody::parse(b"  \n").unwrap().reason, None);
+    assert_eq!(CloseBody::parse(b"{}").unwrap().reason, None);
+    assert_eq!(
+        CloseBody::parse(br#"{"reason":"merged"}"#)
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("merged")
+    );
+    assert!(CloseBody::parse(br#"{"why":"x"}"#).is_err());
+    assert!(CloseBody::parse(b"not json").is_err());
+}
+
+#[tokio::test]
+async fn a_reply_to_a_closed_run_is_taken_as_a_reply_to_a_reported_one() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.close("GD5", Some("settled")).unwrap();
+    let rec = r.svc.reply_and_pump("GD5", "one more thing").await.unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(rec.rounds.len(), 2);
+    assert_eq!((rec.closed_reason, rec.closed_at), (None, None));
+}
+
+#[tokio::test]
+async fn the_devjob_close_tool_closes_by_status_and_says_why_it_refuses() {
+    use crate::gateway::InProcessServer;
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let kc = s.base.join("kc.yaml");
+    std::fs::write(
+        &kc,
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\n\
+         contexts:\n- name: x\n  context:\n    cluster: c\n    user: u\ncurrent-context: x\n\
+         users:\n- name: u\n  user:\n    token: not-a-real-token\n",
+    )
+    .unwrap();
+    let dj = devjob::DevJobs::connect(devjob::DevJobSettings::from_toml(
+        Some(devjob::DevJobToml {
+            enabled: true,
+            kubeconfig: Some(kc),
+            ..devjob::DevJobToml::default()
+        }),
+        "/home/u",
+    ))
+    .await
+    .unwrap();
+    // Without the Studio the tool is not there.
+    assert!(dj
+        .call(devjob::TOOL_CLOSE, json!({ "run_id": "GD5" }))
+        .await
+        .is_err());
+    dj.attach_studio(r.svc.clone());
+    let listed = dj.tools();
+    let close = listed
+        .iter()
+        .find(|t| t["name"] == devjob::TOOL_CLOSE)
+        .expect("listed with the Studio");
+    assert_eq!(close["inputSchema"]["required"], json!(["run_id"]));
+    r.svc.start(item("GD5")).await.unwrap();
+    // Running: refused, and the run goes on.
+    let refused = dj
+        .call(devjob::TOOL_CLOSE, json!({ "run_id": "GD5" }))
+        .await
+        .unwrap();
+    assert_eq!(refused["isError"], true);
+    assert_eq!(
+        refused["content"][0]["text"],
+        "GD5 is running; only a needs_you, interrupted or failed run can be closed"
+    );
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Running);
+    to_needs_you(&r, "GD5").await;
+    let closed = dj
+        .call(
+            devjob::TOOL_CLOSE,
+            json!({ "run_id": "GD5", "reason": "merged by hand" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed["isError"], false, "{closed}");
+    let v = tool_text(&closed);
+    assert_eq!(v["status"], "closed");
+    assert_eq!(v["closed_reason"], "merged by hand");
+    // Unknown arguments are refused, as on every devjob tool.
+    let bad = dj
+        .call(devjob::TOOL_CLOSE, json!({ "run_id": "GD5", "why": "x" }))
+        .await
+        .unwrap();
+    assert_eq!(bad["isError"], true);
+    // devjob_list files it among the finished.
+    let list = tool_text(&dj.call(devjob::TOOL_LIST, json!({})).await.unwrap());
+    assert!(list["studio"]["finished"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["run_id"] == "GD5" && x["status"] == "closed"));
+    assert!(list["studio"]["active"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_closed_run_follows_the_terminal_retention() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.close("GD5", None).unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    assert!(dir.join("worktree").exists());
+    // Past keep_days (7), well short of the 30 a waiting run keeps: the worktree goes.
+    r.svc.cleanup(now_ms() + 8 * 24 * 3_600_000);
+    assert!(!dir.join("worktree").exists());
+    assert!(!dir.join("target").exists());
+    assert!(dir.join(RUN_JSON).is_file());
 }
 
 #[tokio::test]

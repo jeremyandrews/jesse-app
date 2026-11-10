@@ -3952,7 +3952,7 @@ cargo test $F --test containment -- --ignored --nocapture   # the live gate
 cargo build --release                                   # the serving binary, with none of it
 ```
 
-**It runs in the bridge's own environment, with nothing sourced first (0.199.1).** Every run
+**It runs in the bridge's own environment, with nothing sourced first (0.200.1).** Every run
 but `--show` reads the live bridge's LaunchAgent plist's `EnvironmentVariables`
 (`~/Library/LaunchAgents/<bridge label>.plist`, the label found as the battery's signing finds
 it, else the one `*.jesse-bridge.plist` there) before any harness or server starts, so a full

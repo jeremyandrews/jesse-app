@@ -4110,3 +4110,13 @@ dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only
 workflows = "stopping a queued, paused or running Studio run from chat"
 reason = "Cancels a Studio run: a queued or paused one never starts again; a running one gets SIGTERM to its process group, then SIGKILL after 30 seconds."
 note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_start (0.197.0), so it reaches exactly the turns devjob_start reaches: write turns only."
+
+[grant."mcp__devjob__devjob_close"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only by the bridge process; [devjob] enabled; [gateway] enabled"
+workflows = "closing a Studio run whose question is settled (needs you, interrupted or failed) from chat"
+reason = "Marks a Studio run closed so it no longer counts as needing Jeremy; nothing is stopped or deleted, and a reply still continues it."
+note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_start and devjob_cancel (0.199.0), so it reaches exactly the turns devjob_start reaches: write turns only."

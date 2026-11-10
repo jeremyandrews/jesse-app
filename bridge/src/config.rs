@@ -982,14 +982,16 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // Why it is a third instance and not a flag on `google` is under GOOGLE-PERSEIDO above and on
 // the row in `crate::mcpservers`. Never a wildcard.
 //
-// DEVJOB: ALL FIVE, NAMED ONE BY ONE (0.186.0; the last two 0.197.0). `devjob_start` starts a
+// DEVJOB: ALL SIX, NAMED ONE BY ONE (0.186.0; reply and cancel 0.197.0; close 0.199.0).
+// `devjob_start` starts a
 // coding agent on the cluster or the Studio that can push a branch and open a pull request on
 // any repository the credential reaches; it is classed `write` in the row, so it reaches write
 // turns only. `devjob_reply` (a new round of a Studio run) and `devjob_cancel` (stop one) act on
 // runs `devjob_start` could have started, so they are classed `write` beside it and reach exactly
-// the turns it reaches; the server lists them only with `[hostrun]` on. `devjob_status` and
-// `devjob_list` only read. The server is `in_process` and is rendered into a child's config only
-// with the gateway on and `[devjob] enabled`, so with either off these five names grant nothing.
+// the turns it reaches, and so does `devjob_close` (mark a settled one closed); the server lists
+// the three only with `[hostrun]` on. `devjob_status` and `devjob_list` only read. The server is
+// `in_process` and is rendered into a child's config only with the gateway on and `[devjob]
+// enabled`, so with either off these six names grant nothing.
 // Never a wildcard.
 //
 // KUBERNETES-CLOUD: ALL TWENTY OF TWENTY ON THE CLOUD CLUSTER, AND THE CLUSTER IS THE FENCE
@@ -1232,7 +1234,7 @@ mcp__kubernetes-cloud__resources_list,mcp__kubernetes-cloud__resources_get,\
 mcp__kubernetes-cloud__resources_create_or_update,mcp__kubernetes-cloud__resources_scale,\
 mcp__kubernetes-cloud__resources_delete,\
 mcp__devjob__devjob_start,mcp__devjob__devjob_status,mcp__devjob__devjob_list,\
-mcp__devjob__devjob_reply,mcp__devjob__devjob_cancel";
+mcp__devjob__devjob_reply,mcp__devjob__devjob_cancel,mcp__devjob__devjob_close";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.

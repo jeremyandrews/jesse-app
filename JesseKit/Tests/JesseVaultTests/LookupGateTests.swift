@@ -238,3 +238,63 @@ final class LookupGateTests: XCTestCase {
         }
     }
 }
+
+// MARK: - A question about how things are right now
+
+extension LookupGateTests {
+
+    /// 2026-11-10, ~14:56 CET, on the Mac: the bridge was restarting for a deploy, and the
+    /// device answered this with two changelog paragraphs about bridge releases months old.
+    /// No note can know whether things work minutes after a deploy. It passed because it
+    /// ends with a question mark and opens a clause with "are", and nothing refused it.
+    func testTheDeployIncidentSentenceIsRefusedAsLiveState() {
+        let verdict = LookupGate.rule(
+            "It's deployed: are things still working? And, what have we unblocked?")
+        guard case .refused(let refusal) = verdict else {
+            return XCTFail("a question about the world right now must reach the bridge")
+        }
+        XCTAssertEqual(refusal.rule, "live state")
+        XCTAssertEqual(refusal.because,
+                       "it asks how things are right now, which notes cannot know")
+    }
+
+    func testAQuestionAboutThePresentStateOfSomethingIsRefused() {
+        for question in ["Is the bridge still up?",
+                         "is Plex down right now?",
+                         "What's running on the Studio?",
+                         "Did the deploy work?",
+                         "Is CI green yet?",
+                         "is it working now?",
+                         "what is the run doing at the moment?"] {
+            guard case .refused(let refusal) = LookupGate.rule(question) else {
+                XCTFail("passed: \(question)")
+                continue
+            }
+            XCTAssertEqual(refusal.rule, "live state", question)
+        }
+    }
+
+    /// The other half: the same words in a question about the PAST, or about how to do
+    /// something, are a lookup, and so is a present question with no state in it.
+    func testAQuestionAboutTheSameWordsThatNotesCanAnswerStillPasses() {
+        for question in ["When was bridge 0.150 deployed?",
+                         "What does the deploy runbook say about signing?",
+                         "How do I check if the bridge is running?",
+                         "Is the pool outdoor?",
+                         "What is Aurora's birthday?",
+                         "What did the last run report say?"] {
+            XCTAssertEqual(LookupGate.rule(question), .passed, question)
+        }
+    }
+
+    /// "added" is an inflection of the request verb `add`, so the verb rule refuses this
+    /// sentence, before and after the live-state rule existed. What this test pins is that
+    /// the live-state rule does not fire on it: it names no now marker and no state word.
+    func testAPastQuestionAboutAVersionIsNotLiveState() {
+        let question = "Which version added the places server?"
+        XCTAssertEqual(LookupGate.rule(question),
+                       .refused(.request(LookupGate.requestVerbs.first { $0.verb == "add" }!)))
+        XCTAssertFalse(LookupGate.asksAboutLiveState(
+            question.split(whereSeparator: \.isWhitespace)))
+    }
+}

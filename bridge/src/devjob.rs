@@ -1406,27 +1406,21 @@ impl Notifier for AppNotifier {
                 eprintln!("jesse-bridge: devjob PUSH {job} — push is not configured, nothing sent");
                 return;
             };
-            let Some(token) = devices.get() else {
-                eprintln!("jesse-bridge: devjob PUSH {job} — no device registered, nothing sent");
-                return;
-            };
-            match apns
-                .push_payload(
-                    &token,
-                    build_devjob_payload(&title, &body, &job),
-                    Some(badge),
-                )
-                .await
-            {
-                PushOutcome::Sent => eprintln!("jesse-bridge: devjob PUSH {job} sent"),
-                PushOutcome::DeadToken => {
-                    devices.clear();
-                    eprintln!("jesse-bridge: devjob PUSH {job} — device token rejected, cleared");
-                }
-                PushOutcome::Failed(e) => {
-                    eprintln!("jesse-bridge: devjob PUSH {job} failed: {e} — swallowed")
-                }
-            }
+            // Every paired device, each as its own topic: one line per device, then the sum.
+            let tally = push_to_devices(
+                &apns,
+                &devices,
+                "devjob",
+                &job,
+                build_devjob_payload(&title, &body, &job),
+                Some(badge),
+            )
+            .await;
+            eprintln!(
+                "jesse-bridge: devjob PUSH {job} sent to {} of {} device(s)",
+                tally.sent,
+                tally.devices()
+            );
         })
     }
 }
@@ -2307,7 +2301,7 @@ struct CancelArgs {
 
 /// One Studio run, as `devjob_status` reports it: the record, `host`, and the readable log tail.
 fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) -> Value {
-    let mut v = crate::hostrun::run_json(r);
+    let mut v = crate::hostrun::run_json_located(r, svc.notes_root());
     v["log_tail"] = json!(svc
         .log_lines(&r.run_id, STATUS_LOG_LINES)
         .unwrap_or_default());

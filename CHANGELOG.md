@@ -14,6 +14,62 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [PD1: pushes reach every paired device; run reports open after the Inbox is processed] - Bridge 0.199.0, App 1.0 (203) - 2026-11-10
+
+**Every push the bridge sends now goes to every paired device, and a Studio run's report opens
+from the Runs screen after the Inbox has been processed.**
+
+### Root causes
+
+- **The bridge kept one APNs token.** `DeviceStore` held a single `Option<String>`, persisted
+  as `device.json` `{"token": …}`, and `POST /jesse/device` overwrote it on every
+  registration with nothing saying which device sent it. Whichever device registered last
+  got every push, and a 410 for that token cleared it for everyone. Every push path
+  (`notify_if_complete`, the Studio run notifier `AppNotifier`, the scheduler's outcome and
+  alert pushes, the transcription push, the sentinel) sent to that one token. On 2026-11-10
+  the stored token was 64 hex characters, the length of a physical iOS device token (a
+  simulator's is longer), and the Mac app had never registered: it had no push entitlement
+  and no call to `registerDevice`.
+- **Run reports were served at the path they were written to.** `run.json` records each
+  round's report as `Inbox/<date>-run-<id>.md`. Processing the Inbox moves a read report
+  to `Inbox/archive/`, but `GET /jesse/runs` and `GET /jesse/runs/:id` kept serving the
+  recorded path. The run detail's Report link then opened "doesn't exist on the Studio".
+  On the live vault this applied to MT5, MT5b, MT5c and s-ho1c-road-ready. The list itself is
+  complete: against a scratch bridge serving a copy of the live run store, `GET /jesse/runs`
+  returned all 18 runs, App 1.0 (202) decoded all 18, and the iPhone Runs list showed all 18.
+
+### Bridge 0.199.0
+
+- `DeviceStore` keeps a map of devices keyed by a device id, each with its token, platform
+  (`ios`, `macos`), APNs topic and last registration time. `device.json` is written as
+  version 2 (`{"v":2,"token":…,"devices":{…}}`). It still reads the version 1 single token
+  file, as a `legacy` entry. The top-level `token` is kept, holding the newest iPhone token,
+  so a rolled back bridge or an older sentinel still pushes to the phone.
+- `POST /jesse/device` accepts optional `device_id`, `platform` and `topic`. A body with only
+  `token`, as older app builds send, is stored under `legacy` and still pushed. When the same
+  token is re-registered under a device id, it replaces its `legacy` entry, so no device
+  is pushed twice. Each registration logs `device registered: <platform> <short id>`. The
+  token is never logged.
+- Every push path goes through one fan-out, `push_to_devices`, which sends to every stored
+  device with that device's own topic. It logs one line per device:
+  `push <kind> <id> -> <platform> <short id>: sent|dead|failed`. A 410 removes only that
+  device, and only if it still holds the token APNs rejected. The sentinel pushes every
+  device too, read only, as before.
+- A device not re-registered in 60 days is dropped, on load and on each registration.
+- `GET /jesse/runs`, `GET /jesse/runs/:id`, the reply and cancel answers and `devjob_status`
+  serve each `report_paths` entry where the note lives now: the recorded path, or the same
+  file under `archive/`. `run.json` is unchanged.
+
+### App 1.0 (203)
+
+- iOS sends `identifierForVendor`, `ios` and its bundle id with each registration. It still
+  re-registers on every launch and foreground.
+- The Mac app registers for APNs at every launch (`MacPush.swift`). It sends a device id it
+  keeps in `UserDefaults`, `macos`, and its bundle id `com.tag1.JesseMac` as the topic.
+  New `JesseMac.entitlements` carries `com.apple.developer.aps-environment` = `development`.
+- New gated UI test `StudioRunsListEveryRunUITests` (runs only with `PD1_BRIDGE` set) walks the
+  Runs list against a bridge and fails if any listed run has no row. Then it opens a report.
+
 ## [Gate simulator: a standard iPhone Pro] - 2026-11-10
 
 **The local gate ran every iPhone UI test on an iPhone Duo, and 38 of them failed on code

@@ -131,7 +131,7 @@ impl DeviceStore {
             .unwrap_or_else(|| LEGACY_DEVICE_ID.to_string());
         let n = {
             let mut g = self.devices.lock_ok();
-            g.retain(|other, d| *other == id || d.token != reg.token);
+            g.retain(|other, d| *other == id || !same_token(&d.token, &reg.token));
             g.insert(
                 id,
                 Device {
@@ -168,7 +168,7 @@ impl DeviceStore {
     pub fn remove_dead(&self, id: &str, token: &str) -> bool {
         let removed = {
             let mut g = self.devices.lock_ok();
-            if g.get(id).is_some_and(|d| d.token == token) {
+            if g.get(id).is_some_and(|d| same_token(&d.token, token)) {
                 g.remove(id);
                 true
             } else {
@@ -215,6 +215,12 @@ impl DeviceStore {
             persist_devices(path, &snapshot);
         }
     }
+}
+
+/// Whether two APNs tokens are the same, compared in constant time as every token
+/// comparison in the bridge is.
+fn same_token(a: &str, b: &str) -> bool {
+    a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
 
 /// Remove and return every device not registered within [`DEVICE_STALE_MS`] of `now_ms`.

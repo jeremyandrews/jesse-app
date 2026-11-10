@@ -165,6 +165,47 @@ public enum StrandState: String, CaseIterable, Codable, Equatable, Hashable, Sen
     public var isDormant: Bool { self == .dormant }
 }
 
+/// One checkbox line of a strand note, as `annotate_strands` serves it under `drafts`.
+///
+/// `studioRunnable` is the bridge's own answer to "would a person's start of this line with
+/// no repository be accepted", so the app never re-derives eligibility. It does NOT say
+/// whether the line already has a live run: the start route answers that with a 409, and the
+/// app checks the runs list first so it never offers a second start.
+public struct StrandDraft: Decodable, Equatable, Hashable, Identifiable, Sendable {
+    public var id: String
+    public var text: String
+    /// `queue`, `later`, `running` or `done`. A string, for `StrandFinding.code`'s reason.
+    public var section: String
+    public var checked: Bool
+    public var studioRunnable: Bool
+
+    public init(id: String, text: String = "", section: String = "queue",
+                checked: Bool = false, studioRunnable: Bool = false) {
+        self.id = id
+        self.text = text
+        self.section = section
+        self.checked = checked
+        self.studioRunnable = studioRunnable
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, text, section, checked
+        case studioRunnable = "studio_runnable"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        section = try c.decodeIfPresent(String.self, forKey: .section) ?? ""
+        checked = try c.decodeIfPresent(Bool.self, forKey: .checked) ?? false
+        studioRunnable = try c.decodeIfPresent(Bool.self, forKey: .studioRunnable) ?? false
+    }
+
+    /// An open line the strand's view lists: unchecked and not yet done.
+    public var isOpen: Bool { !checked && section != "done" }
+}
+
 /// One status note, as the bridge parsed and audited it.
 public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
     /// The file stem of `Strands/<slug>.md`, and the only way a client addresses one.
@@ -191,6 +232,14 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
     /// bridge that predates the key, and what hides the `Tree` lens rather than drawing
     /// every strand at the top level as if the vault had no tree.
     public var servesParent: Bool
+    /// Its queued, running, needs-you and paused Studio runs, by the bridge's count
+    /// (`annotate_strands`). Nil from a bridge that predates Studio runs.
+    public var runsActive: Int?
+    /// How many of those are waiting on the owner (`runs_needs_you`). Nil from an older bridge.
+    public var runsNeedsYou: Int?
+    /// Every checkbox line, each with `studio_runnable`. Nil from a bridge that predates
+    /// Studio runs, which is different from a note with no lines.
+    public var drafts: [StrandDraft]?
 
     public var id: String { slug }
 
@@ -198,7 +247,9 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
                 state: StrandState = .active, updated: String = "", repos: [String] = [],
                 now: String? = nil, waiting: StrandWaiting? = nil, next: StrandNext? = nil,
                 counts: StrandCounts = StrandCounts(), findings: [StrandFinding] = [],
-                parent: String? = nil, servesParent: Bool = true) {
+                parent: String? = nil, servesParent: Bool = true,
+                runsActive: Int? = nil, runsNeedsYou: Int? = nil,
+                drafts: [StrandDraft]? = nil) {
         self.slug = slug
         self.title = title
         self.group = group
@@ -212,11 +263,16 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
         self.findings = findings
         self.parent = parent
         self.servesParent = servesParent
+        self.runsActive = runsActive
+        self.runsNeedsYou = runsNeedsYou
+        self.drafts = drafts
     }
 
     private enum CodingKeys: String, CodingKey {
         case slug, title, group, state, updated, repos, now, waiting, next, counts, findings,
-             parent
+             parent, drafts
+        case runsActive = "runs_active"
+        case runsNeedsYou = "runs_needs_you"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -238,6 +294,9 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
         // and only the first means the bridge cannot say.
         servesParent = c.contains(.parent)
         parent = try c.decodeIfPresent(String.self, forKey: .parent)
+        runsActive = try c.decodeIfPresent(Int.self, forKey: .runsActive)
+        runsNeedsYou = try c.decodeIfPresent(Int.self, forKey: .runsNeedsYou)
+        drafts = try c.decodeIfPresent([StrandDraft].self, forKey: .drafts)
     }
 
     /// The vault path of the note itself. One function, because the list, the reader and

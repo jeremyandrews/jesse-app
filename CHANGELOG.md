@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [bridge 0.198.0] - 2026-11-09
+## [bridge 0.201.0] - 2026-11-10
 
 **Every workout figure lands in its own CSV column, written by the bridge from structured data,
 with a history backfill.** Root cause: workout figures reached the bridge only as prose inside
@@ -50,10 +50,10 @@ history beyond 48 hours carried only minutes.
   `written`, `unchanged`, `added`, `replaced`, `splits_written`. `400` for a page that does not
   validate (nothing written).
 
-## [App 1.0 (202)] - 2026-11-09
+## [App 1.0 (205)] - 2026-11-10
 
 **Workouts travel as structured records beside the feed line, and history can be backfilled.**
-Same root cause as bridge 0.198.0.
+Same root cause as bridge 0.201.0.
 
 - **Added: `WorkoutRecord`** (JesseKit, `Codable`, `Sendable`): every figure `WorkoutSummary`
   holds, units in the field names, a basis marker wherever the app computes rather than reads
@@ -77,6 +77,276 @@ Same root cause as bridge 0.198.0.
 - **Fixed: the requestable `workouts` metric header states the window requested.** It printed
   the point count as days, so a 31-day request with 62 workouts read "last 62 days";
   `MetricSeriesFormatter.lines` now takes the request's `windowDays`.
+## [UT2: the Away mode UI tests scroll to their row; an outbox test waits for its reply] - App 1.0 (204) - 2026-11-10
+
+**`testSettingsPushesAwayMode` and `testAwayModeCarriesAnAskEntry` pass on the gate's iPhone
+18 Pro (iOS 27.2) simulator, and
+`RunCoordinatorOutboxTests.testRetrySameRequestIdNoDuplicateTurnAttemptsIncrementSuccessDeletes`
+no longer fails intermittently.** On clean `main` both Away mode tests failed 3 times out of 3,
+and the outbox test failed on the first full JesseTests run tried. Both fixes are test-only;
+the app's behaviour is unchanged.
+
+### Root cause
+
+- **The Away mode row was below the fold, and the Settings `Form` creates rows lazily.** The
+  form is a collection view that creates a cell, and that cell's accessibility element, only
+  when the row comes near the screen. On an iPhone 18 Pro the Settings sheet ends partway
+  through "Bridge ops" (y 838–890 on an 874 pt screen), so "Away mode", the next row down, was
+  not in the accessibility hierarchy at all, and `waitForExistence` timed out. After one swipe
+  the row exists and is hittable, so a user can reach it and the app needed no change.
+- **The outbox retry test counted turns between the ACK and the reply.**
+  `RunCoordinator.transmit` deletes the outbox item at the 202 ACK (`ackDelete`), and only
+  then does `consume` poll `result(jobId:)` and append the reply. The test waited for the
+  delete and asserted two turns straight away. Under the load of the whole JesseTests target
+  it sometimes asserted inside that window and saw one.
+
+### Changed
+
+- **`OpsNavigationUITests.settingsRowBelowTheFold(_:_:)`** swipes the Settings form until the
+  row exists and is hittable, as a user would. It swipes the collection view that holds
+  "Bridge ops", not the Chats list under the sheet. Both Away mode tests use it. No timeout,
+  skip or assertion changed. "Bridge ops" is in the hierarchy on first render and its tests
+  already passed, so they are unchanged. No other UI test opens Settings.
+- **The outbox retry test holds the turn in that window, asserts it, then releases it.** The
+  fake client's `result(jobId:)` can be held (`holdsResult`, `releaseResult()`). The test
+  asserts one turn once the item is deleted, releases the result, waits for the reply and
+  asserts two turns and the reply's text. The outcome no longer depends on scheduling.
+
+## [PE1: containment-probe loads the bridge's plist environment] - Bridge 0.200.1 - 2026-11-10
+
+**`containment-probe` now always runs with the environment the live bridge runs with, with
+nothing sourced by hand first.**
+
+### Root cause
+
+- **The battery used whatever environment its shell had.** The bridge's real environment, PATH
+  included, lives in its launchd plist's `EnvironmentVariables`, which an interactive shell
+  does not have. The plist PATH leads with the nvm node bin and `~/.local/bin`, where `qmd`,
+  `node`, `npx` and `uvx` live; without them qmd, github, google, google-perseido, imcp,
+  proxmox, routeros, unifi and whatsapp started with zero tools, the battery still finished,
+  and `--write` recorded a posture the bridge never runs. The only safeguard was a hand step
+  exporting the plist's variables first.
+
+### Changed
+
+- **`containment-probe` loads the bridge's LaunchAgent plist by default**
+  (`~/Library/LaunchAgents/<bridge label>.plist`, the label resolved as the battery's signing
+  resolves it, else the one `*.jesse-bridge.plist` there), before any harness or server
+  starts. The plist wins for every variable; PATH is the plist's PATH followed by any shell
+  entries it lacks. `--env-plist <path>` overrides the
+  path, `--no-env-plist` turns it off (CI and tests). A missing or unreadable plist makes
+  `--write` refuse to start; a run without `--write` warns and goes on. One line names the
+  plist, the number of variables taken and PATH's first three entries, and no other value.
+- **A pre-flight** starts every MCP server the chosen rows load, through the gateway's own
+  start path with no ledger and no socket, and stops the run before any model turn, naming
+  every server that registered zero tools or did not start.
+- **`load_plist_env` moved** from `jesse-transcribe` to the shared `plistenv` module;
+  `jesse-transcribe --env-plist` behaves as before (it fills only unset variables).
+- `bridge/README.md` and `SECURITY.md` give the one command for a full battery.
+## [bridge 0.200.0] - 2026-11-10
+
+**A Studio run waiting on Jeremy closes by itself once its question is settled, so `needs_you`
+always means something he still has to answer.**
+
+- **Root cause:** `needs_you` was live with no exit but a reply. `cancel` refused it (and
+  `interrupted`), a further run of the same item with `again` left the earlier one as it was,
+  and neither ticking the item's Drafts line nor archiving its report reached the run record.
+  So every stale one kept counting in `runs_active` and `runs_needs_you`, refused a plain start
+  of its item (`live_run_of`) and held its worktree for the 30 days a waiting run keeps it. Seen
+  on 2026-11-09: MT5 and MT5b stayed `needs_you` after MT5c superseded them, and
+  `s-ho1c-road-ready` after its work merged and its line was ticked.
+- **Added: the status `closed`.** Terminal, not live, not counted active, not a `needs_you`.
+  `run.json` gains `closed_reason` and `closed_at` (RFC 3339), both optional and written only
+  on a closed run, so a record from before reads unchanged and an unclosed one serializes the
+  same keys as before. A closed run's worktree and artifacts follow the terminal retention
+  (`keep_days`, or as soon as its branch is merged or gone). A reply to a closed run is taken
+  exactly as a reply to a `reported` one, and opens it again.
+- **Added: three automatic closes,** each silent (no chat turn, no push) and logged as
+  `jesse-bridge: hostrun <id>: closed (<reason>)`. None ever touches a queued, running or
+  paused run.
+  - **Superseded:** a start with `again` closes every earlier `needs_you` or `interrupted` run
+    of the same strand item, `superseded by <new run id>`, under the same queue lock as the
+    create. A plain start is unchanged.
+  - **Item ticked:** each watcher pass closes a `needs_you` or `interrupted` run whose Drafts
+    line, read through the strands parser, is checked or sits under `### Done`. A note or a
+    line that can no longer be found closes nothing.
+  - **Report archived:** each watcher pass closes a `needs_you` run when every one of its Inbox
+    reports is gone and at least one is in `Inbox/archive/` under the same name. A report that
+    is simply missing closes nothing.
+- **Added: `POST /jesse/runs/:run_id/close`** with an optional `{ "reason": "..." }` (default
+  `closed by Jeremy`; one line, at most 500 bytes), paired device auth as `cancel`. Accepted
+  for `needs_you`, `interrupted` and `failed`; any other status is a 409 naming it.
+- **Added: the MCP tool `devjob_close { run_id, reason? }`,** listed with `[hostrun]` on and
+  classed `write` beside `devjob_start`, `devjob_reply` and `devjob_cancel`, so it reaches
+  exactly the turns they reach: in `DEFAULT_ALLOWED_TOOLS`, the `devjob` row's writes, Codex's
+  `enabled_tools`, the direct harness's gateway grants, the capability map and the containment
+  battery's stand-in. `devjob_list` files a closed run among the finished, and its entries gain
+  `closed_reason`.
+- **Re-recorded live:** `containment.toml` (claude-code, now against 2.1.322; gate pass, no
+  verdict moved; the two known-open write baselines unchanged) and `containment-direct.toml`.
+  The only posture change in either is the write row's `toolset_args` gaining
+  `mcp__devjob__devjob_close`; the claude-code record's observed `root_tools` also list the
+  already granted `imcp` `messages_fetch` and `maps_search`, which the server listed this time.
+  Both records were taken by a build stamped 0.199.0, before PD1 took that number; they
+  carry `bridge_version = "0.199.0"` for that reason, and PD1 moves no toolset they certify.
+- **Not changed:** how a round decides `needs_you`, replies, cancels, the usage limit pause,
+  every other route and the app (which decodes `closed` as an unknown status).
+- **Tests:** `again` closes an earlier `needs_you` and an earlier `interrupted` run and leaves
+  running, queued and paused ones; a ticked or Done line closes and an unticked, missing or
+  vanished one does not; an archived report closes and a deleted or merely copied one does not;
+  the close route and tool accept and refuse by status; a closed run is not live, not active,
+  no longer blocks a plain start and follows the terminal retention; a record from before
+  reads and a closed record round trips.
+
+## [PD1: pushes reach every paired device; run reports open after the Inbox is processed] - Bridge 0.199.0, App 1.0 (203) - 2026-11-10
+
+**Every push the bridge sends now goes to every paired device, and a Studio run's report opens
+from the Runs screen after the Inbox has been processed.**
+
+### Root causes
+
+- **The bridge kept one APNs token.** `DeviceStore` held a single `Option<String>`, persisted
+  as `device.json` `{"token": …}`, and `POST /jesse/device` overwrote it on every
+  registration with nothing saying which device sent it. Whichever device registered last
+  got every push, and a 410 for that token cleared it for everyone. Every push path
+  (`notify_if_complete`, the Studio run notifier `AppNotifier`, the scheduler's outcome and
+  alert pushes, the transcription push, the sentinel) sent to that one token. On 2026-11-10
+  the stored token was 64 hex characters, the length of a physical iOS device token (a
+  simulator's is longer), and the Mac app had never registered: it had no push entitlement
+  and no call to `registerDevice`.
+- **Run reports were served at the path they were written to.** `run.json` records each
+  round's report as `Inbox/<date>-run-<id>.md`. Processing the Inbox moves a read report
+  to `Inbox/archive/`, but `GET /jesse/runs` and `GET /jesse/runs/:id` kept serving the
+  recorded path. The run detail's Report link then opened "doesn't exist on the Studio".
+  On the live vault this applied to MT5, MT5b, MT5c and s-ho1c-road-ready. The list itself is
+  complete: against a scratch bridge serving a copy of the live run store, `GET /jesse/runs`
+  returned all 18 runs, App 1.0 (202) decoded all 18, and the iPhone Runs list showed all 18.
+
+### Bridge 0.199.0
+
+- `DeviceStore` keeps a map of devices keyed by a device id, each with its token, platform
+  (`ios`, `macos`), APNs topic and last registration time. `device.json` is written as
+  version 2 (`{"v":2,"token":…,"devices":{…}}`). It still reads the version 1 single token
+  file, as a `legacy` entry. The top-level `token` is kept, holding the newest iPhone token,
+  so a rolled back bridge or an older sentinel still pushes to the phone.
+- `POST /jesse/device` accepts optional `device_id`, `platform` and `topic`. A body with only
+  `token`, as older app builds send, is stored under `legacy` and still pushed. When the same
+  token is re-registered under a device id, it replaces its `legacy` entry, so no device
+  is pushed twice. Each registration logs `device registered: <platform> <short id>`. The
+  token is never logged.
+- Every push path goes through one fan-out, `push_to_devices`, which sends to every stored
+  device with that device's own topic. It logs one line per device:
+  `push <kind> <id> -> <platform> <short id>: sent|dead|failed`. A 410 removes only that
+  device, and only if it still holds the token APNs rejected. The sentinel pushes every
+  device too, read only, as before.
+- A device not re-registered in 60 days is dropped, on load and on each registration.
+- `GET /jesse/runs`, `GET /jesse/runs/:id`, the reply and cancel answers and `devjob_status`
+  serve each `report_paths` entry where the note lives now: the recorded path, or the same
+  file under `archive/`. `run.json` is unchanged.
+
+### App 1.0 (203)
+
+- iOS sends `identifierForVendor`, `ios` and its bundle id with each registration. It still
+  re-registers on every launch and foreground.
+- The Mac app registers for APNs at every launch (`MacPush.swift`). It sends a device id it
+  keeps in `UserDefaults`, `macos`, and its bundle id `com.tag1.JesseMac` as the topic.
+  New `JesseMac.entitlements` carries `com.apple.developer.aps-environment` = `development`.
+- New gated UI test `StudioRunsListEveryRunUITests` (runs only with `PD1_BRIDGE` set) walks the
+  Runs list against a bridge and fails if any listed run has no row. Then it opens a report.
+
+## [Gate simulator: a standard iPhone Pro] - 2026-11-10
+
+**The local gate ran every iPhone UI test on an iPhone Duo, and 38 of them failed on code
+nobody had touched.** `scripts/local-ci-macos.sh` on the Mac Studio went red at `iOS test` on
+a clean `main`, every time, with each failure a timeout waiting for the `Chats` or `Today`
+tab button.
+
+**Root cause: the simulator rule took whatever Xcode listed last.** Both gates picked the
+newest iOS runtime and the last iPhone device type it supports. Xcode 27 ships two iOS 27.2
+runtimes: the general one and `iOS-27-2-iPhone19-4`, which supports only iPhone Duo. They
+share a version, the sort is stable, the Duo runtime is listed second, and so the Duo won.
+On iPhone Duo, iOS draws the app's `TabView` as a vertical rail beside the content rather
+than a bottom tab bar, so there is no `TabBar` element for `app.tabBars.buttons[...]` to
+find. The tabs are there and work; the tests, written for a phone with a tab bar, cannot
+see them. On the same `main`, iPhone 18 Pro on iOS 27.2 passes 38 of those UI tests and the
+Duo passes 2. Before the Duo runtime arrived the same rule picked an iPhone 11, on this
+Studio and on the hosted runner.
+
+### Changed
+
+- **`scripts/simulator-pick.jq` is the rule, and both gates read it.** For an iPhone: the
+  device type in `JESSE_CI_IPHONE_TYPE` if set (and nothing at all if no runtime supports
+  it), else the highest numbered `iPhone NN Pro`, else the highest numbered `iPhone NN`, else
+  the old last-listed fallback. Pro Max, Plus, mini, `e`, SE, Air, Duo and folds are never
+  picked automatically. The best tier any runtime offers wins, then the newest runtime in
+  it, so a single-device runtime loses to the general one. On this Studio: iPhone 18 Pro,
+  iOS 27.2. The Apple Watch keeps the old rule (Apple Watch SE 3 (40mm), watchOS 27.2), which
+  is an ordinary watch.
+- **`ios-ci.yml` uses the same file**, for the iPhone and the watch, so the nightly picks
+  the model the local gate picks. Its gate also wakes for a change to the rule. Its resolve
+  step also names `scripts/ios-deployment-target.sh` from the workspace root: the job runs
+  in `Jesse/`, and since 2026-09-24 every nightly that reached the step failed there with exit
+  127 (`No such file or directory`).
+- **The local gate reuses a simulator by name and device type.** A `jesse-local-ci-iphone`
+  or `jesse-local-ci-watch` of another model under the chosen runtime is deleted and made
+  again, not reused. The gate prints the device type and runtime it chose.
+
+### Added
+
+- **`scripts/test-simulator-pick.sh`**, run on Linux by `ci.yml`, pins the rule against
+  runtime lists in `simctl`'s shape, including this Studio's two 27.2 runtimes.
+
+### Not changed
+
+- No test is skipped, weakened or deleted, and no app code changes. Whether the UI tests
+  should also find tabs drawn as a rail is a separate question.
+
+## [App 1.0 (202)] - 2026-11-10
+
+**Studio runs can be started, watched and steered from the app, without a chat turn.** Five
+screens on the iPhone and the Mac, all on the bridge's existing run routes:
+
+- **Run on Studio.** A strand's sheet shows its open Drafts lines above the note. A line the
+  bridge marks `studio_runnable` offers `Run on Studio` on a long press (a secondary click on
+  the Mac); it posts the start, says `Started <run id>` and opens that run. A line with a live
+  run shows the run's status instead (tap it to open the run), and other lines offer nothing.
+- **Runs list.** A `Studio runs` button in the Strands segment's toolbar, and `Runs` on a
+  strand's Drafts block filtered to that strand. Each row: run ID, strand, status with its icon
+  and colour, age, `waiting for` on a queued run and `Resumes HH:MM` on a paused one. Live runs
+  first, then the rest newest first. Pull to refresh; refreshed every 15 seconds only while on
+  screen.
+- **Run detail.** Status, strand and draft, repository, branch, round, started and updated
+  times, the latest Inbox report (opened in the Vault tab), and the log tail in a monospaced
+  view that follows new lines unless you have scrolled up. Refreshed every 5 seconds until the
+  run is reported, failed or cancelled.
+- **Reply.** A composer enabled on `needs_you`, `interrupted` and `reported`. On `interrupted`
+  and `needs_you` with nothing typed, `Resume` sends `Continue where you left off.` In every
+  other state it is disabled with one line saying why.
+- **Cancel.** On `queued`, `running` and `paused`, behind a confirmation naming the run ID.
+- **Board badge.** A strand row with active runs shows their count, tinted the needs-you colour
+  when one is waiting on you. VoiceOver reads it as part of the row: "2 Studio runs, 1 needs
+  you".
+- A refusal from the bridge (a 409 for a live run, any 4xx with a reason) is shown in an alert
+  in the bridge's own words.
+- JesseKit: `StudioRun`, `StudioRunList`, `StudioRunStarted`, `StudioRunLog` and the six calls
+  on `JesseBridgeClient`; `Strand.runsActive`, `Strand.runsNeedsYou` and `Strand.drafts`, all
+  optional so an older bridge still decodes. An unknown status decodes to `.unknown`.
+  Decoding tests read fixtures written by the bridge's own serializers.
+
+## [bridge 0.198.0] - 2026-11-10
+
+**`GET /jesse/strands` says how many of a strand's runs need you.** Additive only.
+
+- **Added: `runs_needs_you`** on each strand, beside `runs_active`: how many of its runs are
+  `needs_you`. The app's board tints its run badge with it.
+- **Added: the app's wire fixtures come from the serializers.**
+  `the_app_wire_fixtures_match_what_the_run_routes_serialize` drives runs to `needs_you`,
+  `reported`, `paused` and `queued` and writes `run_json`, `list_json`, the start and log
+  answers and the annotated and plain strands snapshot into
+  `JesseKit/Tests/JesseNetworkingTests/Fixtures/` (`JESSE_RUN_FIXTURE_WRITE=1`); otherwise it
+  fails when a serializer's keys no longer match the committed files. The start and log
+  answers are built by `started_json` and `log_json`, which the two handlers now call; the JSON
+  they send is unchanged.
 
 ## [App 1.0 (201)] - 2026-11-09
 

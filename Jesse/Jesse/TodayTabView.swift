@@ -31,6 +31,14 @@ struct TodayTabView: View {
     /// day screen exactly as it was before the segment existed.
     var strands: StrandsModel?
 
+    /// The Studio runs, owned by `RootTabView` beside the board. `nil` offers no Runs list and
+    /// no `Run on Studio`.
+    var runs: StudioRunsModel?
+
+    /// Put the Vault tab on screen with one note open. The root's, because only the root
+    /// selects a tab; this tab closes its own sheets first.
+    var onOpenVaultNote: (String) -> Void = { _ in }
+
     /// Drain the offline capture queue NOW. Owned by `RootTabView` (which holds the
     /// replayer) and reached from here for the one trigger this screen knows about: a
     /// per-row Retry, which has to look like it did something.
@@ -44,11 +52,15 @@ struct TodayTabView: View {
     @State private var strandOpener: StrandOpener
 
     init(isActive: Bool, model: TodayDashboardModel, strands: StrandsModel? = nil,
-         onReplay: @escaping () -> Void = {}) {
+         runs: StudioRunsModel? = nil,
+         onReplay: @escaping () -> Void = {},
+         onOpenVaultNote: @escaping (String) -> Void = { _ in }) {
         self.isActive = isActive
         _model = Bindable(model)
         self.strands = strands
+        self.runs = runs
         self.onReplay = onReplay
+        self.onOpenVaultNote = onOpenVaultNote
         _strandOpener = State(initialValue: StrandOpener(localNotes: VaultLocalNoteProvider(),
                                                          remote: strands))
     }
@@ -136,7 +148,8 @@ struct TodayTabView: View {
                           onTellFallback: tellFallback,
                           onOpenLocalDayFile: Self.hasVaultFolder ? { openedDayFile = true } : nil,
                           strands: strands,
-                          strandOpener: strandOpener)
+                          strandOpener: strandOpener,
+                          runs: runs)
                 // The day file's own title is a sentence ("Today: Monday, August 10,
                 // 2026"), which a large title truncates to "Today: Monday, Augus…" on
                 // a phone. Inline fits it and buys back the vertical space the list
@@ -172,9 +185,17 @@ struct TodayTabView: View {
         }
         // A strand's note, with the open items that name it above it. A line there
         // lands on that item's detail, pushed once the sheet has gone.
-        .strandNoteSheet(strandOpener, day: model.snapshot, onOpenLink: openLink) { item in
+        .strandNoteSheet(strandOpener, day: model.snapshot, strands: strands, runs: runs,
+                         onOpenLink: openLink) { item in
             openedItem = item
         }
+        // A Studio run's report, from a run detail in either sheet: close both, then the root
+        // puts the Vault tab up with the note open.
+        .environment(\.studioRunReport, StudioRunReportAction { path in
+            runs?.presentsList = false
+            strandOpener.openedNote = nil
+            onOpenVaultNote(path)
+        })
         // `Discuss this strand`, for the board's rows. Injected HERE rather than at the
         // app's root because it opens a conversation, and the thread that conversation
         // needs while its sheet is up is held by this screen (the root holds no model
@@ -376,6 +397,6 @@ struct TodayTabView: View {
 extension TodayTabView: Equatable {
     static func == (lhs: TodayTabView, rhs: TodayTabView) -> Bool {
         lhs.isActive == rhs.isActive && lhs.model === rhs.model
-            && lhs.strands === rhs.strands
+            && lhs.strands === rhs.strands && lhs.runs === rhs.runs
     }
 }

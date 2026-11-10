@@ -1324,7 +1324,7 @@ async fn device_register_round_trip_stores_token() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        st.devices.get().as_deref(),
+        st.devices.token_of(LEGACY_DEVICE_ID).as_deref(),
         Some("deadbeefcafe"),
         "token stored"
     );
@@ -1338,7 +1338,103 @@ async fn device_register_round_trip_stores_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(st.devices.get().as_deref(), Some("newtoken99"));
+    assert_eq!(
+        st.devices.token_of(LEGACY_DEVICE_ID).as_deref(),
+        Some("newtoken99")
+    );
+    assert_eq!(st.devices.len(), 1, "a re-register replaces, never adds");
+}
+#[tokio::test]
+async fn device_register_keeps_one_entry_per_device() {
+    // THE DEFECT: one stored token, so the iPhone and the Mac replaced each other. Now each
+    // registration keeps its own entry, with its platform and topic.
+    let st = test_state();
+    for body in [
+        r#"{"token":"phonetok","device_id":"6F1C-PHONE","platform":"ios","topic":"com.tag1.Jesse"}"#,
+        r#"{"token":"mactok","device_id":"A9E2-MAC","platform":"macos","topic":"com.tag1.JesseMac"}"#,
+    ] {
+        let resp = app(st.clone())
+            .oneshot(device_request(Some("Bearer test-token"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert_eq!(st.devices.len(), 2);
+    assert_eq!(
+        st.devices.token_of("6F1C-PHONE").as_deref(),
+        Some("phonetok")
+    );
+    assert_eq!(st.devices.token_of("A9E2-MAC").as_deref(), Some("mactok"));
+    let mac = st
+        .devices
+        .all()
+        .into_iter()
+        .find(|(id, _)| id == "A9E2-MAC")
+        .unwrap()
+        .1;
+    assert_eq!(mac.platform.as_deref(), Some("macos"));
+    assert_eq!(mac.topic.as_deref(), Some("com.tag1.JesseMac"));
+}
+#[tokio::test]
+async fn a_registration_without_a_device_id_still_gets_pushed() {
+    // An app build from before device ids: only `token`. It is stored under `legacy` and
+    // pushed beside a device that did name itself.
+    let mock = MockApns::default();
+    let mut st = test_state();
+    st.apns = Some(test_apns(Arc::new(mock.clone())));
+    for body in [
+        r#"{"token":"oldbuildtoken"}"#,
+        r#"{"token":"mactok","device_id":"A9E2-MAC","platform":"macos","topic":"com.tag1.JesseMac"}"#,
+    ] {
+        let resp = app(st.clone())
+            .oneshot(device_request(Some("Bearer test-token"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let id = st.jobs.create();
+    st.jobs
+        .complete(&id, Ok(("already done".to_string(), None, None)));
+    let resp = app(st.clone())
+        .oneshot(notify_request(Some("Bearer test-token"), &id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let mut sent: Vec<(String, String)> = mock
+        .calls
+        .lock_ok()
+        .iter()
+        .map(|r| (r.path.clone(), r.topic.clone()))
+        .collect();
+    sent.sort();
+    assert_eq!(
+        sent,
+        vec![
+            (
+                "/3/device/mactok".to_string(),
+                "com.tag1.JesseMac".to_string()
+            ),
+            (
+                "/3/device/oldbuildtoken".to_string(),
+                "com.tag1.Jesse".to_string()
+            ),
+        ]
+    );
+}
+#[tokio::test]
+async fn device_register_refuses_a_malformed_device_id() {
+    let st = test_state();
+    for body in [
+        r#"{"token":"t","device_id":"has space"}"#,
+        r#"{"token":"t","platform":"ios\nX"}"#,
+    ] {
+        let resp = app(st.clone())
+            .oneshot(device_request(Some("Bearer test-token"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    assert!(st.devices.is_empty());
 }
 #[tokio::test]
 async fn device_register_rejects_empty_token() {
@@ -10457,7 +10553,8 @@ async fn strands_list_serves_the_contract_json() {
         .iter()
         .find(|t| t["slug"] == "Clean-Strand")
         .unwrap();
-    // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served.
+    // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served;
+    // `runs_needs_you` joined them in 0.198.0.
     assert_eq!(
         keys(clean),
         vec![
@@ -10470,6 +10567,7 @@ async fn strands_list_serves_the_contract_json() {
             "parent",
             "repos",
             "runs_active",
+            "runs_needs_you",
             "slug",
             "state",
             "title",
@@ -10478,6 +10576,7 @@ async fn strands_list_serves_the_contract_json() {
         ]
     );
     assert_eq!(clean["runs_active"], 0, "[hostrun] is off in the fixture");
+    assert_eq!(clean["runs_needs_you"], 0);
     assert!(clean["drafts"]
         .as_array()
         .unwrap()

@@ -1092,10 +1092,41 @@ public struct JesseStreamFrameData: Decodable {
     }
 }
 
-/// The `POST /jesse/device` body — register this phone's APNs token.
-public struct JesseDeviceRegistration: Encodable {
+/// The `POST /jesse/device` body — register this device's APNs token.
+///
+/// `deviceID`, `platform` and `topic` are what let the bridge keep ONE ENTRY PER DEVICE and push
+/// every one of them: before, it kept a single token and each registration replaced it, so the
+/// iPhone and the Mac took turns receiving every push. All three are optional on the wire and
+/// left out when nil, so the body of a bare token is the one older bridges were always sent.
+public struct JesseDeviceRegistration: Encodable, Equatable, Sendable {
     public let token: String
-    public init(token: String) { self.token = token }
+    /// Stable per install: `identifierForVendor` on iOS, a UUID the Mac app keeps.
+    public let deviceID: String?
+    /// `ios` or `macos`.
+    public let platform: String?
+    /// The app's bundle id, which APNs needs as the `apns-topic` of this token's pushes.
+    public let topic: String?
+
+    public init(token: String, deviceID: String? = nil, platform: String? = nil,
+                topic: String? = nil) {
+        self.token = token
+        self.deviceID = deviceID
+        self.platform = platform
+        self.topic = topic
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case token, platform, topic
+        case deviceID = "device_id"
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(token, forKey: .token)
+        try c.encodeIfPresent(deviceID, forKey: .deviceID)
+        try c.encodeIfPresent(platform, forKey: .platform)
+        try c.encodeIfPresent(topic, forKey: .topic)
+    }
 }
 
 // MARK: - Global model switch (GET /jesse/models, POST /jesse/model)

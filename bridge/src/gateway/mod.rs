@@ -529,6 +529,22 @@ impl Gateway {
     /// The deployment's gateway: its settings, its ledger, and the values its own config
     /// supplies for the `house` and `healthdb` rows.
     pub fn from_config(cfg: &crate::Config, state_dir: &Path) -> Gateway {
+        Gateway::from_config_with_ledger(cfg, state_dir, crate::activity::global(cfg))
+    }
+
+    /// [`Gateway::from_config`] with NO activity ledger: the containment battery's pre-flight
+    /// starts every upstream once to count its tools, and that is neither a turn nor anything
+    /// the deployment's ledger (or its process-wide slot) should learn about.
+    #[cfg(feature = "containment-probe")]
+    pub fn from_config_without_ledger(cfg: &crate::Config, state_dir: &Path) -> Gateway {
+        Gateway::from_config_with_ledger(cfg, state_dir, None)
+    }
+
+    fn from_config_with_ledger(
+        cfg: &crate::Config,
+        state_dir: &Path,
+        ledger: Option<Arc<ActivityLedger>>,
+    ) -> Gateway {
         let mut g = Gateway::new(
             state_dir,
             cfg.gateway.clone(),
@@ -538,7 +554,7 @@ impl Gateway {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            crate::activity::global(cfg),
+            ledger,
         );
         if let Some(h) = cfg.house.ready() {
             g.deployment_env.insert(

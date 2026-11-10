@@ -126,6 +126,16 @@ pub const TITLE_TAG_OWNER: &str = "jeremyandrews";
 pub const HOST_KEY: &str = "devjob-host";
 /// The `origin` of the agent turns this module sends.
 pub const STUDIO_RUN_ORIGIN: &str = "studio-run";
+/// `closed_reason` when Jeremy closes a run and gives no reason.
+pub const CLOSED_BY_JEREMY: &str = "closed by Jeremy";
+/// `closed_reason` when the run's Drafts line is checked or sits under `### Done`.
+pub const CLOSED_ITEM_TICKED: &str = "item ticked";
+/// `closed_reason` when every report of the run has moved to `Inbox/archive/`.
+pub const CLOSED_REPORT_ARCHIVED: &str = "report archived";
+/// The longest reason a close takes.
+pub const MAX_CLOSE_REASON_BYTES: usize = 500;
+/// Where an archived Inbox report goes, under the notes directory.
+pub const INBOX_ARCHIVE_DIR: &str = "Inbox/archive";
 
 /// The environment a run may see, by name. Everything else (every bridge secret, the APNs key,
 /// the gateway's credentials, the model tokens) is stripped. `JESSE_RUN_ID`, `JESSE_RUN_REPORT`
@@ -500,6 +510,10 @@ pub enum RunStatus {
     Interrupted,
     /// The plan's usage limit ended the round; the run continues by itself at `resume_at`.
     Paused,
+    /// Settled without a reply: superseded by a later run of its item, its Drafts line ticked,
+    /// its report archived, or closed by Jeremy. `closed_reason` says which. Terminal; a reply
+    /// still continues it, as it does a reported run.
+    Closed,
 }
 
 impl RunStatus {
@@ -513,6 +527,7 @@ impl RunStatus {
             RunStatus::Cancelled => "cancelled",
             RunStatus::Interrupted => "interrupted",
             RunStatus::Paused => "paused",
+            RunStatus::Closed => "closed",
         }
     }
 
@@ -533,12 +548,17 @@ impl RunStatus {
         )
     }
 
-    /// Reported, failed or cancelled: done with, unless someone replies.
+    /// Reported, failed, cancelled or closed: done with, unless someone replies.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunStatus::Reported | RunStatus::Failed | RunStatus::Cancelled
+            RunStatus::Reported | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Closed
         )
+    }
+
+    /// Waiting on Jeremy with nothing running: what the automatic closes may settle.
+    pub fn is_settleable(self) -> bool {
+        matches!(self, RunStatus::NeedsYou | RunStatus::Interrupted)
     }
 
     /// Not queued, not running and not paused (a paused run continues by itself).
@@ -656,6 +676,13 @@ pub struct RunRecord {
     /// The repository's `env_file` at creation: its path only, never its contents.
     #[serde(default)]
     pub env_file: Option<String>,
+    /// Why the run was closed: `superseded by <run_id>`, `item ticked`, `report archived`, or
+    /// what Jeremy gave. Only while `closed`; absent from records written before 0.200.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_reason: Option<String>,
+    /// When the run was closed (RFC 3339). Only while `closed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
 }
 
 impl RunRecord {
@@ -1491,6 +1518,83 @@ async fn write_report(
     written.map_err(|e| format!("could not write {rel}: {e}"))
 }
 
+// ---- CLOSING A SETTLED RUN ----------------------------------------------------------------
+
+/// `superseded by <run_id>`.
+pub fn superseded_reason(run_id: &str) -> String {
+    format!("superseded by {run_id}")
+}
+
+/// Close the run in `dir` with `reason` if, read again under its lock, its status is one `may`
+/// accepts. Silent: one log line, no push and no turn. `Ok(None)` when its status had moved on.
+fn close_run(
+    dir: &Path,
+    reason: &str,
+    may: impl Fn(RunStatus) -> bool,
+    now: u64,
+) -> Result<Option<RunRecord>, String> {
+    let mut closed = false;
+    let rec = update_run(dir, |r| {
+        if !may(r.status) {
+            return;
+        }
+        r.status = RunStatus::Closed;
+        r.closed_reason = Some(reason.to_string());
+        r.closed_at = Some(rfc(now));
+        r.waiting_for = None;
+        r.stalled_since = None;
+        r.resume_at = None;
+        if r.finished_at.is_none() {
+            r.finished_at = Some(rfc(now));
+        }
+        closed = true;
+    })?;
+    if !closed {
+        return Ok(None);
+    }
+    eprintln!("jesse-bridge: hostrun {}: closed ({reason})", rec.run_id);
+    Ok(Some(rec))
+}
+
+/// Whether the strand item's Drafts line is checked or under `### Done`. `None` when the note or
+/// the line can no longer be found, which settles nothing.
+pub fn item_ticked(notes_root: &Path, slug: &str, item_id: &str) -> Option<bool> {
+    if !crate::strands::is_safe_slug(slug) {
+        return None;
+    }
+    let src = std::fs::read_to_string(notes_root.join(format!("{STRANDS_DIR}/{slug}.md"))).ok()?;
+    let strand = parse_strand(slug, &src);
+    let lines: Vec<_> = strand.items.iter().filter(|i| i.id == item_id).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(
+        lines
+            .iter()
+            .any(|i| i.checked || i.section == StrandSection::Done),
+    )
+}
+
+/// Whether every report of the run is gone from where it was written and at least one of them
+/// is in `Inbox/archive/` under the same name. A run with no report, or a report that is simply
+/// missing, is not archived.
+pub fn reports_archived(notes_root: &Path, rec: &RunRecord) -> bool {
+    let paths: Vec<&str> = rec
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.as_deref())
+        .collect();
+    if paths.is_empty() || paths.iter().any(|p| notes_root.join(p).exists()) {
+        return false;
+    }
+    paths.iter().any(|p| {
+        p.rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty() && *name != ".." && *name != ".")
+            .is_some_and(|name| notes_root.join(INBOX_ARCHIVE_DIR).join(name).is_file())
+    })
+}
+
 // ---- THE SERVICE -------------------------------------------------------------------------
 
 /// How a run is asked for.
@@ -1841,6 +1945,23 @@ impl HostRuns {
                 .map(|(s, i)| format!(" strand={s} item={i}"))
                 .unwrap_or_default()
         );
+        // A further run of the item settles the earlier ones still waiting on Jeremy: the
+        // question they asked is now the new run's. Queued, running and paused runs go on.
+        if req.again {
+            if let Some((strand, item_id)) = &step {
+                let reason = superseded_reason(&run_id);
+                for (d, r) in self.runs() {
+                    if r.run_id != run_id
+                        && r.step() == Some((strand.as_str(), item_id.as_str()))
+                        && r.status.is_settleable()
+                    {
+                        if let Err(e) = close_run(&d, &reason, RunStatus::is_settleable, now_ms()) {
+                            eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id);
+                        }
+                    }
+                }
+            }
+        }
         drop(_gate);
         Ok(StartedRun {
             run_id,
@@ -2182,10 +2303,11 @@ impl HostRuns {
                 | RunStatus::Failed
                 | RunStatus::Interrupted
                 | RunStatus::Paused
+                | RunStatus::Closed
         ) {
             return Err(Refusal::State(format!(
-                "{run_id} is {}; a reply needs it to be needs_you, reported, failed, interrupted \
-                 or paused",
+                "{run_id} is {}; a reply needs it to be needs_you, reported, failed, interrupted, \
+                 paused or closed",
                 rec.status.label()
             )));
         }
@@ -2215,6 +2337,9 @@ impl HostRuns {
             r.stalled_since = None;
             r.disk_pushed = false;
             r.resume_at = None;
+            // A closed run that is answered is open again.
+            r.closed_reason = None;
+            r.closed_at = None;
             if auto == Some(AUTO_RESTART) {
                 r.restart_resumed = true;
             }
@@ -2338,6 +2463,98 @@ impl HostRuns {
             this.wake();
         });
         Ok(rec)
+    }
+
+    /// Close a run Jeremy has settled: `needs_you`, `interrupted` or `failed` only. `reason`
+    /// defaults to [`CLOSED_BY_JEREMY`]. Silent: no push and no turn.
+    pub fn close(&self, run_id: &str, reason: Option<&str>) -> Result<RunRecord, Refusal> {
+        let reason = match reason.map(str::trim) {
+            None | Some("") => CLOSED_BY_JEREMY.to_string(),
+            Some(r) if r.len() > MAX_CLOSE_REASON_BYTES => {
+                return Err(Refusal::Invalid(format!(
+                    "the reason is {} bytes; the most is {MAX_CLOSE_REASON_BYTES}",
+                    r.len()
+                )))
+            }
+            Some(r) if r.contains(['\n', '\r']) => {
+                return Err(Refusal::Invalid("the reason is one line".into()))
+            }
+            Some(r) => r.to_string(),
+        };
+        let may = |s: RunStatus| {
+            matches!(
+                s,
+                RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+            )
+        };
+        let _gate = lock(&self.gate);
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        let refused = |s: RunStatus| {
+            Refusal::State(format!(
+                "{run_id} is {}; only a needs_you, interrupted or failed run can be closed",
+                s.label()
+            ))
+        };
+        if !may(rec.status) {
+            return Err(refused(rec.status));
+        }
+        match close_run(&self.settings.run_dir(run_id), &reason, may, now_ms()) {
+            Ok(Some(r)) => Ok(r),
+            Ok(None) => Err(refused(
+                self.get(run_id).map(|r| r.status).unwrap_or(rec.status),
+            )),
+            Err(e) => Err(Refusal::Internal(e)),
+        }
+    }
+
+    /// Close, off the async runtime.
+    pub async fn close_blocking(
+        self: &Arc<Self>,
+        run_id: &str,
+        reason: Option<String>,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        tokio::task::spawn_blocking(move || this.close(&id, reason.as_deref()))
+            .await
+            .map_err(|e| Refusal::Internal(format!("the close task failed: {e}")))?
+    }
+
+    /// The watcher's settling: close every `needs_you` or `interrupted` run whose strand item's
+    /// line is ticked ([`CLOSED_ITEM_TICKED`]), and every `needs_you` run whose reports have all
+    /// moved to `Inbox/archive/` ([`CLOSED_REPORT_ARCHIVED`]). Returns each run closed and why.
+    /// Never touches a queued, running or paused run.
+    pub fn close_settled(&self, now: u64) -> Vec<(String, String)> {
+        let _gate = lock(&self.gate);
+        let mut out = Vec::new();
+        for (dir, r) in self.runs() {
+            if !r.status.is_settleable() {
+                continue;
+            }
+            let reason = if r
+                .step()
+                .and_then(|(slug, id)| item_ticked(&self.notes_root, slug, id))
+                == Some(true)
+            {
+                CLOSED_ITEM_TICKED
+            } else if r.status == RunStatus::NeedsYou && reports_archived(&self.notes_root, &r) {
+                CLOSED_REPORT_ARCHIVED
+            } else {
+                continue;
+            };
+            let may = |s: RunStatus| match reason {
+                CLOSED_REPORT_ARCHIVED => s == RunStatus::NeedsYou,
+                _ => s.is_settleable(),
+            };
+            match close_run(&dir, reason, may, now) {
+                Ok(Some(_)) => out.push((r.run_id.clone(), reason.to_string())),
+                Ok(None) => {}
+                Err(e) => eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id),
+            }
+        }
+        out
     }
 
     // ---- THE WATCHER -------------------------------------------------------------------
@@ -2647,6 +2864,8 @@ impl HostRuns {
                 eprintln!("jesse-bridge: hostrun {id}: report not written yet: {e}");
             }
         }
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;
@@ -2975,7 +3194,10 @@ impl HostRuns {
         });
         let h = lock(&self.house);
         json!({
-            "runs": runs.iter().map(run_json).collect::<Vec<_>>(),
+            "runs": runs
+                .iter()
+                .map(|r| run_json_located(r, &self.notes_root))
+                .collect::<Vec<_>>(),
             "counts": counts,
             "disk": {
                 "total_bytes": h.last_total_bytes,
@@ -3007,6 +3229,41 @@ pub fn valid_run_id(id: &str) -> bool {
     devjob::valid_label_value(id) && !id.contains("..")
 }
 
+/// Where a report the run recorded at `rel` lives now, vault relative.
+///
+/// A report is written to `Inbox/` and its path recorded in `run.json` once. Processing the
+/// Inbox then files a read report under `Inbox/archive/`, and the recorded path names a note
+/// that is no longer there: the app's Report link opened "doesn't exist on the Studio" for
+/// every run whose report had been processed. So the path served is the note's CURRENT one:
+/// the recorded path while it exists, else the same file under the folder's `archive/`, else
+/// the recorded path unchanged (nothing better is known; the app says it is missing).
+pub fn locate_report(notes_root: &Path, rel: &str) -> String {
+    if notes_root.join(rel).is_file() {
+        return rel.to_string();
+    }
+    let p = Path::new(rel);
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+        let archived = parent.join(crate::strands::ARCHIVE_SEGMENT).join(name);
+        if notes_root.join(&archived).is_file() {
+            return archived.to_string_lossy().into_owned();
+        }
+    }
+    rel.to_string()
+}
+
+/// [`run_json`] with every report path resolved to where the note lives now
+/// ([`locate_report`]): what the routes serve.
+pub fn run_json_located(r: &RunRecord, notes_root: &Path) -> Value {
+    let mut v = run_json(r);
+    v["report_paths"] = json!(r
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.as_deref())
+        .map(|rel| locate_report(notes_root, rel))
+        .collect::<Vec<_>>());
+    v
+}
+
 /// One run for the routes and the tools: `run.json`, `host`, and its report paths.
 pub fn run_json(r: &RunRecord) -> Value {
     let mut v = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
@@ -3022,6 +3279,16 @@ pub fn run_json(r: &RunRecord) -> Value {
         );
     }
     v
+}
+
+/// What `POST /jesse/runs` answers: the run, its status and why it waits, if it does.
+pub fn started_json(s: &StartedRun) -> Value {
+    json!({ "run_id": s.run_id, "status": s.status, "waiting_for": s.waiting_for })
+}
+
+/// What `GET /jesse/runs/:run_id/log` answers.
+pub fn log_json(run_id: &str, lines: Vec<String>) -> Value {
+    json!({ "run_id": run_id, "lines": lines })
 }
 
 /// `18:00` in local time, or `Nov 10 18:00` when not today.
@@ -3044,8 +3311,9 @@ pub fn human_bytes(b: u64) -> String {
 // ---- THE STRANDS SNAPSHOT ------------------------------------------------------------------
 
 /// Add the Studio fields to `GET /jesse/strands`: each strand's `runs_active` (its running,
-/// needs-you and paused runs), and `drafts`, its items each with `studio_runnable` (whether a
-/// person's start with no `repo` would be accepted). Additive only.
+/// needs-you and paused runs), `runs_needs_you` (those of them waiting on Jeremy), and
+/// `drafts`, its items each with `studio_runnable` (whether a person's start with no `repo`
+/// would be accepted). Additive only.
 pub fn annotate_strands(
     value: &mut Value,
     snap: &crate::strands::StrandsSnapshot,
@@ -3073,6 +3341,13 @@ pub fn annotate_strands(
             })
             .count();
         obj.insert("runs_active".into(), json!(active as u32));
+        let needs_you = runs
+            .iter()
+            .filter(|r| {
+                r.strand.as_deref() == Some(strand.slug.as_str()) && r.status == RunStatus::NeedsYou
+            })
+            .count();
+        obj.insert("runs_needs_you".into(), json!(needs_you as u32));
         let runnable = |item: &crate::strands::StrandItem| {
             service.is_some()
                 && studio_item_of(
@@ -3171,6 +3446,23 @@ pub struct ReplyBody {
     pub text: String,
 }
 
+/// `POST /jesse/runs/:run_id/close`: an optional `{ "reason": "..." }`.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CloseBody {
+    pub reason: Option<String>,
+}
+
+impl CloseBody {
+    /// An empty body is no reason; anything else must be the JSON object.
+    pub fn parse(bytes: &[u8]) -> Result<CloseBody, String> {
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(CloseBody::default());
+        }
+        serde_json::from_slice(bytes).map_err(|e| format!("bad body: {e}"))
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LogQuery {
     pub tail: Option<usize>,
@@ -3205,7 +3497,7 @@ pub async fn jesse_runs_start(
         })
         .await
         .map_err(refusal)?;
-    Ok(Json(json!({ "run_id": started.run_id, "status": started.status, "waiting_for": started.waiting_for })).into_response())
+    Ok(Json(started_json(&started)).into_response())
 }
 
 /// `GET /jesse/runs/:run_id`.
@@ -3216,7 +3508,7 @@ pub async fn jesse_run(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     match svc.get(&run_id) {
-        Some(r) => Ok(Json(run_json(&r)).into_response()),
+        Some(r) => Ok(Json(run_json_located(&r, svc.notes_root())).into_response()),
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
@@ -3235,7 +3527,7 @@ pub async fn jesse_run_log(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match lines {
-        Some(l) => Ok(Json(json!({ "run_id": run_id, "lines": l })).into_response()),
+        Some(l) => Ok(Json(log_json(&run_id, l)).into_response()),
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
@@ -3252,7 +3544,7 @@ pub async fn jesse_run_reply(
         .reply_and_pump(&run_id, &body.text)
         .await
         .map_err(refusal)?;
-    Ok(Json(run_json(&r)).into_response())
+    Ok(Json(run_json_located(&r, svc.notes_root())).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/cancel`.
@@ -3263,6 +3555,22 @@ pub async fn jesse_run_cancel(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let r = svc.cancel_and_wake(&run_id).await.map_err(refusal)?;
+    Ok(Json(run_json_located(&r, svc.notes_root())).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/close` with an optional `{ reason }`.
+pub async fn jesse_run_close(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let body = CloseBody::parse(&body).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let r = svc
+        .close_blocking(&run_id, body.reason)
+        .await
+        .map_err(refusal)?;
     Ok(Json(run_json(&r)).into_response())
 }
 

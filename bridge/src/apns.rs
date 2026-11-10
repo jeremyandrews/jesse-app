@@ -9,60 +9,296 @@ use crate::*;
 // the phone can wake and re-attach. A push failure is always logged and swallowed
 // — it must never fail the turn or its stored result.
 
-/// The registered APNs device token for the single user. One current token is
-/// enough; a re-register overwrites it (idempotent upsert). Persisted to
-/// `<state_dir>/device.json` (0600) so it survives a restart, mirroring the job
-/// store. Only the token is written — never the bearer token or any other secret.
+/// The id an APNs token is stored under when the app that sent it named no device: an app
+/// build from before the bridge kept one entry per device. One such entry at most, so an old
+/// build keeps getting pushes exactly as it did, and the first registration from a newer build
+/// that sends the same token takes it over (see [`DeviceStore::register`]).
+pub const LEGACY_DEVICE_ID: &str = "legacy";
+
+/// A device that has not re-registered in this long is dropped. Every app build re-registers
+/// on each launch and foreground, so 60 days of silence means an app that was deleted, a
+/// device that was wiped, or a Mac that is no longer used: pushing on to its token would only
+/// spend a request per push on a device nobody reads.
+pub const DEVICE_STALE_MS: u64 = 60 * 24 * 60 * 60 * 1000;
+
+/// The current `device.json` format: a map of devices. Version 1 was a single `token`.
+pub const DEVICE_FILE_VERSION: u64 = 2;
+
+/// One paired device: where its pushes go and what they are sent as.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct Device {
+    /// The APNs device token, hex. Never logged.
+    pub token: String,
+    /// `ios`, `macos`, … as the app said; `None` for a legacy registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// The `apns-topic` this device's pushes need (the sending app's bundle id), when it
+    /// differs from the bridge's `JESSE_APNS_TOPIC`. The iPhone app and the Mac app are two
+    /// bundle ids, and APNs refuses a push whose topic is not the token's own app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    /// When the device last registered, epoch milliseconds.
+    #[serde(default)]
+    pub registered_at_ms: u64,
+}
+
+impl Device {
+    /// The topic to send this device's pushes as: its own, else the bridge's.
+    pub fn topic_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.topic
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or(default)
+    }
+
+    /// The platform word for a log line.
+    pub fn platform_label(&self) -> &str {
+        self.platform.as_deref().unwrap_or("unknown")
+    }
+}
+
+/// The first eight characters of a device id, for a log line. A token is never shortened into
+/// a log; only the id the app chose is.
+pub fn short_device_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Every device the owner has paired, keyed by the stable id each app sends
+/// (`identifierForVendor` on iOS, a UUID the Mac app keeps), persisted to
+/// `<state_dir>/device.json` (0600) so it survives a restart. Only tokens and their routing
+/// are written, never the bearer token or any other secret.
+///
+/// ONE ENTRY PER DEVICE. This was one `Option<String>`: every registration overwrote it, so the
+/// iPhone and each Mac took turns owning the bridge's only token and the last to register got
+/// every push. Now a registration upserts its own entry, every push goes to every entry, and a
+/// 410 removes only the entry whose token APNs called dead.
 pub struct DeviceStore {
-    token: Mutex<Option<String>>,
+    devices: Mutex<std::collections::BTreeMap<String, Device>>,
     path: Option<PathBuf>,
+}
+
+/// One registration, as `POST /jesse/device` carries it.
+#[derive(Debug, Clone, Default)]
+pub struct DeviceRegistration {
+    pub token: String,
+    /// `None` (an older app build): stored under [`LEGACY_DEVICE_ID`].
+    pub device_id: Option<String>,
+    pub platform: Option<String>,
+    pub topic: Option<String>,
 }
 
 impl DeviceStore {
     pub fn new(path: Option<PathBuf>) -> Self {
-        let token = path.as_deref().and_then(load_device_token);
-        DeviceStore {
-            token: Mutex::new(token),
+        Self::new_at(path, crate::activity::now_ms())
+    }
+
+    /// [`new`](Self::new) on a given clock, so a test can load a file whose devices are stale.
+    /// Stale devices are dropped here, and the file rewritten when any were.
+    pub fn new_at(path: Option<PathBuf>, now_ms: u64) -> Self {
+        let mut devices = path.as_deref().map(load_devices).unwrap_or_default();
+        let dropped = prune_stale(&mut devices, now_ms);
+        for (id, d) in &dropped {
+            eprintln!(
+                "jesse-bridge: device {} {} dropped on load: not registered in 60 days",
+                d.platform_label(),
+                short_device_id(id)
+            );
+        }
+        let store = DeviceStore {
+            devices: Mutex::new(devices),
             path,
+        };
+        if !dropped.is_empty() {
+            store.persist();
         }
+        store
     }
 
-    /// Idempotent upsert of the current device token (overwrites any prior one),
-    /// persisting it when a state dir is configured.
+    /// Upsert one device's registration, persisting the map when a state dir is configured.
+    /// Returns how many devices are stored afterwards.
+    ///
+    /// The same token under another id is removed first: an app updated from a build that
+    /// sent no id re-registers its unchanged token WITH one, and keeping both entries would
+    /// push that device twice. Stale devices are dropped on every registration too.
+    pub fn register(&self, reg: DeviceRegistration) -> usize {
+        self.register_at(reg, crate::activity::now_ms())
+    }
+
+    pub fn register_at(&self, reg: DeviceRegistration, now_ms: u64) -> usize {
+        let id = reg
+            .device_id
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| LEGACY_DEVICE_ID.to_string());
+        let n = {
+            let mut g = self.devices.lock_ok();
+            g.retain(|other, d| *other == id || !same_token(&d.token, &reg.token));
+            g.insert(
+                id,
+                Device {
+                    token: reg.token,
+                    platform: reg.platform,
+                    topic: reg.topic,
+                    registered_at_ms: now_ms,
+                },
+            );
+            for (gone, d) in prune_stale(&mut g, now_ms) {
+                eprintln!(
+                    "jesse-bridge: device {} {} dropped: not registered in 60 days",
+                    d.platform_label(),
+                    short_device_id(&gone)
+                );
+            }
+            g.len()
+        };
+        self.persist();
+        n
+    }
+
+    /// Register a bare token, as an app that names no device does.
     pub fn set(&self, token: String) {
-        *self.token.lock_ok() = Some(token.clone());
-        if let Some(path) = &self.path {
-            persist_device_token(path, &token);
-        }
+        self.register(DeviceRegistration {
+            token,
+            ..Default::default()
+        });
     }
 
-    /// Clear the stored device token and persist the cleared state (M4). Called
-    /// when APNs reports the token is dead (HTTP 410): the phone must re-register
-    /// before any further push, and a dead token must stop being retried on every
-    /// completion. Persisting the cleared state means the token stays gone across
-    /// a restart, too.
+    /// Remove one device because APNs called its token dead (HTTP 410), and persist. Only
+    /// when it still holds THAT token: a device that re-registered a fresh token while the
+    /// push was in flight must not lose it to its old token's 410. Returns whether it went.
+    pub fn remove_dead(&self, id: &str, token: &str) -> bool {
+        let removed = {
+            let mut g = self.devices.lock_ok();
+            if g.get(id).is_some_and(|d| same_token(&d.token, token)) {
+                g.remove(id);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.persist();
+        }
+        removed
+    }
+
+    /// Forget every device and persist the empty map.
     pub fn clear(&self) {
-        *self.token.lock_ok() = None;
+        self.devices.lock_ok().clear();
+        self.persist();
+    }
+
+    /// Every stored device, by id.
+    pub fn all(&self) -> Vec<(String, Device)> {
+        self.devices
+            .lock_ok()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.devices.lock_ok().is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.devices.lock_ok().len()
+    }
+
+    /// One device's token, by id.
+    pub fn token_of(&self, id: &str) -> Option<String> {
+        self.devices.lock_ok().get(id).map(|d| d.token.clone())
+    }
+
+    fn persist(&self) {
         if let Some(path) = &self.path {
-            persist_device_token(path, "");
+            let snapshot = self.devices.lock_ok().clone();
+            persist_devices(path, &snapshot);
         }
     }
+}
 
-    pub fn get(&self) -> Option<String> {
-        self.token.lock_ok().clone()
+/// Whether two APNs tokens are the same, compared in constant time as every token
+/// comparison in the bridge is.
+fn same_token(a: &str, b: &str) -> bool {
+    a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
+}
+
+/// Remove and return every device not registered within [`DEVICE_STALE_MS`] of `now_ms`.
+fn prune_stale(
+    devices: &mut std::collections::BTreeMap<String, Device>,
+    now_ms: u64,
+) -> Vec<(String, Device)> {
+    let stale: Vec<String> = devices
+        .iter()
+        .filter(|(_, d)| now_ms.saturating_sub(d.registered_at_ms) > DEVICE_STALE_MS)
+        .map(|(k, _)| k.clone())
+        .collect();
+    stale
+        .into_iter()
+        .filter_map(|k| devices.remove(&k).map(|d| (k, d)))
+        .collect()
+}
+
+/// Read `device.json`, either format: version 2's `devices` map, or version 1's single
+/// `token`, which becomes the [`LEGACY_DEVICE_ID`] entry registered when the file was last
+/// written (its modification time, the closest thing that file has to a registration time).
+/// A missing or unreadable file is no devices.
+pub fn load_devices(path: &Path) -> std::collections::BTreeMap<String, Device> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return out;
+    };
+    if let Some(map) = v.get("devices").and_then(|d| d.as_object()) {
+        for (id, d) in map {
+            if let Ok(dev) = serde_json::from_value::<Device>(d.clone()) {
+                if !dev.token.is_empty() {
+                    out.insert(id.clone(), dev);
+                }
+            }
+        }
+        return out;
     }
-}
-
-pub fn load_device_token(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    v.get("token")
+    if let Some(token) = v
+        .get("token")
         .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
+    {
+        let written = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_else(crate::activity::now_ms);
+        out.insert(
+            LEGACY_DEVICE_ID.to_string(),
+            Device {
+                token: token.to_string(),
+                platform: None,
+                topic: None,
+                registered_at_ms: written,
+            },
+        );
+    }
+    out
 }
 
-/// Write the device token atomically (temp + rename), 0600 — same discipline as
+/// The file `persist_devices` writes. Version 2 keeps a top-level `token` beside the map, the
+/// newest registration sent as the bridge's own topic: a bridge rolled back to a build that
+/// reads only `token` still pushes to the iPhone rather than to nobody.
+pub fn devices_file_json(devices: &std::collections::BTreeMap<String, Device>) -> Value {
+    let compat = devices
+        .values()
+        .filter(|d| d.topic.is_none() && d.platform.as_deref() != Some("macos"))
+        .max_by_key(|d| d.registered_at_ms)
+        .map(|d| d.token.clone())
+        .unwrap_or_default();
+    json!({ "v": DEVICE_FILE_VERSION, "token": compat, "devices": devices })
+}
+
+/// Write the device map atomically (temp + rename), 0600, same discipline as
 /// `persist_job`. Best-effort: a failure is logged, never fatal.
 ///
 /// The temp file name is unique per write (pid + a process-wide counter), NOT a
@@ -70,21 +306,24 @@ pub fn load_device_token(path: &Path) -> Option<String> {
 /// the phone re-registers on foreground, so two `POST /jesse/device` calls can
 /// overlap, and with one temp path the loser's rename finds nothing (a spurious
 /// ENOENT warning) while its still-open fd writes into the file the winner just
-/// renamed into place — defeating the atomicity this function exists to provide.
+/// renamed into place, defeating the atomicity this function exists to provide.
 /// Unique temp names give each writer its own file, so both renames are atomic
 /// and the last one simply wins.
-pub fn persist_device_token(path: &Path, token: &str) {
-    if let Err(e) = try_persist_device_token(path, token) {
-        eprintln!("warning: could not persist device token: {e}");
+pub fn persist_devices(path: &Path, devices: &std::collections::BTreeMap<String, Device>) {
+    if let Err(e) = try_persist_devices(path, devices) {
+        eprintln!("warning: could not persist device tokens: {e}");
     }
 }
 
-/// The fallible body of [`persist_device_token`]. Separate so a test can assert the
+/// The fallible body of [`persist_devices`]. Separate so a test can assert the
 /// no-collision contract directly: under concurrency EVERY write must succeed, which
 /// is exactly what the shared temp path broke.
-fn try_persist_device_token(path: &Path, token: &str) -> std::io::Result<()> {
+fn try_persist_devices(
+    path: &Path,
+    devices: &std::collections::BTreeMap<String, Device>,
+) -> std::io::Result<()> {
     static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
-    let value = json!({ "v": 1, "token": token });
+    let value = devices_file_json(devices);
     let seq = WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()));
     let write = || -> std::io::Result<()> {
@@ -101,6 +340,69 @@ fn try_persist_device_token(path: &Path, token: &str) -> std::io::Result<()> {
     write().inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// What one fan-out did, device by device.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PushTally {
+    pub sent: usize,
+    pub dead: usize,
+    pub failed: usize,
+}
+
+impl PushTally {
+    pub fn devices(&self) -> usize {
+        self.sent + self.dead + self.failed
+    }
+}
+
+/// Send one payload to EVERY stored device, each as its own topic, logging one line per
+/// device: `push <kind> <id> -> <platform> <short id>: sent|dead|failed`. A 410 removes that
+/// device and no other. Every failure is swallowed, as every push's always was.
+///
+/// The one fan-out every bridge push path goes through, so none of them can push to "the"
+/// device again.
+pub async fn push_to_devices(
+    apns: &ApnsClient,
+    devices: &DeviceStore,
+    kind: &str,
+    id: &str,
+    payload: Vec<u8>,
+    badge: Option<u64>,
+) -> PushTally {
+    let targets = devices.all();
+    let mut tally = PushTally::default();
+    if targets.is_empty() {
+        eprintln!("push {kind} {id}: no device registered, nothing sent");
+        return tally;
+    }
+    for (dev_id, dev) in targets {
+        let topic = dev.topic_or(&apns.cfg.topic).to_string();
+        let outcome = apns
+            .push_payload_to(&dev.token, &topic, payload.clone(), badge)
+            .await;
+        let who = format!(
+            "push {kind} {id} -> {} {}",
+            dev.platform_label(),
+            short_device_id(&dev_id)
+        );
+        match outcome {
+            PushOutcome::Sent => {
+                tally.sent += 1;
+                eprintln!("{who}: sent");
+            }
+            PushOutcome::DeadToken => {
+                tally.dead += 1;
+                devices.remove_dead(&dev_id, &dev.token);
+                eprintln!("{who}: dead (410, device removed)");
+            }
+            PushOutcome::Failed(e) => {
+                tally.failed += 1;
+                eprintln!("{who}: failed ({e})");
+            }
+        }
+    }
+    tally
 }
 
 /// Job ids the phone asked to be notified about on completion. A flag is consumed
@@ -333,6 +635,21 @@ impl ApnsClient {
         payload: Vec<u8>,
         badge: Option<u64>,
     ) -> PushOutcome {
+        let topic = self.cfg.topic.clone();
+        self.push_payload_to(device_token, &topic, payload, badge)
+            .await
+    }
+
+    /// [`push_payload`](Self::push_payload) as a given `apns-topic`: the Mac app's tokens
+    /// belong to a different bundle id than the iPhone's, and APNs refuses a push whose topic
+    /// is not the token's own app.
+    pub async fn push_payload_to(
+        &self,
+        device_token: &str,
+        topic: &str,
+        payload: Vec<u8>,
+        badge: Option<u64>,
+    ) -> PushOutcome {
         let payload = with_badge(payload, badge);
         let jwt = match self.jwt() {
             Ok(j) => j,
@@ -342,7 +659,7 @@ impl ApnsClient {
             host: self.cfg.host.clone(),
             path: format!("/3/device/{device_token}"),
             jwt,
-            topic: self.cfg.topic.clone(),
+            topic: topic.to_string(),
             payload,
         };
         match self.transport.post(req).await {
@@ -899,36 +1216,22 @@ pub async fn notify_if_complete(
     if !notify.take(job_id) {
         return; // not flagged, or another path already pushed
     }
-    let Some(token) = devices.get() else {
-        eprintln!("push: job {job_id} flagged but no device registered — skipping");
+    if devices.is_empty() {
+        eprintln!("push: job {job_id} flagged but no device registered, skipping");
         return;
-    };
+    }
     // Counted HERE rather than passed in, and counted AFTER the reply landed in the
     // store, so the number on the icon describes the state the user is being told about
     // — including this very reply.
     let badge = Some(unread_conversation_count(conversations, flags));
-    match apns
-        .push(
-            &token,
-            job_id,
-            conversation_id.as_deref(),
-            &artifacts,
-            summary,
-            badge,
-        )
-        .await
-    {
-        PushOutcome::Sent => eprintln!("push: completion alert sent for job {job_id}"),
-        PushOutcome::DeadToken => {
-            // APNs reports the token is dead (410). Clear it so it isn't retried
-            // on every future completion; the phone must re-register (M4).
-            devices.clear();
-            eprintln!("push: device token rejected (410 dead) for job {job_id} — cleared");
-        }
-        PushOutcome::Failed(e) => {
-            eprintln!("push: APNs send failed for job {job_id}: {e} — swallowed")
-        }
-    }
+    let payload = build_apns_payload(job_id, conversation_id.as_deref(), &artifacts, summary);
+    // Every paired device, each as its own topic; a 410 removes only the device it names.
+    let tally = push_to_devices(apns, devices, "turn", job_id, payload, badge).await;
+    eprintln!(
+        "push: completion alert for job {job_id}: sent to {} of {} device(s)",
+        tally.sent,
+        tally.devices()
+    );
 }
 
 /// Construct the APNs client from the environment, or `None` when push is
@@ -997,6 +1300,8 @@ pub(crate) mod tests {
         pub(crate) calls: Arc<Mutex<Vec<ApnsRequest>>>,
         pub(crate) fail: bool,
         pub(crate) status: u16,
+        /// Tokens APNs calls dead: a push to one answers 410 whatever `status` says.
+        pub(crate) dead_tokens: Vec<String>,
     }
     impl ApnsTransport for MockApns {
         fn post(
@@ -1006,6 +1311,15 @@ pub(crate) mod tests {
             let calls = self.calls.clone();
             let fail = self.fail;
             let status = if self.status == 0 { 200 } else { self.status };
+            let status = if self
+                .dead_tokens
+                .iter()
+                .any(|t| req.path == format!("/3/device/{t}"))
+            {
+                410
+            } else {
+                status
+            };
             Box::pin(async move {
                 calls.lock_ok().push(req);
                 if fail {
@@ -2017,7 +2331,11 @@ pub(crate) mod tests {
             store.set("persisted-token".to_string());
         }
         let restarted = DeviceStore::new(Some(path.clone()));
-        assert_eq!(restarted.get().as_deref(), Some("persisted-token"));
+        assert_eq!(
+            restarted.token_of(LEGACY_DEVICE_ID).as_deref(),
+            Some("persisted-token")
+        );
+        assert_eq!(restarted.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[tokio::test]
@@ -2046,7 +2364,7 @@ pub(crate) mod tests {
 
         assert_eq!(mock.calls.lock_ok().len(), 1, "the push was attempted");
         assert!(
-            st.devices.get().is_none(),
+            st.devices.is_empty(),
             "a 410 must clear the dead device token so it isn't retried forever"
         );
     }
@@ -2075,7 +2393,7 @@ pub(crate) mod tests {
         .await;
 
         assert_eq!(
-            st.devices.get().as_deref(),
+            st.devices.token_of(LEGACY_DEVICE_ID).as_deref(),
             Some("livetoken"),
             "a transient (non-410) failure must NOT clear the token"
         );
@@ -2088,10 +2406,10 @@ pub(crate) mod tests {
         let store = DeviceStore::new(Some(path.clone()));
         store.set("tok".to_string());
         store.clear();
-        assert!(store.get().is_none(), "clear empties the in-memory token");
+        assert!(store.is_empty(), "clear empties the in-memory token");
         let restarted = DeviceStore::new(Some(path.clone()));
         assert!(
-            restarted.get().is_none(),
+            restarted.is_empty(),
             "the cleared token stays cleared across a restart"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2124,7 +2442,17 @@ pub(crate) mod tests {
                     gate.wait();
                     (0..4)
                         .filter_map(|i| {
-                            try_persist_device_token(&path, &format!("token-{t}-{i}")).err()
+                            let mut one = std::collections::BTreeMap::new();
+                            one.insert(
+                                format!("device-{t}"),
+                                Device {
+                                    token: format!("token-{t}-{i}"),
+                                    platform: Some("ios".into()),
+                                    topic: None,
+                                    registered_at_ms: crate::activity::now_ms(),
+                                },
+                            );
+                            try_persist_devices(&path, &one).err()
                         })
                         .map(|e| e.to_string())
                         .collect::<Vec<_>>()
@@ -2142,7 +2470,13 @@ pub(crate) mod tests {
             &errors[..errors.len().min(3)]
         );
 
-        let loaded = load_device_token(&path).expect("the file parses after the race");
+        let all = load_devices(&path);
+        assert_eq!(
+            all.len(),
+            1,
+            "the file parses to one whole write after the race"
+        );
+        let loaded = all.values().next().unwrap().token.clone();
         assert!(
             loaded.starts_with("token-"),
             "a torn write would leave something other than a whole token: {loaded:?}"
@@ -2229,5 +2563,262 @@ pub(crate) mod tests {
             pubkey.verify(tampered_input.as_bytes(), &good_sig).is_err(),
             "a tampered payload must not verify under the original signature"
         );
+    }
+
+    // ---- PD1: every paired device gets every push -------------------------------------
+
+    fn reg(
+        id: Option<&str>,
+        token: &str,
+        platform: Option<&str>,
+        topic: Option<&str>,
+    ) -> DeviceRegistration {
+        DeviceRegistration {
+            token: token.to_string(),
+            device_id: id.map(str::to_string),
+            platform: platform.map(str::to_string),
+            topic: topic.map(str::to_string),
+        }
+    }
+
+    /// The iPhone and the Mac, as the two apps register now.
+    fn phone_and_mac(st: &AppState) {
+        st.devices.register(reg(
+            Some("PHONE-1111-2222"),
+            "phonetoken",
+            Some("ios"),
+            Some("com.tag1.Jesse"),
+        ));
+        st.devices.register(reg(
+            Some("MAC-3333-4444"),
+            "mactoken",
+            Some("macos"),
+            Some("com.tag1.JesseMac"),
+        ));
+    }
+
+    /// `(token, topic)` of every request the mock saw, sorted.
+    fn sent_to(mock: &MockApns) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = mock
+            .calls
+            .lock_ok()
+            .iter()
+            .map(|r| {
+                (
+                    r.path.trim_start_matches("/3/device/").to_string(),
+                    r.topic.clone(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn two_registered_devices_both_get_the_completion_push() {
+        // THE DEFECT: one stored token, overwritten by each registration, so the last device
+        // to register got every push and every other device none.
+        let mock = MockApns::default();
+        let mut st = test_state();
+        st.apns = Some(test_apns(Arc::new(mock.clone())));
+        phone_and_mac(&st);
+
+        let id = st.jobs.create();
+        st.jobs.complete(&id, Ok(("done".into(), None, None)));
+        st.notify.insert(&id);
+        notify_if_complete(
+            st.apns.as_deref(),
+            &st.devices,
+            &st.notify,
+            &st.jobs,
+            &id,
+            &st.conversations,
+            &st.flags,
+        )
+        .await;
+
+        assert_eq!(
+            sent_to(&mock),
+            vec![
+                ("mactoken".to_string(), "com.tag1.JesseMac".to_string()),
+                ("phonetoken".to_string(), "com.tag1.Jesse".to_string()),
+            ],
+            "both devices are pushed, each as its own app's topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_registered_devices_both_get_the_studio_run_push() {
+        // The push the overnight runs sent (`devjob PUSH <run> sent`), through the notifier
+        // the run service holds.
+        let mock = MockApns::default();
+        let mut st = test_state();
+        st.apns = Some(test_apns(Arc::new(mock.clone())));
+        phone_and_mac(&st);
+        let notifier = crate::devjob::AppNotifier::of(&st);
+        use crate::devjob::Notifier;
+        notifier
+            .notify("Reported".into(), "HO1b".into(), "HO1b".into())
+            .await;
+        assert_eq!(
+            sent_to(&mock)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec!["mactoken".to_string(), "phonetoken".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_410_on_one_device_removes_it_and_leaves_the_other() {
+        let mock = MockApns {
+            dead_tokens: vec!["mactoken".into()],
+            ..Default::default()
+        };
+        let mut st = test_state();
+        st.apns = Some(test_apns(Arc::new(mock.clone())));
+        phone_and_mac(&st);
+
+        let apns = st.apns.clone().unwrap();
+        let tally = push_to_devices(&apns, &st.devices, "test", "x", b"{}".to_vec(), None).await;
+        assert_eq!(
+            tally,
+            PushTally {
+                sent: 1,
+                dead: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(
+            st.devices.token_of("MAC-3333-4444"),
+            None,
+            "the dead one goes"
+        );
+        assert_eq!(
+            st.devices.token_of("PHONE-1111-2222").as_deref(),
+            Some("phonetoken"),
+            "the live one stays"
+        );
+
+        // And the next push reaches the phone alone.
+        mock.calls.lock_ok().clear();
+        push_to_devices(&apns, &st.devices, "test", "y", b"{}".to_vec(), None).await;
+        assert_eq!(sent_to(&mock).len(), 1);
+        assert_eq!(sent_to(&mock)[0].0, "phonetoken");
+    }
+
+    #[test]
+    fn a_410_does_not_remove_a_token_registered_while_the_push_was_in_flight() {
+        let st = test_state();
+        st.devices
+            .register(reg(Some("PHONE"), "old", Some("ios"), None));
+        st.devices
+            .register(reg(Some("PHONE"), "fresh", Some("ios"), None));
+        assert!(!st.devices.remove_dead("PHONE", "old"));
+        assert_eq!(st.devices.token_of("PHONE").as_deref(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn an_old_single_token_device_json_loads_and_is_pushed() {
+        let dir = temp_jobs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("device.json");
+        // Byte for byte what bridges up to this one wrote.
+        std::fs::write(&path, r#"{"token":"eecc2d52oldtoken","v":1}"#).unwrap();
+
+        let store = DeviceStore::new(Some(path.clone()));
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.token_of(LEGACY_DEVICE_ID).as_deref(),
+            Some("eecc2d52oldtoken")
+        );
+
+        let mock = MockApns::default();
+        let apns = test_apns(Arc::new(mock.clone()));
+        push_to_devices(&apns, &store, "test", "x", b"{}".to_vec(), None).await;
+        assert_eq!(
+            sent_to(&mock),
+            vec![("eecc2d52oldtoken".into(), "com.tag1.Jesse".into())],
+            "a legacy entry is pushed as the bridge's own topic"
+        );
+
+        // The phone's next launch, now naming itself, takes the legacy entry over rather
+        // than leaving the same token stored twice (and pushed twice).
+        store.register(reg(
+            Some("PHONE-1111"),
+            "eecc2d52oldtoken",
+            Some("ios"),
+            Some("com.tag1.Jesse"),
+        ));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.token_of(LEGACY_DEVICE_ID), None);
+        assert_eq!(
+            store.token_of("PHONE-1111").as_deref(),
+            Some("eecc2d52oldtoken")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_device_map_survives_a_restart_and_keeps_a_token_an_older_bridge_reads() {
+        let dir = temp_jobs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("device.json");
+        {
+            let store = DeviceStore::new(Some(path.clone()));
+            store.register(reg(Some("PHONE"), "phonetoken", Some("ios"), None));
+            store.register(reg(
+                Some("MAC"),
+                "mactoken",
+                Some("macos"),
+                Some("com.tag1.JesseMac"),
+            ));
+        }
+        let restarted = DeviceStore::new(Some(path.clone()));
+        let all = restarted.all();
+        assert_eq!(all.len(), 2);
+        let mac = &all.iter().find(|(id, _)| id == "MAC").unwrap().1;
+        assert_eq!(mac.platform.as_deref(), Some("macos"));
+        assert_eq!(mac.topic.as_deref(), Some("com.tag1.JesseMac"));
+        assert!(mac.registered_at_ms > 0);
+
+        // A rollback to a bridge that reads only `token` still finds the iPhone, never the
+        // Mac, whose token that bridge would send as the wrong topic.
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["v"], 2);
+        assert_eq!(v["token"], "phonetoken");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_device_not_registered_in_60_days_is_dropped_on_load_and_on_registration() {
+        let dir = temp_jobs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("device.json");
+        let day = 24 * 60 * 60 * 1000;
+        let t0 = 1_000 * day;
+        {
+            let store = DeviceStore::new_at(Some(path.clone()), t0);
+            store.register_at(reg(Some("OLDMAC"), "oldmac", Some("macos"), None), t0);
+            store.register_at(
+                reg(Some("PHONE"), "phone", Some("ios"), None),
+                t0 + 30 * day,
+            );
+        }
+        // 61 days after the Mac's last registration, 31 after the phone's: the Mac is gone
+        // as the file loads, and the file no longer names it.
+        let store = DeviceStore::new_at(Some(path.clone()), t0 + 61 * day);
+        assert_eq!(store.token_of("OLDMAC"), None);
+        assert_eq!(store.token_of("PHONE").as_deref(), Some("phone"));
+        assert!(!load_devices(&path).contains_key("OLDMAC"));
+
+        // On registration: another device registering 91 days in drops the phone too.
+        store.register_at(reg(Some("IPAD"), "ipad", Some("ios"), None), t0 + 91 * day);
+        assert_eq!(store.token_of("PHONE"), None);
+        assert_eq!(store.len(), 1);
+        // And at exactly 60 days a device is kept.
+        store.register_at(reg(Some("X"), "x", None, None), t0 + 151 * day);
+        assert_eq!(store.token_of("IPAD").as_deref(), Some("ipad"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

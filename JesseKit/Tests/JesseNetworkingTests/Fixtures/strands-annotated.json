@@ -1,0 +1,106 @@
+{
+  "counts": {
+    "active": 1,
+    "dormant": 0,
+    "unstranded": 0,
+    "waiting": 0
+  },
+  "global_findings": [],
+  "strands": [
+    {
+      "counts": {
+        "done": 1,
+        "later": 0,
+        "queue": 7,
+        "running": 0
+      },
+      "drafts": [
+        {
+          "checked": false,
+          "id": "GD5",
+          "section": "queue",
+          "studio_runnable": true,
+          "text": "Run the thing on the Studio."
+        },
+        {
+          "checked": true,
+          "id": "GD6",
+          "section": "queue",
+          "studio_runnable": false,
+          "text": "Checked one."
+        },
+        {
+          "checked": false,
+          "id": "GD7",
+          "section": "queue",
+          "studio_runnable": false,
+          "text": "Archived one."
+        },
+        {
+          "checked": false,
+          "id": "GD8",
+          "section": "queue",
+          "studio_runnable": false,
+          "text": "No prompt section."
+        },
+        {
+          "checked": false,
+          "id": "GD9",
+          "section": "queue",
+          "studio_runnable": false,
+          "text": "No repository."
+        },
+        {
+          "checked": false,
+          "id": "GD10",
+          "section": "queue",
+          "studio_runnable": true,
+          "text": "No host."
+        },
+        {
+          "checked": false,
+          "id": "GD11",
+          "section": "queue",
+          "studio_runnable": false,
+          "text": "Wrong id."
+        },
+        {
+          "checked": false,
+          "id": "GD12",
+          "section": "queue",
+          "studio_runnable": true,
+          "text": "On the cluster."
+        }
+      ],
+      "findings": [
+        {
+          "code": "CHECKED-NOT-MOVED",
+          "line": 12,
+          "message": "GD6 is checked but still above Done"
+        },
+        {
+          "code": "QUEUE-ARCHIVED",
+          "line": 13,
+          "message": "queue link points to an archived prompt: todo-list/Projects/drafts/archive/gd7-prompt"
+        }
+      ],
+      "group": "tag1",
+      "next": {
+        "id": "GD5",
+        "link": "todo-list/Projects/drafts/gd5-prompt",
+        "text": "Run the thing on the Studio.",
+        "waits_on": null
+      },
+      "now": "testing",
+      "parent": null,
+      "repos": [],
+      "runs_active": 2,
+      "runs_needs_you": 1,
+      "slug": "Gd",
+      "state": "active",
+      "title": "Gd",
+      "updated": "2026-11-09",
+      "waiting": null
+    }
+  ]
+}

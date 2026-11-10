@@ -56,12 +56,33 @@ struct MacShellView: View {
     /// tab because the indexer is driven by the WINDOW becoming active, which is a fact
     /// about the app and not about which tab is showing. The real on-device expander is
     /// injected at this one point, exactly as the sidebar's search does below.
-    @State private var vaultModel = VaultBrowserModel(
-        expander: VaultModelExpansion(FoundationModelExpander()))
+    @State private var vaultModel: VaultBrowserModel
+
+    /// The conversation search's expander, for a test; nil is the real on-device one.
+    private let searchExpander: (any QueryExpanding)?
+
+    /// This window's menu-command state, published to the menu bar as a focused scene value
+    /// (`MacConversationCommands`).
+    @State private var commands: MacWindowCommands
+
+    /// `vaultModel`, `initialTab` and `commands` are for a test that hosts the whole shell
+    /// over a scratch vault (so it never reads the folder this Mac holds) and drives its
+    /// commands. The app passes none of them.
+    init(storeError: Error? = nil, vaultModel: VaultBrowserModel? = nil,
+         initialTab: Tab = .chats, commands: MacWindowCommands? = nil,
+         searchExpander: (any QueryExpanding)? = nil) {
+        self.storeError = storeError
+        self.searchExpander = searchExpander
+        _tab = State(initialValue: initialTab)
+        _commands = State(initialValue: commands ?? MacWindowCommands())
+        _vaultModel = State(initialValue: vaultModel ?? VaultBrowserModel(
+            expander: VaultModelExpansion(FoundationModelExpander())))
+    }
 
     var body: some View {
         TabView(selection: $tab) {
-            MacRootView(storeError: storeError)
+            MacRootView(storeError: storeError, commands: commands, isActive: tab == .chats,
+                        searchExpander: searchExpander)
                 .safeAreaInset(edge: .top, spacing: 0) {
                     AwayProfileBanner(configuration: coordinator.configStore.opsConfiguration)
                 }
@@ -99,6 +120,21 @@ struct MacShellView: View {
         .environment(\.strandRecord, StrandRecordAction { slug, section in
             showStrandRecord(slug, section: section)
         })
+        // The menu bar reads this window's commands while the window is key.
+        .focusedSceneValue(\.macWindowCommands, commands)
+        .onChange(of: tab, initial: true) { _, now in commands.tab = now }
+        // Command F: the Vault tab searches its notes; every other tab searches
+        // conversations, which means putting the Chats tab on screen first.
+        .onChange(of: commands.searchRequest) { _, request in
+            guard request != nil else { return }
+            commands.searchRequest = nil
+            if tab == .vault {
+                vaultModel.searchFocusRequested = true
+            } else {
+                tab = .chats
+                commands.chatsSearchFocusPending = true
+            }
+        }
         // The vault index's one automatic trigger, the same one the iPhone uses: the window
         // becoming active is when the synced folder may have changed behind the app's back.
         // Debounced to once per 30 seconds inside the indexer, and never on a timer.
@@ -130,6 +166,12 @@ struct MacRootView: View {
     @Environment(\.modelContext) private var context
     @Environment(MacCoordinator.self) private var coordinator
 
+    /// The window's menu-command state: this view publishes what the Conversations menu may
+    /// offer and carries out what it asks for.
+    let commands: MacWindowCommands
+    /// Whether the Chats tab is the one on screen. Only then does the menu act on it.
+    let isActive: Bool
+
     /// The raw store rows. Sort order here is immaterial; `threadListLayout` groups
     /// and orders them, and the @Query just keeps the set live as the store changes.
     @Query(sort: \JesseThread.updatedAt, order: .reverse) private var threads: [JesseThread]
@@ -151,7 +193,7 @@ struct MacRootView: View {
     /// `NoExpansion` so unit tests never spin up the real on-device model. Do not
     /// push `FoundationModelExpander()` down into a test-reachable default. The
     /// Settings toggle drives the tier's enabled flag each keystroke.
-    @State private var listModel = MacThreadListModel(searchExpander: FoundationModelExpander())
+    @State private var listModel: MacThreadListModel
 
     // Whether the on-device query-expansion tier is enabled (Settings toggle, default
     // ON). Off -> no `expand` calls, pure Tier-1 multi-token search. Same key and
@@ -164,6 +206,20 @@ struct MacRootView: View {
 
     /// Store-open failure banner (in-memory fallback — history not being saved).
     var storeError: Error?
+
+    /// Whether the caret is in the sidebar's search field. Command F sets it.
+    @State private var searchFocused = false
+
+    /// `searchExpander` is for a test, which passes an inert one; the app passes nothing and
+    /// gets the real on-device expander (see `listModel`).
+    init(storeError: Error? = nil, commands: MacWindowCommands = MacWindowCommands(),
+         isActive: Bool = true, searchExpander: (any QueryExpanding)? = nil) {
+        self.storeError = storeError
+        _listModel = State(initialValue: MacThreadListModel(
+            searchExpander: searchExpander ?? FoundationModelExpander()))
+        self.commands = commands
+        self.isActive = isActive
+    }
 
     private var selectedThread: JesseThread? {
         threads.first { $0.id == selection }
@@ -333,6 +389,12 @@ struct MacRootView: View {
         }
         .safeAreaInset(edge: .top) {
             VStack(spacing: 0) {
+                // THE SEARCH FIELD LIVES IN THE COLUMN, not the toolbar: see
+                // `MacSidebarSearchField` for why a `.searchable` cannot be used here.
+                MacSidebarSearchField(text: $listModel.searchText, isFocused: $searchFocused,
+                                      prompt: SearchFieldDriving.prompt)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 6)
                 scopePicker
                 // What the on-device tier is doing: expanding, or the terms it added.
                 SearchExpansionCaption(model: listModel.search, searchActive: isSearching)
@@ -345,7 +407,7 @@ struct MacRootView: View {
         // widened by on-device query expansion when available. On the first
         // keystroke the model is prewarmed; every keystroke re-drives it.
         .modifier(SearchFieldDriving(
-            text: $listModel.searchText, placement: .sidebar,
+            text: $listModel.searchText, presentsField: false, focus: $searchFocused,
             threadCount: threads.count, newestStamp: threads.first?.updatedAt,
             expansionEnabled: searchExpansionEnabled,
             onFocus: prepareSearch,
@@ -354,40 +416,21 @@ struct MacRootView: View {
         .navigationTitle("Jesse")
         // DECLARATION ORDER IS LEFT-TO-RIGHT, ordered by taps per day exactly as on the
         // iPhone: New Chat is the most-used action here so it is declared LAST and sits
-        // farthest right, the morning routine is next, and the rest work inward through
-        // Refresh, the favorites filter, Archive, and Settings, which is opened least of
-        // all. See README, "UI conventions".
+        // farthest right, the morning routine is next, then Refresh. See README, "UI
+        // conventions".
         //
-        // ONE MAC-ONLY CONSEQUENCE, measured rather than assumed: this group renders
-        // above the SIDEBAR, so its width is the sidebar's, not the window's, and at the
-        // default sidebar width only three of the six items are laid out. The rest go
-        // into the "more toolbar items" overflow, and NSToolbar clips from the trailing
-        // end. Every keyboard shortcut in this group still works while clipped, and
-        // widening the sidebar reveals more items.
+        // THREE ITEMS, AND NO SIDEBAR TOGGLE, BECAUSE THIS SECTION IS THE SIDEBAR'S WIDTH.
+        // It renders above the sidebar, beside the window buttons, and at the narrowest
+        // width the split view allows it holds exactly three buttons; a fourth item goes into
+        // the toolbar's overflow menu, clipped from the trailing end, which is where New Chat
+        // sits. The system's sidebar toggle is that fourth item, so it is removed here; hiding
+        // the sidebar stays in the menu bar, with its shortcut. Settings (app menu, ⌘,), the
+        // favorites filter (the picker below, Conversations menu, ⇧⌘F) and Archive (each
+        // row's context menu and swipe, Conversations menu, ⇧⌘A) are reached elsewhere.
+        // `MacSearchVisibilityTests` pins that every item here is laid out at that width.
+        .toolbar(removing: .sidebarToggle)
         .toolbar {
             ToolbarItemGroup {
-                // Opens the shared Settings scene. The scene owns the standard ⌘, shortcut
-                // globally, so this button carries none of its own (a second ⌘, binding
-                // would just shadow the system one).
-                Button { openSettings() } label: { Label("Settings", systemImage: "gearshape") }
-                // Archive / restore the selected conversation. ⌘⇧A works with only a
-                // sidebar selection (no visible control focused); the row's context
-                // menu and trailing swipe mirror the same action. Disabled with no
-                // selection so the shortcut is a no-op then.
-                Button { archiveSelected() } label: {
-                    Label(selectedThread?.isArchived == true ? "Unarchive" : "Archive",
-                          systemImage: selectedThread?.isArchived == true
-                              ? "tray.and.arrow.up" : "archivebox")
-                }
-                .keyboardShortcut("a", modifiers: [.command, .shift])
-                .disabled(selectedThread == nil)
-                // Toggle the favorites filter. ⌘⇧F flips scope even with no visible
-                // control focused; the segmented picker below mirrors the same state.
-                Button { listModel.toggleFavoritesScope() } label: {
-                    Label("Show Favorites",
-                          systemImage: listModel.scope == .favorites ? "star.fill" : "star")
-                }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
                 Button { Task { await coordinator.refreshSessions(context: context) } } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -397,9 +440,8 @@ struct MacRootView: View {
                 // `cup.and.saucer` because both sun glyphs are spoken for: `sun.horizon`
                 // is the Health tab's "Start new day" and `sunrise` is the Today tab.
                 //
-                // NO KEYBOARD SHORTCUT, unlike every other button in this group. The
-                // other four are cheap and reversible (a new chat, a refresh, a filter
-                // flip, an archive toggle); this one starts a routine that runs for
+                // NO KEYBOARD SHORTCUT, unlike the other buttons in this group. They are
+                // cheap and reversible (a new chat, a refresh); this one starts a routine that runs for
                 // minutes and rewrites the day file, and a shortcut is exactly how it
                 // would get fired by a mistyped ⌘-something. Being heavy is also why it
                 // sits inward of New Chat rather than in the rightmost, mis-click slot.
@@ -424,6 +466,42 @@ struct MacRootView: View {
             Text(MorningRoutine.confirmationMessage(lastFiredDay: morningRoutineLastFiredDay.isEmpty
                                                         ? nil : morningRoutineLastFiredDay,
                                                     now: .now))
+        }
+        // The Conversations menu: what it may offer, and what it asks for.
+        .onChange(of: menuState, initial: true) { _, state in commands.conversations = state }
+        .onDisappear { commands.conversations = nil }
+        .onChange(of: commands.pending) { _, filed in
+            guard let filed, isActive else { return }
+            commands.pending = nil
+            perform(filed.request)
+        }
+        // Command F, once the shell has put this tab on screen. `initial` because the tab
+        // may have been built by that very switch.
+        .onChange(of: commands.chatsSearchFocusPending, initial: true) { _, pending in
+            guard pending else { return }
+            commands.chatsSearchFocusPending = false
+            searchFocused = true
+        }
+    }
+
+    /// What the Conversations menu may offer while this tab is on screen.
+    private var menuState: MacWindowCommands.Conversations? {
+        guard isActive else { return nil }
+        return MacWindowCommands.Conversations(
+            favoritesShown: listModel.scope == .favorites,
+            selectionArchived: selectedThread?.isArchived,
+            canStartChat: coordinator.configStore.isConfigured)
+    }
+
+    /// A Conversations menu item, carried out by the same code as the control it mirrors.
+    private func perform(_ request: MacWindowCommands.Request) {
+        switch request {
+        case .toggleFavorites: listModel.toggleFavoritesScope()
+        case .archiveSelected: archiveSelected()
+        case .newChat:
+            if coordinator.configStore.isConfigured { newChat() }
+        case .refresh:
+            Task { await coordinator.refreshSessions(context: context) }
         }
     }
 
@@ -609,7 +687,7 @@ struct MacRootView: View {
     }
 
     /// The ⌘⇧A action: archive / restore whatever thread is selected in the sidebar.
-    /// No-op with no selection (the toolbar button is disabled then).
+    /// No-op with no selection (the menu item is disabled then).
     private func archiveSelected() {
         guard let thread = selectedThread else { return }
         toggleArchived(thread)

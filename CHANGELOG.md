@@ -14,6 +14,10 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (208)] - 2026-11-10
+
+**The Mac app's conversation search is in the Chats sidebar at every width, and Command F reaches it.** Root cause: inside the window's `TabView`, a sidebar `.searchable` became a principal toolbar search item that cannot sit beside the tab picker, so it and every sidebar toolbar button went into the overflow menu at every width; the field now lives in the sidebar column, the toolbar holds three buttons, and a Conversations menu carries the rest.
+
 ## [bridge 0.201.0] - 2026-11-10
 
 **Every workout figure lands in its own CSV column, written by the bridge from structured data,

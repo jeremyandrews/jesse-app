@@ -172,6 +172,10 @@ struct JesseMacApp: App {
         // toolbar button) all open THIS scene via `openSettings`, so there is one settings
         // surface, always available.
         .commands {
+            // DECLARED BEFORE Ops, because the menu bar is searched for a shortcut in this
+            // order: Archive Selected shares ⇧⌘A with Away Mode and must be found first
+            // while it can act. See `MacConversationMenuItems`.
+            MacConversationCommands()
             // A menu of its own rather than two more items under an existing one: these are
             // the only commands in the app that act on the MACHINE rather than on a
             // conversation, and burying them under File would read as a document action.

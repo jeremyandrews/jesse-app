@@ -2982,7 +2982,7 @@ stand-in lists all five tools, as the real server does on the Studio, and the cl
 direct records were re-recorded with them: only the write rows moved, by these two tools.
 **Since 0.199.0, `POST /jesse/runs/:id/close` (paired device) and `devjob_close` join them**,
 classed and granted exactly as `devjob_cancel`; the battery's stand-in lists six tools and both
-records were re-recorded again, moving only the write rows, by that one tool. A close stops
+records were re-recorded again, moving only the write rows' grants, by that one tool. A close stops
 nothing and deletes nothing: it marks a `needs_you`, `interrupted` or `failed` run `closed`. The
 watcher closes a waiting run by itself only when a further run of its item supersedes it, its
 Drafts line is ticked, or its report has moved to `Inbox/archive/`, and never a queued, running

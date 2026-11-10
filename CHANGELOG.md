@@ -53,6 +53,11 @@ always means something he still has to answer.**
   `enabled_tools`, the direct harness's gateway grants, the capability map and the containment
   battery's stand-in. `devjob_list` files a closed run among the finished, and its entries gain
   `closed_reason`.
+- **Re-recorded live:** `containment.toml` (claude-code, now against 2.1.322; gate pass, no
+  verdict moved; the two known-open write baselines unchanged) and `containment-direct.toml`.
+  The only posture change in either is the write row's `toolset_args` gaining
+  `mcp__devjob__devjob_close`; the claude-code record's observed `root_tools` also list the
+  already granted `imcp` `messages_fetch` and `maps_search`, which the server listed this time.
 - **Not changed:** how a round decides `needs_you`, replies, cancels, the usage limit pause,
   every other route and the app (which decodes `closed` as an unknown status).
 - **Tests:** `again` closes an earlier `needs_you` and an earlier `interrupted` run and leaves

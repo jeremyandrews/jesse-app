@@ -50,6 +50,32 @@ history beyond 48 hours carried only minutes.
   `written`, `unchanged`, `added`, `replaced`, `splits_written`. `400` for a page that does not
   validate (nothing written).
 
+## [App 1.0 (206)] - 2026-11-10
+
+**On iPhone and iPad, tapping the Today tab bar item while the Today tab is up and its Strands
+segment is showing returns to the day.** Root cause: the shell (`RootTabView`) bound the tab
+bar straight to its selection and had no notion of a re-tap, so the Today tab's segment could
+only change from the segmented picker at the top of the screen.
+
+- **Added: `TodayTabRetap`** (JesseKit, `JesseTodayDisplay`): the rule, as a pure function of
+  the selected tab, the tapped tab and the segment showing. A tap that selects the Today tab
+  from another tab keeps the remembered segment; a re-tap with Strands showing answers Today; a
+  re-tap with the day showing, and every tap on another tab, changes nothing.
+- **The tab bar writes through its own binding** (`RootTabView.tabBarSelection`). A write that
+  carries the tab already selected is a re-tap. Programmatic selections (`openVaultNote`,
+  `showStrandRecord`, the Chats landing binding, the UI test seams) write `selection` directly
+  and never pass through it. When the rule answers Today the shell bumps a counter, the only
+  new value the Today tab receives; it is part of `TodayTabView`'s `==`, so it gets past
+  `.equatable()`. The shell still holds no model objects.
+- **The Today tab, on that counter,** writes Today to `today.segment` (the key the picker
+  writes) and clears any pushed item, so the tap ends on the day's list. Sheets are untouched,
+  and the system's own re-tap behaviour (popping a pushed item) is kept.
+- The Mac app, the bridge, the wire and the stored segment key are unchanged.
+- Tests: `TodayTabRetapTests` (JesseKit); `TodayRetapUITests` (two taps from Chats with Strands
+  remembered land on the day, the first keeping Strands; a re-tap on the day changes nothing);
+  `TodayRetapScreenshotUITests`, skipped unless `TT1_BRIDGE` is set. Screenshots in
+  `docs/tt1-screenshots/`.
+
 ## [App 1.0 (205)] - 2026-11-10
 
 **Workouts travel as structured records beside the feed line, and history can be backfilled.**

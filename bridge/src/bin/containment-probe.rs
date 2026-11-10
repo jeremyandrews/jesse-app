@@ -442,18 +442,34 @@ async fn run(args: Vec<String>) {
     let servers = jesse_bridge::preflight_servers(&opts.rows);
     if !servers.is_empty() {
         let counts = jesse_bridge::count_server_tools(&cfg, &servers).await;
-        if let Err(e) = jesse_bridge::preflight_verdict(&counts) {
-            eprintln!("containment-probe: {e}");
-            std::process::exit(1);
-        }
         let listed: Vec<String> = counts
             .iter()
-            .map(|(n, r)| format!("{n} {}", r.as_ref().map(|c| *c).unwrap_or(0)))
+            .map(|(n, r)| match r {
+                Ok(c) => format!("{n} {c}"),
+                Err(_) => format!("{n} -"),
+            })
             .collect();
         eprintln!(
-            "containment-probe: pre-flight passed, {} MCP server(s) registered tools: {}",
-            counts.len(),
+            "containment-probe: pre-flight, tools per MCP server: {}",
             listed.join(", ")
+        );
+        if let Err(e) = jesse_bridge::preflight_verdict(&counts) {
+            eprintln!("containment-probe: {e}");
+            let failures: Vec<(String, String)> = counts
+                .iter()
+                .filter_map(|(n, r)| r.as_ref().err().map(|e| (n.clone(), e.clone())))
+                .collect();
+            let exe = std::env::current_exe()
+                .map(|e| e.display().to_string())
+                .unwrap_or_else(|_| "containment-probe".to_string());
+            for l in jesse_bridge::probesign::local_network_lines(&failures, &exe) {
+                eprintln!("  ✗ {l}");
+            }
+            std::process::exit(1);
+        }
+        eprintln!(
+            "containment-probe: pre-flight passed, all {} MCP server(s) registered tools",
+            counts.len()
         );
     }
 

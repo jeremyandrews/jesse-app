@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(find_bridge_plist(&dir, None), Some(only.clone()));
         // A label whose plist is not there falls back to the suffix match.
         assert_eq!(
-            find_bridge_plist(&dir, Some("com.other.jesse-bridge")),
+            find_bridge_plist(&dir, Some("com.example.missing-bridge")),
             Some(only)
         );
         // Two candidates and no label: not settled.

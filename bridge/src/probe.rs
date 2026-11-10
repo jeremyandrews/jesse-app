@@ -3370,8 +3370,21 @@ pub async fn count_server_tools(
         }
     }
     drop(guard);
+    // A server that would not start is only `did not start` to the session; WHY is what the
+    // gateway recorded for this binary's run. Taken here so the verdict names the cause, and
+    // so a pre-flight failure is not reported a second time as a battery one.
+    let why = crate::gateway::take_upstream_failures();
     counted.sort_by_key(|(i, _)| *i);
-    out.extend(counted.into_iter().map(|(i, r)| (names[i].clone(), r)));
+    out.extend(counted.into_iter().map(|(i, r)| {
+        let name = names[i].clone();
+        let r = r.map_err(|e| {
+            why.iter()
+                .find(|(s, _)| *s == name)
+                .map(|(_, w)| w.clone())
+                .unwrap_or(e)
+        });
+        (name, r)
+    }));
     out
 }
 

@@ -190,7 +190,7 @@ public struct VaultAnswerer: Sendable {
         Answer only from the notes given. If they do not contain the answer, set \
         abstain. Cite only the paths given. Today, tomorrow and yesterday mean the date \
         in the first line. My and I mean the asker; a fact about a different named \
-        person is not an answer. At most 60 words.
+        person is not an answer. Give the value, never a placeholder. At most 60 words.
         """
 
     /// How many citations the model may return.
@@ -319,12 +319,31 @@ public struct VaultAnswerer: Sendable {
                          question: question) else {
             return .unanswered(.abstained)
         }
+        // …and it has to STATE the value, not copy a template that leaves a slot for it.
+        guard !hasUnfilledSlot(text) else { return .unanswered(.abstained) }
         // …and a question about the asker is not answered by somebody else's fact.
         if LookupQuery.isFirstPerson(question),
            isAboutSomebodyElse(text, question: question, ownerName: ownerName) {
             return .unanswered(.abstained)
         }
         return .answered(VaultAnswer(text: text, citations: citations))
+    }
+
+    /// WHETHER AN ANSWER IS A TEMPLATE: it holds an unfilled slot, an angle-bracketed run
+    /// of letters, digits, hyphens or underscores with no space in it (`<macbook-ip>`,
+    /// `<PID>`, `<file>`).
+    ///
+    /// On 2026-10-01, with the bridge unreachable, "What's the connection to Tailscale into
+    /// my studio at home?" was answered `tailscale ping --tsmp <macbook-ip>`, lifted from a
+    /// runbook's fallback section and citing the remote access note whose first line held
+    /// the address. Real paths, and `ping` and `tsmp` were in the cited runbook, so the
+    /// grounding check passed it. A copied command whose key value is a slot has stated no
+    /// fact; whoever reads it still has to find the value it leaves out.
+    ///
+    /// No list of slot names: the shape is the rule. A comparison (`< 600`) has a space
+    /// inside its brackets and an address (`<a@b.com>`) has `@` and `.`, so neither is one.
+    public static func hasUnfilledSlot(_ answer: String) -> Bool {
+        answer.range(of: #"<[\p{L}\p{N}_-]+>"#, options: .regularExpression) != nil
     }
 
     /// Whether `answer` carries at least one significant word that is in an extract it

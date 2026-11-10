@@ -59,6 +59,19 @@ public nonisolated enum PendingIntentKind: String, Codable, CaseIterable, Sendab
     /// routine to diff against the CSV so a late replay is idempotent, and refusing it
     /// would recreate exactly the late-logged row this intent exists to prevent.
     case logWorkouts
+    /// **Done** pressed on a timed reminder's notification while the bridge could not be
+    /// reached (`POST /jesse/reminders/{id}/done`). The notification is already gone by
+    /// then, so this row is the only record that the button was pressed.
+    ///
+    /// No day guard, and no identity check beyond the id: a reminder is the bridge's own
+    /// object, addressed by the id the push carried, and the bridge answering `404` for
+    /// it is the one refusal there is (the row is then dropped, not shown — see
+    /// `IntentReplayer`).
+    case reminderDone
+    /// **Snooze** pressed on a timed reminder's notification while the bridge could not
+    /// be reached (`POST /jesse/reminders/{id}/snooze`, `payload.minutes`). Same rules as
+    /// `reminderDone`.
+    case reminderSnooze
 
     /// Whether replaying this intent writes to the DAY FILE (as opposed to opening a
     /// conversation). The two families have completely different replay rules — one
@@ -67,8 +80,16 @@ public nonisolated enum PendingIntentKind: String, Codable, CaseIterable, Sendab
     public var isDayFileWrite: Bool {
         switch self {
         case .check, .uncheck, .defer, .undefer, .move: return true
-        case .quickLog, .startNewDay, .processUpdates, .logWorkouts: return false
+        case .quickLog, .startNewDay, .processUpdates, .logWorkouts,
+             .reminderDone, .reminderSnooze: return false
         }
+    }
+
+    /// Whether this is one of a timed reminder's two notification actions. Neither pending
+    /// list shows these — they are not a fact about the day or the diet, and a reminder
+    /// that cannot be delivered is dropped rather than held for a decision.
+    public var isReminderAction: Bool {
+        self == .reminderDone || self == .reminderSnooze
     }
 
     /// The checkbox/postponement state this kind asserts, for the two pairs that have
@@ -93,6 +114,8 @@ public nonisolated enum PendingIntentKind: String, Codable, CaseIterable, Sendab
         case .startNewDay: return "Start new day"
         case .processUpdates: return "Process updates"
         case .logWorkouts: return "Log workouts"
+        case .reminderDone: return "Reminder done"
+        case .reminderSnooze: return "Reminder snoozed"
         }
     }
 }
@@ -132,15 +155,23 @@ public nonisolated struct PendingIntentPayload: Codable, Equatable, Sendable {
     /// phone fired by itself (`automatic`). Absent means an ordinary `phone` thread, which
     /// is what every row written before this field existed replays as.
     public var origin: String?
+    /// The bridge's id of the timed reminder a `reminderDone` / `reminderSnooze` is about —
+    /// the push's `reminder_id`, verbatim.
+    public var reminderId: String?
+    /// A `reminderSnooze`'s length in minutes. Absent means the bridge's own default.
+    public var minutes: Int?
 
     public init(evidence: String? = nil, moveOp: String? = nil,
                 moveSection: String? = nil, text: String? = nil,
-                origin: String? = nil) {
+                origin: String? = nil, reminderId: String? = nil,
+                minutes: Int? = nil) {
         self.evidence = evidence
         self.moveOp = moveOp
         self.moveSection = moveSection
         self.text = text
         self.origin = origin
+        self.reminderId = reminderId
+        self.minutes = minutes
     }
 
     /// Serialized for storage. An encode failure yields `"{}"` rather than throwing: a

@@ -488,6 +488,13 @@ mod tests {
             .expect("the shipped set names a `places` server");
         assert_eq!(places.command, "jesse-places-mcp");
         assert!(missing.iter().any(|m| m.command == "jesse-build-mcp"));
+        // The reminders server (0.199.0) is checked the same way: a missing
+        // `jesse-reminders-mcp` would leave every main turn unable to set a reminder.
+        let reminders = missing
+            .iter()
+            .find(|m| m.server == "reminders")
+            .expect("the shipped set names a `reminders` server");
+        assert_eq!(reminders.command, "jesse-reminders-mcp");
         // The Home Assistant and Roon entries speak HTTP and name no binary.
         assert!(!missing.iter().any(|m| m.server == "homeassistant"));
         assert!(!missing.iter().any(|m| m.server == "roon"));

@@ -26,5 +26,14 @@
 	-->
 	<key>com.apple.developer.healthkit.background-delivery</key>
 	<true/>
+	<!--
+	  Lets a timed reminder's push (interruption-level time-sensitive) break through a
+	  Focus and stay on the lock screen. Without it iOS delivers the push at the active
+	  level. Like the HealthKit background delivery above, the App ID and provisioning
+	  profile must carry the capability too, which automatic signing adds on the next
+	  signed build.
+	-->
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
 </dict>
 </plist>

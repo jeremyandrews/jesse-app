@@ -14,6 +14,73 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (203)] - 2026-11-10
+
+**A timed reminder can be finished or snoozed from the notification, without opening the app.**
+The bridge pushes a reminder when it falls due; its notification now carries two buttons.
+
+- **Done** and **Snooze 10 min** (category `JESSE_REMINDER`). Neither opens the app: each posts
+  `POST /jesse/reminders/{id}/done` or `/snooze` with `{"minutes": 10}` in the background, and
+  the notification's completion is reported only once the press has landed or been queued.
+- **Offline.** A press the bridge cannot be reached for (no network, a timeout, a 5xx, a refused
+  pairing) waits on the offline capture queue and is sent on the next recovery, alongside held
+  check-offs and quick logs. A `404` (a reminder the bridge no longer has) is final: the press is
+  dropped, never retried. Reminder presses are not shown on the Today or Health pending lists.
+- **Tapping the reminder itself** opens the app and does nothing else; it is never routed to a
+  conversation.
+- **Time Sensitive.** The app now carries the time-sensitive notifications entitlement, so a
+  reminder (`interruption-level: time-sensitive`) can break through a Focus. The App ID needs
+  the capability too; automatic signing adds it on the next signed build.
+- JesseKit: `reminderDone(id:)` and `reminderSnooze(id:minutes:)` on `JesseBridgeClient` behind
+  `ReminderActing`, and `PendingIntentKind.reminderDone` / `.reminderSnooze` with
+  `PendingIntentPayload.reminderId` and `.minutes`.
+
+## [bridge 0.199.0] - 2026-11-10
+
+**Timed reminders: a turn can set a push for a chosen minute, one off or repeating.** "Remind me
+at 6:45 to start the pancakes" and "every weekday at 7:30 remind me to take the bins out" now work
+from any turn. At the minute, in the active profile's zone, the bridge sends one push with `Done`
+and `Snooze 10 min`. A reminder is a notification, never an agent turn: firing one spawns no model
+process.
+
+- **Added: `reminders.rs`**, the model and the store. A reminder has an id, text, `created_at`,
+  `next_fire` (UTC), `local_time` (`HH:MM`), a zone mode (`profile` or a fixed IANA zone), an
+  optional recurrence (`daily`, `weekdays`, `weekly` on a set of days, `monthly` on a day of the
+  month with the 31st falling back to the month's last day, `every_n_days`, each with an optional
+  `until` date or `count`), a state (active, done, cancelled, missed), `fired_count` and
+  `last_fired_at`. The store is one file, `<state_dir>/reminders.json`, written atomically under an
+  exclusive advisory `flock` on `reminders.json.lock`, because the MCP child and the bridge both
+  write it. A file that does not parse is never overwritten. Done, cancelled and missed reminders
+  are pruned 30 days after they close.
+- **Added: `compute_next_fire` and `due`**, pure and tested without a clock. A pending occurrence
+  is named by its local date, so a profile change re-resolves the same occurrence in the new zone
+  rather than inventing another. DST: a local time missing on the spring-forward day fires at the
+  first valid minute after it; one that happens twice on the fall-back day fires once, at the
+  first.
+- **Added: the reminder ticker**, beside the scheduler, every 30 seconds. It records each fired
+  occurrence before sending, so a restart can lose a push but never send one twice. Payload:
+  title `Reminder`, the text, a sound, `interruption-level: time-sensitive`, category
+  `JESSE_REMINDER`, `reminder_id` and the badge every push carries. A one-off becomes done and
+  stays listed as `fired` until acknowledged; a series advances. After downtime a reminder fires
+  at most 6 hours late with `(late: due HH:MM)`; older than that it is marked missed and ONE
+  summary push lists every missed one. A repeating reminder fires at most once per catch-up, for
+  its latest passed occurrence. Push errors are logged and swallowed, as `push_schedule_outcome`
+  does. `POST /jesse/profile` re-resolves profile-mode reminders at once.
+- **Added: `jesse-reminders-mcp`**, a stdio server over `reminders.rs` in the style of
+  `jesse-places-mcp`: `create_reminder(text, at, recurrence?, zone?)` (`at` is `HH:MM`, the next
+  such minute, or a local date-time; the reply gives the next fire in local time and UTC),
+  `list_reminders(include_inactive?)`, `cancel_reminder(id)` and `snooze_reminder(id, minutes)`.
+  A past time, an empty text and an `until` before the first fire are each refused with a reason.
+  It reads the profile zone as the bridge does and writes only `reminders.json`.
+- **Added: `reminders` on every main turn**, on Claude Code and Codex, registered as
+  `jesse-places-mcp` is (a row in the server table, a bare name on the child's `PATH`). All four
+  tools are granted by name; three are `write`, `list_reminders` is a read. New row label
+  `...+kubernetes-cloud+reminders`; the 0.188.0 set is kept as a retired label. In
+  `deploy-bins.toml`, the startup resolve check, the capability map and SECURITY.md.
+- **Added: `GET /jesse/reminders`, `POST /jesse/reminders/{id}/done` and `POST
+  /jesse/reminders/{id}/snooze`** (`{"minutes": N}`, default 10), on the `/jesse/schedule` auth.
+  The app's notification actions call them.
+
 ## [App 1.0 (202)] - 2026-11-10
 
 **Studio runs can be started, watched and steered from the app, without a chat turn.** Five

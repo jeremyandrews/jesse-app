@@ -330,6 +330,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // taps reach us. Authorization is requested later (after a turn succeeds),
         // not here on cold launch.
         UNUserNotificationCenter.current().delegate = self
+        // The timed reminder's Done / Snooze buttons. Registered on every launch, before
+        // any push can be shown: a category the center does not know is drawn with no
+        // buttons at all, and a reminder's whole point is that it can be acted on from the
+        // lock screen.
+        ReminderNotification.register()
+        // A UI test that screenshots a delivered reminder needs the permission up front.
+        // A no-op on every ordinary launch (see the seam).
+        MainActor.assumeIsolated { ReminderNotificationUITestSeam.arm() }
         // Start listening for spoken turns relayed from the Apple Watch. No-ops on a
         // device without WatchConnectivity support (e.g. iPad).
         PhoneWatchConnectivity.shared.activate()
@@ -462,16 +470,36 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         completionHandler(onScreen ? [] : [.banner, .sound])
     }
 
-    // A tap: hand BOTH routing keys to the router so ContentView opens the thread and
-    // re-attaches to fetch the finished reply. Parsed through `PushTap`, which reads the
-    // keys `BackgroundDelivery.PayloadKey` names rather than spelling them again here.
+    // A response: a reminder button, a reminder's body, or a "Jesse finished" tap.
+    //
+    // A reminder button is pressed on the bridge in the background, and the completion
+    // handler is called only once that press has landed or been QUEUED — never before, or
+    // iOS may suspend the app with the request in flight and the press would be lost.
+    //
+    // A reminder's body opens the app and nothing else (`NotificationResponseRoute`). A
+    // "Jesse finished" tap hands BOTH routing keys to the router so ContentView opens the
+    // thread and re-attaches; parsed through `PushTap`, which reads the keys
+    // `BackgroundDelivery.PayloadKey` names rather than spelling them again here.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        if let tap = PushTap(userInfo: response.notification.request.content.userInfo) {
+        let route = NotificationResponseRoute(
+            actionIdentifier: response.actionIdentifier,
+            categoryIdentifier: response.notification.request.content.categoryIdentifier,
+            userInfo: response.notification.request.content.userInfo)
+        switch route {
+        case .reminder(let action):
+            let done = UncheckedCompletion(completionHandler)
+            Task { @MainActor in
+                await ReminderActionHandler.shared.handle(action)
+                done.call()
+            }
+        case .openOnly:
+            completionHandler()
+        case .thread(let tap):
             PushRouter.shared.pendingTap = tap
+            completionHandler()
         }
-        completionHandler()
     }
 }
 

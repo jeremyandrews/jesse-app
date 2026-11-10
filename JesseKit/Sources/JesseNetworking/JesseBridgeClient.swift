@@ -599,6 +599,39 @@ public struct JesseBridgeClient: BridgeClientProtocol {
         throw JesseError.badResponse(http.statusCode, String(data: data, encoding: .utf8) ?? "")
     }
 
+    // MARK: - Timed reminders
+
+    /// `POST /jesse/reminders/{id}/done` — the **Done** button on a reminder's notification.
+    /// See `ReminderActionResult` for what each answer means; a transport failure, a `5xx`
+    /// and an auth refusal THROW, because those are the answers a retry can change.
+    public func reminderDone(id: String) async throws -> ReminderActionResult {
+        try await reminderCall("/jesse/reminders/\(Self.pathEscaped(id))/done", body: nil)
+    }
+
+    /// `POST /jesse/reminders/{id}/snooze` with `{"minutes": n}` — the **Snooze** button.
+    /// The bridge's default is ten minutes; the app always says so explicitly.
+    public func reminderSnooze(id: String, minutes: Int) async throws -> ReminderActionResult {
+        try await reminderCall("/jesse/reminders/\(Self.pathEscaped(id))/snooze",
+                               body: ReminderSnoozeBody(minutes: minutes))
+    }
+
+    /// One reminder action. Bounded at `ReminderActionResult.requestTimeout` rather than
+    /// the session's 30s: the caller is a notification action running in the background,
+    /// which must finish (or queue) inside the few seconds iOS grants it.
+    private func reminderCall(_ path: String, body: ReminderSnoozeBody?) async throws
+        -> ReminderActionResult {
+        guard var req = authorized(path, method: "POST") else { throw JesseError.notConfigured }
+        req.timeoutInterval = ReminderActionResult.requestTimeout
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try Self.encodeBody(body)
+        }
+        let (data, resp) = try await perform(req)
+        guard let http = resp as? HTTPURLResponse else { throw JesseError.decoding }
+        return try ReminderActionResult.classify(status: http.statusCode,
+                                                 body: String(data: data, encoding: .utf8) ?? "")
+    }
+
     // MARK: - Sessions list
 
     /// `GET /jesse/conversations`. `since` narrows to conversations touched after that unix

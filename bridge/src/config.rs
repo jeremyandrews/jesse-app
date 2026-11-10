@@ -1014,6 +1014,13 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // which admission policy confines to burst nodes. Granted beside `git`, the one other verb
 // that reaches a network service with the bridge's credentials. Codex's shell is an OS
 // sandbox, not a grant list, and `direct` has no shell, so neither takes it.
+//
+// REMINDERS: ALL FOUR TOOLS OF THIS REPOSITORY'S OWN `jesse-reminders-mcp` (0.199.0).
+//
+// `create_reminder`, `list_reminders`, `cancel_reminder` and `snooze_reminder`: the server's
+// whole `tools/list` (`ReminderTool::ALL`), granted by name and none withheld. They read and
+// write `<state_dir>/reminders.json` and nothing else; a reminder becomes a push from the
+// bridge's ticker, never a turn. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1231,6 +1238,8 @@ mcp__kubernetes-cloud__pods_run,mcp__kubernetes-cloud__pods_exec,mcp__kubernetes
 mcp__kubernetes-cloud__resources_list,mcp__kubernetes-cloud__resources_get,\
 mcp__kubernetes-cloud__resources_create_or_update,mcp__kubernetes-cloud__resources_scale,\
 mcp__kubernetes-cloud__resources_delete,\
+mcp__reminders__create_reminder,mcp__reminders__list_reminders,\
+mcp__reminders__cancel_reminder,mcp__reminders__snooze_reminder,\
 mcp__devjob__devjob_start,mcp__devjob__devjob_status,mcp__devjob__devjob_list,\
 mcp__devjob__devjob_reply,mcp__devjob__devjob_cancel";
 
@@ -6058,6 +6067,33 @@ mod tests {
                 .split(',')
                 .any(|e| e == "mcp__house__*" || e == "mcp__house"),
             "a wildcard grant on the house server is never acceptable"
+        );
+    }
+
+    /// THE REMINDERS GRANT IS ALL FOUR OF THE SERVER'S TOOLS, AND NEVER A WILDCARD. Equality
+    /// against `ReminderTool::ALL`, so a tool added to the server is a compile-visible decision
+    /// here rather than a grant that arrives by itself, and none of the four is withheld.
+    #[test]
+    fn the_reminders_grant_is_all_four_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__reminders"))
+            .collect();
+        granted.sort_unstable();
+        let mut expected: Vec<String> = crate::reminders::ReminderTool::ALL
+            .iter()
+            .map(|t| format!("mcp__reminders__{}", t.tool_name()))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(granted, expected);
+        assert_eq!(
+            expected,
+            [
+                "mcp__reminders__cancel_reminder",
+                "mcp__reminders__create_reminder",
+                "mcp__reminders__list_reminders",
+                "mcp__reminders__snooze_reminder",
+            ]
         );
     }
 

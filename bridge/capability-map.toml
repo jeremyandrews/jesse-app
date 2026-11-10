@@ -4061,6 +4061,42 @@ dependency = "KUBECONFIG set by the jesse-k8s-cloud-mcp launcher to ~/.kube/kc1-
 workflows = "workloads on the cloud cluster kc1 and its burst workers: load tests, builds, batch jobs, short lived services in the work namespace"
 reason = "Changes the cluster: runs, execs into or deletes pods, or creates, scales or deletes resources."
 
+[grant."mcp__reminders__create_reminder"]
+kind = "mcp"
+server = "reminders"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-reminders-mcp (this repository, in deploy-bins.toml); JESSE_STATE_DIR (else HOME/.jesse-bridge): reminders.json, written under its advisory lock, and profile.json, read for the zone; no credential, no host"
+workflows = "timed reminders from chat: remind me at 6:45 to start the pancakes, every weekday at 7:30 take the bins out"
+reason = "Stores a timed reminder in the bridge's reminders.json; at its minute the bridge's ticker sends the owner one push with Done and Snooze. No turn runs."
+
+[grant."mcp__reminders__list_reminders"]
+kind = "mcp"
+server = "reminders"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-reminders-mcp (this repository, in deploy-bins.toml); JESSE_STATE_DIR (else HOME/.jesse-bridge): reminders.json, written under its advisory lock, and profile.json, read for the zone; no credential, no host"
+workflows = "reading reminders back: what is set, when each fires next, what fired"
+reason = "Lists the stored reminders with their next fire in local time and UTC; reads only."
+
+[grant."mcp__reminders__cancel_reminder"]
+kind = "mcp"
+server = "reminders"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-reminders-mcp (this repository, in deploy-bins.toml); JESSE_STATE_DIR (else HOME/.jesse-bridge): reminders.json, written under its advisory lock, and profile.json, read for the zone; no credential, no host"
+workflows = "cancelling a reminder from chat"
+reason = "Cancels one stored reminder so it never fires again."
+
+[grant."mcp__reminders__snooze_reminder"]
+kind = "mcp"
+server = "reminders"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-reminders-mcp (this repository, in deploy-bins.toml); JESSE_STATE_DIR (else HOME/.jesse-bridge): reminders.json, written under its advisory lock, and profile.json, read for the zone; no credential, no host"
+workflows = "remind me again in twenty minutes"
+reason = "Schedules one extra fire of a stored reminder a number of minutes from now."
+
 [grant."mcp__devjob__devjob_start"]
 kind = "mcp"
 server = "devjob"

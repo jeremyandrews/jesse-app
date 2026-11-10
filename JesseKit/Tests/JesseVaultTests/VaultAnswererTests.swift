@@ -317,7 +317,7 @@ final class VaultAnswererTests: XCTestCase {
             tailscale ping --tsmp <macbook-ip>
             """)
         let remote = chunk("Machines/Remote-Access.md", line: 3,
-                           text: "Tailscale reaches the Studio at 100.83.198.100.")
+                           text: "Tailscale reaches the Studio at 192.0.2.10.")
         let draft = VaultAnswerDraft(
             answer: "tailscale ping --tsmp <macbook-ip>",
             citations: ["Runbooks/Overlay-Wedge.md", "Machines/Remote-Access.md"],

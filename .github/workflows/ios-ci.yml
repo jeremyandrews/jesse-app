@@ -82,8 +82,9 @@ jobs:
           #              no .xcworkspace in this repo to match.
           #   JesseKit/  the local SwiftPM package (JesseCore/JesseNetworking/
           #              JesseConversations) that the first step below builds.
-          # Plus the two files that define this check itself, so a change to the
-          # workflow or the local script gets exercised rather than trusted.
+          # Plus the files that define this check itself, so a change to the
+          # workflow, the local script or the simulator rule they share gets
+          # exercised rather than trusted.
           #
           # Everything else — bridge/, eval/, scripts/, docs — is Rust or infra
           # that ci.yml already gated on Linux, and is exactly what should never
@@ -94,7 +95,8 @@ jobs:
           # involved. Erring toward running is the right direction for a gate.
           commits="$(git log --since='25 hours ago' --full-history --oneline -- \
             'Jesse/' 'JesseKit/' \
-            '.github/workflows/ios-ci.yml' 'scripts/local-ci-macos.sh')"
+            '.github/workflows/ios-ci.yml' 'scripts/local-ci-macos.sh' \
+            'scripts/simulator-pick.jq')"
 
           if [ -n "$commits" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
@@ -191,28 +193,26 @@ jobs:
           # of trusting whatever `simctl` happens to list) guarantees xcodebuild
           # has a concrete, matching destination id to build and test against.
           xcrun simctl list runtimes available
+          # The runtime and model come from scripts/simulator-pick.jq, the file
+          # scripts/local-ci-macos.sh reads, so the nightly and the local gate test
+          # on the same iPhone: the newest standard "iPhone NN Pro", never a Duo,
+          # fold, Air, SE, mini, Plus or "e" just because Xcode listed it last.
+          # This job runs in Jesse/, so repository scripts are named from the
+          # workspace root.
           read -r RUNTIME_ID RUNTIME_VER DEVTYPE DEV_NAME < <(
-            xcrun simctl list runtimes --json | jq -r '
-              .runtimes
-              | map(select(.platform == "iOS" and .isAvailable))
-              | map({
-                  id: .identifier,
-                  ver: .version,
-                  dt: (.supportedDeviceTypes | map(select(.productFamily == "iPhone")) | last)
-                })
-              | map(select(.dt != null))
-              | sort_by(.ver | split(".") | map(tonumber))
-              | last
-              | "\(.id) \(.ver) \(.dt.identifier) \(.dt.name)"
-            '
+            xcrun simctl list runtimes --json | jq -r \
+              --arg platform iOS --arg family iPhone --arg override "" \
+              -f "${{ github.workspace }}/scripts/simulator-pick.jq"
           )
-          if [ -z "${RUNTIME_ID:-}" ] || [ -z "${DEVTYPE:-}" ]; then
+          if [ -z "${RUNTIME_ID:-}" ] || [ "$RUNTIME_ID" = "null" ] || [ -z "${DEVTYPE:-}" ]; then
             echo "No available iOS runtime with an iPhone device type on the runner" >&2
             exit 1
           fi
           UDID=$(xcrun simctl create "ci-iphone" "$DEVTYPE" "$RUNTIME_ID")
           xcrun simctl boot "$UDID" || true
           DEST="platform=iOS Simulator,id=${UDID}"
+          echo "Device type: ${DEV_NAME} (${DEVTYPE})"
+          echo "Runtime:     iOS ${RUNTIME_VER} (${RUNTIME_ID})"
           echo "Resolved: ${DEV_NAME} (iOS ${RUNTIME_VER}) -> ${DEST}"
           echo "destination=${DEST}" >> "$GITHUB_OUTPUT"
           # Build at the target the app SHIPS, lowered only far enough to fit an
@@ -223,8 +223,8 @@ jobs:
           # warnings-as-errors, failing on a diagnostic the shipping app never
           # sees. The min lives in scripts/ios-deployment-target.sh, so this job
           # and scripts/local-ci-macos.sh cannot drift.
-          TARGET="$(bash scripts/ios-deployment-target.sh "$RUNTIME_VER")"
-          echo "Deployment target: project ships $(bash scripts/ios-deployment-target.sh --project-target), runner runs ${RUNTIME_VER} -> building at ${TARGET}"
+          TARGET="$(bash "${{ github.workspace }}/scripts/ios-deployment-target.sh" "$RUNTIME_VER")"
+          echo "Deployment target: project ships $(bash "${{ github.workspace }}/scripts/ios-deployment-target.sh" --project-target), runner runs ${RUNTIME_VER} -> building at ${TARGET}"
           echo "deployment_target=${TARGET}" >> "$GITHUB_OUTPUT"
 
       # Warnings are errors for PRODUCTION code — the Swift-side counterpart of the
@@ -301,21 +301,11 @@ jobs:
           set -euo pipefail
           xcrun simctl list runtimes available
           read -r RUNTIME_ID RUNTIME_VER DEVTYPE DEV_NAME < <(
-            xcrun simctl list runtimes --json | jq -r '
-              .runtimes
-              | map(select(.platform == "watchOS" and .isAvailable))
-              | map({
-                  id: .identifier,
-                  ver: .version,
-                  dt: (.supportedDeviceTypes | map(select(.productFamily == "Apple Watch")) | last)
-                })
-              | map(select(.dt != null))
-              | sort_by(.ver | split(".") | map(tonumber))
-              | last
-              | "\(.id) \(.ver) \(.dt.identifier) \(.dt.name)"
-            '
+            xcrun simctl list runtimes --json | jq -r \
+              --arg platform watchOS --arg family "Apple Watch" --arg override "" \
+              -f "${{ github.workspace }}/scripts/simulator-pick.jq"
           )
-          if [ -z "${RUNTIME_ID:-}" ] || [ -z "${DEVTYPE:-}" ]; then
+          if [ -z "${RUNTIME_ID:-}" ] || [ "$RUNTIME_ID" = "null" ] || [ -z "${DEVTYPE:-}" ]; then
             echo "No available watchOS runtime with an Apple Watch device type on the runner" >&2
             exit 1
           fi
@@ -323,6 +313,8 @@ jobs:
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b || true
           DEST="platform=watchOS Simulator,id=${UDID}"
+          echo "Device type: ${DEV_NAME} (${DEVTYPE})"
+          echo "Runtime:     watchOS ${RUNTIME_VER} (${RUNTIME_ID})"
           echo "Resolved: ${DEV_NAME} (watchOS ${RUNTIME_VER}) -> ${DEST}"
           echo "destination=${DEST}" >> "$GITHUB_OUTPUT"
           # Reported for the log only: no watch xcodebuild call below passes

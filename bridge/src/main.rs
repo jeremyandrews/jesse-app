@@ -785,6 +785,9 @@ async fn main() {
         eprintln!("jesse-bridge: could not write the boot line to the schedule ledger: {e}");
     }
     spawn_scheduler(state.clone());
+    // THE REMINDER TICKER, beside the scheduler: every 30 s it fires due reminders as pushes.
+    // A notification, never a turn. See `remindersvc`.
+    jesse_bridge::remindersvc::spawn_reminder_ticker(state.clone());
     // THE NIGHTLY STRANDS AUDIT, beside the scheduler and on its clock: once a day at 03:20
     // in the scheduler's zone (an away profile moves it), and at startup when today's file
     // is missing and the hour has passed. It writes one Inbox file and nothing else.

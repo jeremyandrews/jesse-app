@@ -1012,6 +1012,7 @@ and read-only). Only the servers named in that config load:
 | `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
 | `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
 | `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
+| `reminders` | Timed reminders, added 2026-11-10 (bridge 0.199.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0199)
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -2822,6 +2823,45 @@ Over SSH, `launchctl getenv PATH` prints nothing; take `EnvironmentVariables.PAT
 bridge plist with `plutil -extract` instead. Rotate the token before it expires by minting a new
 one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
 --duration=2160h`) and replacing the file; see the k3s README, "Jesse's access to kc1".
+
+## Timed reminders (`reminders`, 0.199.0)
+
+"Remind me at 6:45 to start the pancakes" and "every weekday at 7:30 remind me to take the bins
+out" are set from any turn through `reminders`, this repository's own `jesse-reminders-mcp`, the
+twenty-eighth server in the main set on Claude Code and Codex. At the minute, in the active
+profile's zone, the bridge sends one push to the registered phone with `Done` and `Snooze 10 min`
+actions.
+
+### What the server can do
+
+| | |
+|---|---|
+| Tools | `create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`: the whole `tools/list` (`ReminderTool::ALL`), **all four granted, none withheld**, pinned by equality in `the_reminders_grant_is_all_four_tools_and_nothing_else` |
+| Classes | `create_reminder`, `cancel_reminder` and `snooze_reminder` are `write` (write turns only, like every main-set write); `list_reminders` is a read |
+| Reads | `<state_dir>/reminders.json` and `<state_dir>/profile.json` (the zone, read through `ProfileStore` exactly as the bridge reads it) |
+| Writes | `<state_dir>/reminders.json` only, atomically (`write_atomic`), under an exclusive advisory `flock` on `reminders.json.lock`, which it creates `0600` |
+| Environment | `JESSE_STATE_DIR` beside the base five; `HOME/.jesse-bridge` when it is unset, as the bridge itself does |
+| Network | none. It starts no process and sends nothing |
+
+**What a turn gains is a scheduled push to the owner's phone**, with text the turn wrote (at most
+300 characters, control characters replaced) at a minute the turn chose. That is the whole new
+capability. The push goes through the bridge's existing APNs client to the one registered device,
+so it can reach nobody else. A prompt-injected turn could set a misleading reminder; the owner
+sees every one as a notification titled `Reminder` and can list and cancel them from chat.
+
+**A reminder is never a turn.** The bridge's ticker (`remindersvc.rs`, every 30 s) reads the
+store, records each fired occurrence BEFORE it sends (so a restart can lose a push but never
+send one twice), and sends title `Reminder`, the text, a sound, `interruption-level:
+time-sensitive`, category `JESSE_REMINDER`, the id and the usual badge. It spawns no model
+process. Push errors are logged and swallowed and cannot touch the store, which is already
+written. A store that does not parse is never overwritten.
+
+**The routes** `GET /jesse/reminders`, `POST /jesse/reminders/{id}/done` and `POST
+/jesse/reminders/{id}/snooze` take the same bearer token and rate limiter as `/jesse/schedule`.
+They are what the app's notification actions call.
+
+**Not in the vault.** The store is the bridge's state directory, never the vault, so no reminder
+reaches git, qmd or a turn's file tools.
 
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 

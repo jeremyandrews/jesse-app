@@ -466,6 +466,8 @@ pub async fn jesse_set_profile(
     // implementation, so a change made from the phone and one a tick notices can never
     // leave the anchors in different states.
     st.scheduler.clone().observe_profile_change(&st, now_ms);
+    // Profile-mode reminders follow the zone too: the same occurrences, re-resolved now.
+    crate::remindersvc::reresolve_reminders(&st).await;
     Ok(Json(profile_body(&st)))
 }
 

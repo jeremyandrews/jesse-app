@@ -149,6 +149,11 @@ mod prompt;
 mod queue;
 mod quota;
 mod ratelimit;
+/// Timed reminders: the model, the store and when one fires. Addressed through the module
+/// (`crate::reminders::…`).
+pub mod reminders;
+/// The reminder ticker and the notification-action routes (`crate::remindersvc::…`).
+pub mod remindersvc;
 mod routing;
 // THE SHARED INSTRUCTION BUNDLE, namespaced rather than flattened, for the reason the
 // sentinel below is: it is a vocabulary of its own (`Rule`, `Manifest`, `Bundle`, `check`,

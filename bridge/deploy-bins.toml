@@ -37,6 +37,7 @@ bins = [
     "jesse-places-mcp",
     "jesse-inbound-mcp",
     "jesse-healthdb-mcp",
+    "jesse-reminders-mcp",
     # The tool gateway's stub: with `[gateway] enabled`, the ONLY program a child's MCP config
     # starts for a gateway server, so it moves with the bridge that hands it out. A missing
     # stub is fatal at startup when the gateway is on.

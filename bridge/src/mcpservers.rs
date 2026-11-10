@@ -818,6 +818,21 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
             "resources_delete",
         ],
     ),
+    // TIMED REMINDERS (0.199.0): this repository's own `jesse-reminders-mcp`, a BARE NAME on
+    // the child's `PATH` like `jesse-places-mcp`, and in `deploy-bins.toml`. It reads and writes
+    // one file, `<state_dir>/reminders.json`, and reads `<state_dir>/profile.json` for the zone,
+    // so its environment is the state dir alone (`HOME`, in [`BASE_ENV`], is its fallback, as
+    // it is the bridge's). No credential, no host. The three tools that change the store are
+    // `write`; `list_reminders` only reads.
+    writes(
+        stdio(
+            "reminders",
+            "jesse-reminders-mcp",
+            &[],
+            &["JESSE_STATE_DIR"],
+        ),
+        &["create_reminder", "cancel_reminder", "snooze_reminder"],
+    ),
     // CODING AGENTS ON THE CLUSTER (0.186.0), served inside the bridge by
     // [`crate::devjob::DevJobs`]: no process, no socket, and the only row whose credential (the
     // kubeconfig) never leaves the bridge process. `in_process` rows render only with the gateway
@@ -1060,8 +1075,9 @@ pub const MAIN_SET: &[&str] = &[
     "runn-rs",
     "google-sheets",
     "kubernetes-cloud",
+    "reminders",
     // `in_process`: absent from the rendered string with the gateway off, so
-    // `MAIN_CHILD_MCP_CONFIG` is byte for byte the twenty-seven-server golden. With the gateway on
+    // `MAIN_CHILD_MCP_CONFIG` is byte for byte the twenty-eight-server golden. With the gateway on
     // and `[devjob] enabled`, [`crate::render_child_mcp`] adds its entry and the gateway serves it.
     "devjob",
 ];
@@ -1258,7 +1274,7 @@ pub(crate) fn golden_main_config() -> String {
     [
         r#"{"mcpServers":{"qmd":{"type":"stdio","command":"qmd","args":["mcp"]},"slack":{"type":"stdio","command":"npx","args":["-y","slack-mcp-server@latest","--transport","stdio"]},"browser":{"type":"stdio","command":"npx","args":["-y","@playwright/mcp@latest","--headless","--isolated","--output-dir","/tmp/jesse-browser","--output-max-size","104857600"]},"homeassistant":{"type":"http","url":""#,
         HOME_ASSISTANT_MCP_URL,
-        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","docs","drive","--tool-tier","complete"]},"kubernetes-cloud":{"type":"stdio","command":"jesse-k8s-cloud-mcp","args":["--toolsets","core,config"]}}}"#,
+        r#"","headers":{"Authorization":"Bearer ${HA_MCP_TOKEN}"}},"roon":{"type":"http","url":"http://10.40.0.2:8088/mcp"},"google":{"type":"stdio","command":"workspace-mcp","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"github":{"type":"stdio","command":"github-mcp-server","args":["stdio","--read-only","--toolsets","repos,actions,issues,pull_requests"]},"fastmail":{"type":"stdio","command":"npx","args":["-y","github:jeremyandrews/jmap-mcp-server"]},"unifi":{"type":"stdio","command":"unifi-network-mcp","args":[]},"routeros":{"type":"stdio","command":"routeros-mcp","args":[]},"proxmox":{"type":"stdio","command":"mcp-proxmox","args":[]},"whatsapp":{"type":"stdio","command":"whatsapp-mcp","args":[]},"imcp":{"type":"stdio","command":"/Applications/iMCP.app/Contents/MacOS/imcp-server","args":[]},"google-perseido":{"type":"stdio","command":"workspace-mcp-perseido","args":["--single-user","--read-only","--tools","calendar","gmail","drive"]},"build":{"type":"stdio","command":"jesse-build-mcp","args":[]},"places":{"type":"stdio","command":"jesse-places-mcp","args":[]},"inbound":{"type":"stdio","command":"jesse-inbound-mcp","args":[]},"kubernetes":{"type":"stdio","command":"jesse-k8s-mcp","args":["--toolsets","core,config"]},"rybbit":{"type":"http","url":"https://app.rybbit.io/api/mcp","headers":{"Authorization":"Bearer ${RYBBIT_API_KEY}"}},"tag1":{"type":"http","url":"https://www.tag1.com/mcp"},"plex":{"type":"stdio","command":"plex-mcp","args":[]},"house":{"type":"http","url":"${JESSE_HOUSE_URL}","headers":{"Authorization":"Bearer ${JESSE_HOUSE_TOKEN}"}},"healthdb":{"type":"stdio","command":"jesse-healthdb-mcp","args":[]},"clockify-rs":{"type":"stdio","command":"clockify-rs-mcp","args":[]},"runn-rs":{"type":"stdio","command":"runn-rs-mcp","args":[]},"google-sheets":{"type":"stdio","command":"workspace-mcp-sheets","args":["--single-user","--tools","sheets","docs","drive","--tool-tier","complete"]},"kubernetes-cloud":{"type":"stdio","command":"jesse-k8s-cloud-mcp","args":["--toolsets","core,config"]},"reminders":{"type":"stdio","command":"jesse-reminders-mcp","args":[]}}}"#,
     ]
     .concat()
 }

@@ -3005,6 +3005,17 @@ pub fn app(state: AppState) -> Router {
         .route("/jesse/schedule/reload", post(jesse_schedule_reload))
         .route("/jesse/schedule/:id/fire", post(jesse_schedule_fire))
         .route("/jesse/schedule/:id/enable", post(jesse_schedule_enable))
+        // TIMED REMINDERS, beside the schedule and on its auth: the list, and the two verbs the
+        // app's `JESSE_REMINDER` notification actions call. See `remindersvc`.
+        .route("/jesse/reminders", get(crate::remindersvc::jesse_reminders))
+        .route(
+            "/jesse/reminders/:id/done",
+            post(crate::remindersvc::jesse_reminder_done),
+        )
+        .route(
+            "/jesse/reminders/:id/snooze",
+            post(crate::remindersvc::jesse_reminder_snooze),
+        )
         // RECORDED AUDIO, transcribed on this machine. The upload route is THE ONE DOOR audio
         // enters by, and it carries its own limit — the audio cap, enforced as the body
         // streams — in place of the one below, which is sized for base64 photos. See

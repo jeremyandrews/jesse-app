@@ -78,6 +78,11 @@ public struct TodayListView: View {
     /// strand chip and the board is not drawn.
     private let strandOpener: StrandOpener?
 
+    /// **The Studio runs**, or `nil` in a shell with none: the Strands segment then offers no
+    /// Runs button. The sheet it opens hangs here and is bound to the model, so the shell can
+    /// close it when a report opens in the Vault tab.
+    private let runs: StudioRunsModel?
+
     /// Which segment is showing, remembered on this device. `@AppStorage` rather than a
     /// value the shell threads through: it is view state with nothing behind it, and
     /// both shells would otherwise have to write the same three lines.
@@ -106,10 +111,12 @@ public struct TodayListView: View {
                 onTellFallback: ((PendingIntentRecord) -> Void)? = nil,
                 onOpenLocalDayFile: (() -> Void)? = nil,
                 strands: StrandsModel? = nil,
-                strandOpener: StrandOpener? = nil) {
+                strandOpener: StrandOpener? = nil,
+                runs: StudioRunsModel? = nil) {
         self.model = model
         self.strands = strands
         self.strandOpener = strandOpener
+        self.runs = runs
         self.isProcessing = isProcessing
         self.selection = selection
         self.opensOnDoubleTap = opensOnDoubleTap
@@ -187,11 +194,28 @@ public struct TodayListView: View {
                     TodayBadgeFilterButton(count: model.badgeCount, isOn: $model.isBadgeFilterOn)
                 }
             } else if let strands {
+                if let runs {
+                    // The Runs list: a sheet over the board, not a tab of its own.
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            runs.presentsList = true
+                        } label: {
+                            Label("Studio runs", systemImage: "desktopcomputer")
+                        }
+                        .accessibilityLabel("Studio runs")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     StrandsSortMenu(selection: Binding(get: { strands.effectiveSortKey },
                                                        set: { strands.sortKey = $0 }),
                                     available: strands.availableSortKeys)
                 }
+            }
+        }
+        .sheet(isPresented: Binding(get: { runs?.presentsList ?? false },
+                                    set: { runs?.presentsList = $0 })) {
+            if let runs {
+                StudioRunsScreen(model: runs) { runs.presentsList = false }
             }
         }
     }

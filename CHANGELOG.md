@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (202)] - 2026-11-10
+
+**Studio runs can be started, watched and steered from the app, without a chat turn.** Five
+screens on the iPhone and the Mac, all on the bridge's existing run routes:
+
+- **Run on Studio.** A strand's sheet shows its open Drafts lines above the note. A line the
+  bridge marks `studio_runnable` offers `Run on Studio` on a long press (a secondary click on
+  the Mac); it posts the start, says `Started <run id>` and opens that run. A line with a live
+  run shows the run's status instead (tap it to open the run), and other lines offer nothing.
+- **Runs list.** A `Studio runs` button in the Strands segment's toolbar, and `Runs` on a
+  strand's Drafts block filtered to that strand. Each row: run ID, strand, status with its icon
+  and colour, age, `waiting for` on a queued run and `Resumes HH:MM` on a paused one. Live runs
+  first, then the rest newest first. Pull to refresh; refreshed every 15 seconds only while on
+  screen.
+- **Run detail.** Status, strand and draft, repository, branch, round, started and updated
+  times, the latest Inbox report (opened in the Vault tab), and the log tail in a monospaced
+  view that follows new lines unless you have scrolled up. Refreshed every 5 seconds until the
+  run is reported, failed or cancelled.
+- **Reply.** A composer enabled on `needs_you`, `interrupted` and `reported`. On `interrupted`
+  and `needs_you` with nothing typed, `Resume` sends `Continue where you left off.` In every
+  other state it is disabled with one line saying why.
+- **Cancel.** On `queued`, `running` and `paused`, behind a confirmation naming the run ID.
+- **Board badge.** A strand row with active runs shows their count, tinted the needs-you colour
+  when one is waiting on you. VoiceOver reads it as part of the row: "2 Studio runs, 1 needs
+  you".
+- A refusal from the bridge (a 409 for a live run, any 4xx with a reason) is shown in an alert
+  in the bridge's own words.
+- JesseKit: `StudioRun`, `StudioRunList`, `StudioRunStarted`, `StudioRunLog` and the six calls
+  on `JesseBridgeClient`; `Strand.runsActive`, `Strand.runsNeedsYou` and `Strand.drafts`, all
+  optional so an older bridge still decodes. An unknown status decodes to `.unknown`.
+  Decoding tests read fixtures written by the bridge's own serializers.
+
+## [bridge 0.198.0] - 2026-11-10
+
+**`GET /jesse/strands` says how many of a strand's runs need you.** Additive only.
+
+- **Added: `runs_needs_you`** on each strand, beside `runs_active`: how many of its runs are
+  `needs_you`. The app's board tints its run badge with it.
+- **Added: the app's wire fixtures come from the serializers.**
+  `the_app_wire_fixtures_match_what_the_run_routes_serialize` drives runs to `needs_you`,
+  `reported`, `paused` and `queued` and writes `run_json`, `list_json`, the start and log
+  answers and the annotated and plain strands snapshot into
+  `JesseKit/Tests/JesseNetworkingTests/Fixtures/` (`JESSE_RUN_FIXTURE_WRITE=1`); otherwise it
+  fails when a serializer's keys no longer match the committed files. The start and log
+  answers are built by `started_json` and `log_json`, which the two handlers now call; the JSON
+  they send is unchanged.
+
 ## [App 1.0 (201)] - 2026-11-09
 
 **Mac composer: measuring its height no longer relays out the text view, so a pasted page in a fence cannot loop SwiftUI layout until AppKit throws.** `ComposerNSTextView.measuredTextHeight`, called from `sizeThatFits` inside `NSHostingView.layout()`, rewrapped the view's own text container at each probe width and back, moving the text view's frame on every question; it now measures on a separate layout manager, and fence tints lay out only the visible lines.

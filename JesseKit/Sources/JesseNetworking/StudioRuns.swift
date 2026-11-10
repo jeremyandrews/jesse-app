@@ -1,0 +1,461 @@
+import Foundation
+
+// The Studio run routes (`bridge/src/hostrun.rs`), decoded exactly as the bridge serializes
+// them, and the six calls that reach them.
+//
+// ## The wire
+//
+// A run is `run_json`: the whole `run.json` record (`RunRecord`, serde's own snake_case field
+// names, no rename attribute) plus `host` and `report_paths`. `GET /jesse/runs` wraps a list of
+// those with `counts`; `POST /jesse/runs` answers `started_json`; the log answers `log_json`.
+// The fixtures the decoding tests read are written by the bridge's own serializers
+// (`the_app_wire_fixtures_match_what_the_run_routes_serialize`), never by hand.
+//
+// Tolerance is the strand board's: only `run_id` is required, every other key decodes to a
+// default when it is missing, and a status this build has never heard of is `.unknown`
+// rather than a failed decode. A bridge that grows a status must not blank the Runs list.
+//
+// ## Errors
+//
+// A refusal is the bridge's sentence (`Refusal::message`), sent as the plain text body of a
+// 4xx. It is shown VERBATIM: the bridge already names the run and the state ("HO1b is
+// reported; only a queued, running or paused run can be cancelled"), and a client paraphrase
+// is how the reason gets lost. `StudioRunError.refused` carries it untouched.
+
+/// How a run stands. The bridge's `RunStatus`, plus `unknown` for a word this build lacks.
+public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
+    case queued
+    case running
+    case needsYou
+    case reported
+    case failed
+    case cancelled
+    case interrupted
+    /// The plan's usage limit ended the round; the run continues by itself at `resume_at`.
+    case paused
+    /// A status a newer bridge serves. Carries the word so the screen can still show it.
+    case unknown(String)
+
+    public init(wire: String) {
+        switch wire {
+        case "queued": self = .queued
+        case "running": self = .running
+        case "needs_you": self = .needsYou
+        case "reported": self = .reported
+        case "failed": self = .failed
+        case "cancelled": self = .cancelled
+        case "interrupted": self = .interrupted
+        case "paused": self = .paused
+        default: self = .unknown(wire)
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self.init(wire: raw)
+    }
+
+    /// The word on the wire.
+    public var wire: String {
+        switch self {
+        case .queued: return "queued"
+        case .running: return "running"
+        case .needsYou: return "needs_you"
+        case .reported: return "reported"
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
+        case .interrupted: return "interrupted"
+        case .paused: return "paused"
+        case .unknown(let w): return w
+        }
+    }
+
+    /// Queued, running, waiting on the owner or paused: the bridge's `is_live`, which is what
+    /// refuses a second start of the same draft.
+    public var isLive: Bool {
+        switch self {
+        case .queued, .running, .needsYou, .paused: return true
+        default: return false
+        }
+    }
+
+    /// Something is still happening without anyone's help: queued, running or paused. What
+    /// keeps a detail screen polling.
+    public var isMoving: Bool {
+        switch self {
+        case .queued, .running, .paused: return true
+        default: return false
+        }
+    }
+}
+
+/// One round of a run: the first run of the prompt, or one reply.
+public struct StudioRunRound: Decodable, Equatable, Hashable, Sendable {
+    public var n: Int
+    /// The reply text; nil for round 1.
+    public var text: String?
+    public var queuedAt: String?
+    public var startedAt: String?
+    public var finishedAt: String?
+    public var reportPath: String?
+    public var outcome: StudioRunStatus?
+    public var cancelRequestedAt: String?
+    /// Who queued the round when no person did (the usage limit, a restart).
+    public var auto: String?
+
+    public init(n: Int, text: String? = nil, queuedAt: String? = nil, startedAt: String? = nil,
+                finishedAt: String? = nil, reportPath: String? = nil,
+                outcome: StudioRunStatus? = nil, cancelRequestedAt: String? = nil,
+                auto: String? = nil) {
+        self.n = n
+        self.text = text
+        self.queuedAt = queuedAt
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.reportPath = reportPath
+        self.outcome = outcome
+        self.cancelRequestedAt = cancelRequestedAt
+        self.auto = auto
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case n, text, outcome, auto
+        case queuedAt = "queued_at"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+        case reportPath = "report_path"
+        case cancelRequestedAt = "cancel_requested_at"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        n = try c.decodeIfPresent(Int.self, forKey: .n) ?? 0
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        queuedAt = try c.decodeIfPresent(String.self, forKey: .queuedAt)
+        startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
+        finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
+        reportPath = try c.decodeIfPresent(String.self, forKey: .reportPath)
+        outcome = try c.decodeIfPresent(StudioRunStatus.self, forKey: .outcome)
+        cancelRequestedAt = try c.decodeIfPresent(String.self, forKey: .cancelRequestedAt)
+        auto = try c.decodeIfPresent(String.self, forKey: .auto)
+    }
+}
+
+/// One run, as `run_json` serves it.
+public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable {
+    public var runID: String
+    public var strand: String?
+    public var itemID: String?
+    /// The draft the prompt came from, under the notes directory.
+    public var promptPath: String?
+    public var itemText: String?
+    public var repo: String
+    public var branch: String
+    public var origin: String
+    public var status: StudioRunStatus
+    /// Why a queued run is not running: `slot`, `repo <owner/name>`, `disk`, `limit`.
+    public var waitingFor: String?
+    public var createdAt: String
+    public var queuedAt: String?
+    public var startedAt: String?
+    public var finishedAt: String?
+    public var lastEventAt: String?
+    public var stalledSince: String?
+    public var rounds: [StudioRunRound]
+    public var model: String?
+    public var error: String?
+    /// While `paused`: when the bridge queues the next round by itself.
+    public var resumeAt: String?
+    public var host: String?
+    /// Every round's Inbox report, vault relative, oldest first.
+    public var reportPaths: [String]
+
+    public var id: String { runID }
+
+    public init(runID: String, strand: String? = nil, itemID: String? = nil,
+                promptPath: String? = nil, itemText: String? = nil, repo: String = "",
+                branch: String = "", origin: String = "", status: StudioRunStatus = .queued,
+                waitingFor: String? = nil, createdAt: String = "", queuedAt: String? = nil,
+                startedAt: String? = nil, finishedAt: String? = nil,
+                lastEventAt: String? = nil, stalledSince: String? = nil,
+                rounds: [StudioRunRound] = [], model: String? = nil, error: String? = nil,
+                resumeAt: String? = nil, host: String? = nil, reportPaths: [String] = []) {
+        self.runID = runID
+        self.strand = strand
+        self.itemID = itemID
+        self.promptPath = promptPath
+        self.itemText = itemText
+        self.repo = repo
+        self.branch = branch
+        self.origin = origin
+        self.status = status
+        self.waitingFor = waitingFor
+        self.createdAt = createdAt
+        self.queuedAt = queuedAt
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.lastEventAt = lastEventAt
+        self.stalledSince = stalledSince
+        self.rounds = rounds
+        self.model = model
+        self.error = error
+        self.resumeAt = resumeAt
+        self.host = host
+        self.reportPaths = reportPaths
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case strand, repo, branch, origin, status, rounds, model, error, host
+        case runID = "run_id"
+        case itemID = "item_id"
+        case promptPath = "prompt_path"
+        case itemText = "item_text"
+        case waitingFor = "waiting_for"
+        case createdAt = "created_at"
+        case queuedAt = "queued_at"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+        case lastEventAt = "last_event_at"
+        case stalledSince = "stalled_since"
+        case resumeAt = "resume_at"
+        case reportPaths = "report_paths"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try c.decode(String.self, forKey: .runID)
+        strand = try c.decodeIfPresent(String.self, forKey: .strand)
+        itemID = try c.decodeIfPresent(String.self, forKey: .itemID)
+        promptPath = try c.decodeIfPresent(String.self, forKey: .promptPath)
+        itemText = try c.decodeIfPresent(String.self, forKey: .itemText)
+        repo = try c.decodeIfPresent(String.self, forKey: .repo) ?? ""
+        branch = try c.decodeIfPresent(String.self, forKey: .branch) ?? ""
+        origin = try c.decodeIfPresent(String.self, forKey: .origin) ?? ""
+        status = try c.decodeIfPresent(StudioRunStatus.self, forKey: .status) ?? .unknown("")
+        waitingFor = try c.decodeIfPresent(String.self, forKey: .waitingFor)
+        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        queuedAt = try c.decodeIfPresent(String.self, forKey: .queuedAt)
+        startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
+        finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
+        lastEventAt = try c.decodeIfPresent(String.self, forKey: .lastEventAt)
+        stalledSince = try c.decodeIfPresent(String.self, forKey: .stalledSince)
+        rounds = try c.decodeIfPresent([StudioRunRound].self, forKey: .rounds) ?? []
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        resumeAt = try c.decodeIfPresent(String.self, forKey: .resumeAt)
+        host = try c.decodeIfPresent(String.self, forKey: .host)
+        reportPaths = try c.decodeIfPresent([String].self, forKey: .reportPaths) ?? []
+    }
+
+    public static func decode(from data: Data) throws -> StudioRun {
+        try JSONDecoder().decode(StudioRun.self, from: data)
+    }
+
+    /// The current round's number, or 0 before the first.
+    public var round: Int { rounds.last?.n ?? 0 }
+
+    /// The newest report, the one the detail screen links.
+    public var latestReportPath: String? { reportPaths.last }
+
+    /// When anything last happened to the run: its last agent event, else the last of its
+    /// own stamps.
+    public var updatedAt: String {
+        [lastEventAt, finishedAt, startedAt, queuedAt].compactMap { $0 }.max() ?? createdAt
+    }
+}
+
+/// The bridge's own tallies in `GET /jesse/runs`.
+public struct StudioRunCounts: Decodable, Equatable, Sendable {
+    public var running: Int
+    public var queued: Int
+    public var needsYou: Int
+    public var paused: Int
+
+    public init(running: Int = 0, queued: Int = 0, needsYou: Int = 0, paused: Int = 0) {
+        self.running = running
+        self.queued = queued
+        self.needsYou = needsYou
+        self.paused = paused
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case running, queued, paused
+        case needsYou = "needs_you"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        running = try c.decodeIfPresent(Int.self, forKey: .running) ?? 0
+        queued = try c.decodeIfPresent(Int.self, forKey: .queued) ?? 0
+        needsYou = try c.decodeIfPresent(Int.self, forKey: .needsYou) ?? 0
+        paused = try c.decodeIfPresent(Int.self, forKey: .paused) ?? 0
+    }
+}
+
+/// `GET /jesse/runs`. `disk` and `orphans` are housekeeping for the Studio's owner at a
+/// terminal and are not decoded.
+public struct StudioRunList: Decodable, Equatable, Sendable {
+    public var runs: [StudioRun]
+    public var counts: StudioRunCounts
+
+    public init(runs: [StudioRun] = [], counts: StudioRunCounts = StudioRunCounts()) {
+        self.runs = runs
+        self.counts = counts
+    }
+
+    private enum CodingKeys: String, CodingKey { case runs, counts }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        runs = try c.decodeIfPresent([StudioRun].self, forKey: .runs) ?? []
+        counts = try c.decodeIfPresent(StudioRunCounts.self, forKey: .counts) ?? StudioRunCounts()
+    }
+
+    public static func decode(from data: Data) throws -> StudioRunList {
+        try JSONDecoder().decode(StudioRunList.self, from: data)
+    }
+}
+
+/// What `POST /jesse/runs` answers.
+public struct StudioRunStarted: Decodable, Equatable, Sendable {
+    public var runID: String
+    public var status: StudioRunStatus
+    public var waitingFor: String?
+
+    public init(runID: String, status: StudioRunStatus, waitingFor: String? = nil) {
+        self.runID = runID
+        self.status = status
+        self.waitingFor = waitingFor
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case runID = "run_id"
+        case waitingFor = "waiting_for"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try c.decode(String.self, forKey: .runID)
+        status = try c.decodeIfPresent(StudioRunStatus.self, forKey: .status) ?? .queued
+        waitingFor = try c.decodeIfPresent(String.self, forKey: .waitingFor)
+    }
+
+    public static func decode(from data: Data) throws -> StudioRunStarted {
+        try JSONDecoder().decode(StudioRunStarted.self, from: data)
+    }
+}
+
+/// What `GET /jesse/runs/:run_id/log` answers: the readable lines, oldest first.
+public struct StudioRunLog: Decodable, Equatable, Sendable {
+    public var runID: String
+    public var lines: [String]
+
+    public init(runID: String, lines: [String] = []) {
+        self.runID = runID
+        self.lines = lines
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lines
+        case runID = "run_id"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try c.decodeIfPresent(String.self, forKey: .runID) ?? ""
+        lines = try c.decodeIfPresent([String].self, forKey: .lines) ?? []
+    }
+
+    public static func decode(from data: Data) throws -> StudioRunLog {
+        try JSONDecoder().decode(StudioRunLog.self, from: data)
+    }
+}
+
+/// A run route failed.
+public enum StudioRunError: LocalizedError, Equatable, Sendable {
+    /// The bridge answered with a refusal; `message` is its own sentence, shown verbatim.
+    case refused(status: Int, message: String)
+    /// Anything else: the transport's own description.
+    case other(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .refused(let status, let message):
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "The bridge answered \(status) with no reason." : trimmed
+        case .other(let message):
+            return message
+        }
+    }
+}
+
+/// The six calls. A seam so the screens' models can be driven by a fake in a test.
+public protocol StudioRunsProviding: Sendable {
+    func listRuns() async throws -> StudioRunList
+    func startRun(strand: String, itemID: String) async throws -> StudioRunStarted
+    func getRun(id: String) async throws -> StudioRun
+    func runLog(id: String, tail: Int?) async throws -> StudioRunLog
+    func replyToRun(id: String, text: String) async throws -> StudioRun
+    func cancelRun(id: String) async throws -> StudioRun
+}
+
+extension JesseBridgeClient: StudioRunsProviding {
+
+    public func listRuns() async throws -> StudioRunList {
+        let data = try await runCall("/jesse/runs", method: "GET")
+        return try runDecode { try StudioRunList.decode(from: data) }
+    }
+
+    public func startRun(strand: String, itemID: String) async throws -> StudioRunStarted {
+        let data = try await runCall("/jesse/runs", method: "POST",
+                                     body: ["strand": strand, "item_id": itemID])
+        return try runDecode { try StudioRunStarted.decode(from: data) }
+    }
+
+    public func getRun(id: String) async throws -> StudioRun {
+        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))", method: "GET")
+        return try runDecode { try StudioRun.decode(from: data) }
+    }
+
+    public func runLog(id: String, tail: Int? = nil) async throws -> StudioRunLog {
+        let query = tail.map { [URLQueryItem(name: "tail", value: String($0))] } ?? []
+        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/log", method: "GET",
+                                     query: query)
+        return try runDecode { try StudioRunLog.decode(from: data) }
+    }
+
+    public func replyToRun(id: String, text: String) async throws -> StudioRun {
+        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/reply",
+                                     method: "POST", body: ["text": text])
+        return try runDecode { try StudioRun.decode(from: data) }
+    }
+
+    public func cancelRun(id: String) async throws -> StudioRun {
+        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/cancel",
+                                     method: "POST", body: [String: String]())
+        return try runDecode { try StudioRun.decode(from: data) }
+    }
+
+    /// One call: the paired request, the bridge's own words for any refusal.
+    private func runCall(_ path: String, method: String, query: [URLQueryItem] = [],
+                         body: [String: String]? = nil) async throws -> Data {
+        guard var req = todayRequest(path, method: method, query: query) else {
+            throw JesseError.notConfigured
+        }
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        let (data, http) = try await todaySend(req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw StudioRunError.refused(status: http.statusCode, message: Self.bodyText(data))
+        }
+        return data
+    }
+
+    private func runDecode<T>(_ decode: () throws -> T) throws -> T {
+        do { return try decode() } catch { throw JesseError.decoding }
+    }
+}

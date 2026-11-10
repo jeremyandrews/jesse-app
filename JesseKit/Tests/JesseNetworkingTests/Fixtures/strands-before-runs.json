@@ -1,0 +1,46 @@
+{
+  "counts": {
+    "active": 1,
+    "dormant": 0,
+    "unstranded": 0,
+    "waiting": 0
+  },
+  "global_findings": [],
+  "strands": [
+    {
+      "counts": {
+        "done": 1,
+        "later": 0,
+        "queue": 7,
+        "running": 0
+      },
+      "findings": [
+        {
+          "code": "CHECKED-NOT-MOVED",
+          "line": 12,
+          "message": "GD6 is checked but still above Done"
+        },
+        {
+          "code": "QUEUE-ARCHIVED",
+          "line": 13,
+          "message": "queue link points to an archived prompt: todo-list/Projects/drafts/archive/gd7-prompt"
+        }
+      ],
+      "group": "tag1",
+      "next": {
+        "id": "GD5",
+        "link": "todo-list/Projects/drafts/gd5-prompt",
+        "text": "Run the thing on the Studio.",
+        "waits_on": null
+      },
+      "now": "testing",
+      "parent": null,
+      "repos": [],
+      "slug": "Gd",
+      "state": "active",
+      "title": "Gd",
+      "updated": "2026-11-09",
+      "waiting": null
+    }
+  ]
+}

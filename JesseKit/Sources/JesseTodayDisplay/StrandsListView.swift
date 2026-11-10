@@ -241,6 +241,7 @@ public struct StrandsListView: View {
                   referenceDay: model.referenceDay,
                   onTodayCaption: StrandOnToday.caption(count: onTodayCount(strand.slug)),
                   insideCaption: insideCaption,
+                  runBadge: StudioRunSemantics.badge(for: strand),
                   isOpening: opener.opening == strand.slug,
                   onOpen: { opener.open(slug: strand.slug, title: strand.title) },
                   onShowFindings: { findingsFor = strand })
@@ -320,6 +321,8 @@ struct StrandRow: View {
     var onTodayCaption: String? = nil
     /// `N inside`, on a collapsed `Tree` parent only.
     var insideCaption: String? = nil
+    /// The strand's active Studio runs, or nil with none (or from a bridge that predates them).
+    var runBadge: StudioRunBadge? = nil
     let isOpening: Bool
     let onOpen: () -> Void
     let onShowFindings: () -> Void
@@ -405,6 +408,9 @@ struct StrandRow: View {
                     .controlSize(.mini)
             }
             Spacer(minLength: 4)
+            if let runBadge {
+                StudioRunBadgeView(badge: runBadge)
+            }
             if !strand.findings.isEmpty {
                 // A BUTTON of its own, not part of the row's tap: the findings are about
                 // the note's bookkeeping and the row's tap is about the work, and one
@@ -434,8 +440,9 @@ struct StrandRow: View {
     /// One sentence for a screen reader — the row's content, computed where a test can
     /// reach it.
     private var accessibilityLabel: String {
-        let sentence = StrandsSemantics.rowAccessibilityLabel(strand, today: referenceDay,
+        var sentence = StrandsSemantics.rowAccessibilityLabel(strand, today: referenceDay,
                                                               parentTitle: parentTitle)
+        if let runBadge { sentence += ", \(runBadge.accessibilityLabel)" }
         guard let insideCaption else { return sentence }
         return "\(sentence), \(insideCaption)"
     }

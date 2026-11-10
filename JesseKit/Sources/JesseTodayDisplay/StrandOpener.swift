@@ -243,18 +243,25 @@ extension View {
     /// Today segment on screen and, once the sheet is gone, hands the item to
     /// `onSelectItem`, which opens its detail: navigating while a sheet is still going is
     /// how a push gets dropped.
+    ///
+    /// `strands` and `runs` add the strand's `Drafts` block, with `Run on Studio`, above the
+    /// note; without both the sheet is exactly what it was.
     public func strandNoteSheet(_ opener: StrandOpener,
                                 day: TodaySnapshot?,
+                                strands: StrandsModel? = nil,
+                                runs: StudioRunsModel? = nil,
                                 onOpenLink: @escaping (TodayLinkOrigin) -> Void,
                                 onSelectItem: @escaping (TodayItem) -> Void) -> some View {
-        modifier(StrandNoteSheetModifier(opener: opener, day: day, onOpenLink: onOpenLink,
-                                         onSelectItem: onSelectItem))
+        modifier(StrandNoteSheetModifier(opener: opener, day: day, strands: strands, runs: runs,
+                                         onOpenLink: onOpenLink, onSelectItem: onSelectItem))
     }
 }
 
 private struct StrandNoteSheetModifier: ViewModifier {
     @Bindable var opener: StrandOpener
     let day: TodaySnapshot?
+    let strands: StrandsModel?
+    let runs: StudioRunsModel?
     let onOpenLink: (TodayLinkOrigin) -> Void
     let onSelectItem: (TodayItem) -> Void
 
@@ -274,10 +281,17 @@ private struct StrandNoteSheetModifier: ViewModifier {
     }
 
     private func onToday(_ slug: String) -> some View {
-        StrandOnTodayBlock(items: StrandOnToday.items(forSlug: slug, in: day)) { item in
-            selected = item
-            storedSegment = TodaySegment.today.rawValue
-            opener.openedNote = nil
+        VStack(alignment: .leading, spacing: 10) {
+            StrandOnTodayBlock(items: StrandOnToday.items(forSlug: slug, in: day)) { item in
+                selected = item
+                storedSegment = TodaySegment.today.rawValue
+                opener.openedNote = nil
+            }
+            if let runs, let strand = strands?.snapshot?.strand(slug: slug) {
+                StrandDraftsBlock(strand: strand, runs: runs) {
+                    Task { await strands?.load() }
+                }
+            }
         }
     }
 

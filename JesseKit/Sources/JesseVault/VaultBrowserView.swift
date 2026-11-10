@@ -101,6 +101,22 @@ public final class VaultBrowserModel {
         return true
     }
 
+    /// **A note another screen asked this tab to open**, vault relative, until the browser
+    /// pushes it. What a Studio run's report link sets, after the shell has put this tab on
+    /// screen.
+    public private(set) var pendingNote: String?
+
+    /// Open the note at `path` (vault relative) in this tab's reader.
+    public func openNote(_ path: String) {
+        pendingNote = path
+    }
+
+    /// The browser took the pending note. Returns it, once.
+    func takePendingNote() -> String? {
+        defer { pendingNote = nil }
+        return pendingNote
+    }
+
     /// The scope a chip or a strand implies, set without the scope setter's own reset.
     private func moveToStrands() {
         scopeStorage = .strands
@@ -609,7 +625,11 @@ public struct VaultBrowserView: View {
         // different tab. Without this, a user who picks the folder and comes back here is
         // told there is no folder until the next launch. It costs a bookmark resolve and two
         // COUNT queries.
-        .onAppear { model.refreshInBackground() }
+        .onAppear {
+            model.refreshInBackground()
+            pushPendingNote()
+        }
+        .onChange(of: model.pendingNote) { _, _ in pushPendingNote() }
         // An index that finished has both new counts AND new answers: a query typed while
         // the first index was still running must not be left showing the empty result it
         // legitimately had thirty seconds ago.
@@ -617,6 +637,12 @@ public struct VaultBrowserView: View {
             model.refreshInBackground()
             model.search()
         }
+    }
+
+    /// A note asked for from outside, pushed alone on the stack.
+    private func pushPendingNote() {
+        guard let note = model.takePendingNote() else { return }
+        path = [VaultNoteRoute(path: note)]
     }
 
     @ViewBuilder

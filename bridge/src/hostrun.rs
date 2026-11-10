@@ -3024,6 +3024,16 @@ pub fn run_json(r: &RunRecord) -> Value {
     v
 }
 
+/// What `POST /jesse/runs` answers: the run, its status and why it waits, if it does.
+pub fn started_json(s: &StartedRun) -> Value {
+    json!({ "run_id": s.run_id, "status": s.status, "waiting_for": s.waiting_for })
+}
+
+/// What `GET /jesse/runs/:run_id/log` answers.
+pub fn log_json(run_id: &str, lines: Vec<String>) -> Value {
+    json!({ "run_id": run_id, "lines": lines })
+}
+
 /// `18:00` in local time, or `Nov 10 18:00` when not today.
 pub fn local_clock(ms: u64, now: u64) -> String {
     use chrono::TimeZone;
@@ -3044,8 +3054,9 @@ pub fn human_bytes(b: u64) -> String {
 // ---- THE STRANDS SNAPSHOT ------------------------------------------------------------------
 
 /// Add the Studio fields to `GET /jesse/strands`: each strand's `runs_active` (its running,
-/// needs-you and paused runs), and `drafts`, its items each with `studio_runnable` (whether a
-/// person's start with no `repo` would be accepted). Additive only.
+/// needs-you and paused runs), `runs_needs_you` (those of them waiting on Jeremy), and
+/// `drafts`, its items each with `studio_runnable` (whether a person's start with no `repo`
+/// would be accepted). Additive only.
 pub fn annotate_strands(
     value: &mut Value,
     snap: &crate::strands::StrandsSnapshot,
@@ -3073,6 +3084,13 @@ pub fn annotate_strands(
             })
             .count();
         obj.insert("runs_active".into(), json!(active as u32));
+        let needs_you = runs
+            .iter()
+            .filter(|r| {
+                r.strand.as_deref() == Some(strand.slug.as_str()) && r.status == RunStatus::NeedsYou
+            })
+            .count();
+        obj.insert("runs_needs_you".into(), json!(needs_you as u32));
         let runnable = |item: &crate::strands::StrandItem| {
             service.is_some()
                 && studio_item_of(
@@ -3205,7 +3223,7 @@ pub async fn jesse_runs_start(
         })
         .await
         .map_err(refusal)?;
-    Ok(Json(json!({ "run_id": started.run_id, "status": started.status, "waiting_for": started.waiting_for })).into_response())
+    Ok(Json(started_json(&started)).into_response())
 }
 
 /// `GET /jesse/runs/:run_id`.
@@ -3235,7 +3253,7 @@ pub async fn jesse_run_log(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match lines {
-        Some(l) => Ok(Json(json!({ "run_id": run_id, "lines": l })).into_response()),
+        Some(l) => Ok(Json(log_json(&run_id, l)).into_response()),
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }

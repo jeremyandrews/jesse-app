@@ -454,12 +454,23 @@ pub struct MockApns {
     pub calls: Arc<Mutex<Vec<ApnsRequest>>>,
     pub fail: bool,
     pub status: u16,
+    /// Tokens APNs calls dead: a push to one answers 410 whatever `status` says.
+    pub dead_tokens: Vec<String>,
 }
 impl ApnsTransport for MockApns {
     fn post(&self, req: ApnsRequest) -> Pin<Box<dyn Future<Output = Result<u16, String>> + Send>> {
         let calls = self.calls.clone();
         let fail = self.fail;
         let status = if self.status == 0 { 200 } else { self.status };
+        let status = if self
+            .dead_tokens
+            .iter()
+            .any(|t| req.path == format!("/3/device/{t}"))
+        {
+            410
+        } else {
+            status
+        };
         Box::pin(async move {
             calls.lock_ok().push(req);
             if fail {

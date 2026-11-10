@@ -477,7 +477,7 @@ fn an_in_process_row_in_a_set_reaches_a_spawned_child_through_the_stub_with_the_
     );
     let mut tools = devjob.tools.clone();
     tools.sort();
-    // `devjob_reply` and `devjob_cancel` (0.197.0) and `devjob_close` (0.199.0) reach exactly the
+    // `devjob_reply` and `devjob_cancel` (0.197.0) and `devjob_close` (0.200.0) reach exactly the
     // turns `devjob_start` does.
     assert_eq!(
         tools,

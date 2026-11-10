@@ -372,6 +372,35 @@ fn accepted_running(job_id: &str, conversation_id: &str) -> Response {
 #[derive(Deserialize)]
 pub struct DeviceRequest {
     token: String,
+    /// A stable id for this device: `identifierForVendor` on iOS, a UUID the Mac app keeps.
+    /// Absent from an older app build, whose token is then kept under `legacy`.
+    #[serde(default)]
+    device_id: Option<String>,
+    /// `ios`, `macos`, …
+    #[serde(default)]
+    platform: Option<String>,
+    /// The sending app's bundle id, the `apns-topic` its pushes need.
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+/// Trim an optional registration field to `None` when blank, and refuse one that is too long
+/// or carries anything but letters, digits, `.`, `-` and `_`: these become a map key, a log
+/// word and an HTTP header value.
+fn device_field(name: &str, v: Option<String>, max: usize) -> Result<Option<String>, ApiError> {
+    let Some(v) = v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let ok = v.len() <= max
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !ok {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{name}: at most {max} letters, digits, '.', '-' or '_'"),
+        ));
+    }
+    Ok(Some(v))
 }
 
 /// Body of `POST /jesse/title`: the conversation text to turn into a short title.
@@ -2437,11 +2466,13 @@ pub async fn jesse_cancel(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /jesse/device` — register/update this phone's APNs device token. Same
-/// bearer auth as `/jesse`. Idempotent upsert: a re-register overwrites the
-/// stored token. Persisted (when a state dir is configured) so it survives a
-/// restart. Works even when push is disabled — the bridge just won't send. Never
-/// logs the token.
+/// `POST /jesse/device` — register/update one device's APNs token. Same bearer auth as
+/// `/jesse`. Idempotent upsert of THIS device's entry, keyed by the optional `device_id`
+/// (with `platform` and `topic` beside it); a body with only `token`, as an older app build
+/// sends, is kept under `legacy`. Every other device's entry is left alone, so the iPhone and
+/// the Mac no longer replace each other. Persisted (when a state dir is configured) so it
+/// survives a restart. Works even when push is disabled — the bridge just won't send. Never
+/// logs the token; logs the platform and the device id's first eight characters.
 pub async fn jesse_device(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -2452,7 +2483,21 @@ pub async fn jesse_device(
     if token.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "missing device token".to_string()));
     }
-    st.devices.set(token);
+    let device_id = device_field("device_id", req.device_id, 128)?;
+    let platform = device_field("platform", req.platform, 32)?.map(|p| p.to_ascii_lowercase());
+    let topic = device_field("topic", req.topic, 200)?;
+    let label = format!(
+        "{} {}",
+        platform.as_deref().unwrap_or("unknown"),
+        short_device_id(device_id.as_deref().unwrap_or(LEGACY_DEVICE_ID))
+    );
+    let n = st.devices.register(DeviceRegistration {
+        token,
+        device_id,
+        platform,
+        topic,
+    });
+    eprintln!("jesse-bridge: device registered: {label} ({n} device(s) stored)");
     Ok(Json(json!({ "ok": true })))
 }
 

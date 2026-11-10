@@ -982,7 +982,7 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // Why it is a third instance and not a flag on `google` is under GOOGLE-PERSEIDO above and on
 // the row in `crate::mcpservers`. Never a wildcard.
 //
-// DEVJOB: ALL SIX, NAMED ONE BY ONE (0.186.0; reply and cancel 0.197.0; close 0.199.0).
+// DEVJOB: ALL SIX, NAMED ONE BY ONE (0.186.0; reply and cancel 0.197.0; close 0.200.0).
 // `devjob_start` starts a
 // coding agent on the cluster or the Studio that can push a branch and open a pull request on
 // any repository the credential reaches; it is classed `write` in the row, so it reaches write

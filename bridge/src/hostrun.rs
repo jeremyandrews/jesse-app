@@ -677,7 +677,7 @@ pub struct RunRecord {
     #[serde(default)]
     pub env_file: Option<String>,
     /// Why the run was closed: `superseded by <run_id>`, `item ticked`, `report archived`, or
-    /// what Jeremy gave. Only while `closed`; absent from records written before 0.199.0.
+    /// what Jeremy gave. Only while `closed`; absent from records written before 0.200.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_reason: Option<String>,
     /// When the run was closed (RFC 3339). Only while `closed`.
@@ -3194,7 +3194,10 @@ impl HostRuns {
         });
         let h = lock(&self.house);
         json!({
-            "runs": runs.iter().map(run_json).collect::<Vec<_>>(),
+            "runs": runs
+                .iter()
+                .map(|r| run_json_located(r, &self.notes_root))
+                .collect::<Vec<_>>(),
             "counts": counts,
             "disk": {
                 "total_bytes": h.last_total_bytes,
@@ -3224,6 +3227,41 @@ impl HostRuns {
 /// A run id names one directory under `runs/` and nothing else.
 pub fn valid_run_id(id: &str) -> bool {
     devjob::valid_label_value(id) && !id.contains("..")
+}
+
+/// Where a report the run recorded at `rel` lives now, vault relative.
+///
+/// A report is written to `Inbox/` and its path recorded in `run.json` once. Processing the
+/// Inbox then files a read report under `Inbox/archive/`, and the recorded path names a note
+/// that is no longer there: the app's Report link opened "doesn't exist on the Studio" for
+/// every run whose report had been processed. So the path served is the note's CURRENT one:
+/// the recorded path while it exists, else the same file under the folder's `archive/`, else
+/// the recorded path unchanged (nothing better is known; the app says it is missing).
+pub fn locate_report(notes_root: &Path, rel: &str) -> String {
+    if notes_root.join(rel).is_file() {
+        return rel.to_string();
+    }
+    let p = Path::new(rel);
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+        let archived = parent.join(crate::strands::ARCHIVE_SEGMENT).join(name);
+        if notes_root.join(&archived).is_file() {
+            return archived.to_string_lossy().into_owned();
+        }
+    }
+    rel.to_string()
+}
+
+/// [`run_json`] with every report path resolved to where the note lives now
+/// ([`locate_report`]): what the routes serve.
+pub fn run_json_located(r: &RunRecord, notes_root: &Path) -> Value {
+    let mut v = run_json(r);
+    v["report_paths"] = json!(r
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.as_deref())
+        .map(|rel| locate_report(notes_root, rel))
+        .collect::<Vec<_>>());
+    v
 }
 
 /// One run for the routes and the tools: `run.json`, `host`, and its report paths.
@@ -3470,7 +3508,7 @@ pub async fn jesse_run(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     match svc.get(&run_id) {
-        Some(r) => Ok(Json(run_json(&r)).into_response()),
+        Some(r) => Ok(Json(run_json_located(&r, svc.notes_root())).into_response()),
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
@@ -3506,7 +3544,7 @@ pub async fn jesse_run_reply(
         .reply_and_pump(&run_id, &body.text)
         .await
         .map_err(refusal)?;
-    Ok(Json(run_json(&r)).into_response())
+    Ok(Json(run_json_located(&r, svc.notes_root())).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/cancel`.
@@ -3517,7 +3555,7 @@ pub async fn jesse_run_cancel(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let r = svc.cancel_and_wake(&run_id).await.map_err(refusal)?;
-    Ok(Json(run_json(&r)).into_response())
+    Ok(Json(run_json_located(&r, svc.notes_root())).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/close` with an optional `{ reason }`.

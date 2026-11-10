@@ -2462,7 +2462,7 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     }
 }
 
-// ---- SETTLED RUNS CLOSE THEMSELVES (0.199.0) ---------------------------------------------
+// ---- SETTLED RUNS CLOSE THEMSELVES (0.200.0) ---------------------------------------------
 
 /// Drive `id`'s current round to `needs_you`.
 async fn to_needs_you(r: &Rig, id: &str) {
@@ -2992,4 +2992,52 @@ async fn a_closed_run_follows_the_terminal_retention() {
     assert!(!dir.join("worktree").exists());
     assert!(!dir.join("target").exists());
     assert!(dir.join(RUN_JSON).is_file());
+}
+
+#[tokio::test]
+async fn a_report_filed_under_the_inbox_archive_is_served_where_it_now_lives() {
+    // THE DEFECT: the Inbox is processed, a read report moves to `Inbox/archive/`, and the
+    // path `run.json` recorded names a note that is gone; the app's Report link opened
+    // "doesn't exist on the Studio".
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    finish_round(&r, "GD5", 0, Some("Done.\n"), STREAM_TEXT);
+    r.svc.pass(now_ms()).await;
+    let rel = format!("Inbox/{}-run-GD5.md", today());
+    let archived = format!("Inbox/archive/{}-run-GD5.md", today());
+
+    // Before the move, the recorded path.
+    let listed = r.svc.list_json();
+    assert_eq!(listed["runs"][0]["report_paths"], json!([rel.clone()]));
+
+    std::fs::create_dir_all(s.notes().join("Inbox/archive")).unwrap();
+    std::fs::rename(s.notes().join(&rel), s.notes().join(&archived)).unwrap();
+
+    // After it, the list and the run both serve the note's current path; the record keeps
+    // what it recorded.
+    let listed = r.svc.list_json();
+    assert_eq!(listed["runs"][0]["report_paths"], json!([archived.clone()]));
+    let one = run_json_located(&r.svc.get("GD5").unwrap(), r.svc.notes_root());
+    assert_eq!(one["report_paths"], json!([archived.clone()]));
+    assert_eq!(
+        r.svc
+            .get("GD5")
+            .unwrap()
+            .round()
+            .unwrap()
+            .report_path
+            .as_deref(),
+        Some(rel.as_str())
+    );
+
+    // A report gone from both places is served as recorded: nothing better is known.
+    std::fs::remove_file(s.notes().join(&archived)).unwrap();
+    assert_eq!(
+        locate_report(r.svc.notes_root(), &rel),
+        rel,
+        "a missing note keeps its recorded path"
+    );
 }

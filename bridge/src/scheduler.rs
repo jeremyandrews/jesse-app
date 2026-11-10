@@ -2228,14 +2228,6 @@ pub async fn push_schedule_outcome(
         );
         return;
     };
-    let Some(token) = st.devices.get() else {
-        eprintln!(
-            "jesse-bridge: schedule PUSH id={schedule_id} outcome={} — no device registered, \
-             nothing sent",
-            outcome.label()
-        );
-        return;
-    };
     // The morning chain (by default) rewrites the day file in full, so its outcome push
     // also asks the phone to refresh the two cached snapshots — see `push_prefetch_jobs`.
     let prefetch = wants_prefetch(schedule_id, &push_prefetch_jobs());
@@ -2251,22 +2243,13 @@ pub async fn push_schedule_outcome(
     // Every push the bridge sends to the phone carries the unread count, so a scheduled
     // run's alert leaves the icon showing the same number the Chats tab does.
     let badge = Some(unread_conversation_count(&st.conversations, &st.flags));
-    match apns.push_payload(&token, payload, badge).await {
-        PushOutcome::Sent => eprintln!(
-            "jesse-bridge: schedule PUSH id={schedule_id} outcome={} sent",
-            outcome.label()
-        ),
-        PushOutcome::DeadToken => {
-            st.devices.clear();
-            eprintln!(
-                "jesse-bridge: schedule PUSH id={schedule_id} — device token rejected (410 \
-                 dead) — cleared"
-            );
-        }
-        PushOutcome::Failed(e) => {
-            eprintln!("jesse-bridge: schedule PUSH id={schedule_id} failed: {e} — swallowed")
-        }
-    }
+    let tally = push_to_devices(apns, &st.devices, "schedule", schedule_id, payload, badge).await;
+    eprintln!(
+        "jesse-bridge: schedule PUSH id={schedule_id} outcome={} sent to {} of {} device(s)",
+        outcome.label(),
+        tally.sent,
+        tally.devices()
+    );
 }
 
 /// Push the CONSECUTIVE-FAILURE escalation. Same client, same swallow-every-error
@@ -2303,30 +2286,14 @@ async fn push_alert(st: &AppState, schedule_id: &str, payload: Vec<u8>, what: &s
         );
         return;
     };
-    let Some(token) = st.devices.get() else {
-        eprintln!(
-            "jesse-bridge: schedule PUSH id={schedule_id} {what} — no device registered, \
-             nothing sent"
-        );
-        return;
-    };
     // Same rule as the outcome push: every push to the phone restates the unread count.
     let badge = Some(unread_conversation_count(&st.conversations, &st.flags));
-    match apns.push_payload(&token, payload, badge).await {
-        PushOutcome::Sent => {
-            eprintln!("jesse-bridge: schedule PUSH id={schedule_id} {what} sent")
-        }
-        PushOutcome::DeadToken => {
-            st.devices.clear();
-            eprintln!(
-                "jesse-bridge: schedule PUSH id={schedule_id} {what} — device token rejected \
-                 (410 dead) — cleared"
-            );
-        }
-        PushOutcome::Failed(e) => {
-            eprintln!("jesse-bridge: schedule PUSH id={schedule_id} {what} failed: {e} — swallowed")
-        }
-    }
+    let tally = push_to_devices(apns, &st.devices, "schedule", schedule_id, payload, badge).await;
+    eprintln!(
+        "jesse-bridge: schedule PUSH id={schedule_id} {what} sent to {} of {} device(s)",
+        tally.sent,
+        tally.devices()
+    );
 }
 
 // ---- The boot table ----------------------------------------------------------

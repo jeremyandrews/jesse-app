@@ -2980,7 +2980,7 @@ default allowlist, classed `write`**, so they reach exactly the turns `devjob_st
 turns, on every harness that renders it) and no read turn. The containment battery's `devjob`
 stand-in lists all five tools, as the real server does on the Studio, and the claude-code and
 direct records were re-recorded with them: only the write rows moved, by these two tools.
-**Since 0.199.0, `POST /jesse/runs/:id/close` (paired device) and `devjob_close` join them**,
+**Since 0.200.0, `POST /jesse/runs/:id/close` (paired device) and `devjob_close` join them**,
 classed and granted exactly as `devjob_cancel`; the battery's stand-in lists six tools and both
 records were re-recorded again, moving only the write rows' grants, by that one tool. A close stops
 nothing and deletes nothing: it marks a `needs_you`, `interrupted` or `failed` run `closed`. The

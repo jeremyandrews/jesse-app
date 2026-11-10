@@ -255,6 +255,42 @@ final class MacLargePasteTests: XCTestCase {
               + "\(builds) document builds, \(composer.lastMeasuredCharacters) characters measured")
     }
 
+    // MARK: - The transcript the composer sits under
+
+    /// The transcript's own scroll view: the one whose document is not the composer's text.
+    static func transcriptScrollView(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView, !(scroll.documentView is NSTextView) { return scroll }
+        for sub in view.subviews {
+            if let found = transcriptScrollView(in: sub) { return found }
+        }
+        return nil
+    }
+
+    /// Opening a conversation puts the transcript at its bottom in ONE layout and leaves
+    /// nothing in motion. An animated scroll to the bottom of the lazy transcript chased its
+    /// anchor for several frames after the conversation opened, and kept the target after it
+    /// stopped. The next resize of the transcript (the composer growing on a paste) started the
+    /// chase again, and each frame of it laid out the whole detail view and asked the composer
+    /// for its size: the intermittent failure of the detail view paste tests above.
+    func testOpeningAConversationLandsAtTheBottomInOneLayout() throws {
+        let context = try MacTestFixtures.context()
+        let (host, _) = try detailHost(context: context)
+        _ = window(for: host, size: NSSize(width: 1200, height: 900))
+        settle(host)
+        let scroll = try XCTUnwrap(Self.transcriptScrollView(in: host), "no transcript scroll view")
+        let document = try XCTUnwrap(scroll.documentView, "the transcript has no document")
+        XCTAssertGreaterThan(document.frame.height, scroll.contentView.bounds.height * 2,
+                             "the fixture transcript is tall enough to need scrolling")
+        // The bottom anchor sits inside the transcript's 20 point padding.
+        let bottom = document.frame.height - 20
+        XCTAssertEqual(scroll.contentView.bounds.maxY, bottom, accuracy: 1,
+                       "the transcript was not at its bottom after the first layout")
+        let landed = scroll.contentView.bounds.origin
+        settle(host)
+        XCTAssertEqual(scroll.contentView.bounds.origin, landed,
+                       "the transcript was still scrolling after it landed")
+    }
+
     // MARK: - Typing after a large paste
 
     /// A keystroke after a 1 MB paste. Each one used to compare the whole draft twice as a

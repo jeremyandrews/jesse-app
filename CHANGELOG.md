@@ -14,6 +14,12 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (209)] - 2026-11-10
+
+**The Mac transcript lands at its bottom without animating when a conversation opens, so a paste into the composer no longer restarts a scroll behind it.** Root cause: the Mac detail view scrolled to the bottom of its `LazyVStack` transcript with `withAnimation` on appear and on every stream delta. An animated `scrollTo` aims at an estimated offset and keeps chasing the anchor as rows are measured, and SwiftUI keeps that target after the motion stops. The next resize of the transcript restarted the chase: the composer growing on a paste. The transcript pinned its bottom, flipped its height estimate and eased back over several frames, and each frame laid out the whole detail view again, asking the composer for its size and sometimes rebuilding a transcript row and its reply document. That was the intermittent `MacLargePasteTests` detail view failure (5 of 20, 1 of 20 and 7 of 20 class runs for 10 KB, 100 KB and 1 MB). The Mac now follows the phone's rule (`ThreadDetailView.autoScroll`): opening and stream deltas scroll without animation, and a settled new turn keeps the short ease.
+
+- **Added:** `MacLargePasteTests.testOpeningAConversationLandsAtTheBottomInOneLayout`. Opening a conversation leaves the transcript at its bottom after one layout and still on the next one. It failed 20 of 20 runs before the fix.
+
 ## [App 1.0 (208)] - 2026-11-10
 
 **The Mac app's conversation search is in the Chats sidebar at every width, and Command F reaches it.** Root cause: inside the window's `TabView`, a sidebar `.searchable` became a principal toolbar search item that cannot sit beside the tab picker, so it and every sidebar toolbar button went into the overflow menu at every width; the field now lives in the sidebar column, the toolbar holds three buttons, and a Conversations menu carries the rest.

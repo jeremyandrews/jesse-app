@@ -14,10 +14,13 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [UT2: the Away mode UI tests scroll to their row] - App 1.0 (204) - 2026-11-10
+## [UT2: the Away mode UI tests scroll to their row; an outbox test waits for its reply] - App 1.0 (204) - 2026-11-10
 
 **`testSettingsPushesAwayMode` and `testAwayModeCarriesAnAskEntry` pass on the gate's iPhone
-18 Pro (iOS 27.2) simulator.** On clean `main` both failed 3 times out of 3. Test-only change;
+18 Pro (iOS 27.2) simulator, and
+`RunCoordinatorOutboxTests.testRetrySameRequestIdNoDuplicateTurnAttemptsIncrementSuccessDeletes`
+no longer fails intermittently.** On clean `main` both Away mode tests failed 3 times out of 3,
+and the outbox test failed on the first full JesseTests run tried. Both fixes are test-only;
 the app's behaviour is unchanged.
 
 ### Root cause
@@ -28,6 +31,11 @@ the app's behaviour is unchanged.
   through "Bridge ops" (y 838–890 on an 874 pt screen), so "Away mode", the next row down, was
   not in the accessibility hierarchy at all, and `waitForExistence` timed out. After one swipe
   the row exists and is hittable, so a user can reach it and the app needed no change.
+- **The outbox retry test counted turns between the ACK and the reply.**
+  `RunCoordinator.transmit` deletes the outbox item at the 202 ACK (`ackDelete`), and only
+  then does `consume` poll `result(jobId:)` and append the reply. The test waited for the
+  delete and asserted two turns straight away. Under the load of the whole JesseTests target
+  it sometimes asserted inside that window and saw one.
 
 ### Changed
 
@@ -36,6 +44,10 @@ the app's behaviour is unchanged.
   "Bridge ops", not the Chats list under the sheet. Both Away mode tests use it. No timeout,
   skip or assertion changed. "Bridge ops" is in the hierarchy on first render and its tests
   already passed, so they are unchanged. No other UI test opens Settings.
+- **The outbox retry test holds the turn in that window, asserts it, then releases it.** The
+  fake client's `result(jobId:)` can be held (`holdsResult`, `releaseResult()`). The test
+  asserts one turn once the item is deleted, releases the result, waits for the reply and
+  asserts two turns and the reply's text. The outcome no longer depends on scheduling.
 
 ## [PE1: containment-probe loads the bridge's plist environment] - Bridge 0.200.1 - 2026-11-10
 

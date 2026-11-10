@@ -14,6 +14,29 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [UT2: the Away mode UI tests scroll to their row] - App 1.0 (204) - 2026-11-10
+
+**`testSettingsPushesAwayMode` and `testAwayModeCarriesAnAskEntry` pass on the gate's iPhone
+18 Pro (iOS 27.2) simulator.** On clean `main` both failed 3 times out of 3. Test-only change;
+the app's behaviour is unchanged.
+
+### Root cause
+
+- **The Away mode row was below the fold, and the Settings `Form` creates rows lazily.** The
+  form is a collection view that creates a cell, and that cell's accessibility element, only
+  when the row comes near the screen. On an iPhone 18 Pro the Settings sheet ends partway
+  through "Bridge ops" (y 838–890 on an 874 pt screen), so "Away mode", the next row down, was
+  not in the accessibility hierarchy at all, and `waitForExistence` timed out. After one swipe
+  the row exists and is hittable, so a user can reach it and the app needed no change.
+
+### Changed
+
+- **`OpsNavigationUITests.settingsRowBelowTheFold(_:_:)`** swipes the Settings form until the
+  row exists and is hittable, as a user would. It swipes the collection view that holds
+  "Bridge ops", not the Chats list under the sheet. Both Away mode tests use it. No timeout,
+  skip or assertion changed. "Bridge ops" is in the hierarchy on first render and its tests
+  already passed, so they are unchanged. No other UI test opens Settings.
+
 ## [PE1: containment-probe loads the bridge's plist environment] - Bridge 0.200.1 - 2026-11-10
 
 **`containment-probe` now always runs with the environment the live bridge runs with, with

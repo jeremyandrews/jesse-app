@@ -46,6 +46,27 @@ final class OpsNavigationUITests: XCTestCase {
                       "the Settings sheet is up")
     }
 
+    /// A Settings row that sits below the fold, scrolled into view the way a user reaches it.
+    ///
+    /// The Settings `Form` is a lazily populated collection view: a row's cell, and so its
+    /// accessibility element, does not exist until it is scrolled near the screen. On an
+    /// iPhone 18 Pro the sheet ends just after "Bridge ops", so "Away mode", the next row
+    /// down, is absent from the hierarchy until the form scrolls, and `waitForExistence`
+    /// on it times out however long it waits. This swipes the form (the collection view
+    /// holding "Bridge ops", not the Chats list under the sheet) until the row is there
+    /// and hittable, and returns it.
+    private func settingsRowBelowTheFold(_ app: XCUIApplication, _ label: String) -> XCUIElement {
+        let form = app.collectionViews.containing(.button, identifier: "Bridge ops").firstMatch
+        XCTAssertTrue(form.waitForExistence(timeout: 10), "the Settings form")
+        let row = app.buttons[label]
+        var swipes = 0
+        while !(row.exists && row.isHittable) && swipes < 6 {
+            form.swipeUp(velocity: .slow)
+            swipes += 1
+        }
+        return row
+    }
+
     /// Settings → Bridge ops → Schedule. Both pushes, in one pass, because the second is
     /// only reachable through the first and asserting them separately would launch the app
     /// twice to walk the same path.
@@ -123,7 +144,7 @@ final class OpsNavigationUITests: XCTestCase {
         app.launch()
         openSettings(app)
 
-        let awayRow = app.buttons["Away mode"]
+        let awayRow = settingsRowBelowTheFold(app, "Away mode")
         XCTAssertTrue(awayRow.waitForExistence(timeout: 10), "the Away mode row")
         awayRow.tap()
         XCTAssertTrue(app.navigationBars["Away mode"].waitForExistence(timeout: 10),
@@ -132,14 +153,14 @@ final class OpsNavigationUITests: XCTestCase {
                       "Away mode's Ask entry is a real navigation-bar button")
     }
 
-    /// Away mode is the second row, and it is a BRIDGE screen: it needs no sentinel at all,
+    /// Away mode is the second Operations row, below the fold on an iPhone, and it is a BRIDGE screen: it needs no sentinel at all,
     /// so it must render its own form rather than a call to action.
     func testSettingsPushesAwayMode() {
         let app = XCUIApplication()
         app.launch()
         openSettings(app)
 
-        let awayRow = app.buttons["Away mode"]
+        let awayRow = settingsRowBelowTheFold(app, "Away mode")
         XCTAssertTrue(awayRow.waitForExistence(timeout: 10),
                       "the Away mode row is in the Settings form")
         awayRow.tap()

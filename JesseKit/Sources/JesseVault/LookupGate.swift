@@ -38,6 +38,18 @@ import Foundation
 // QUESTION now — a question mark, or an interrogative first word — and everything else is
 // refused and queued for the bridge, which can actually perform it.
 //
+// WHY "CAN YOU MAKE" IS REFUSED BUT "MAKE" IS NOT A REQUEST VERB. On 2026-10-17, with the
+// bridge unreachable, "That beautiful. But can you make a photo realistic version?" (a
+// follow-up to an image the bridge had just made) ended with a question mark, opened its
+// second sentence with "can", and named no listed verb, so it passed and was answered with
+// passport-photo advice out of three unrelated notes. The request was for WORK, and only the
+// bridge can attempt it. Adding `make` to `requestVerbs` would be the wrong fix: "how do I
+// make pizza dough?" is a cookbook lookup and must still pass. What marks the request is its
+// ADDRESS: a modal followed by "you" asks the assistant to act, so the word after "can you"
+// must be one of a short list of lookup verbs ("can you tell me", "could you find"), and any
+// other word refuses. The rule looks anywhere in the text, not only at its start, because the
+// incident opens with a separate sentence.
+//
 // This file imports no model framework and has no dependency surface at all. Every rule
 // below is a pure function over a string.
 
@@ -131,6 +143,31 @@ public enum LookupGate {
         "can", "could", "will", "would", "should", "has", "have", "had",
     ]
 
+    /// The modals that, followed by "you", address a request to the assistant.
+    static let addressingModals: Set<String> = ["can", "could", "would", "will"]
+
+    /// "you", as it is typed: in full, and as the one-letter shorthand "u".
+    static let addressee: Set<String> = ["you", "u"]
+
+    /// The verbs that may follow "can you" and still make a LOOKUP.
+    ///
+    /// Every other word after a modal plus "you" asks the assistant to do something, and
+    /// that is the bridge's work. Each entry is here because its object is something
+    /// already in the notes:
+    ///
+    /// - `tell`: "can you tell me when the concert is" asks for a fact to be repeated.
+    /// - `find`: "could you find Aurora's birthday" asks for a fact to be located.
+    /// - `check`: "can you check what time the flight is" asks for a fact to be read.
+    /// - `look`: "can you look up the router address" is `find` as a phrasal verb.
+    /// - `show`: "can you show me the packing list" asks for a note to be displayed.
+    /// - `say`: "could you say when the bins go out" is `tell` without the "me".
+    ///
+    /// `remember` is NOT here: it is already a request verb, because "can you remember
+    /// that the plumber comes Tuesday" asks for a write.
+    public static let lookupVerbs: Set<String> = [
+        "tell", "find", "check", "look", "show", "say",
+    ]
+
     /// A refusal, in the two registers the two readers need.
     ///
     /// `rule` is for the diagnostics list, where the question is "which rule fired";
@@ -156,6 +193,10 @@ public enum LookupGate {
 
         static let notAQuestion = Refusal(rule: "not a question",
                                           because: "it is not a question")
+
+        /// "can you make …": a modal plus "you" followed by anything but a lookup verb.
+        static let addressedRequest = Refusal(rule: "addressed request",
+                                              because: "it asks the assistant to do something")
 
         static func request(_ verb: RequestVerb) -> Refusal {
             Refusal(rule: "request verb: \(verb.verb)", because: verb.because)
@@ -195,10 +236,33 @@ public enum LookupGate {
                 return .refused(.request(verb))
             }
         }
+        // An ADDRESSED REQUEST is checked before the question shape, because it is a
+        // question in shape: "can you make a poster?" ends with a mark and opens with an
+        // interrogative, and is still a request for work.
+        if isAddressedRequest(words) {
+            return .refused(.addressedRequest)
+        }
         guard readsAsAQuestion(trimmed, words: words) else {
             return .refused(.notAQuestion)
         }
         return .passed
+    }
+
+    /// Whether the text asks the assistant to DO something: anywhere in it, a modal, then
+    /// "you", then a word that is not a lookup verb.
+    ///
+    /// Anywhere and not only first, because "That beautiful. But can you make …" opens
+    /// with a separate sentence. A modal with any other subject ("Can I park at the
+    /// station?", "Can the kids swim?") is an ordinary yes/no question and is not matched,
+    /// and neither is "can you" with nothing after it.
+    static func isAddressedRequest(_ words: [some StringProtocol]) -> Bool {
+        let stems = words.map { firstWordStem($0) }
+        guard stems.count >= 3 else { return false }
+        for index in 0..<(stems.count - 2)
+        where addressingModals.contains(stems[index]) && addressee.contains(stems[index + 1]) {
+            if !lookupVerbs.contains(stems[index + 2]) { return true }
+        }
+        return false
     }
 
     /// Whether this text asks something.

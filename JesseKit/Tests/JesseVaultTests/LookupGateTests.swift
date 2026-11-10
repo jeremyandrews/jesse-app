@@ -197,4 +197,44 @@ final class LookupGateTests: XCTestCase {
                            "the renderer adds the full stop")
         }
     }
+
+    // MARK: - A request addressed to the assistant
+
+    /// 2026-10-17, bridge unreachable: a follow-up to an image the bridge had just made
+    /// was answered from the notes with passport-photo advice. "can you make" asks the
+    /// assistant to DO something, and only the bridge can attempt it. The modal and "you"
+    /// sit in the second sentence, so the rule has to look past the first word.
+    func testTheIncidentSentenceIsRefusedAsAnAddressedRequest() {
+        XCTAssertEqual(LookupGate.rule("That beautiful. But can you make a photo realistic version?"),
+                       .refused(.addressedRequest))
+    }
+
+    func testAModalAddressedToTheAssistantWithAWorkVerbIsRefused() {
+        for request in ["Can you make a poster of Barga?",
+                        "could you draw the house?",
+                        "Would you generate a chart of my weight?",
+                        "will you build me a playlist?",
+                        "Can u make it bigger?"] {
+            XCTAssertEqual(LookupGate.rule(request), .refused(.addressedRequest), request)
+        }
+        XCTAssertEqual(LookupGate.Refusal.addressedRequest.rule, "addressed request")
+        XCTAssertEqual(LookupGate.Refusal.addressedRequest.because,
+                       "it asks the assistant to do something")
+    }
+
+    /// The other half: a polite lookup ("can you tell me", "could you find") is still a
+    /// lookup, `make` alone is not a request ("how do I make pizza dough?" is a cookbook
+    /// question), and a modal whose subject is not "you" is an ordinary yes/no question.
+    func testALookupAddressedToTheAssistantStillPasses() {
+        for question in ["Can you tell me when the school concert is?",
+                         "could you find Aurora's birthday?",
+                         "Can you check what time the KLM flight is?",
+                         "can you look up the router address?",
+                         "how do I make pizza dough?",
+                         "What make is the car?",
+                         "Can the kids swim on Saturday?",
+                         "Can I park at the station?"] {
+            XCTAssertEqual(LookupGate.rule(question), .passed, question)
+        }
+    }
 }

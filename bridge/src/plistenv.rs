@@ -1,10 +1,10 @@
 //! The bridge's launch environment, read from its launchd plist.
 //!
-//! The live bridge runs with the `EnvironmentVariables` of
-//! `~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`, PATH included. An interactive shell
-//! has none of it, so a tool that must behave like the bridge (the containment battery, the
-//! transcriber) reads the plist itself. The plist is read with `plutil`, never PlistBuddy, and
-//! nothing is ever written back.
+//! The live bridge runs with the `EnvironmentVariables` of its LaunchAgent plist
+//! (`~/Library/LaunchAgents/<bridge label>.plist`), PATH included. An interactive shell has none
+//! of it, so a tool that must behave like the bridge (the containment battery, the transcriber)
+//! reads the plist itself. The plist is read with `plutil`, never PlistBuddy, and nothing is
+//! ever written back.
 //!
 //! Two policies, one per caller:
 //!
@@ -16,12 +16,36 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Where the live bridge's launchd plist lives, under `$HOME`.
-pub const BRIDGE_PLIST_RELATIVE: &str = "Library/LaunchAgents/com.jeremy.jesse-bridge.plist";
+/// The suffix every bridge LaunchAgent plist's file name ends with: `<reverse dns>.jesse-bridge`
+/// plus `.plist`, the same rule `scripts/install-sentinel.sh` finds it by.
+pub const BRIDGE_PLIST_SUFFIX: &str = ".jesse-bridge.plist";
 
-/// The live bridge's plist for this user, or `None` when `HOME` is unset.
-pub fn default_bridge_plist() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(BRIDGE_PLIST_RELATIVE))
+/// The bridge's LaunchAgent plist in `launch_agents`: `<label>.plist` when `label` is given and
+/// that file exists, else the ONE file whose name ends [`BRIDGE_PLIST_SUFFIX`]. `None` when
+/// neither settles it (none, or more than one).
+pub fn find_bridge_plist(launch_agents: &Path, label: Option<&str>) -> Option<PathBuf> {
+    if let Some(l) = label {
+        let p = launch_agents.join(format!("{l}.plist"));
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(launch_agents)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(BRIDGE_PLIST_SUFFIX))
+        })
+        .collect();
+    if found.len() == 1 {
+        found.pop()
+    } else {
+        None
+    }
 }
 
 /// Every string in a launchd plist's `EnvironmentVariables`. Non-string values are skipped.
@@ -268,7 +292,7 @@ mod tests {
 
     #[test]
     fn a_missing_plist_refuses_write_and_only_warns_without_it() {
-        let missing = PathBuf::from("/nonexistent/jesse/com.jeremy.jesse-bridge.plist");
+        let missing = PathBuf::from("/nonexistent/jesse/com.example.jesse-bridge.plist");
         // The real reader, against a path that is not there.
         let plan = bridge_env_plan(&EnvSource::Plist(missing.clone()), read_plist_env, |_| None);
         assert!(
@@ -298,6 +322,38 @@ mod tests {
         let sentinel = "JESSE_PLISTENV_TEST_SENTINEL_UNSET";
         plan.apply();
         assert!(std::env::var_os(sentinel).is_none());
+    }
+
+    #[test]
+    fn the_bridge_plist_is_found_by_label_then_by_its_one_suffix_match() {
+        let dir = std::env::temp_dir().join(format!("jesse-plistfind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(find_bridge_plist(&dir, None), None);
+        for f in [
+            "com.example.jesse-bridge.plist",
+            "com.example.jesse-bridge.plist.bak-1",
+            "com.example.jesse-pro-bridge.plist",
+            "com.example.jesse-sentinel.plist",
+        ] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let only = dir.join("com.example.jesse-bridge.plist");
+        assert_eq!(find_bridge_plist(&dir, None), Some(only.clone()));
+        // A label whose plist is not there falls back to the suffix match.
+        assert_eq!(
+            find_bridge_plist(&dir, Some("com.other.jesse-bridge")),
+            Some(only)
+        );
+        // Two candidates and no label: not settled.
+        std::fs::write(dir.join("org.second.jesse-bridge.plist"), "").unwrap();
+        assert_eq!(find_bridge_plist(&dir, None), None);
+        // The label settles it.
+        assert_eq!(
+            find_bridge_plist(&dir, Some("org.second.jesse-bridge")),
+            Some(dir.join("org.second.jesse-bridge.plist"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "macos")]

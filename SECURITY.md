@@ -3365,7 +3365,7 @@ cargo run --bin containment-probe -- --show  # print the record, run nothing
 
 (All three need `--features containment-probe`, run from `bridge/`.) **The battery takes the
 bridge's environment itself.** Every run but `--show` loads the live bridge's launchd plist
-`EnvironmentVariables` (`~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`; `--env-plist
+`EnvironmentVariables` (`~/Library/LaunchAgents/<bridge label>.plist`; `--env-plist
 <path>` for another, `--no-env-plist` for none) before anything starts: the plist wins for every
 variable, and PATH is the plist's followed by any shell entries it lacks. A `--write` whose
 plist cannot be read refuses to start, and a pre-flight stops any run, before a model turn, if

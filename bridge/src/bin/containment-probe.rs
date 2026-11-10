@@ -16,7 +16,7 @@
 //! ```
 //!
 //! Every form but `--show` first takes the LIVE BRIDGE'S ENVIRONMENT from its launchd plist
-//! (`~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`, `EnvironmentVariables`): the plist
+//! (`~/Library/LaunchAgents/<bridge label>.plist`, `EnvironmentVariables`): the plist
 //! wins for every variable, and PATH is the plist's followed by any shell entries it lacks.
 //! `--env-plist <path>` names another plist; `--no-env-plist` keeps the shell's environment
 //! (CI and tests). `--write` refuses to start when the plist cannot be read. Before any model
@@ -167,14 +167,26 @@ fn take_env_source(args: &mut Vec<String>) -> Result<plistenv::EnvSource, String
         (true, Some(_)) => Err("--env-plist and --no-env-plist contradict each other".into()),
         (true, None) => Ok(plistenv::EnvSource::Off),
         (false, Some(p)) => Ok(plistenv::EnvSource::Plist(p)),
-        (false, None) => plistenv::default_bridge_plist()
-            .map(plistenv::EnvSource::Plist)
-            .ok_or_else(|| {
-                "HOME is unset, so the bridge's plist cannot be found; name it with \
-                 --env-plist <path>, or pass --no-env-plist"
-                    .to_string()
-            }),
+        (false, None) => default_bridge_plist(),
     }
+}
+
+/// The live bridge's LaunchAgent plist: `<bridge label>.plist` (the label resolved as the
+/// battery's signing does, [`jesse_bridge::probesign::bridge_label`]), else the one
+/// `*.jesse-bridge.plist` there. When neither is found, the label's path, which then fails to
+/// read and is reported as such.
+fn default_bridge_plist() -> Result<plistenv::EnvSource, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        "HOME is unset, so the bridge's plist cannot be found; name it with --env-plist \
+         <path>, or pass --no-env-plist"
+            .to_string()
+    })?;
+    let agents = PathBuf::from(home).join("Library/LaunchAgents");
+    let label = jesse_bridge::probesign::bridge_label();
+    Ok(plistenv::EnvSource::Plist(
+        plistenv::find_bridge_plist(&agents, Some(&label))
+            .unwrap_or_else(|| agents.join(format!("{label}.plist"))),
+    ))
 }
 
 async fn run(args: Vec<String>) {

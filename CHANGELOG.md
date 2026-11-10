@@ -31,9 +31,11 @@ nothing sourced by hand first.**
 
 ### Changed
 
-- **`containment-probe` loads `~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist` by
-  default**, before any harness or server starts. The plist wins for every variable; PATH is
-  the plist's PATH followed by any shell entries it lacks. `--env-plist <path>` overrides the
+- **`containment-probe` loads the bridge's LaunchAgent plist by default**
+  (`~/Library/LaunchAgents/<bridge label>.plist`, the label resolved as the battery's signing
+  resolves it, else the one `*.jesse-bridge.plist` there), before any harness or server
+  starts. The plist wins for every variable; PATH is the plist's PATH followed by any shell
+  entries it lacks. `--env-plist <path>` overrides the
   path, `--no-env-plist` turns it off (CI and tests). A missing or unreadable plist makes
   `--write` refuse to start; a run without `--write` warns and goes on. One line names the
   plist, the number of variables taken and PATH's first three entries, and no other value.

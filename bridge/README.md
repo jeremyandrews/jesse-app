@@ -3953,9 +3953,10 @@ cargo build --release                                   # the serving binary, wi
 ```
 
 **It runs in the bridge's own environment, with nothing sourced first (0.199.1).** Every run
-but `--show` reads the live bridge's `~/Library/LaunchAgents/com.jeremy.jesse-bridge.plist`
-`EnvironmentVariables` before any harness or server starts, so a full battery from a plain
-shell, in `bridge/`, is one command:
+but `--show` reads the live bridge's LaunchAgent plist's `EnvironmentVariables`
+(`~/Library/LaunchAgents/<bridge label>.plist`, the label found as the battery's signing finds
+it, else the one `*.jesse-bridge.plist` there) before any harness or server starts, so a full
+battery from a plain shell, in `bridge/`, is one command:
 
 ```bash
 cargo run --features containment-probe --bin containment-probe -- --write

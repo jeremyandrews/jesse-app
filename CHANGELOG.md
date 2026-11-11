@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.201.1] - 2026-11-11
+
+**The bridge's lockfile follows jesse-agent 0.14.1.** The bridge depends on `agent/` by path,
+and its `--locked` release build refuses a lock that still records `jesse-agent` 0.14.0. The
+agent 0.14.1 release is the rustls-webpki (RUSTSEC-2026-0382) and webpki-roots
+(RUSTSEC-2026-0381) advisory fix in the root lockfile. Those two crates were not vulnerable
+in `bridge/Cargo.lock`.
+
+- **Changed:** `bridge/Cargo.lock` records `jesse-agent` 0.14.1 and `jesse-bridge` 0.201.1.
+  No other crate in the lock changed, and no bridge code changed.
+
+## [agent 0.14.1] - 2026-11-11
+
+**The root lockfile no longer pulls in two vulnerable TLS crates, and CI now audits it.**
+`cargo audit` at the repository root (the lockfile for `agent/` and `eval/`) reported two
+vulnerabilities, both reached through `reqwest` 0.12 → `hyper-rustls` / `rustls`. No
+workflow audited that lockfile: the bridge job and `audit.yml` both audit `bridge/` only.
+
+- **Fixed:** RUSTSEC-2026-0382, `rustls-webpki` 0.103.15 → 0.103.16 (certificate
+  verification may accept distrusted intermediates).
+- **Fixed:** RUSTSEC-2026-0381, `webpki-roots` 1.0.9 → 1.0.12 (bundled roots allowed trust
+  in distrusted emSign intermediates).
+- **Added:** a `cargo audit` step at the repository root in the `agent` job of
+  `.github/workflows/ci.yml`, so every PR audits the root lockfile the way the bridge job
+  audits `bridge/`. A vulnerability fails it; informational warnings do not.
+- No code changed. Only `Cargo.lock` was updated (`cargo update -p rustls-webpki -p webpki-roots`).
+
+## [eval 0.8.0] - 2026-11-11
+
+**The eval harness is a library as well as a binary.** `eval/` now has a `[lib]` target that
+imports as `jesse_eval`: one suite definition, one runner, one set of assertions, and a
+`Driver` seam a runner outside this repository can implement. Until now the crate was binary
+only, so an out of tree runner could not implement `Driver` at all. No behaviour changed:
+every command, flag, output file and exit code is what it was, and
+`eval/tests/integration.rs`, which drives the compiled binary, passes unedited.
+
+- **Added:** `eval/src/lib.rs`, holding the module declarations that were in `main.rs`, each
+  now `pub mod` (`suite_checks` stays a test-only private module).
+- **Added:** crate root re-exports for implementing a driver and running a suite through it:
+  `Driver`, `BoxFuture`, `PreparedWorkspace`, `TaskRun`; `Suite`, `Task`; `run_suite`,
+  `RunConfig`, `RunReport`; and the two foreign types those signatures name, `PriceDeck`
+  (from `jesse-agent`) and `CancellationToken` (from `tokio-util`).
+- **Added:** `eval/tests/out_of_tree_driver.rs`, an in-memory driver written against the
+  crate root alone that runs a one-task suite through `run_suite`.
+- **Changed:** `main.rs` is a thin CLI: the clap structs, the translation from arguments to
+  a driver and a `RunConfig`, and `fn main`, reaching everything else through `jesse_eval`.
+
 ## [App 1.0 (211)] - 2026-11-10
 
 **The offline gate refuses a question about how things are right now ("are things still working?", "is Plex down right now?", "did the deploy work?") and queues it for the bridge, instead of answering it from the notes.** On 2026-11-10 at about 14:56 CET, with the bridge restarting for a deploy, the Mac answered "It's deployed: are things still working? And, what have we unblocked?" with two changelog paragraphs about bridge releases 0.71.0 and 0.71.1, months old, citing a project overview note and an unrelated search baseline note. Root cause: `LookupGate.rule` read it as a lookup because it ends with a question mark and opens a clause with "are", and no rule refused it; nothing in the gate knew that some questions are about the world at this moment, which no copy of the notes can know. The answerer then accepted retrieved text that shared the words "deployed" and "working" but answered a different question. The gate now has a live-state rule, run after the addressed-request rule and before the question rule: in any clause that is itself a question and not a how-to ("how do I …"), a now marker (`still`, `now`, `currently`, `yet`, `anymore`, "at the moment") or a state word (`working`, `broken`, `down`, `running`, `green`, `red`, `unblocked`, `deployed`) in a present or present perfect question, or "did" with `work`, `succeed` or `fail`, refuses with `live state` ("it asks how things are right now, which notes cannot know"). "When was bridge 0.150 deployed?" and "How do I check if the bridge is running?" still pass. `up` is not a state word: it is the particle in "can you look up the router address?", an existing lookup.

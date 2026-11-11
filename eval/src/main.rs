@@ -8,23 +8,13 @@
 //!   baseline run, over both answer orderings.
 //! * `compare` — mechanical, model-free comparison of two runs of the SAME suite:
 //!   per-class pass rates, latency, tool calls, usage and cost, side by side.
-
-mod assertions;
-mod compare;
-mod driver;
-mod judge;
-mod mapping;
-mod mock;
-mod runner;
-mod state;
-mod suite;
-#[cfg(test)]
-mod suite_checks;
-mod transcript;
-mod workspace;
+//!
+//! Everything but the flags lives in the `jesse_eval` library; this binary parses arguments,
+//! turns them into a driver and a run config, and prints what the library returns.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use jesse_agent::{PersonaPack, PriceDeck, Thinking, Wire};
+use jesse_eval::{compare, driver, judge, mapping, mock, runner, suite};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;

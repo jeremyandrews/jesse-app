@@ -315,6 +315,30 @@ Answer the question I asked, not the one you wish I had asked.
 # [devjob]
 # enabled = true
 
+# -----------------------------------------------------------------------------
+# [hostrun]: coding agents on the Mac Studio (optional, OFF by default)
+# -----------------------------------------------------------------------------
+#
+# With `enabled = true`, `devjob_start` takes `host = "studio"` and `POST /jesse/runs` starts a run:
+# Claude Code on this Mac, with no time limit, in its own worktree under `root`. See SECURITY.md
+# ("Coding agents on the Studio") and bridge/README.md.
+#
+# A run needs no GitHub repository: `local/<name>` is a repository that exists only on the Studio
+# (`<root>/local/<name>.git`, no remote, no pull request; the agent merges into its `main`). When
+# nothing names a repository a Studio run uses local/<strand slug>, local/scratch (a loose draft)
+# or local/<branch_slug> (a free prompt). The cluster refuses local repositories.
+#
+# root (optional): default ~/jesse-runs.
+# local_checkout_root (optional): default ~/jesse/Code/local. A plain checkout of each local
+#   repository's main, updated after every finished round, readable by bridge sessions. It may
+#   not overlap root.
+# max_concurrent, max_per_repo, stall_minutes, permission_mode, keep_days, min_free_gb,
+#   max_total_gb, label_prefix, auto_resume_interrupted, claude (optional).
+#
+# [hostrun]
+# enabled = true
+# local_checkout_root = "~/jesse/Code/local"
+
 # =============================================================================
 # [[models]] — the global model switch's registry (declarative, operator-configurable)
 # =============================================================================

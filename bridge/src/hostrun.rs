@@ -51,7 +51,7 @@ use std::sync::OnceLock;
 
 use serde::Serialize;
 
-use crate::devjob::{valid_repo, valid_slug, Notifier};
+use crate::devjob::{is_local_repo, local_repo, valid_repo, valid_slug, Notifier};
 use crate::strandjobs::{fm, DRAFTS_DIR};
 use crate::strands::{parse_strand, resolve_target, StrandSection, ARCHIVE_SEGMENT, STRANDS_DIR};
 use crate::*;
@@ -62,6 +62,11 @@ use self::sys::{Forge, Launcher, PrState};
 
 /// The default `[hostrun] root`, under the bridge user's home.
 pub const DEFAULT_ROOT: &str = "jesse-runs";
+/// The default `[hostrun] local_checkout_root`, under the bridge user's home: where a plain,
+/// readable checkout of each local repository's `main` is kept.
+pub const DEFAULT_LOCAL_CHECKOUT_ROOT: &str = "jesse/Code/local";
+/// The local repository a loose draft that names none goes to.
+pub const LOCAL_SCRATCH: &str = "scratch";
 pub const DEFAULT_MAX_CONCURRENT: usize = 3;
 pub const DEFAULT_MAX_PER_REPO: usize = 1;
 pub const DEFAULT_STALL_MINUTES: u64 = 60;
@@ -202,6 +207,9 @@ pub struct HostRunToml {
     pub label_prefix: Option<String>,
     /// An `interrupted` run gets one automatic round. Default true.
     pub auto_resume_interrupted: Option<bool>,
+    /// Where the readable checkout of each local repository's `main` is kept. Default
+    /// [`DEFAULT_LOCAL_CHECKOUT_ROOT`] under the home; `~` is expanded.
+    pub local_checkout_root: Option<PathBuf>,
 }
 
 /// Where the running [`HostRuns`] lives once `main` has built it.
@@ -247,6 +255,9 @@ pub struct HostRunSettings {
     pub remote_base: String,
     /// `<ns>.jesse-run.`: a run's label is this and its id.
     pub label_prefix: String,
+    /// `<local_checkout_root>/<name>` is a plain checkout of `local/<name>`'s `main`, brought
+    /// up to date after each finished round of a run on it.
+    pub local_checkout_root: PathBuf,
     pub service: HostRunSlot,
 }
 
@@ -330,6 +341,10 @@ impl HostRunSettings {
             label_prefix: t.label_prefix.unwrap_or_else(|| {
                 sys::label_prefix_from(std::env::var("XPC_SERVICE_NAME").ok().as_deref())
             }),
+            local_checkout_root: match t.local_checkout_root {
+                Some(p) => expand_home(&p, home),
+                None => Path::new(home).join(DEFAULT_LOCAL_CHECKOUT_ROOT),
+            },
             service: HostRunSlot::default(),
         }
     }
@@ -383,7 +398,16 @@ impl HostRunSettings {
         format!("{}{run_id}", self.label_prefix)
     }
 
-    /// The clone URL of `owner/name`.
+    /// The readable checkout of a local repository's `main`: `<local_checkout_root>/<name>`.
+    pub fn local_checkout(&self, repo: &str) -> Option<PathBuf> {
+        if !is_local_repo(repo) {
+            return None;
+        }
+        let (_, name) = repo.split_once('/')?;
+        Some(self.local_checkout_root.join(name))
+    }
+
+    /// The clone URL of `owner/name`. Never asked for a local repository, which has none.
     pub fn repo_url(&self, repo: &str) -> String {
         format!("{}{repo}.git", self.remote_base)
     }
@@ -477,6 +501,25 @@ impl HostRunSettings {
         }
         if self.stall_minutes == 0 {
             out.push("[hostrun] stall_minutes must be at least 1".into());
+        }
+        let lcr = &self.local_checkout_root;
+        if !lcr.is_absolute() {
+            out.push(format!(
+                "[hostrun] local_checkout_root {} is not an absolute path",
+                lcr.display()
+            ));
+        } else if sys::is_under(lcr, &self.root) || sys::is_under(&self.root, lcr) {
+            // Bridge sessions read the checkout and must not read the run root.
+            out.push(format!(
+                "[hostrun] local_checkout_root {} overlaps root {}",
+                lcr.display(),
+                self.root.display()
+            ));
+        } else if let Err(e) = std::fs::create_dir_all(lcr) {
+            out.push(format!(
+                "[hostrun] local_checkout_root {} is unwritable: {e}",
+                lcr.display()
+            ));
         }
         out
     }
@@ -1001,6 +1044,20 @@ pub struct RunPlace<'a> {
 /// The generated section's first paragraph, exactly: where the run is, and that this replaces
 /// whatever machine or directory the prompt names.
 pub fn place_paragraph(p: &RunPlace) -> String {
+    if is_local_repo(p.repo) {
+        return format!(
+            "You are running on the Mac Studio as a Studio run, in a fresh worktree of {} (Studio \
+             only) on branch {}, cut from {}. Wherever the prompt above names another machine, \
+             host, user or directory to work in, this worktree replaces it: do not change \
+             machines, do not stop because the host differs, and do not work in any other \
+             checkout of this repository. If the work needs another repository, clone it under \
+             {}/{EXTRA_DIR}/ and work there.",
+            p.repo,
+            p.branch,
+            p.default_branch,
+            p.run_dir.display()
+        );
+    }
     format!(
         "You are running on the Mac Studio as a Studio run, in a fresh worktree of {} on branch \
          {}, cut from origin/{}. Wherever the prompt above names another machine, host, user or \
@@ -1037,6 +1094,28 @@ pub fn generated_paragraph(run_id: &str, pr_title_tag: bool) -> String {
     )
 }
 
+/// What a local repository's run is told in place of the push, pull request and fetch
+/// sentences, exactly.
+pub const LOCAL_REPO_SENTENCE: &str = "This repository exists only on the Mac Studio and has no \
+remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch \
+push, a pull request, CI or a merge, do this instead: commit on your branch, and once your \
+verification passes, merge your branch into main of this repository with a fast forward (rebase \
+onto main first if it moved), then report the main commit.";
+
+/// [`generated_paragraph`] for a local repository: the same rules, with [`LOCAL_REPO_SENTENCE`]
+/// where the pull request title and the fetch before a merge were.
+pub fn generated_paragraph_local(run_id: &str) -> String {
+    let lower = run_id.to_lowercase();
+    format!(
+        "This run is {run_id}. Start every branch name with {lower}-. {LOCAL_REPO_SENTENCE} Keep \
+         everything you create inside your working directory or the system temporary directory. \
+         When you finish, or stop early, write your complete report back, the same text you \
+         would answer with, to the file named in the environment variable JESSE_RUN_REPORT, \
+         then answer as usual. If you need a decision from Jeremy to continue, stop, make the \
+         first line of that report NEEDS YOU: followed by the one question, and end the run."
+    )
+}
+
 /// The prompt a run is served: the section byte for byte, a blank line, then the generated
 /// section (where the run is, then the run's rules) and nothing else.
 pub fn served_prompt(section: &str, place: &RunPlace) -> String {
@@ -1050,7 +1129,11 @@ pub fn served_prompt(section: &str, place: &RunPlace) -> String {
     s.push_str("### Run ID and report\n\n");
     s.push_str(&place_paragraph(place));
     s.push_str("\n\n");
-    s.push_str(&generated_paragraph(place.run_id, place.pr_title_tag));
+    if is_local_repo(place.repo) {
+        s.push_str(&generated_paragraph_local(place.run_id));
+    } else {
+        s.push_str(&generated_paragraph(place.run_id, place.pr_title_tag));
+    }
     s.push('\n');
     s
 }
@@ -1085,6 +1168,9 @@ pub enum OptIn<'a> {
     /// opt in. The repository is the draft's `devjob-repo`, else `repo`, else the strand's one
     /// `repos:` entry.
     Request { repo: Option<&'a str> },
+    /// [`OptIn::Request`], and where that names no repository because the strand lists none,
+    /// the Studio only `local/<strand slug, lowercased>`. What a run started on the Studio uses.
+    RequestOrLocal { repo: Option<&'a str> },
 }
 
 /// A model id a draft's `devjob-model` may name.
@@ -1102,13 +1188,24 @@ fn check_model(path: &str, model: &Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// The local repository a strand that lists no repos falls back to: `local/<slug, lowercased>`.
+pub fn strand_local_repo(slug: &str) -> Result<String, String> {
+    local_repo(&slug.to_lowercase()).ok_or_else(|| {
+        format!(
+            "strand {slug} lists no repos and its slug makes no local repository name: pass repo"
+        )
+    })
+}
+
 /// The repository a requested run of a draft goes to: the draft's `devjob-repo`, else the
-/// caller's `repo`, else the strand's `repos:` when it lists exactly one.
+/// caller's `repo`, else the strand's `repos:` when it lists exactly one. With `local`, a strand
+/// that lists none gives [`strand_local_repo`] instead of an error.
 fn request_repo(
     path: &str,
     src: &str,
     repo: Option<&str>,
     strand: Option<(&str, &[String])>,
+    local: bool,
 ) -> Result<String, String> {
     if let Some(r) = fm(src, "devjob-repo") {
         if !valid_repo(&r) {
@@ -1130,6 +1227,7 @@ fn request_repo(
         [one] => Err(format!(
             "{path} has no devjob-repo and strand {slug}'s repos entry {one:?} is not owner/name: pass repo"
         )),
+        [] if local => strand_local_repo(slug),
         [] => Err(format!(
             "{path} has no devjob-repo and strand {slug} lists no repos: pass repo"
         )),
@@ -1196,7 +1294,12 @@ pub fn studio_item_of(
             }
             repo
         }
-        OptIn::Request { repo } => request_repo(&path, &src, repo, Some((slug, strand_repos)))?,
+        OptIn::Request { repo } => {
+            request_repo(&path, &src, repo, Some((slug, strand_repos)), false)?
+        }
+        OptIn::RequestOrLocal { repo } => {
+            request_repo(&path, &src, repo, Some((slug, strand_repos)), true)?
+        }
     };
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
@@ -1256,6 +1359,44 @@ pub fn studio_draft(
     draft: &str,
     repo: Option<&str>,
 ) -> Result<StudioDraft, String> {
+    studio_draft_with(notes_root, draft, repo, false)
+}
+
+/// [`studio_draft`], and where neither the draft nor `repo` names a repository, a local one: a
+/// draft of a strand that lists no repos uses `local/<strand slug, lowercased>`, a loose draft
+/// (no strand, or no such strand note) `local/scratch`. A draft of a strand that lists
+/// repositories still needs `repo`. What a run started on the Studio uses.
+pub fn studio_draft_or_local(
+    notes_root: &Path,
+    draft: &str,
+    repo: Option<&str>,
+) -> Result<StudioDraft, String> {
+    studio_draft_with(notes_root, draft, repo, true)
+}
+
+/// The local repository a draft that names none falls back to, or `None` when its strand lists
+/// repositories (so the caller must still pick one).
+fn draft_local_repo(notes_root: &Path, src: &str) -> Result<Option<String>, String> {
+    let Some(slug) = fm(src, "strand").filter(|s| crate::strands::is_safe_slug(s)) else {
+        return Ok(local_repo(LOCAL_SCRATCH));
+    };
+    let Ok(note) = std::fs::read_to_string(notes_root.join(format!("{STRANDS_DIR}/{slug}.md")))
+    else {
+        return Ok(local_repo(LOCAL_SCRATCH));
+    };
+    if parse_strand(&slug, &note).repos.is_empty() {
+        strand_local_repo(&slug).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn studio_draft_with(
+    notes_root: &Path,
+    draft: &str,
+    repo: Option<&str>,
+    local: bool,
+) -> Result<StudioDraft, String> {
     let target = draft.trim();
     let Some(path) = resolve_target(notes_root, target) else {
         return Err(format!("the draft {target:?} does not resolve to a file"));
@@ -1271,7 +1412,15 @@ pub fn studio_draft(
     }
     let src = std::fs::read_to_string(notes_root.join(&path))
         .map_err(|e| format!("{path} is unreadable: {e}"))?;
-    let repo = request_repo(&path, &src, repo, None)?;
+    let local_fallback = if local && repo.is_none() && fm(&src, "devjob-repo").is_none() {
+        draft_local_repo(notes_root, &src)?
+    } else {
+        None
+    };
+    let repo = match local_fallback {
+        Some(r) => r,
+        None => request_repo(&path, &src, repo, None, false)?,
+    };
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
     let Some(section) = prompt_section(&src) else {
@@ -1414,6 +1563,18 @@ pub fn pull_request_url(report: &str) -> Option<String> {
 /// The Inbox note for one finished round: the front matter, then the report verbatim, then the
 /// pull request link when the report names one.
 pub fn render_inbox(rec: &RunRecord, round: u32, status: RunStatus, report: &str) -> String {
+    render_inbox_with(rec, round, status, report, None)
+}
+
+/// [`render_inbox`], and for a local repository, after the report: where the work is, since
+/// there is no pull request to point at. `local_main` is its `main`'s commit now.
+pub fn render_inbox_with(
+    rec: &RunRecord,
+    round: u32,
+    status: RunStatus,
+    report: &str,
+    local_main: Option<&str>,
+) -> String {
     let mut s = format!(
         "---\ndevjob: {}\nrepo: {}\noutcome: {}\n",
         rec.run_id,
@@ -1438,7 +1599,23 @@ pub fn render_inbox(rec: &RunRecord, round: u32, status: RunStatus, report: &str
         }
         s.push_str(&format!("\nPull request: [{url}]({url})\n"));
     }
+    if is_local_repo(&rec.repo) {
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str(&local_footer(rec, local_main));
+    }
     s
+}
+
+/// The lines a local repository's Inbox report ends with.
+pub fn local_footer(rec: &RunRecord, local_main: Option<&str>) -> String {
+    format!(
+        "\nRepository: {} (Studio only)\nBranch: {}\nmain: {}\n",
+        rec.repo,
+        rec.branch,
+        local_main.unwrap_or("unknown")
+    )
 }
 
 /// The first line of a report, trimmed.
@@ -1815,7 +1992,7 @@ impl HostRuns {
                 let opt_in = if *scheduled {
                     OptIn::Schedule
                 } else {
-                    OptIn::Request {
+                    OptIn::RequestOrLocal {
                         repo: repo.as_deref(),
                     }
                 };
@@ -1832,7 +2009,7 @@ impl HostRuns {
                 )
             }
             StartKind::Draft { draft, repo } => {
-                let d = studio_draft(&self.notes_root, draft, repo.as_deref())
+                let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
                     .map_err(Refusal::Invalid)?;
                 (
                     format!("s-{}", d.slug),
@@ -1850,7 +2027,13 @@ impl HostRuns {
                 slug,
                 model,
             } => {
-                if !valid_repo(repo) {
+                // A free prompt that names no repository goes to `local/<branch_slug>`.
+                let repo = if repo.trim().is_empty() && valid_slug(slug) {
+                    local_repo(slug).unwrap_or_default()
+                } else {
+                    repo.clone()
+                };
+                if !valid_repo(&repo) {
                     return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
                 }
                 if prompt.trim().is_empty() {
@@ -1870,7 +2053,7 @@ impl HostRuns {
                 }
                 (
                     format!("s-{slug}"),
-                    repo.clone(),
+                    repo,
                     prompt.clone(),
                     None,
                     model.clone(),
@@ -2150,7 +2333,7 @@ impl HostRuns {
                     base = Some(git::add_worktree(
                         &self.settings.root,
                         &rec.repo,
-                        &self.settings.repo_url(&rec.repo),
+                        &self.clone_url(&rec.repo),
                         &worktree,
                         &rec.branch,
                     )?);
@@ -2158,7 +2341,7 @@ impl HostRuns {
                     git::restore_worktree(
                         &self.settings.root,
                         &rec.repo,
-                        &self.settings.repo_url(&rec.repo),
+                        &self.clone_url(&rec.repo),
                         &worktree,
                         &rec.branch,
                     )?;
@@ -2712,7 +2895,16 @@ impl HostRuns {
             None => {
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
                 let rel = report_rel_path(&date, run_id, round.n);
-                let text = render_inbox(&rec, round.n, status, &report);
+                let local_main = if is_local_repo(&rec.repo) {
+                    let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+                    tokio::task::spawn_blocking(move || git::local_main_sha(&root, &repo))
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                let text = render_inbox_with(&rec, round.n, status, &report, local_main.as_deref());
                 write_report(&self.notes_root, &sink.broker, run_id, &rel, &text).await?;
                 eprintln!(
                     "jesse-bridge: hostrun REPORT {run_id} round {} {} at {rel}",
@@ -2760,6 +2952,21 @@ impl HostRuns {
         }
         if rec.round().is_some_and(|r| r.notified) {
             return Ok(());
+        }
+        // A local repository's readable copy of `main`, once per finished round.
+        if let Some(checkout) = self.settings.local_checkout(&rec.repo) {
+            let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+            let res = tokio::task::spawn_blocking(move || {
+                git::update_local_checkout(&root, &repo, &checkout)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            if let Err(e) = res {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: the readable checkout of {}: {e}",
+                    rec.repo
+                );
+            }
         }
         if let Some(n) = &sink.notifier {
             let title = format!("Run {run_id} {}", status.outcome());
@@ -2981,9 +3188,26 @@ impl HostRuns {
         }
     }
 
+    /// The clone URL for a run's repository: none for a local repository, which has no remote.
+    fn clone_url(&self, repo: &str) -> String {
+        if is_local_repo(repo) {
+            String::new()
+        } else {
+            self.settings.repo_url(repo)
+        }
+    }
+
     /// Whether a finished run's pull request is merged or closed, or its branch (seen on origin
-    /// before) is gone from it. Records a sighting of the branch.
+    /// before) is gone from it. Records a sighting of the branch. A local repository has no
+    /// pull request and the forge is never asked: its run is done with once its branch is in
+    /// its `main` and its worktree holds nothing uncommitted.
     fn merged_or_gone(&self, dir: &Path, rec: &RunRecord) -> bool {
+        if is_local_repo(&rec.repo) {
+            let bare = git::bare_path(&self.settings.root, &rec.repo);
+            let wt = dir.join(WORKTREE_DIR);
+            return git::merged_into_local_main(&bare, &rec.branch) == Some(true)
+                && (!wt.exists() || git::worktree_clean(&wt));
+        }
         if matches!(
             self.forge.pr_state(&rec.repo, &rec.branch),
             Some(PrState::Merged | PrState::Closed)
@@ -3406,7 +3630,9 @@ fn refusal(r: Refusal) -> ApiError {
 }
 
 /// `POST /jesse/runs`: a strand item (`strand` and `item_id`), or a draft by its path
-/// (`draft`). `repo` names the repository when the draft does not.
+/// (`draft`). `repo` names the repository when the draft does not; `local/<name>` is a Studio
+/// only one. With none named, a strand that lists no repos runs in `local/<strand slug>` and a
+/// loose draft in `local/scratch` ([`HostRuns::create`]).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartBody {

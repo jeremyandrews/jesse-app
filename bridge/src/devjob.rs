@@ -226,8 +226,10 @@ pub enum StartPlan {
 /// nothing else, so the cluster path is unchanged; `strand`, `item_id` and `again` are refused
 /// there. With `studio`, a strand item (`strand` and `item_id`, optional `repo`; its prompt and
 /// model come from its draft, its repository from the draft, else `repo`, else the strand's one
-/// `repos:` entry), a draft by its path (`draft`, optional `repo`), or a free prompt (`repo`,
-/// `prompt`, `branch_slug`, optional `model`). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
+/// `repos:` entry), a draft by its path (`draft`, optional `repo`), or a free prompt (`prompt`,
+/// `branch_slug`, optional `repo` and `model`). Where nothing names a repository, a Studio run
+/// goes to a Studio only `local/<name>` one ([`crate::hostrun`]); the cluster refuses
+/// `local/<name>` and a start with no repository ([`LOCAL_ONLY_STUDIO`]). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
 /// so `agent` may only be `claude`.
 pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, String> {
     match args.host.as_deref().map(str::trim) {
@@ -240,6 +242,11 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 return Err(
                     "strand, item_id, draft and again apply only with host \"studio\"".into(),
                 );
+            }
+            match args.repo.as_deref().map(str::trim) {
+                None | Some("") => return Err(format!("repo is missing: {LOCAL_ONLY_STUDIO}")),
+                Some(r) if is_local_repo(r) => return Err(LOCAL_ONLY_STUDIO.into()),
+                Some(_) => {}
             }
             DevJobSpec::validate(args, default_agent).map(StartPlan::Cluster)
         }
@@ -348,6 +355,29 @@ pub fn valid_repo(repo: &str) -> bool {
     owner_ok && name_ok
 }
 
+/// The reserved owner of a Studio only repository: `local/<name>` lives at
+/// `<[hostrun] root>/local/<name>.git` and has no remote ([`is_local_repo`]).
+pub const LOCAL_OWNER: &str = "local";
+
+/// Why a cluster start of a local repository (or of no repository) is refused.
+pub const LOCAL_ONLY_STUDIO: &str = "local repositories run only on the Studio (host: \"studio\")";
+
+/// Whether `repo` is `local/<name>`, a repository that exists only on the Studio, `<name>`
+/// following [`valid_repo`]'s name rules. Such a repository is never a GitHub one: no `gh`, no
+/// `git push`, no clone URL.
+pub fn is_local_repo(repo: &str) -> bool {
+    valid_repo(repo)
+        && repo
+            .split_once('/')
+            .is_some_and(|(owner, _)| owner == LOCAL_OWNER)
+}
+
+/// `local/<name>` for a name, when the name follows [`valid_repo`]'s rules.
+pub fn local_repo(name: &str) -> Option<String> {
+    let repo = format!("{LOCAL_OWNER}/{name}");
+    is_local_repo(&repo).then_some(repo)
+}
+
 /// Whether `slug` is lowercase letters, digits and hyphens, at most [`MAX_SLUG_CHARS`], starting
 /// and ending with a letter or digit (it becomes part of a Kubernetes name and a label value).
 pub fn valid_slug(slug: &str) -> bool {
@@ -421,9 +451,22 @@ fn valid_model(model: &str) -> bool {
 impl DevJobSpec {
     /// Check every field. `default_agent` applies when `agent` is absent.
     pub fn validate(args: DevJobArgs, default_agent: Agent) -> Result<DevJobSpec, String> {
+        DevJobSpec::validate_on(args, default_agent, false)
+    }
+
+    /// [`DevJobSpec::validate`], with `studio` saying the run goes to the Studio, where a
+    /// `local/<name>` repository is allowed; the cluster refuses one ([`LOCAL_ONLY_STUDIO`]).
+    pub fn validate_on(
+        args: DevJobArgs,
+        default_agent: Agent,
+        studio: bool,
+    ) -> Result<DevJobSpec, String> {
         let repo = args.repo.unwrap_or_default().trim().to_string();
         if !valid_repo(&repo) {
             return Err(format!("repo {repo:?} is not owner/name"));
+        }
+        if !studio && is_local_repo(&repo) {
+            return Err(LOCAL_ONLY_STUDIO.into());
         }
         let prompt = args.prompt.unwrap_or_default();
         if prompt.trim().is_empty() {
@@ -2213,13 +2256,26 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              with no time limit, in its own worktree: pass strand and item_id to run any \
              unchecked Drafts item of a strand (\"run GD5 on the Studio\"); its repository is \
              the draft's devjob-repo, else repo, else the strand's one repos entry (a strand with \
-             several needs repo). Or pass draft (a path under Projects/drafts/) and repo to run \
-             a draft outside any strand line, or repo, prompt and branch_slug for a free prompt. \
-             It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A second \
-             start of an item that is still queued, running, paused or needs Jeremy is refused \
-             unless again is true."
+             several needs repo). Or pass draft (a path under Projects/drafts/), and repo if it \
+             names none, to run a draft outside any strand line, or prompt and branch_slug (and \
+             repo) for a free prompt. On the Studio repo is optional: local/<name> names a \
+             repository that exists only on the Studio, with no GitHub remote, no push, no pull \
+             request and no CI (the agent merges into its main), created on first use. When \
+             nothing names a repository, a strand with no repos uses local/<strand slug>, a \
+             loose draft local/scratch, and a free prompt local/<branch_slug>. The cluster \
+             refuses local/<name>. It returns a run_id; the report lands in \
+             Inbox/<date>-run-<run_id>.md. A second start of an item that is still queued, \
+             running, paused or needs Jeremy is refused unless again is true."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
+            props.insert(
+                "repo".into(),
+                json!({ "type": "string",
+                        "description": "owner/name on GitHub; required on the cluster. Host \
+                            studio: optional, and local/<name> names a Studio only repository \
+                            with no remote; with none named it falls back to local/<strand slug>, \
+                            local/scratch or local/<branch_slug>" }),
+            );
             props.insert(
                 "host".into(),
                 json!({ "type": "string", "enum": ["cluster", "studio"],

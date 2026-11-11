@@ -2931,6 +2931,13 @@ Places keys. What a run can still reach is what `jandrews` reaches without them:
 keychain, `~/.claude` (Claude Code's own sign in), `gh`'s stored login and `~/.ssh`. A run pushes
 and opens pull requests with Jeremy's own GitHub identity, exactly as at a desk.
 
+**Local repositories (0.202.0).** A run on `local/<name>` works in a bare repository at
+`<root>/local/<name>.git` that has no remote: the bridge never runs `gh`, `git fetch` or `git push`
+for it and never builds a clone URL, and the cluster refuses it. The agent is told to fast forward
+its branch into the repository's `main`; a run's branch is deleted only once it is in `main`, and
+nothing deletes `<root>/local/`. A plain checkout of `main` at `[hostrun] local_checkout_root`
+(default `~/jesse/Code/local`, refused if it overlaps `root`) is what bridge sessions read.
+
 **An env file's contents reach the agent (0.197.0).** `[hostrun.repos."owner/name"] env_file =
 "<path>"` names a file of `KEY=value` lines (blank lines and `#` comments skipped, `export `
 allowed, one pair of quotes removed) for the variables that repository's tests need. The runner

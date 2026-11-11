@@ -114,7 +114,7 @@ public struct StudioRunsScreen: View {
     public var body: some View {
         NavigationStack {
             StudioRunsList(model: model, strand: strand)
-                .navigationTitle(strand.map { "Runs: \($0)" } ?? "Studio runs")
+                .navigationTitle(strand.map { "Runs: \($0)" } ?? "Runs")
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done", action: onDone)
@@ -148,7 +148,7 @@ struct StudioRunsList: View {
                     .foregroundStyle(.red)
             }
             if runs.isEmpty, model.hasLoaded {
-                Text(strand == nil ? "No Studio runs on this bridge." : "No Studio runs for this strand.")
+                Text(strand == nil ? "No runs on this bridge." : "No runs for this project.")
                     .foregroundStyle(.secondary)
             } else if runs.isEmpty, model.loadError == nil {
                 ProgressView().frame(maxWidth: .infinity)
@@ -172,16 +172,24 @@ struct StudioRunsList: View {
     }
 }
 
-/// One run: its id, its strand, its status, how old it is, and when a paused run resumes.
+/// One run: its title, then its id, its strand, its status, how old it is, and when a paused
+/// run resumes.
 struct StudioRunRow: View {
     let run: StudioRun
     let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            if run.title != nil {
+                Text(WorkSemantics.title(run))
+                    .font(.body.weight(.semibold))
+                    .lineLimit(2)
+            }
             HStack(spacing: 6) {
                 Text(run.runID)
-                    .font(.body.monospaced().weight(.semibold))
+                    .font(run.title == nil ? .body.monospaced().weight(.semibold)
+                                           : .caption.monospaced())
+                    .foregroundStyle(run.title == nil ? .primary : .secondary)
                     .lineLimit(1)
                 if let strand = run.strand {
                     Text(strand)
@@ -209,7 +217,12 @@ struct StudioRunRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if let text = run.itemText, !text.isEmpty {
+            if run.status.isMoving, let line = run.lastLine, !line.isEmpty {
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if run.title == nil, let text = run.itemText, !text.isEmpty {
                 Text(text)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -245,14 +258,24 @@ public struct StudioRunDetailScreen: View {
     }
 }
 
-/// Status, strand and draft, branch, round, times, the report, the log tail, Reply and Cancel.
+/// A run, question first: its title, the question it asks (or its report's first line), the
+/// answer field, then the log tail. Run id, strand, step, repository, branch, round and times
+/// are folded into a collapsed Details group. Resume (the empty continue) is offered on an
+/// interrupted run only; on a `needs_you` run Send needs text.
 public struct StudioRunDetailView: View {
     @Bindable var model: StudioRunDetailModel
     @Environment(\.studioRunReport) private var reportAction
     @State private var confirmsCancel = false
+    @State private var showsDetails = false
 
     public init(model: StudioRunDetailModel) {
         self.model = model
+    }
+
+    /// Open with Details expanded (a screenshot of them, a test).
+    public init(model: StudioRunDetailModel, showsDetails: Bool) {
+        self.model = model
+        self._showsDetails = State(initialValue: showsDetails)
     }
 
     public var body: some View {
@@ -263,26 +286,17 @@ public struct StudioRunDetailView: View {
                     .foregroundStyle(.red)
             }
             if let run = model.run {
-                summary(run)
-                if let path = run.latestReportPath {
-                    Section("Report") {
-                        Button {
-                            reportAction?.open(path)
-                        } label: {
-                            Label(path, systemImage: "doc.text")
-                                .font(.footnote)
-                                .lineLimit(2)
-                        }
-                        .disabled(reportAction == nil)
-                        .accessibilityHint("Opens the report in the Vault tab")
-                    }
-                }
+                top(run)
                 Section("Log") {
                     StudioRunLogView(lines: model.lines)
                         .frame(height: 280)
                         .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                 }
-                Section("Reply") { composer }
+                Section {
+                    DisclosureGroup("Details", isExpanded: $showsDetails) {
+                        details(run)
+                    }
+                }
                 if model.canCancel {
                     Section {
                         Button(role: .destructive) {
@@ -296,7 +310,7 @@ public struct StudioRunDetailView: View {
                 ProgressView().frame(maxWidth: .infinity)
             }
         }
-        .navigationTitle(model.runID)
+        .navigationTitle("Run")
         .refreshable { await model.refresh() }
         .task { await model.refresh() }
         // Every 5 seconds while the run can still change by itself; restarted when a reply
@@ -309,9 +323,9 @@ public struct StudioRunDetailView: View {
                 await model.refresh()
             }
         }
-        .confirmationDialog("Cancel run \(model.runID)?", isPresented: $confirmsCancel,
+        .confirmationDialog("Cancel this run?", isPresented: $confirmsCancel,
                             titleVisibility: .visible) {
-            Button("Cancel \(model.runID)", role: .destructive) {
+            Button("Cancel run", role: .destructive) {
                 Task { await model.cancel() }
             }
             Button("Keep running", role: .cancel) {}
@@ -321,40 +335,78 @@ public struct StudioRunDetailView: View {
         .studioRunAlert($model.alert)
     }
 
+    /// The first screen: the title, the status, the question or the report's first line, and
+    /// the answer field. No machine, run id, branch or step here.
     @ViewBuilder
-    private func summary(_ run: StudioRun) -> some View {
+    private func top(_ run: StudioRun) -> some View {
         let now = model.currentDate
         Section {
-            HStack {
-                StudioRunStatusLabel(status: run.status, font: .headline)
-                Spacer()
-                if let resume = StudioRunSemantics.resumeLine(run, now: now) {
-                    Text(resume).font(.subheadline).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.title)
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    StudioRunStatusLabel(status: run.status, font: .subheadline)
+                    if let resume = StudioRunSemantics.resumeLine(run, now: now) {
+                        Text(resume).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                if let headline = model.headline {
+                    Text(headline)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.top, 2)
+                }
+                if run.status.isMoving, let line = run.lastLine, !line.isEmpty {
+                    Text(line)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
-            if run.status == .queued, let waiting = run.waitingFor {
-                field("Waiting for", waiting)
-            }
-            if let error = run.error, !error.isEmpty {
-                Text(error).font(.footnote).foregroundStyle(.red)
-            }
-            if let strand = run.strand { field("Strand", strand) }
-            if let item = run.itemID {
-                field("Draft", [item, run.itemText].compactMap { $0 }.joined(separator: " "))
-            } else if let prompt = run.promptPath {
-                field("Draft", prompt)
-            }
-            field("Repository", run.repo)
-            field("Branch", run.branch, monospaced: true)
-            field("Round", "\(run.round)")
-            if let started = StudioRunSemantics.clock(run.startedAt ?? run.createdAt, now: now) {
-                field("Started", started)
-            }
-            if let updated = StudioRunSemantics.clock(run.updatedAt, now: now) {
-                let age = StudioRunSemantics.age(run.updatedAt, now: now).map { " (\($0))" } ?? ""
-                field("Updated", updated + age)
+            .padding(.vertical, 2)
+            if let path = run.latestReportPath {
+                Button {
+                    reportAction?.open(path)
+                } label: {
+                    Label("Open report", systemImage: "doc.text")
+                }
+                .disabled(reportAction == nil)
+                .accessibilityHint("Opens the report in the Vault tab")
             }
         }
+        Section(run.status == .needsYou ? "Your answer" : "Reply") { composer }
+    }
+
+    @ViewBuilder
+    private func details(_ run: StudioRun) -> some View {
+        let now = model.currentDate
+        field("Run", run.runID, monospaced: true)
+        if run.status == .queued, let waiting = run.waitingFor {
+            field("Waiting for", waiting)
+        }
+        if let error = run.error, !error.isEmpty {
+            Text(error).font(.footnote).foregroundStyle(.red)
+        }
+        if let strand = run.strand { field("Strand", strand) }
+        if let item = run.itemID {
+            field("Step", [item, run.itemText].compactMap { $0 }.joined(separator: " "))
+        } else if let prompt = run.promptPath {
+            field("Draft", prompt)
+        }
+        if let host = run.host, !host.isEmpty { field("Host", host) }
+        field("Repository", run.repo)
+        field("Branch", run.branch, monospaced: true)
+        field("Round", "\(run.round)")
+        if let started = StudioRunSemantics.clock(run.startedAt ?? run.createdAt, now: now) {
+            field("Started", started)
+        }
+        if let updated = StudioRunSemantics.clock(run.updatedAt, now: now) {
+            let age = StudioRunSemantics.age(run.updatedAt, now: now).map { " (\($0))" } ?? ""
+            field("Updated", updated + age)
+        }
+        if let path = run.latestReportPath { field("Report", path) }
     }
 
     private func field(_ name: String, _ value: String, monospaced: Bool = false) -> some View {
@@ -368,7 +420,8 @@ public struct StudioRunDetailView: View {
 
     @ViewBuilder
     private var composer: some View {
-        TextField("Reply to \(model.runID)", text: $model.composer, axis: .vertical)
+        TextField(model.status == .needsYou ? "Your answer" : "Reply", text: $model.composer,
+                  axis: .vertical)
             .lineLimit(1...6)
             .disabled(!model.isComposerEnabled)
         HStack {
@@ -566,7 +619,7 @@ public struct StrandDraftsBlock: View {
 extension View {
     /// The bridge's refusal, verbatim, in an alert.
     func studioRunAlert(_ message: Binding<String?>) -> some View {
-        alert("Studio run",
+        alert("Run",
               isPresented: Binding(get: { message.wrappedValue != nil },
                                    set: { if !$0 { message.wrappedValue = nil } })) {
             Button("OK", role: .cancel) { message.wrappedValue = nil }

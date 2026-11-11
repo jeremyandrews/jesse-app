@@ -35,7 +35,9 @@ final class StudioRunsListEveryRunUITests: XCTestCase {
 
     private func row(_ app: XCUIApplication, _ runID: String) -> XCUIElement {
         app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH %@", "\(runID),")).firstMatch
+            // A row reads `<title>, <run id>, …` once the bridge serves titles, `<run id>, …` before.
+            .matching(NSPredicate(format: "label BEGINSWITH %@ OR label CONTAINS %@",
+                                  "\(runID),", ", \(runID),")).firstMatch
     }
 
     func testEveryRunIsListedAndAReportOpens() throws {
@@ -51,7 +53,7 @@ final class StudioRunsListEveryRunUITests: XCTestCase {
         let today = app.tabBars.buttons["Today"]
         XCTAssertTrue(today.waitForExistence(timeout: 30))
         today.tap()
-        let runsButton = app.navigationBars.buttons["Studio runs"]
+        let runsButton = app.navigationBars.buttons["Runs"]
         XCTAssertTrue(runsButton.waitForExistence(timeout: 30), "the Runs toolbar button")
         runsButton.tap()
         XCTAssertTrue(row(app, ids[0]).waitForExistence(timeout: 30), "the first row")
@@ -79,8 +81,8 @@ final class StudioRunsListEveryRunUITests: XCTestCase {
             tries += 1
         }
         row(app, reportRun).tap()
-        let report = app.buttons.matching(NSPredicate(format: "label CONTAINS %@",
-                                                      "run-\(reportRun)")).firstMatch
+        // The detail's own `Open report` button (the path itself is under Details).
+        let report = app.buttons["Open report"].firstMatch
         XCTAssertTrue(report.waitForExistence(timeout: 30), "the Report link of \(reportRun)")
         sleep(1)
         shot("pd1-ios-run-detail")

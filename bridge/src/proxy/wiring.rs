@@ -342,7 +342,10 @@ pub fn child_env(
         // `-p` turn made eleven such requests). On a `closed` turn each would be a refusal
         // line in the ledger and noise in the digest; the CLI's documented switch turns them
         // off. It changes nothing a turn does.
-        set.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into());
+        set.insert(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+            "1".into(),
+        );
         if let Some(ca) = ca_path {
             for v in CA_TRUST_VARS {
                 set.insert((*v).to_string(), ca.display().to_string());

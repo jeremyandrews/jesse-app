@@ -2215,8 +2215,8 @@ Granted and omitted, enumerated live on 2026-08-10 against the running servers:
 
 **The iMessage line above is the 0.73.0 enumeration and is superseded twice over.** The server
 became `imcp` in 0.76.0 (a different, six-tool surface), and in 0.99.0 the grant on it stopped
-being purely local: `maps_search` is granted and it leaves the host. The current enumeration,
-and the egress decision that goes with it, are below — read those, not this bullet.
+being purely local: `maps_search` is granted and it leaves the host (joined since by
+`maps_directions` and `maps_eta`). The current enumeration, and the egress decision that goes with it, are below — read those, not this bullet.
 
 ### The allowlist is the only boundary on the two message servers
 
@@ -2386,12 +2386,13 @@ results on 2026-08-11. Maps touches no local user data, so the app's per-service
 not gate it. So on this server **the advertised surface is not the enabled surface**, and the
 bridge's allowlist — not the app's toggle — is what decides which Maps tools the child reaches.
 
-Of the six tools iMCP advertises, **two are granted**: `messages_fetch` and `maps_search`.
-**Four are not**: `maps_directions`, `maps_explore`, `maps_eta`, `maps_generate`. All six
-carry `readOnlyHint:true`, including the four that are not granted, which is the standing
-reason annotations are not the boundary — and here it is more than a formality, because the
-tool that was granted carries the same hint as the local database reader while behaving
-completely differently.
+Of the six tools iMCP advertises, **four are granted**: `messages_fetch`, `maps_search`,
+`maps_directions` and `maps_eta` (the last two since per-turn egress tiers; see the next
+section). **Two are not**: `maps_explore` and `maps_generate`, because no workflow asked for
+them. All six carry `readOnlyHint:true`, including the two that are not granted, which is the
+standing reason annotations are not the boundary — and here it is more than a formality,
+because the granted Maps tools carry the same hint as the local database reader while
+behaving completely differently.
 
 **The granted tool is `openWorldHint:true`, and that egress channel is ACCEPTED rather than
 mitigated.** `maps_search` leaves the machine for Apple's map services carrying a query
@@ -2401,13 +2402,36 @@ leaves the host, which is a low-bandwidth exfiltration channel. Nothing in 0.99.
 the allowlist cannot inspect a query, and no filter was added. The trade Jeremy accepted on
 2026-08-27 is one search tool's worth of that channel in exchange for the capability, with
 the other four Maps tools withheld to keep the channel as narrow as it can be while the
-capability exists. `maps_directions` was considered and rejected for this change: route
-planning is a separate request nobody has made, and it would widen the same channel for no
-capability the asked-for job needs.
+capability exists. `maps_directions` was considered and rejected for 0.99.0: route planning
+was a separate request nobody had made, and it would have widened the same channel on every
+turn, attended or not. That changed with per-turn egress tiers, below.
 
 The grant is still pinned **as an exact set** in a test rather than guarded by a denylist —
-the permitted set simply grew from one name to two. Any other iMCP tool name, including one a
-future version starts advertising, still fails the build.
+the permitted set grew from one name to two in 0.99.0 and from two to four with tiers. Any
+other iMCP tool name, including one a future version starts advertising, still fails the
+build.
+
+### iMCP's `maps_directions` and `maps_eta` are GRANTED on every harness, classed `egress`
+
+A phone turn can now get drive times and directions from Apple Maps. `mcp__imcp__maps_directions`
+and `mcp__imcp__maps_eta` are granted on Claude Code (`DEFAULT_ALLOWED_TOOLS`), Codex (its
+per-server `enabled_tools`, read from the same list) and `direct` (whose gateway grant is
+the same per-level list filtered by class, and `egress` is permitted at the `write` level that
+list grants them at), and both are classed `egress` in the
+`imcp` row of `bridge/src/mcpservers.rs`, beside `maps_search`.
+
+**They were withheld only because an unattended turn could use their query strings as an
+exfiltration channel** — each takes a free-text origin and destination that leaves the host
+for Apple, out of a child that also reads attacker-authored message bodies. What changed is
+not the tools but which turns hold them. Every turn now carries an egress tier, and the
+gateway (`filter_by_tier` in `bridge/src/gateway/mod.rs`) hides `egress`-class tools on
+`closed` and `allowlist` turns. These two are named in `TIER_GATED_TOOLS`, so they are hidden
+on those tiers **even with the egress proxy off**. Scheduled jobs default to `closed`, so a
+scheduled scan cannot reach them; an `open-logged` phone turn, attended by the person who asked,
+can. On the turns that hold them the channel is the same shape as `maps_search`'s and is
+accepted rather than mitigated.
+
+`maps_explore` and `maps_generate` stay **out**: no workflow asked for them.
 
 **iMCP advertises no send or compose tool at all.** Where `mac-messages-mcp` had
 `tool_send_message` and the allowlist was the only thing holding it back, sending is now
@@ -3147,8 +3171,8 @@ Slack section above.
 The grant is narrower than the main turn's everywhere, and a test asserts it can never be
 wider: the six Gmail READ tools on each Google instance (not Drive, not Calendar — a sent
 reply is mail), Fastmail's three, Slack's six, WhatsApp's eight, and `messages_fetch` on imcp.
-`maps_search` is granted to the main turn and deliberately **not** here: it leaves the host
-carrying a query string, and a brief has no use for a map.
+`maps_search`, `maps_directions` and `maps_eta` are granted to the main turn and deliberately
+**not** here: they leave the host carrying a query string, and a brief has no use for a map.
 
 **That has been true on Claude Code, and became true on Codex only in 0.145.0.** `Codex::command`
 built the child's `enabled_tools` from `cfg.allowed_tools` — the MAIN TURN's list — rather than

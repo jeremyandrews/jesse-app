@@ -20,6 +20,39 @@ use jesse_bridge::{
 
 #[tokio::main]
 async fn main() {
+    // `jesse-bridge activity-digest …`: print the activity digest and exit, BEFORE anything
+    // below runs. It reads the ledger files under the state directory and nothing else — no
+    // config gate, no listener, no child — so it is safe beside a running bridge.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("activity-digest") {
+        match jesse_bridge::activity_query::run_digest_cli(&argv[2..]) {
+            Ok(md) => {
+                print!("{md}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("jesse-bridge activity-digest: {e}");
+                eprintln!("{}", jesse_bridge::activity_query::DIGEST_USAGE);
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // `jesse-bridge canary new --path …`: write one canary note for the egress proxy's content
+    // check and exit. The operator runs it; nothing below starts.
+    if argv.get(1).map(String::as_str) == Some("canary") {
+        match jesse_bridge::proxy::wiring::run_canary_cli(&argv[2..]) {
+            Ok(out) => {
+                print!("{out}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("jesse-bridge canary: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     // THE OPEN FILES LIMIT, raised FIRST: before any listener is bound, any child spawned or any
     // turn admitted, every one of which costs descriptors, and a gateway-on turn costs over a
     // hundred. launchd's default soft limit of 256 is two turns. ADVISORY, never fatal: a bridge
@@ -79,6 +112,9 @@ async fn main() {
     // …and `[devjob]`: on, it needs the gateway (the kubeconfig must stay in this process), a
     // kubeconfig it can read and an image pinned by digest. Off is the default and checks nothing.
     errors.extend(jesse_bridge::devjob::validate_devjob(&cfg));
+    // …and the proxies: on, they need the gateway; and whatever the flags, a scheduled job may
+    // run a non-frontier (local or Fireworks) model only on a `closed` egress tier.
+    errors.extend(jesse_bridge::proxy::wiring::validate_proxy(&cfg));
     errors.extend(jesse_bridge::hostrun::validate_hostrun(&cfg));
     // The `[concurrency]` table joins the SAME gate. A misspelled model id there is refused by
     // name rather than silently ignored — a config surface that quietly does nothing is the
@@ -126,6 +162,13 @@ async fn main() {
         );
     }
     let _ = BINARY_DRIFT.set(drift);
+
+    // THE EGRESS TIER TABLE: every scheduled job with its tier, and a warning naming each job
+    // that runs `open`. Printed whatever the flags say, so the posture the schedule asks for is
+    // visible before `[proxy] egress` enforces it.
+    for line in jesse_bridge::proxy::wiring::tier_table(&cfg) {
+        eprintln!("{line}");
+    }
 
     // The one settings scope the child still loads. `local` is excluded by
     // `--setting-sources user,project`; `project` is kept for the vault's hooks, so a
@@ -704,6 +747,25 @@ async fn main() {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default()
             );
+            // THE PROXIES (off by default): the model proxy and the egress proxy, each on its
+            // own listener. A bind failure is fatal: children would be pointed at a proxy that
+            // is not there.
+            match jesse_bridge::proxy::wiring::start_model_proxy(&state.cfg, gw.clone()).await {
+                Ok(None) => eprintln!("jesse-bridge: model proxy: off"),
+                Ok(Some(a)) => eprintln!("jesse-bridge: model proxy: on, listening on {a}"),
+                Err(e) => {
+                    eprintln!("jesse-bridge: model proxy: {e}");
+                    std::process::exit(1);
+                }
+            }
+            match jesse_bridge::proxy::wiring::start_egress_proxy(&state, gw.clone()).await {
+                Ok(None) => eprintln!("jesse-bridge: egress proxy: off"),
+                Ok(Some(a)) => eprintln!("jesse-bridge: egress proxy: on, listening on {a}"),
+                Err(e) => {
+                    eprintln!("jesse-bridge: egress proxy: {e}");
+                    std::process::exit(1);
+                }
+            }
             if let Some(addr) = gw.settings().listen.clone() {
                 match jesse_bridge::gateway::listen::serve_tcp(gw.clone(), &addr).await {
                     Ok((bound, _task)) => {

@@ -28,7 +28,7 @@ use jesse_agent::tools::{
 use jesse_agent::Scope;
 use serde_json::Value;
 
-use super::{admitted_servers, global, TurnGuard, TurnSession, TurnSpec};
+use super::{admitted_servers, global, ProxyClaims, TurnGuard, TurnSession, TurnSpec};
 
 /// The gateway's tools for one `direct` turn.
 pub struct GatewayToolSet {
@@ -42,6 +42,12 @@ impl GatewayToolSet {
     /// One line per admitted server: how many tools it exposed. Operator log only.
     pub fn report(&self) -> &[String] {
         &self.report
+    }
+
+    /// The turn's signed token: what the in-process `fetch_url` and provider present to the
+    /// proxies.
+    pub fn token(&self) -> &str {
+        self._guard.token()
     }
 }
 
@@ -132,12 +138,13 @@ pub async fn direct_tool_set(
     capability: crate::Capability,
     harness_env_value: &str,
     deadline: Duration,
+    proxy: ProxyClaims,
 ) -> Result<Option<GatewayToolSet>, String> {
     let Some(gw) = global(cfg) else {
         return Ok(None);
     };
     let level = level_of(capability);
-    if level == Level::Basic {
+    if level == Level::Basic && !proxy.required {
         return Ok(None);
     }
     // The MAIN set, rendered for this deployment, and the allowlist a main turn at this
@@ -156,12 +163,12 @@ pub async fn direct_tool_set(
         .into_iter()
         .filter(|a| !a.tools.is_empty())
         .collect();
-    if servers.is_empty() {
+    if servers.is_empty() && !proxy.required {
         return Ok(None);
     }
     let guard = gw
         .open_turn(TurnSpec {
-            proxy: Default::default(),
+            proxy,
             job_id: job_id.to_string(),
             capability,
             servers,

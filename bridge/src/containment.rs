@@ -451,8 +451,9 @@ pub enum McpSet {
     ///   tool to withhold, so the question of a layer does not arise.
     /// * `imcp` — registers no send or compose tool at all; sending is absent at the root. Its
     ///   six tools are `messages_fetch` and five Maps tools, of which this set grants only
-    ///   `messages_fetch` (NOT `maps_search`, whose egress the main turn accepts and this child
-    ///   has no use for).
+    ///   `messages_fetch` (NOT `maps_search`, `maps_directions` or `maps_eta`, whose egress the
+    ///   main turn accepts and this child has no use for; `maps_explore` and `maps_generate`
+    ///   are granted nowhere).
     /// * `slack` — read-only at THREE layers, and it is the best protected of the six rather
     ///   than the worst. Its posting tool `conversations_add_message` is not registered at all
     ///   (the opt-in `SLACK_MCP_ADD_MESSAGE_TOOL` is deliberately never set, and the same goes

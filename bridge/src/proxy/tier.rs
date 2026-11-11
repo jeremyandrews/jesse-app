@@ -195,6 +195,19 @@ pub fn tier_for(job_id: &str) -> Egress {
         .unwrap_or(Egress::Closed)
 }
 
+/// Every job with a filed tier, and the tier's label, sorted: `/health`'s view of the turns
+/// running now.
+pub fn filed() -> Vec<(String, &'static str)> {
+    let mut v: Vec<(String, &'static str)> = registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .map(|(j, t)| (j.clone(), t.label()))
+        .collect();
+    v.sort();
+    v
+}
+
 /// Removes a filed tier on drop.
 pub struct TierGuard(String);
 
@@ -241,8 +254,14 @@ mod tests {
     #[test]
     fn schedule_entries_parse_to_tiers_and_default_closed() {
         assert_eq!(Egress::from_schedule(None, &[]), Ok(Egress::Closed));
-        assert_eq!(Egress::from_schedule(Some("closed"), &[]), Ok(Egress::Closed));
-        assert_eq!(Egress::from_schedule(Some("open"), &[]), Ok(Egress::OpenLogged));
+        assert_eq!(
+            Egress::from_schedule(Some("closed"), &[]),
+            Ok(Egress::Closed)
+        );
+        assert_eq!(
+            Egress::from_schedule(Some("open"), &[]),
+            Ok(Egress::OpenLogged)
+        );
         assert_eq!(
             Egress::from_schedule(Some("allowlist"), &["API.github.com".into()]),
             Ok(Egress::Allowlist(vec!["api.github.com".into()]))
@@ -272,7 +291,10 @@ mod tests {
             select(TurnKind::Client, None, &Egress::Closed),
             Egress::Closed
         );
-        assert_eq!(select(TurnKind::OneShot, Some(&job), &phone), Egress::Closed);
+        assert_eq!(
+            select(TurnKind::OneShot, Some(&job), &phone),
+            Egress::Closed
+        );
         assert_eq!(kind_from_origin("schedule:x"), TurnKind::Scheduled("x"));
         assert_eq!(kind_from_origin("phone"), TurnKind::Client);
         assert_eq!(kind_from_origin("strand-tick"), TurnKind::Client);
@@ -280,7 +302,10 @@ mod tests {
 
     #[test]
     fn the_phone_setting_parses() {
-        assert_eq!(Egress::from_phone_setting("open-logged"), Ok(Egress::OpenLogged));
+        assert_eq!(
+            Egress::from_phone_setting("open-logged"),
+            Ok(Egress::OpenLogged)
+        );
         assert_eq!(Egress::from_phone_setting("closed"), Ok(Egress::Closed));
         assert!(Egress::from_phone_setting("allowlist").is_err());
     }

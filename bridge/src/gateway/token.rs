@@ -38,9 +38,10 @@ pub struct Claims {
     /// `fireworks`, ...). Empty when the model proxy is off or the turn's model has no route.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub route: String,
-    /// The registry id of the turn's model, for metering. Empty with the model proxy off.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub model: String,
+    /// The registry id the model proxy meters this turn's calls under. OPAQUE here: the
+    /// caller supplies it and nothing in the gateway reads it. Empty with the model proxy off.
+    #[serde(default, rename = "model", skip_serializing_if = "String::is_empty")]
+    pub metered: String,
     /// Unix seconds after which the token is refused.
     pub exp: u64,
 }
@@ -163,7 +164,7 @@ mod tests {
             servers: vec!["github".into(), "slack".into()],
             tier: String::new(),
             route: String::new(),
-            model: String::new(),
+            metered: String::new(),
             exp,
         }
     }
@@ -192,10 +193,19 @@ mod tests {
         let k = TokenKey::generate();
         let mut c = claims(1_000);
         c.route = "fireworks".into();
-        c.model = "glm".into();
+        c.metered = "glm".into();
         let t = k.sign(&c);
-        assert_eq!(k.verify_route(&t, "fireworks", 1).map(|c| c.model), Ok("glm".into()));
-        for other in ["anthropic-subscription", "anthropic-api", "local", "openai-chatgpt", ""] {
+        assert_eq!(
+            k.verify_route(&t, "fireworks", 1).map(|c| c.metered),
+            Ok("glm".into())
+        );
+        for other in [
+            "anthropic-subscription",
+            "anthropic-api",
+            "local",
+            "openai-chatgpt",
+            "",
+        ] {
             assert_eq!(
                 k.verify_route(&t, other, 1),
                 Err(TokenError::RouteNotGranted),
@@ -208,7 +218,10 @@ mod tests {
             k.verify_route(&none, "fireworks", 1),
             Err(TokenError::RouteNotGranted)
         );
-        assert_eq!(k.verify_route(&t, "fireworks", 1_000), Err(TokenError::Expired));
+        assert_eq!(
+            k.verify_route(&t, "fireworks", 1_000),
+            Err(TokenError::Expired)
+        );
     }
 
     #[test]

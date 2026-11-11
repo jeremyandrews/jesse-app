@@ -272,6 +272,7 @@ fn main() {
                 // the git lock too. Taken INSIDE the file lock, matching the bridge's one
                 // total order.
                 git: true,
+                tool: Some(payload.tool_name.clone()),
             }
         }
         "post" => HookRequest::Post {

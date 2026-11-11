@@ -148,6 +148,11 @@ pub enum HookRequest {
         target: Option<Option<String>>,
         /// Whether this call also touches git (so the git lock is taken inside the file lock).
         git: bool,
+        /// The harness's tool name (`Write`, `Edit`, …), for the activity ledger's `op` only.
+        /// Optional on the wire both ways: an older `jesse-hook` sends none and a grant is
+        /// then recorded as `other`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
     },
     /// The tool RAN and finished. Release, and record what it leaves this conversation
     /// looking at.
@@ -239,6 +244,9 @@ pub struct LockBroker {
     inner: Mutex<BrokerInner>,
     /// Bumped whenever a lock is released, so waiters re-check rather than poll blindly.
     released: tokio::sync::Notify,
+    /// Where each PATH grant is recorded (`vault_write`), and the roots its path is made
+    /// relative to, most specific first. `None` records nothing (tests, no state dir).
+    ledger: Option<(Arc<crate::activity::ActivityLedger>, Vec<PathBuf>)>,
 }
 
 impl Default for LockBroker {
@@ -252,7 +260,43 @@ impl LockBroker {
         LockBroker {
             inner: Mutex::new(BrokerInner::default()),
             released: tokio::sync::Notify::new(),
+            ledger: None,
         }
+    }
+
+    /// A broker that records every path grant in `ledger` as a `vault_write` line, its path
+    /// relative to the first of `roots` it lies under (`_invalid` when under none).
+    pub fn with_ledger(
+        ledger: Option<Arc<crate::activity::ActivityLedger>>,
+        roots: Vec<PathBuf>,
+    ) -> Self {
+        LockBroker {
+            ledger: ledger.map(|l| (l, roots)),
+            ..Self::new()
+        }
+    }
+
+    /// The ledger this broker records into, for a caller that holds the broker and has no
+    /// config (the workout ledger's commit).
+    pub fn ledger(&self) -> Option<&Arc<crate::activity::ActivityLedger>> {
+        self.ledger.as_ref().map(|(l, _)| l)
+    }
+
+    /// One `vault_write` line for a path lock granted to `turn`. Content-free: the turn id, a
+    /// vault-relative path (or `_invalid`), the op word and the time.
+    fn record_grant(&self, path: &Path, turn: &str, op: crate::activity::VaultOp) {
+        let Some((ledger, roots)) = &self.ledger else {
+            return;
+        };
+        let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        ledger.record(&crate::activity::ActivityLine::vault_write(
+            crate::activity::VaultWriteLine {
+                job_id: crate::activity::Token::new(turn),
+                path: crate::activity::vault_relative(&roots, path),
+                op,
+                at_ms: crate::activity::now_ms(),
+            },
+        ));
     }
 
     /// Locks currently held. Tests and introspection only.
@@ -374,8 +418,26 @@ impl LockBroker {
     // neither blind to what a direct turn read nor falsely refused by what it wrote.
 
     /// Take one lock for an in-process turn, waiting up to [`LOCK_WAIT_TIMEOUT`].
+    /// A path grant is recorded in the activity ledger as op `other`; see
+    /// [`LockBroker::acquire_direct_op`] for a caller that knows what it is doing.
     pub async fn acquire_direct(&self, key: &LockKey, turn: &str, call_id: &str) -> bool {
-        self.acquire(key, turn, call_id).await
+        self.acquire_direct_op(key, turn, call_id, crate::activity::VaultOp::Other)
+            .await
+    }
+
+    /// [`LockBroker::acquire_direct`], recording a path grant as `op`.
+    pub async fn acquire_direct_op(
+        &self,
+        key: &LockKey,
+        turn: &str,
+        call_id: &str,
+        op: crate::activity::VaultOp,
+    ) -> bool {
+        let granted = self.acquire(key, turn, call_id).await;
+        if let (true, LockKey::Path(p)) = (granted, key) {
+            self.record_grant(p, turn, op);
+        }
+        granted
     }
 
     /// Release every lock one in-process tool call holds.
@@ -543,6 +605,7 @@ impl LockBroker {
                 tool_use_id,
                 target,
                 git,
+                tool,
             } => {
                 let Some(target) = target else {
                     return HookResponse::allow(); // not a write
@@ -580,6 +643,12 @@ impl LockBroker {
                             .to_string(),
                     );
                 }
+                // GRANTED: the one place a hook-driven write is recorded, after the lock and
+                // the compare-and-swap both passed. A global (unparseable) write names no path
+                // and records nothing.
+                if let Some(p) = &target {
+                    self.record_grant(Path::new(p), &turn, vault_op(tool.as_deref()));
+                }
                 HookResponse::allow()
             }
             HookRequest::Post {
@@ -598,6 +667,17 @@ impl LockBroker {
                 HookResponse::allow()
             }
         }
+    }
+}
+
+/// The ledger's word for a hook's tool: `Write` → write, `Edit`/`MultiEdit` → edit, anything
+/// else (or no name) → other.
+pub fn vault_op(tool: Option<&str>) -> crate::activity::VaultOp {
+    use crate::activity::VaultOp;
+    match tool {
+        Some("Write") => VaultOp::Write,
+        Some("Edit" | "MultiEdit") => VaultOp::Edit,
+        _ => VaultOp::Other,
     }
 }
 
@@ -816,6 +896,7 @@ mod tests {
             tool_use_id: tool.into(),
             target: Some(path.map(|p| p.to_string())),
             git: false,
+            tool: None,
         }
     }
 
@@ -841,7 +922,121 @@ mod tests {
             tool_use_id: tool.into(),
             target: Some(path.map(|p| p.to_string())),
             git: false,
+            tool: None,
         }
+    }
+
+    fn ledger_lines(state: &Path) -> Vec<Value> {
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        std::fs::read_to_string(state.join("activity").join(format!("{day}.jsonl")))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Every PATH grant is one content-free `vault_write` line: the turn, the path relative to
+    /// the notes root (or the vault), the op from the hook's tool name. A denied call, a global
+    /// write and the git lock record nothing; a path outside the vault is `_invalid`.
+    #[tokio::test]
+    async fn a_granted_path_lock_is_a_vault_write_line() {
+        let vault = tmpdir();
+        let notes = vault.join("vault");
+        std::fs::create_dir_all(notes.join("Inbox")).unwrap();
+        let state = tmpdir();
+        let ledger = Arc::new(crate::activity::ActivityLedger::new(&state));
+        let b = LockBroker::with_ledger(Some(ledger), vec![notes.clone(), vault.clone()]);
+        let note = notes.join("Inbox/2026-11-11-vault-lint.md");
+        let pre_tool =
+            |turn: &str, call: &str, path: Option<String>, tool: &str| HookRequest::Pre {
+                turn: turn.into(),
+                conversation: "c".into(),
+                tool_use_id: call.into(),
+                target: Some(path),
+                git: true,
+                tool: Some(tool.into()),
+            };
+        assert!(
+            b.handle(pre_tool(
+                "t1",
+                "c1",
+                Some(note.display().to_string()),
+                "Write"
+            ))
+            .await
+            .allow
+        );
+        assert!(
+            b.handle(pre_tool(
+                "t1",
+                "c2",
+                Some(note.display().to_string()),
+                "MultiEdit"
+            ))
+            .await
+            .allow
+        );
+        assert!(b.handle(pre_tool("t1", "c3", None, "Bash")).await.allow);
+        b.release_turn("t1");
+        assert!(
+            b.handle(pre_tool("t1", "c4", Some("/etc/hosts".into()), "Write"))
+                .await
+                .allow
+        );
+        b.release_turn("t1");
+        assert!(
+            b.acquire_direct_op(
+                &LockKey::Path(vault.join("diet-logs/workout-detail.csv")),
+                "t2",
+                "w",
+                crate::activity::VaultOp::Edit,
+            )
+            .await
+        );
+        assert!(b.acquire_direct(&LockKey::Git, "t2", "w").await);
+        let got: Vec<(String, String, String)> = ledger_lines(&state)
+            .iter()
+            .map(|v| {
+                assert_eq!(v["kind"], "vault_write");
+                (
+                    v["job_id"].as_str().unwrap().to_string(),
+                    v["path"].as_str().unwrap().to_string(),
+                    v["op"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let want = [
+            ("t1", "Inbox/2026-11-11-vault-lint.md", "write"),
+            ("t1", "Inbox/2026-11-11-vault-lint.md", "edit"),
+            ("t1", "_invalid", "write"),
+            ("t2", "diet-logs/workout-detail.csv", "edit"),
+        ];
+        assert_eq!(
+            got,
+            want.map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn the_hook_tool_name_maps_to_an_op_word() {
+        use crate::activity::VaultOp;
+        assert_eq!(vault_op(Some("Write")), VaultOp::Write);
+        assert_eq!(vault_op(Some("Edit")), VaultOp::Edit);
+        assert_eq!(vault_op(Some("MultiEdit")), VaultOp::Edit);
+        assert_eq!(vault_op(Some("apply_patch")), VaultOp::Other);
+        assert_eq!(vault_op(None), VaultOp::Other);
+    }
+
+    /// The `tool` field is optional on the wire: an older hook's payload still parses, and a
+    /// request without one serialises exactly as before.
+    #[test]
+    fn a_pre_without_a_tool_name_is_the_old_wire_shape() {
+        let old = r#"{"op":"pre","turn":"t","conversation":"c","tool_use_id":"u","target":null,"git":true}"#;
+        let req: HookRequest = serde_json::from_str(old).unwrap();
+        assert!(matches!(req, HookRequest::Pre { tool: None, .. }));
+        assert!(!serde_json::to_string(&req).unwrap().contains("tool\""));
     }
 
     #[tokio::test]
@@ -1223,6 +1418,7 @@ mod tests {
                 tool_use_id: "call1".into(),
                 target: Some(Some(f.display().to_string())),
                 git: true,
+                tool: None,
             })
             .await;
         assert!(r.allow);
@@ -1258,6 +1454,7 @@ mod tests {
                 tool_use_id: "call1".into(),
                 target: Some(Some(a.display().to_string())),
                 git: true,
+                tool: None,
             })
             .await
             .allow
@@ -1272,6 +1469,7 @@ mod tests {
                 tool_use_id: "call2".into(),
                 target: Some(Some(z.display().to_string())),
                 git: true,
+                tool: None,
             }),
         )
         .await
@@ -1302,6 +1500,7 @@ mod tests {
                 tool_use_id: "call1".into(),
                 target: Some(Some(f.display().to_string())),
                 git: true,
+                tool: None,
             })
             .await
             .allow
@@ -1318,6 +1517,7 @@ mod tests {
                 tool_use_id: "call2".into(),
                 target: Some(Some(f.display().to_string())),
                 git: false,
+                tool: None,
             }),
         )
         .await;

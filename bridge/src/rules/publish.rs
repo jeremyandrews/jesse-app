@@ -451,6 +451,7 @@ impl VaultLock {
                 // A publication rewrites tracked files in a git repository, so it takes the
                 // git lock inside the global one exactly as a turn's write does.
                 git: true,
+                tool: None,
             },
         );
         if !resp.allow {

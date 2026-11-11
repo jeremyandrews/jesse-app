@@ -237,7 +237,9 @@ impl ProxySettings {
             ("egress_child_addr", &self.egress_child_addr),
         ] {
             if addr.parse::<std::net::SocketAddr>().is_err() && !addr.contains(':') {
-                out.push(format!("[proxy] {name} = \"{addr}\" is not a host:port address"));
+                out.push(format!(
+                    "[proxy] {name} = \"{addr}\" is not a host:port address"
+                ));
             }
         }
         if self.policy.fingerprint_threshold == 0 {
@@ -245,7 +247,9 @@ impl ProxySettings {
         }
         for h in &self.policy.send_hosts {
             if h.is_empty() || h.contains('/') || h.contains(' ') {
-                out.push(format!("[egress] send_hosts entry {h:?} is not a host name"));
+                out.push(format!(
+                    "[egress] send_hosts entry {h:?} is not a host name"
+                ));
             }
         }
         out
@@ -363,7 +367,12 @@ mod tests {
     fn the_defaults_are_the_documented_ones() {
         let p = EgressPolicy::default();
         assert_eq!(
-            (p.read_url_max, p.read_query_max, p.index_interval_secs, p.fingerprint_threshold),
+            (
+                p.read_url_max,
+                p.read_query_max,
+                p.index_interval_secs,
+                p.fingerprint_threshold
+            ),
             (512, 256, 900, 3)
         );
     }

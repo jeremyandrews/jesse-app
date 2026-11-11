@@ -622,3 +622,116 @@ fn a_bind_out_of_open_files_names_the_limit_and_the_open_turns() {
         "{m}"
     );
 }
+
+fn admitted_imcp_and_browser() -> Vec<Admitted> {
+    let settings = GatewaySettings::default();
+    let tools = |server: &str, names: &[&str]| Admitted {
+        server: resolve_row(server, &settings).unwrap(),
+        tools: names.iter().map(|s| s.to_string()).collect(),
+    };
+    vec![
+        tools(
+            "imcp",
+            &[
+                "messages_fetch",
+                "maps_search",
+                "maps_directions",
+                "maps_eta",
+            ],
+        ),
+        tools("browser", &["browser_navigate", "browser_snapshot"]),
+    ]
+}
+
+/// THE GATEWAY'S `egress`-CLASS FILTER BY TIER. With the egress proxy on, every `egress`
+/// tool is gone on `closed` and `allowlist` turns (absent from `tools/list`, refused on call:
+/// both read the same granted list); on `open-logged` all stay. With it off, only the two
+/// tools granted alongside tiers are hidden, so nothing reachable before tiers moved.
+#[test]
+fn egress_class_tools_are_filtered_by_tier() {
+    use crate::proxy::Egress;
+    let names = |a: &[Admitted], s: &str| -> Vec<String> {
+        a.iter().find(|x| x.server.name == s).unwrap().tools.clone()
+    };
+    for tier in [
+        Egress::Closed,
+        Egress::Allowlist(vec!["api.github.com".into()]),
+    ] {
+        let mut a = admitted_imcp_and_browser();
+        filter_by_tier(&mut a, &tier, true);
+        assert_eq!(
+            names(&a, "imcp"),
+            vec!["messages_fetch".to_string()],
+            "{tier:?}"
+        );
+        assert!(names(&a, "browser").iter().all(|t| {
+            crate::mcpservers::row("browser").unwrap().class_of(t)
+                != crate::mcpservers::ToolClass::Egress
+        }));
+        let mut a = admitted_imcp_and_browser();
+        filter_by_tier(&mut a, &tier, false);
+        assert_eq!(
+            names(&a, "imcp"),
+            vec!["messages_fetch".to_string(), "maps_search".to_string()],
+            "with the egress proxy off only the tier-gated pair goes: {tier:?}"
+        );
+        assert_eq!(names(&a, "browser").len(), 2);
+    }
+    let mut a = admitted_imcp_and_browser();
+    filter_by_tier(&mut a, &Egress::OpenLogged, true);
+    assert_eq!(names(&a, "imcp").len(), 4);
+}
+
+/// The filter happens where the token is signed, so a closed turn's session never lists or
+/// admits a filtered tool, and the token carries the tier label.
+#[tokio::test]
+async fn a_closed_turn_session_has_no_egress_tool_and_its_token_names_the_tier() {
+    use crate::proxy::Egress;
+    let dir = std::env::temp_dir().join(format!("gw-tier-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gw = Arc::new(Gateway::new(
+        &dir,
+        GatewaySettings::default(),
+        HashMap::new(),
+        None,
+    ));
+    let guard = gw
+        .open_turn(TurnSpec {
+            proxy: ProxyClaims {
+                tier: Some(Egress::Closed),
+                filter_all_egress: false,
+                ..Default::default()
+            },
+            job_id: "tier-closed-1".into(),
+            capability: Capability::Write,
+            servers: admitted_imcp_and_browser(),
+            harness_env_value: None,
+            deadline: Duration::from_secs(60),
+            bind_sockets: false,
+            env_overlay: BTreeMap::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(guard.session().claims().tier, "closed");
+    let granted = guard.session().granted("imcp").to_vec();
+    assert!(!granted
+        .iter()
+        .any(|t| t == "maps_eta" || t == "maps_directions"));
+    use crate::proxy::TurnAuthority;
+    let t = gw
+        .egress_turn("tier-closed-1", guard.token())
+        .expect("a live turn's token is admitted by the egress authority");
+    assert_eq!(t.tier, Egress::Closed);
+    assert!(gw.egress_turn("someone-else", guard.token()).is_none());
+    assert!(
+        gw.model_turn(guard.token(), "fireworks").is_none(),
+        "no route signed"
+    );
+    let token = guard.token().to_string();
+    drop(guard);
+    assert!(
+        gw.egress_turn("tier-closed-1", &token).is_none(),
+        "a closed turn's token is revoked"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

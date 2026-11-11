@@ -292,10 +292,20 @@ async fn run_stateless_oneshot(
 ) -> Result<(String, ShadowUsage), ApiError> {
     // THE GATEWAY TURN this child's stubs connect to, held until the child is reaped. `None`
     // with the gateway off, or for a child that loads no gateway server.
-    let _gateway =
-        crate::gateway::open_for_child(cfg, req, harness.id(), Duration::from_secs(timeout_secs))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
+    let _gateway = crate::gateway::open_for_child(
+        cfg,
+        req,
+        harness.id(),
+        Duration::from_secs(timeout_secs),
+        crate::proxy::wiring::proxy_claims(cfg, req.active, req.turn_id),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
+    // THE PROXIES (off by default): the turn token, now that it exists, as the child's model
+    // credential and proxy credential. A no-op with both proxies off.
+    if let Some(g) = &_gateway {
+        crate::proxy::wiring::apply_child_env(&mut cmd, cfg, req.active, req.turn_id, g.token());
+    }
     let mut child = jesse_agent::mcp::spawn_serialised(&mut cmd).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -839,9 +849,14 @@ async fn run_spawned_turn(
             &req,
             harness.id(),
             Duration::from_secs(cfg.timeout_secs),
+            crate::proxy::wiring::proxy_claims(cfg, req.active, job_id),
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
+        // THE PROXIES (off by default): see the one-shot path above.
+        if let Some(g) = &_gateway {
+            crate::proxy::wiring::apply_child_env(&mut cmd, cfg, req.active, job_id, g.token());
+        }
 
         let mut child = jesse_agent::mcp::spawn_serialised(&mut cmd).map_err(|e| {
             (

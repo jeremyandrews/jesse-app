@@ -489,8 +489,16 @@ pub fn codex_provider_args(active: &ActiveModel) -> Option<Vec<String>> {
         return None;
     }
     let (base_url, _token, model) = active.env.as_ref()?;
+    Some(codex_provider_args_for(base_url, Some(model)))
+}
+
+/// The provider overrides for `base_url`, naming `model` when given. Shared by
+/// [`codex_provider_args`] and the model proxy's rewrite of it
+/// ([`crate::proxy::wiring::codex_proxy_provider_args`]), which passes no model for the
+/// ChatGPT-login route (the slug then comes from [`codex_model_args`] as before).
+pub fn codex_provider_args_for(base_url: &str, model: Option<&str>) -> Vec<String> {
     let p = CODEX_PROVIDER_ID;
-    Some(vec![
+    let mut args = vec![
         "-c".to_string(),
         format!("model_providers.{p}.name={}", toml_string(p)),
         "-c".to_string(),
@@ -507,9 +515,12 @@ pub fn codex_provider_args(active: &ActiveModel) -> Option<Vec<String>> {
         ),
         "-c".to_string(),
         format!("model_provider={}", toml_string(p)),
-        "-c".to_string(),
-        format!("model={}", toml_string(model)),
-    ])
+    ];
+    if let Some(model) = model {
+        args.push("-c".to_string());
+        args.push(format!("model={}", toml_string(model)));
+    }
+    args
 }
 
 // ---- The model the child actually runs -------------------------------------------
@@ -1759,7 +1770,14 @@ impl Codex {
         )?;
         // `None` for the subscription-OAuth posture, which is every turn that came before
         // this and still the deployed one. See [`codex_provider_args`].
-        let provider = codex_provider_args(req.active);
+        //
+        // THE MODEL PROXY (off by default): a proxied turn's provider is the proxy route, its
+        // key is the turn token (set after the gateway admits the turn, by
+        // `proxy::wiring::apply_child_env`), and its home gets no `auth.json` — the ChatGPT
+        // login stays in the bridge, which adds it at the proxy (fact 3).
+        let proxied = crate::proxy::wiring::codex_proxy_provider_args(cfg, req.active);
+        let is_proxied = proxied.is_some();
+        let provider = proxied.or_else(|| codex_provider_args(req.active));
         // The slug this entry declared, plus its Codex tuning. Skips the slug when the
         // provider path above is already emitting it, so it is never in the argv twice.
         let model = codex_model_args(req.active);
@@ -1832,7 +1850,9 @@ impl Codex {
         // The provider's API key, OUT OF BAND. The argv above names the variable; this puts
         // the value in it, on this child only, so the secret never reaches a process listing,
         // a log, or the recorded argv. See [`CODEX_PROVIDER_KEY_ENV`].
-        if provider.is_some() {
+        // A PROXIED turn never gets the provider's key: the variable is filled with the turn
+        // token once the gateway has admitted the turn.
+        if provider.is_some() && !is_proxied {
             if let Some((_, token, _)) = req.active.env.as_ref() {
                 cmd.env(CODEX_PROVIDER_KEY_ENV, token);
             }
@@ -3142,7 +3162,13 @@ mod tests {
             "{replies:?}"
         );
         // The main turn grants these on `google`; this row must not.
-        for withheld in ["search_drive_files", "list_calendars", "maps_search"] {
+        for withheld in [
+            "search_drive_files",
+            "list_calendars",
+            "maps_search",
+            "maps_directions",
+            "maps_eta",
+        ] {
             assert!(
                 !flat.contains(withheld),
                 "`{withheld}` reached the Replies child's argv: {replies:?}"

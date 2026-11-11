@@ -2932,6 +2932,7 @@ async fn run_row(
                     Duration::from_secs(opts.timeout_secs),
                     GATEWAY_PROBE_GRANT,
                     overlay,
+                    crate::proxy::wiring::proxy_claims(&cfg, req.active, req.turn_id),
                 )
                 .await
             } else {
@@ -2940,6 +2941,7 @@ async fn run_row(
                     &req,
                     harness.id(),
                     Duration::from_secs(opts.timeout_secs),
+                    crate::proxy::wiring::proxy_claims(&cfg, req.active, req.turn_id),
                 )
                 .await
             };

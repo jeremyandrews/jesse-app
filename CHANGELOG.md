@@ -14,6 +14,17 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.201.1] - 2026-11-11
+
+**The bridge's lockfile follows jesse-agent 0.14.1.** The bridge depends on `agent/` by path,
+and its `--locked` release build refuses a lock that still records `jesse-agent` 0.14.0. The
+agent 0.14.1 release is the rustls-webpki (RUSTSEC-2026-0382) and webpki-roots
+(RUSTSEC-2026-0381) advisory fix in the root lockfile. Those two crates were not vulnerable
+in `bridge/Cargo.lock`.
+
+- **Changed:** `bridge/Cargo.lock` records `jesse-agent` 0.14.1 and `jesse-bridge` 0.201.1.
+  No other crate in the lock changed, and no bridge code changed.
+
 ## [agent 0.14.1] - 2026-11-11
 
 **The root lockfile no longer pulls in two vulnerable TLS crates, and CI now audits it.**

@@ -16,57 +16,78 @@ public struct WorkProjectRoute: Hashable, Identifiable, Sendable {
 
 // MARK: - Since your last look
 
+private struct WorkSinceStartsExpandedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Draw `Since your last look` already expanded: for an off screen render, which cannot
+    /// tap. False everywhere a person is looking.
+    public var workSinceStartsExpanded: Bool {
+        get { self[WorkSinceStartsExpandedKey.self] }
+        set { self[WorkSinceStartsExpandedKey.self] = newValue }
+    }
+}
+
 /// `3 finished since your last look`, which expands to one row per run: its title and the
 /// first line of its report, verbatim. A row opens the report. Nothing at all for none.
 struct WorkSinceBlock: View {
     let runs: [StudioRun]
     @State private var expanded = false
     @Environment(\.studioRunReport) private var reportAction
+    @Environment(\.workSinceStartsExpanded) private var startsExpanded
 
     var body: some View {
         if let line = WorkSemantics.sinceLine(count: runs.count) {
+            header(line)
+                .onAppear { if startsExpanded { expanded = true } }
+            if expanded { rows }
+        }
+    }
+
+    private func header(_ line: String) -> some View {
+        Button {
+            withAnimation(.snappy) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                Text(line)
+                    .font(.subheadline.weight(.medium))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(expanded ? "Collapse" : "Shows what finished")
+    }
+
+    private var rows: some View {
+        ForEach(runs, id: \.sectionKey.since) { run in
             Button {
-                withAnimation(.snappy) { expanded.toggle() }
+                if let path = run.latestReportPath { reportAction?.open(path) }
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                    Text(line)
-                        .font(.subheadline.weight(.medium))
-                    Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(WorkSemantics.title(run))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    if let line = run.reportLine, !line.isEmpty {
+                        Text(line)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                    }
                 }
-                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .accessibilityHint(expanded ? "Collapse" : "Shows what finished")
-            if expanded {
-                ForEach(runs) { run in
-                    Button {
-                        if let path = run.latestReportPath { reportAction?.open(path) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(WorkSemantics.title(run))
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(2)
-                            if let line = run.reportLine, !line.isEmpty {
-                                Text(line)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(3)
-                                    .multilineTextAlignment(.leading)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(run.latestReportPath == nil || reportAction == nil)
-                    .accessibilityHint("Opens the report")
-                }
-            }
+            .disabled(run.latestReportPath == nil || reportAction == nil)
+            .accessibilityHint("Opens the report")
         }
     }
 }
@@ -140,7 +161,7 @@ public struct WorkProjectView: View {
         let gate = WorkSemantics.youGate(strand)
         if !turn.isEmpty || gate != nil {
             Section {
-                ForEach(turn) { run in
+                ForEach(turn, id: \.sectionKey.turn) { run in
                     WorkYourTurnRow(run: run, detail: runs.detailModel(for: run.runID),
                                     onOpen: { openedRun = StudioRunRoute(runID: run.runID) },
                                     onSent: { Task { await runs.load() } })
@@ -161,7 +182,7 @@ public struct WorkProjectView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            ForEach(moving) { run in
+            ForEach(moving, id: \.sectionKey.moving) { run in
                 NavigationLink(value: StudioRunRoute(runID: run.runID)) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(WorkSemantics.title(run))
@@ -188,7 +209,9 @@ public struct WorkProjectView: View {
         let next = WorkSemantics.nextLines(strand)
         if !next.isEmpty {
             Section("Next") {
-                ForEach(Array(next.enumerated()), id: \.element.id) { index, draft in
+                // Keyed per section: a step id equals its run's id, and one List holding two rows
+                // with the same id draws one of them twice (seen on macOS).
+                ForEach(Array(next.enumerated()), id: \.element.nextKey) { index, draft in
                     nextRow(draft, index: index)
                 }
             }
@@ -333,4 +356,22 @@ struct WorkYourTurnRow: View {
         .onChange(of: run) { _, newer in detail.adopt(newer) }
         .studioRunAlert($detail.alert)
     }
+}
+
+/// A run's row identity per section of the project view, so the same run (or a step whose id
+/// is the run's) never shares an identity across two sections of one List.
+struct WorkSectionKey {
+    let runID: String
+    var turn: String { "turn-\(runID)" }
+    var moving: String { "moving-\(runID)" }
+    var since: String { "since-\(runID)" }
+}
+
+extension StudioRun {
+    var sectionKey: WorkSectionKey { WorkSectionKey(runID: runID) }
+}
+
+extension StrandDraft {
+    /// A Next row's identity: `next-<step id>`, never the bare id a run of the step also has.
+    var nextKey: String { "next-\(id)" }
 }

@@ -777,6 +777,66 @@ fn persona_user_slug(persona: &Persona) -> String {
 /// then be given the library's short connect budget: the same slowness that made them widen
 /// the probe applies to the turn's first byte. It is a FLOOR rather than an assignment, so a
 /// deployment that narrowed the probe budget cannot accidentally narrow the turn's.
+/// This turn's provider through the model proxy, or `None` when the proxy is off, does not
+/// carry the model, or the provider will not construct (the turn then uses the shared one).
+fn proxied_direct_provider(
+    cfg: &Config,
+    active: &crate::config::ActiveModel,
+    token: &str,
+) -> Option<Box<dyn Provider>> {
+    if !cfg.proxy.model {
+        return None;
+    }
+    let route = crate::proxy::wiring::route_for_active(active)?;
+    let m = cfg
+        .model_registry
+        .models
+        .iter()
+        .find(|m| m.id == active.id)?;
+    let (base_url, _key, model) = m.backend.as_ref()?;
+    let base = crate::proxy::wiring::proxied_base_url(cfg, route, Some(base_url));
+    match build_provider(provider_config_for(m, &base, token, model)) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!(
+                "jesse-bridge: direct model '{}' has no proxied provider ({e}); this turn \
+                 uses its own",
+                m.id
+            );
+            None
+        }
+    }
+}
+
+/// `fetch_url`'s configuration for one turn. With the egress proxy on, every request goes
+/// through it under the turn's tier (so the host list here is `*`: the proxy decides), and the
+/// client trusts the per-install CA in process. Off, the operator's `fetch_allow`, as before.
+fn direct_fetch_config(
+    cfg: &Config,
+    fetch_allow: &[String],
+    job_id: &str,
+    token: Option<&str>,
+) -> jesse_agent::tools::vault::FetchConfig {
+    let base = jesse_agent::tools::vault::FetchConfig::default();
+    if cfg.proxy.egress {
+        let ca = cfg.state_dir.as_deref().and_then(|d| {
+            std::fs::read(crate::proxy::wiring::ca_child_cert_path(
+                std::path::Path::new(d),
+            ))
+            .ok()
+        });
+        if let (Some(token), Some(ca)) = (token, ca) {
+            return base.allowing(["*"]).via_proxy(
+                format!("http://{job_id}:{token}@{}", cfg.proxy.egress_child_addr),
+                ca,
+            );
+        }
+        // On, but no token or no CA: nothing is allowed rather than a direct fetch.
+        return base;
+    }
+    base.allowing(fetch_allow.iter())
+}
+
 fn provider_config_for(
     m: &RegistryModel,
     base_url: &str,
@@ -1151,16 +1211,44 @@ impl Direct {
         // Looked up by MODEL ID, because a provider is per model and this harness may serve
         // several. A turn whose model has no provider fails loudly here rather than running
         // with somebody else's endpoint.
-        let provider = rt
-            .providers
-            .get(&req.active.id)
-            .ok_or_else(|| TurnFailure::Fatal {
-                message: format!(
-                    "model '{}' has no direct provider — its token env var is unset, or its \
+        // THE GATEWAY TURN, opened FIRST since the proxies (off by default) exist: its token is
+        // what this turn's provider and `fetch_url` present to them. With both proxies off this
+        // is the same call, made earlier, and it returns exactly what it did.
+        let gateway_tools = crate::gateway::direct::direct_tool_set(
+            cfg,
+            req.turn_id,
+            req.capability,
+            DIRECT_ID,
+            Duration::from_secs(cfg.timeout_secs),
+            crate::proxy::wiring::proxy_claims(cfg, req.active, req.turn_id),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "jesse-bridge: direct gateway tools unavailable ({e}); this turn runs without them"
+            );
+            None
+        });
+        let turn_token = gateway_tools.as_ref().map(|g| g.token().to_string());
+        // THE MODEL PROXY, in process: a provider built for this turn against the proxy route
+        // with the turn token as its key, so a direct turn is metered exactly as a spawned
+        // child's is. Direct runs inside the bridge, so this is uniform metering, not
+        // isolation. `None` (today's shared provider) when the proxy is off or does not
+        // carry this model.
+        let proxied_provider = turn_token
+            .as_deref()
+            .and_then(|t| proxied_direct_provider(cfg, req.active, t));
+        let provider = match &proxied_provider {
+            Some(p) => Some(p),
+            None => rt.providers.get(&req.active.id),
+        }
+        .ok_or_else(|| TurnFailure::Fatal {
+            message: format!(
+                "model '{}' has no direct provider — its token env var is unset, or its \
                      wire could not be constructed. No turn was attempted.",
-                    req.active.id
-                ),
-            })?;
+                req.active.id
+            ),
+        })?;
 
         // ---- The tool set -------------------------------------------------
         //
@@ -1187,8 +1275,12 @@ impl Direct {
                 index,
                 guard: Arc::new(BrokerGuard::new()),
             }),
-            jesse_agent::tools::vault::FetchConfig::default()
-                .allowing(rt.settings.fetch_allow.iter()),
+            direct_fetch_config(
+                cfg,
+                &rt.settings.fetch_allow,
+                req.turn_id,
+                turn_token.as_deref(),
+            ),
             level,
         )
         .map_err(|e| TurnFailure::Fatal {
@@ -1216,20 +1308,6 @@ impl Direct {
         // than grants of this harness's own, and every other granted table server comes with
         // them (see `crate::gateway::direct`). An operator `[[direct.mcp]]` grant that names a
         // gateway server is dropped in its favour, so one name never has two sources.
-        let gateway_tools = crate::gateway::direct::direct_tool_set(
-            cfg,
-            req.turn_id,
-            req.capability,
-            DIRECT_ID,
-            Duration::from_secs(cfg.timeout_secs),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "jesse-bridge: direct gateway tools unavailable ({e}); this turn runs without them"
-            );
-            None
-        });
         if let Some(g) = &gateway_tools {
             for line in g.report() {
                 eprintln!("jesse-bridge: direct gateway {line}");

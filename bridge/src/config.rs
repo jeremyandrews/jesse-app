@@ -558,7 +558,7 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // send API of its own, and it is below this layer entirely — omitting the tools
 // stops this child, not anything else on the host. See SECURITY.md.
 //
-// IMESSAGE AND MAPS (`imcp`): TWO of SIX. The server is iMCP, not `mac-messages-mcp`,
+// IMESSAGE AND MAPS (`imcp`): FOUR of SIX. The server is iMCP, not `mac-messages-mcp`,
 // and the shape of its surface is different enough that the old reasoning does not
 // carry over — re-decided against a live enumeration of the running 1.4.1 server
 // on 2026-08-11, not translated from the list it replaces. ONE SERVER CARRIES TWO
@@ -571,10 +571,17 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 //
 // Granted: `maps_search` — added 2026-08-27 for "find places near a location and
 // report their hours and ratings", which it satisfies ALONE. It takes a query and
-// a region and returns MapKit place records. `maps_directions` was considered and
-// NOT granted: route planning is a separate request nobody has made, and each
-// additional Maps grant widens the egress channel below for no capability the
-// asked-for job needs.
+// a region and returns MapKit place records.
+//
+// Granted: `maps_directions` and `maps_eta` — added with per-turn egress tiers, so a
+// phone turn can answer "how long to drive there" from Apple Maps. They were held back
+// at 0.99.0 because each takes a free-text origin and destination that an unattended
+// turn could use as an exfiltration channel. What changed is not the tools but the
+// boundary around them: all three Maps grants are classed `egress` in
+// `crate::mcpservers`, and the gateway's tier filter (`gateway::filter_by_tier`, with
+// these two named in `TIER_GATED_TOOLS` so they are hidden even with the egress proxy
+// off) removes them from every `closed` and `allowlist` turn. Scheduled jobs default
+// to `closed`, so a scheduled scan cannot reach them; an `open-logged` phone turn can.
 //
 // THERE IS NO SEND OR COMPOSE TOOL TO OMIT, and that is a genuine narrowing rather
 // than a gap in this list: `mac-messages-mcp` advertised `tool_send_message` and
@@ -583,19 +590,19 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // ungranted. Do not restate the old "its one send tool is not granted" line; it
 // describes a server this project no longer runs.
 //
-// THE FOUR OMITTED TOOLS ARE THE REST OF MAPS, AND THEY ARE OMITTED ON PURPOSE:
-// `maps_directions`, `maps_explore`, `maps_eta`, `maps_generate`. Nothing asked for
-// them, and each one is another instance of the egress channel described below.
+// THE TWO OMITTED TOOLS ARE THE REST OF MAPS, AND THEY ARE OMITTED ON PURPOSE:
+// `maps_explore` and `maps_generate`. No workflow asked for them, and each one is
+// another instance of the egress channel described below.
 //
-// THE EGRESS COST IS ACCEPTED FOR `maps_search`, NOT MITIGATED. All five Maps tools
-// are `openWorldHint:true` — they leave the machine for Apple's map services,
-// carrying an attacker-influenceable query string out of a child that also reads
-// attacker-authored content (WhatsApp and iMessage bodies, mail). Granting one of
-// them opens a low-bandwidth egress channel, and nothing in this change closes it:
-// the query string still leaves the host, and the allowlist cannot inspect it. The
-// trade taken on 2026-08-27 is that one search tool's worth of that channel buys a
-// capability Jeremy wants, and that keeping the other four out keeps the channel as
-// narrow as it can be while the capability exists. Do not read the grant as a
+// THE EGRESS COST IS ACCEPTED FOR THE THREE GRANTED MAPS TOOLS, NOT MITIGATED AWAY.
+// All five Maps tools are `openWorldHint:true` — they leave the machine for Apple's
+// map services, carrying an attacker-influenceable query string out of a child that
+// also reads attacker-authored content (WhatsApp and iMessage bodies, mail). Granting
+// them opens a low-bandwidth egress channel: the query string still leaves the host,
+// and the allowlist cannot inspect it. The tier filter narrows WHICH turns hold the
+// channel (attended phone turns, not unattended scheduled ones); it does not close it
+// on the turns that hold it. Keeping `maps_explore` and `maps_generate` out keeps the
+// channel as narrow as the asked-for capabilities allow. Do not read the grants as a
 // finding that the risk was wrong; see SECURITY.md, which records it as accepted.
 //
 // NAME THEM CAREFULLY, BECAUSE THE OPERATOR'S MENTAL MODEL AND THE WIRE DISAGREE.
@@ -614,11 +621,12 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // counterpart while only Messages is enabled, so the second protected macOS path
 // that grant reached is gone from this set entirely.
 //
-// EVERY ONE OF THE SIX IS ANNOTATED `readOnlyHint:true`, INCLUDING THE FOUR THAT
+// EVERY ONE OF THE SIX IS ANNOTATED `readOnlyHint:true`, INCLUDING THE TWO THAT
 // ARE NOT GRANTED — which is the standing reason annotations are not the boundary.
 // A tool that reaches Apple over the network and one that reads a local database
-// carry the identical hint; only this list tells them apart, and `maps_search`
-// being `readOnlyHint` is exactly why its egress had to be decided by hand.
+// carry the identical hint; only this list (and the `egress` class beside it) tells
+// them apart, and the Maps tools being `readOnlyHint` is exactly why their egress had
+// to be decided by hand.
 //
 // GOOGLE-PERSEIDO: sixteen of eighteen — the SAME sixteen granted on the tag1
 // `google` server, chosen by mirroring rather than re-deciding, because the two
@@ -812,9 +820,10 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // See `crate::places_google`. Granting these tools is therefore also a decision to accept a
 // bounded per-day spend; the bound is `JESSE_PLACES_GOOGLE_MAX_CALLS`.
 //
-// WHAT THEY COST, STATED AGAINST THE MAPS GRANT DIRECTLY ABOVE. `maps_search` sends a
-// caller-authored QUERY STRING to Apple out of a child that reads attacker-authored message
-// bodies, and that egress was accepted rather than mitigated. These two DO NOT WIDEN IT, and
+// WHAT THEY COST, STATED AGAINST THE MAPS GRANTS DIRECTLY ABOVE. `maps_search` (and, since
+// tiers, `maps_directions` and `maps_eta`) send a caller-authored QUERY STRING to Apple out
+// of a child that reads attacker-authored message bodies, and that egress was accepted
+// rather than mitigated. These two DO NOT WIDEN IT, and
 // the reason is structural rather than a matter of degree: the free-text query is resolved
 // against a closed compile-time category table and then used to filter the RESPONSE on this
 // side, and the only caller-supplied string that leaves the host is a place id validated as
@@ -1134,6 +1143,7 @@ mcp__whatsapp__get_chat,mcp__whatsapp__get_direct_chat_by_contact,\
 mcp__whatsapp__get_contact_chats,mcp__whatsapp__get_last_interaction,\
 mcp__whatsapp__get_message_context,\
 mcp__imcp__messages_fetch,mcp__imcp__maps_search,\
+mcp__imcp__maps_directions,mcp__imcp__maps_eta,\
 mcp__google-perseido__list_calendars,mcp__google-perseido__get_events,\
 mcp__google-perseido__query_freebusy,mcp__google-perseido__search_gmail_messages,\
 mcp__google-perseido__get_gmail_message_content,\
@@ -1305,6 +1315,9 @@ pub struct Config {
     /// The tool gateway (`[gateway]`, `[mcp.<name>]`): off unless the table turns it on. See
     /// [`crate::gateway`].
     pub gateway: crate::gateway::GatewaySettings,
+    /// The model proxy and the egress proxy (`[proxy]`, `[egress]`, `[sandbox]`). Both off by
+    /// default. See [`crate::proxy`].
+    pub proxy: crate::proxy::ProxySettings,
     /// Coding agents on the cluster (`[devjob]`): off unless the table turns it on, and refused at
     /// boot without the gateway. See [`crate::devjob`].
     pub devjob: crate::devjob::DevJobSettings,
@@ -2092,12 +2105,38 @@ pub struct PriceDeck {
     pub out_per_m: f64,
 }
 
+/// Anthropic bills a five-minute cache write at 1.25 times the input rate (the one-hour write
+/// at 2x is not what the CLI asks for by default). The four-rate deck the model proxy meters
+/// at needs the write rate stated, not assumed equal to the input rate.
+pub const ANTHROPIC_CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+
 impl PriceDeck {
+    /// Whether all four rates are stated. The model proxy refuses a model whose deck is not,
+    /// rather than counting its calls as free.
+    pub fn is_complete(&self) -> bool {
+        self.cache_write_per_m.is_some()
+            && [self.in_per_m, self.cached_per_m, self.out_per_m]
+                .iter()
+                .all(|r| r.is_finite() && *r >= 0.0)
+            && self
+                .cache_write_per_m
+                .is_some_and(|r| r.is_finite() && r >= 0.0)
+    }
+
+    /// A model with no stated price: the badge shows `$0.00` as it always did, but the deck is
+    /// INCOMPLETE (no cache-write rate), so the model proxy refuses to meter it as free.
+    pub const UNPRICED: PriceDeck = PriceDeck {
+        in_per_m: 0.0,
+        cached_per_m: 0.0,
+        cache_write_per_m: None,
+        out_per_m: 0.0,
+    };
+
     /// A free model (the `local` entry): every turn costs `$0.00`.
     pub const ZERO: PriceDeck = PriceDeck {
         in_per_m: 0.0,
         cached_per_m: 0.0,
-        cache_write_per_m: None,
+        cache_write_per_m: Some(0.0),
         out_per_m: 0.0,
     };
 
@@ -3486,7 +3525,9 @@ fn glm_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) -
             PriceDeck {
                 in_per_m: FW_GLM_5P3_IN_PER_M,
                 cached_per_m: FW_GLM_5P3_CACHED_PER_M,
-                cache_write_per_m: None,
+                // No separate cache-write charge: a prompt that is cached is billed at the
+                // input rate the first time, so the write rate IS the input rate.
+                cache_write_per_m: Some(FW_GLM_5P3_IN_PER_M),
                 out_per_m: FW_GLM_5P3_OUT_PER_M,
             },
         ),
@@ -3603,7 +3644,9 @@ fn kimi_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
             PriceDeck {
                 in_per_m: FW_KIMI_K3P1_PRO_IN_PER_M,
                 cached_per_m: FW_KIMI_K3P1_PRO_CACHED_PER_M,
-                cache_write_per_m: None,
+                // No separate cache-write charge: a prompt that is cached is billed at the
+                // input rate the first time, so the write rate IS the input rate.
+                cache_write_per_m: Some(FW_KIMI_K3P1_PRO_IN_PER_M),
                 out_per_m: FW_KIMI_K3P1_PRO_OUT_PER_M,
             },
         ),
@@ -3703,7 +3746,9 @@ fn muse_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
             PriceDeck {
                 in_per_m: FW_MUSE_SPARK_OPEN_IN_PER_M,
                 cached_per_m: FW_MUSE_SPARK_OPEN_CACHED_PER_M,
-                cache_write_per_m: None,
+                // No separate cache-write charge: a prompt that is cached is billed at the
+                // input rate the first time, so the write rate IS the input rate.
+                cache_write_per_m: Some(FW_MUSE_SPARK_OPEN_IN_PER_M),
                 out_per_m: FW_MUSE_SPARK_OPEN_OUT_PER_M,
             },
         ),
@@ -3790,7 +3835,9 @@ fn qwen_env_entry(default_interval_secs: u64, global_timeout_secs: Option<u64>) 
             PriceDeck {
                 in_per_m: FW_QWEN3P8_MAX_IN_PER_M,
                 cached_per_m: FW_QWEN3P8_MAX_CACHED_PER_M,
-                cache_write_per_m: None,
+                // No separate cache-write charge: a prompt that is cached is billed at the
+                // input rate the first time, so the write rate IS the input rate.
+                cache_write_per_m: Some(FW_QWEN3P8_MAX_IN_PER_M),
                 out_per_m: FW_QWEN3P8_MAX_OUT_PER_M,
             },
         ),
@@ -3972,7 +4019,9 @@ fn gemini_pro_env_entry(
         PriceDeck {
             in_per_m: GEMINI_3P1_PRO_IN_PER_M,
             cached_per_m: GEMINI_3P1_PRO_CACHED_PER_M,
-            cache_write_per_m: None,
+            // No separate cache-write charge: a cached prompt is billed at the input rate the
+            // first time, so the write rate IS the input rate.
+            cache_write_per_m: Some(GEMINI_3P1_PRO_IN_PER_M),
             out_per_m: GEMINI_3P1_PRO_OUT_PER_M,
         },
         default_interval_secs,
@@ -3998,7 +4047,9 @@ fn gemini_flash_env_entry(
         PriceDeck {
             in_per_m: GEMINI_3P8_FLASH_IN_PER_M,
             cached_per_m: GEMINI_3P8_FLASH_CACHED_PER_M,
-            cache_write_per_m: None,
+            // No separate cache-write charge: a cached prompt is billed at the input rate the
+            // first time, so the write rate IS the input rate.
+            cache_write_per_m: Some(GEMINI_3P8_FLASH_IN_PER_M),
             out_per_m: GEMINI_3P8_FLASH_OUT_PER_M,
         },
         default_interval_secs,
@@ -4025,7 +4076,9 @@ fn gemini_flash_lite_env_entry(
         PriceDeck {
             in_per_m: GEMINI_3P5_FLASH_LITE_IN_PER_M,
             cached_per_m: GEMINI_3P5_FLASH_LITE_CACHED_PER_M,
-            cache_write_per_m: None,
+            // No separate cache-write charge: a cached prompt is billed at the input rate the
+            // first time, so the write rate IS the input rate.
+            cache_write_per_m: Some(GEMINI_3P5_FLASH_LITE_IN_PER_M),
             out_per_m: GEMINI_3P5_FLASH_LITE_OUT_PER_M,
         },
         default_interval_secs,
@@ -4190,7 +4243,7 @@ impl ActiveModel {
             price: PriceDeck {
                 in_per_m: OPUS_5_5_IN_PER_M,
                 cached_per_m: OPUS_5_5_CACHED_PER_M,
-                cache_write_per_m: None,
+                cache_write_per_m: Some(OPUS_5_5_IN_PER_M * ANTHROPIC_CACHE_WRITE_MULTIPLIER),
                 out_per_m: OPUS_5_5_OUT_PER_M,
             },
             // Ambient opus sees images natively (CLI Read tool); never uses the helper layer.
@@ -4271,7 +4324,7 @@ fn opus_entry() -> RegistryModel {
         price: PriceDeck {
             in_per_m: OPUS_5_5_IN_PER_M,
             cached_per_m: OPUS_5_5_CACHED_PER_M,
-            cache_write_per_m: None,
+            cache_write_per_m: Some(OPUS_5_5_IN_PER_M * ANTHROPIC_CACHE_WRITE_MULTIPLIER),
             out_per_m: OPUS_5_5_OUT_PER_M,
         },
         health: HealthConfig::default(),
@@ -4378,7 +4431,7 @@ fn fable_env_entry() -> RegistryModel {
             PriceDeck {
                 in_per_m: FABLE_5_1_IN_PER_M,
                 cached_per_m: FABLE_5_1_CACHED_PER_M,
-                cache_write_per_m: None,
+                cache_write_per_m: Some(FABLE_5_1_IN_PER_M * ANTHROPIC_CACHE_WRITE_MULTIPLIER),
                 out_per_m: FABLE_5_1_OUT_PER_M,
             },
         ),
@@ -4442,7 +4495,7 @@ fn sonnet_env_entry() -> RegistryModel {
             PriceDeck {
                 in_per_m: SONNET_5_5_IN_PER_M,
                 cached_per_m: SONNET_5_5_CACHED_PER_M,
-                cache_write_per_m: None,
+                cache_write_per_m: Some(SONNET_5_5_IN_PER_M * ANTHROPIC_CACHE_WRITE_MULTIPLIER),
                 out_per_m: SONNET_5_5_OUT_PER_M,
             },
         ),
@@ -4837,7 +4890,15 @@ pub fn registry_model_from_toml(
             cache_write_per_m: p.cache_write_per_m,
             out_per_m: p.out_per_m.unwrap_or(0.0),
         })
-        .unwrap_or(PriceDeck::ZERO);
+        // NO PRICE TABLE: free only for a `local` model, which costs nothing to call. Any other
+        // entry is UNPRICED — the same zero badge it always showed, but an incomplete deck,
+        // so the model proxy refuses to meter it as free (`unpriced_model`) until the entry
+        // states its four rates.
+        .unwrap_or(if matches!(kind, ModelKind::Local) {
+            PriceDeck::ZERO
+        } else {
+            PriceDeck::UNPRICED
+        });
     let health = t
         .health
         .as_ref()
@@ -5120,6 +5181,7 @@ impl Config {
             healthdb: HealthDbConfig::from_toml(load_healthdb_table(&home)),
             // The `[gateway]` table and `[mcp.*]` overrides. Off when absent.
             gateway: load_gateway_settings(&home),
+            proxy: crate::persona::load_proxy_settings(&home),
             // The `[devjob]` table. Off when absent; its service is built in `main`.
             devjob: crate::devjob::DevJobSettings::from_toml(load_devjob_table(&home), &home),
             // The `[hostrun]` table. Off when absent; its service is built in `main`. Its
@@ -5444,6 +5506,25 @@ pub fn export_mcp_server_env() {
 
 #[cfg(test)]
 mod tests {
+
+    /// A declared model with no price table is UNPRICED (refused by the model proxy) unless
+    /// it is `local`, which is free. A partial table missing the cache-write rate is
+    /// incomplete too. Never counted as zero.
+    #[test]
+    fn a_declared_model_without_four_rates_is_unpriced_unless_local() {
+        let hosted =
+            registry_model_from_toml(&model_toml("h", "hosted", None), None, None).unwrap();
+        assert!(!hosted.price.is_complete(), "{:?}", hosted.price);
+        let local = registry_model_from_toml(&model_toml("l", "local", None), None, None).unwrap();
+        assert!(local.price.is_complete(), "{:?}", local.price);
+        let mut partial = model_toml("p", "hosted", None);
+        partial.price = Some(
+            toml::from_str::<PriceToml>("in_per_m = 2.0\ncached_per_m = 0.2\nout_per_m = 10.0")
+                .unwrap(),
+        );
+        let partial = registry_model_from_toml(&partial, None, None).unwrap();
+        assert!(!partial.price.is_complete());
+    }
 
     #[test]
     fn configured_cache_write_rate_reaches_badge_and_agent() {
@@ -8849,8 +8930,8 @@ mod tests {
         let p = &r.get("muse").expect("muse").price;
         assert_eq!(
             (p.in_per_m, p.cached_per_m, p.out_per_m, p.cache_write_per_m),
-            (1.25, 0.15, 4.25, None),
-            "Fireworks' model page, 2026-10-15"
+            (1.25, 0.15, 4.25, Some(1.25)),
+            "Fireworks' model page, 2026-10-15; the cache-write rate is the input rate"
         );
         let r = muse_registry(&[
             ("JESSE_MODEL_MUSE_AUTH_TOKEN", "fw-muse"),

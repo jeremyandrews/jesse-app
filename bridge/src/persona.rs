@@ -540,6 +540,14 @@ struct LocalConfig {
     /// only while the gateway is on.
     #[serde(default)]
     mcp: std::collections::BTreeMap<String, crate::gateway::McpOverrideToml>,
+    /// The optional `[proxy]`, `[egress]` and `[sandbox]` tables: the model proxy, the egress
+    /// proxy, and the phone's egress tier. See [`crate::proxy`].
+    #[serde(default)]
+    proxy: Option<crate::proxy::ProxyToml>,
+    #[serde(default)]
+    egress: Option<crate::proxy::EgressToml>,
+    #[serde(default)]
+    sandbox: Option<crate::proxy::SandboxToml>,
     /// The optional top-level `[devjob]` table: coding agents on the cluster, served by the
     /// gateway in process. See [`crate::devjob`].
     #[serde(default)]
@@ -808,6 +816,15 @@ pub fn load_gateway_settings(home: &str) -> crate::gateway::GatewaySettings {
     match load_local_config(home) {
         Some(c) => crate::gateway::GatewaySettings::from_toml(c.gateway, c.mcp),
         None => crate::gateway::GatewaySettings::default(),
+    }
+}
+
+/// Read the `[proxy]`, `[egress]` and `[sandbox]` tables from the same overlay file. Absent or
+/// malformed file, or no tables, is both proxies OFF and the phone tier `open-logged`.
+pub fn load_proxy_settings(home: &str) -> crate::proxy::ProxySettings {
+    match load_local_config(home) {
+        Some(c) => crate::proxy::ProxySettings::from_toml(c.proxy, c.egress, c.sandbox),
+        None => crate::proxy::ProxySettings::default(),
     }
 }
 

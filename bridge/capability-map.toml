@@ -2127,8 +2127,8 @@ kind = "mcp"
 server = "imcp"
 harnesses = ["claude-code", "codex"]
 placement = "mac-edge"
-dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search uses Apple Maps"
-workflows = "start-of-day iMessage scanner, the today-brief replies child (messages_fetch); place and address lookups and Apple Maps links (maps_search)"
+dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search, maps_directions and maps_eta use Apple Maps"
+workflows = "start-of-day iMessage scanner, the today-brief replies child (messages_fetch); place and address lookups and Apple Maps links (maps_search); drive times and directions on phone turns (maps_directions, maps_eta)"
 reason = "Reads iMessage history through the iMCP app's grant on ~/Library/Messages, which only exists on macOS."
 
 [grant."mcp__imcp__maps_search"]
@@ -2136,9 +2136,27 @@ kind = "mcp"
 server = "imcp"
 harnesses = ["claude-code", "codex"]
 placement = "mac-edge"
-dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search uses Apple Maps"
-workflows = "start-of-day iMessage scanner, the today-brief replies child (messages_fetch); place and address lookups and Apple Maps links (maps_search)"
+dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search, maps_directions and maps_eta use Apple Maps"
+workflows = "start-of-day iMessage scanner, the today-brief replies child (messages_fetch); place and address lookups and Apple Maps links (maps_search); drive times and directions on phone turns (maps_directions, maps_eta)"
 reason = "Searches Apple Maps through the iMCP app, which only exists on macOS."
+
+[grant."mcp__imcp__maps_directions"]
+kind = "mcp"
+server = "imcp"
+harnesses = ["claude-code", "codex"]
+placement = "mac-edge"
+dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search, maps_directions and maps_eta use Apple Maps"
+workflows = "place and address lookups and Apple Maps links (maps_search); drive times and directions on phone turns (maps_directions, maps_eta)"
+reason = "Plans routes in Apple Maps through the iMCP app, which only exists on macOS. Egress-class: hidden on closed and allowlist turns."
+
+[grant."mcp__imcp__maps_eta"]
+kind = "mcp"
+server = "imcp"
+harnesses = ["claude-code", "codex"]
+placement = "mac-edge"
+dependency = "macOS: the iMCP app at /Applications/iMCP.app in a logged-in GUI session, found over Bonjour (_mcp._tcp on local.), with a security-scoped grant on ~/Library/Messages; maps_search, maps_directions and maps_eta use Apple Maps"
+workflows = "place and address lookups and Apple Maps links (maps_search); drive times and directions on phone turns (maps_directions, maps_eta)"
+reason = "Estimates travel times in Apple Maps through the iMCP app, which only exists on macOS. Egress-class: hidden on closed and allowlist turns."
 
 [grant."mcp__google-perseido__list_calendars"]
 kind = "mcp"

@@ -121,6 +121,7 @@ pub(crate) fn test_config() -> Config {
         // registered. The house tests set it explicitly.
         house: HouseConfig::Absent,
         gateway: crate::gateway::GatewaySettings::default(),
+        proxy: crate::proxy::ProxySettings::default(),
         devjob: crate::devjob::DevJobSettings::default(),
         hostrun: crate::hostrun::HostRunSettings::default(),
         // No `[healthdb]` table: the shipped default. No pool, no task, `not_configured`.

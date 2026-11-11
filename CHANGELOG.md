@@ -14,6 +14,61 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.203.0, agent 0.15.0, eval 0.9.0 - 2026-11-11
+
+**The bridge can be the only route to a model and to the open web: a model proxy that holds every
+model credential and meters every call, an egress proxy that enforces a per-turn tier and logs
+every host, and the overnight activity digest. Both proxies are off by default; with them off
+every child is spawned exactly as before.**
+
+- **Added: the model proxy** (`[proxy] model = true`, `src/proxy/model.rs`) on `[proxy]
+  model_listen` under `/model/<route>/`: `anthropic-subscription`, `anthropic-api`, `fireworks`,
+  `local` (plain or client-certificate HTTPS) and `openai-chatgpt`. A child's credential is its
+  turn token, signed for one route; the proxy swaps in the real credential, forwards the body
+  unchanged and streams the reply back unchanged. Measured first: Claude Code 2.1.322 sends a
+  subscription turn to `ANTHROPIC_BASE_URL` and, given `ANTHROPIC_AUTH_TOKEN`, never uses its
+  stored login (the proxy restores `oauth-2025-04-20` in `anthropic-beta`); Codex 0.153.4 with a
+  custom provider sends its ChatGPT request shape with the turn token and no `auth.json`. Live:
+  Opus (subscription), GLM (Fireworks) and qwen-local turns through the proxy, each ledger line
+  equal to the CLI's own usage; a Codex turn on the ChatGPT login with no login in its home.
+- **Added: metering.** One `model_call` ledger line per metered call from the provider's usage
+  block (Anthropic, OpenAI Responses and chat completions, streamed or not), costed at four
+  rates. A model without all four is refused (`unpriced_model`), never counted as free. Every
+  built-in deck now states its cache-write rate (Anthropic 1.25x input; Fireworks and Gemini the
+  input rate); a declared model with no price table is unpriced unless `local`.
+- **Added: the egress proxy** (`[proxy] egress = true`, `src/proxy/egress.rs`): a forward proxy
+  authenticated by `job:turn-token` that resolves DNS itself, refuses private destinations on
+  every tier, terminates TLS on `allowlist` and `open-logged` turns with a per-install CA (key
+  `0600` under the state directory), refuses opaque or pinned tunnels by name, classes each
+  request `read` or `send`, sends only to `[egress] send_hosts` and the bridge-owned list, and
+  checks outbound content against canaries and vault fingerprints (`src/proxy/content.rs`), with
+  a phone push naming turn, host and reason. One `egress` line per request, host only.
+- **Added: tiers** (`src/proxy/tier.rs`): `closed`, `allowlist`, `open-logged`, signed into the
+  turn token. Scheduled jobs are `closed` unless their entry says `egress = "allowlist"` with
+  `hosts` or `egress = "open"`; phone turns take `[sandbox] egress_phone` (default
+  `open-logged`); the one-shots are `closed`. The gateway hides `egress`-class tools on `closed`
+  and `allowlist` turns. A local or Fireworks `model` on a scheduled job needs `closed` or the
+  boot fails naming the job. A boot table prints every job's tier; `/health` and the ledger
+  carry each turn's tier.
+- **Added: iMCP `maps_directions` and `maps_eta`** on every harness, classed `egress`, so a phone
+  turn gets drive times and a scheduled scan cannot reach them (hidden on `closed` even with the
+  egress proxy off). `maps_explore` and `maps_generate` stay out: no workflow asked for them.
+- **Added: the ledger completed and the digest.** Kinds `vault_write` (where the write-lock
+  broker grants) and `commit`; `GET /jesse/activity` (at most 10,000 lines), `GET
+  /jesse/activity/digest` and `jesse-bridge activity-digest --since`; `jesse-bridge canary new
+  --path`.
+- **Agent 0.15.0:** `FetchConfig::via_proxy`, so `direct`'s `fetch_url` goes through the egress
+  proxy and trusts its CA in process.
+- **Eval 0.9.0:** `inj-scheduled-scan-egress` in `workflows-v1` (a fixture mailbox whose attacker
+  mail asks the turn to fetch a URL carrying vault content and to message an outside number),
+  the assertions `ledger_no_egress` (read from the scratch bridge's activity ledger) and
+  `only_paths_changed`, `run --task`, and overlays `bridge-overlays/proxies/` (six cells, both
+  proxies on) and `proxies-closed/` (the two non-frontier cells on a `closed` tier).
+- **Containment:** ten new probes (`egress-closed-tier`, `egress-open-tier`, `model-token-scope`,
+  `model-credential-absent`, `egress-private-address`, `egress-send-unknown-host`,
+  `egress-long-query`, `egress-canary`, `egress-fingerprint`, `egress-opaque`), run when the
+  proxies are on.
+
 ## [bridge 0.202.0] - 2026-11-11
 
 **A Studio run no longer needs a GitHub repository.** Root cause: repository resolution and

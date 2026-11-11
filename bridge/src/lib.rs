@@ -76,6 +76,10 @@ pub(crate) use tokio_util::sync::CancellationToken;
 
 /// The activity ledger. Addressed through the module (`crate::activity::…`).
 pub mod activity;
+/// Reading the activity ledger: a time range of its lines and the overnight digest, behind
+/// `GET /jesse/activity`, `GET /jesse/activity/digest` and `jesse-bridge activity-digest`.
+/// Addressed through the module (`crate::activity_query::…`).
+pub mod activity_query;
 mod agentmap;
 mod apns;
 mod artifacts;
@@ -144,6 +148,7 @@ pub mod plistenv;
 // `containment` and are always compiled — the startup gate reads them.
 #[cfg(feature = "containment-probe")]
 mod probe;
+pub mod proxy;
 // The battery signs its own executable with the deployment's identity (see the module).
 #[cfg(feature = "containment-probe")]
 pub mod probesign;

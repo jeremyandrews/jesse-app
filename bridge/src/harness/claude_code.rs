@@ -1014,12 +1014,14 @@ pub static MORNING_MCP_CONFIG: LazyLock<String> = LazyLock::new(|| mcp_config_js
 ///     not launchd-supervised, so quitting it — or ending the session — takes iMessage dark
 ///     until it is relaunched by hand. Accepted deliberately; see SECURITY.md.
 ///
-/// Of the six tools it advertises, TWO are granted: `messages_fetch`, and — since 0.99.0 —
-/// `maps_search`. The other four Maps tools (`maps_directions`, `maps_explore`, `maps_eta`,
-/// `maps_generate`) are live but ungranted. There is no send tool to withhold. Note the
-/// granted `maps_search` is `openWorldHint:true` and leaves the host for Apple's map
-/// services, so this ONE server now spans a local read surface and a network one; that
-/// egress is accepted rather than mitigated. See [`crate::DEFAULT_ALLOWED_TOOLS`].
+/// Of the six tools it advertises, FOUR are granted: `messages_fetch`, `maps_search` (since
+/// 0.99.0), and `maps_directions` and `maps_eta` (since per-turn egress tiers). The other
+/// two Maps tools (`maps_explore`, `maps_generate`) are live but ungranted, because no
+/// workflow asked for them. There is no send tool to withhold. Note the three granted Maps
+/// tools are `openWorldHint:true` and leave the host for Apple's map services, so this ONE
+/// server spans a local read surface and a network one; that egress is accepted rather than
+/// mitigated, and all three are classed `egress`, so the gateway hides them on `closed` and
+/// `allowlist` turns. See [`crate::DEFAULT_ALLOWED_TOOLS`].
 ///
 /// `google-perseido` is a SECOND instance of the same `workspace-mcp` the `google` entry
 /// runs, against a different account. It is a second SERVER rather than a second account on
@@ -1816,9 +1818,10 @@ mcp__qmd__query,mcp__qmd__get,mcp__qmd__multi_get,mcp__qmd__status";
 ///   withholding them: the server drives a local Go bridge, so there is no credential to
 ///   scope and no flag to unset. **It is the single-layer server of the six.**
 ///   `download_media` is withheld too, for a different reason — it WRITES a file.
-/// * **`imcp`** — `messages_fetch` only. `maps_search` is granted to the MAIN turn and is
-///   deliberately NOT here: it leaves the host carrying a query string, and a brief has no use
-///   for a map. The other four Maps tools are ungranted there too. iMCP registers no send tool.
+/// * **`imcp`** — `messages_fetch` only. `maps_search`, `maps_directions` and `maps_eta` are
+///   granted to the MAIN turn and are deliberately NOT here: they leave the host carrying a
+///   query string, and a brief has no use for a map. `maps_explore` and `maps_generate` are
+///   granted nowhere. iMCP registers no send tool.
 /// * **`google` / `google-perseido`** — the SIX GMAIL READ TOOLS only. Not Drive, not Calendar:
 ///   the main turn's grant names those and this one must not, because a sent reply is mail.
 /// * **`fastmail`** — all three of its tools, which are all reads.
@@ -3467,22 +3470,32 @@ mod tests {
             // version might add — the one addition that must never pass silently. iMCP has no
             // sending tool today, and this assertion is what keeps that from changing quietly
             // under a version bump.
-            // THE PERMITTED SET GREW FROM ONE NAME TO TWO IN 0.99.0 and the property did not
-            // change: `maps_search` was granted deliberately, so it is written down here by
-            // name. The other four Maps tools stay out — this assertion fails on
-            // `maps_directions`, `maps_explore`, `maps_eta` and `maps_generate` exactly as it
-            // did before, and on any name nobody has seen yet. Widening this list is a
-            // decision to be made in `DEFAULT_ALLOWED_TOOLS`, argued in SECURITY.md and
-            // re-certified in the containment record — never a one-word edit made to get a
-            // red build green.
+            // FOUR OF THE SIX ARE GRANTED: `messages_fetch`, `maps_search`, `maps_directions`
+            // and `maps_eta`, each written down here by name because each was granted
+            // deliberately. The set grew from one name to two in 0.99.0 (`maps_search`) and
+            // from two to four with per-turn egress tiers, and the property did not change.
+            // `maps_directions` and `maps_eta` were withheld until then because their
+            // free-text origin and destination are an exfiltration channel for an unattended
+            // turn; they were granted once the gateway's tier filter could hide every
+            // `egress`-class tool on `closed` and `allowlist` turns (scheduled jobs default to
+            // `closed`), so a phone turn gets drive times and a scheduled scan cannot reach
+            // them. `maps_explore` and `maps_generate` stay OUT because no workflow asked for
+            // them — this assertion fails on either exactly as it did before, and on any name
+            // nobody has seen yet. Widening this list is a decision to be made in
+            // `DEFAULT_ALLOWED_TOOLS`, argued in SECURITY.md and re-certified in the
+            // containment record — never a one-word edit made to get a red build green.
             // Stated as "never anything BUT the permitted set" rather than "always exactly
             // it", because the sites this loop covers do not all grant the message servers:
             // the read-only main turn loads all eighteen servers and grants only qmd's four
             // tools. An equality check would therefore assert a toolset that site does not
             // have. A subset check still fails on every addition, which is the property
             // being bought.
-            const IMCP_PERMITTED: [&str; 2] =
-                ["mcp__imcp__messages_fetch", "mcp__imcp__maps_search"];
+            const IMCP_PERMITTED: [&str; 4] = [
+                "mcp__imcp__messages_fetch",
+                "mcp__imcp__maps_search",
+                "mcp__imcp__maps_directions",
+                "mcp__imcp__maps_eta",
+            ];
             let imcp_granted: Vec<&str> = granted
                 .iter()
                 .copied()
@@ -3490,11 +3503,11 @@ mod tests {
                 .collect();
             assert!(
                 imcp_granted.iter().all(|t| IMCP_PERMITTED.contains(t)),
-                "{label}: `messages_fetch` and `maps_search` are the ONLY iMCP tools that may \
-                 ever be granted — the other four Maps tools it advertises \
-                 (`maps_directions`, `maps_explore`, `maps_eta`, `maps_generate`) are live and \
-                 must stay ungranted, and anything unrecognised here must be re-decided \
-                 against a fresh enumeration rather than added to this list: {imcp_granted:?}"
+                "{label}: `messages_fetch`, `maps_search`, `maps_directions` and `maps_eta` \
+                 are the ONLY iMCP tools that may ever be granted — the other two Maps tools \
+                 it advertises (`maps_explore`, `maps_generate`) are live and must stay \
+                 ungranted, and anything unrecognised here must be re-decided against a fresh \
+                 enumeration rather than added to this list: {imcp_granted:?}"
             );
             // THE GITHUB SERVER'S READ-ONLY POSTURE IS ITS ONLY LAYER. Its credential is a
             // personal CLASSIC PAT carrying `repo` + `workflow` — write-capable — because a
@@ -4926,6 +4939,8 @@ mod tests {
             "mcp__whatsapp__send_audio_message",
             "mcp__whatsapp__download_media",
             "mcp__imcp__maps_search",
+            "mcp__imcp__maps_directions",
+            "mcp__imcp__maps_eta",
             "mcp__google__search_drive_files",
             "mcp__google__get_drive_file_content",
             "mcp__google__list_calendars",

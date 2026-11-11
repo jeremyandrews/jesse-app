@@ -184,6 +184,10 @@ pub struct JesseRequest {
     /// cannot claim to be a schedule or a strand tick.
     #[serde(skip)]
     origin: Option<String>,
+    /// The egress tier the SCHEDULER assigned this turn (its job's `egress`). Never
+    /// deserialised, for the reason `origin` is not: a client cannot pick its own tier.
+    #[serde(skip)]
+    egress: Option<crate::proxy::Egress>,
     // The workouts the attached health block describes, as STRUCTURED DATA (the app's
     // `WorkoutRecord`). DATA, NEVER PROMPT TEXT: it is read by `workoutdetail` alone, which
     // writes it into `diet-logs/workout-detail.csv` and `workout-splits.csv` before the
@@ -213,6 +217,11 @@ impl JesseRequest {
     /// [`STRAND_TICK_ORIGIN`]), for the activity ledger and the `SOURCE:` header line.
     pub fn set_origin(&mut self, origin: impl Into<String>) {
         self.origin = Some(origin.into());
+    }
+
+    /// The scheduled job's egress tier, set by the scheduler alongside its origin.
+    pub fn set_egress(&mut self, tier: crate::proxy::Egress) {
+        self.egress = Some(tier);
     }
 
     /// The request a `[[schedule]]` job submits: a mode, the prompt text, and nothing
@@ -264,6 +273,7 @@ impl JesseRequest {
             request_id: None,
             sent_for: None,
             origin: None,
+            egress: None,
             workout_records: None,
         }
     }
@@ -743,6 +753,19 @@ pub async fn health(State(st): State<AppState>, headers: HeaderMap) -> Json<Valu
                     json!(gw.upstream_health(&crate::gateway::config_server_names(&rendered)));
             }
         }
+        // THE PROXIES and the egress tier of every turn running now. Flags, listeners and
+        // tier labels; never a token or a credential.
+        body["proxy"] = json!({
+            "model": st.cfg.proxy.model,
+            "egress": st.cfg.proxy.egress,
+            "model_listen": st.cfg.proxy.model_listen,
+            "egress_listen": st.cfg.proxy.egress_listen,
+            "egress_phone": st.cfg.proxy.egress_phone.label(),
+            "turn_tiers": crate::proxy::tier::filed()
+                .into_iter()
+                .map(|(job, tier)| json!({ "job_id": job, "tier": tier }))
+                .collect::<Vec<_>>(),
+        });
         // THE OPEN FILES LIMIT the process runs with now (raised at startup, see `nofile`), and
         // how many gateway turns of the measured peak fit under it.
         if let Some(l) = crate::nofile::current() {
@@ -1295,6 +1318,7 @@ pub async fn start_turn(
     let jid = job_id.clone();
     let sid = req.session_id.clone();
     let origin = req.origin.clone().unwrap_or_else(|| "phone".to_string());
+    let egress_tier = req.egress.clone();
     // `active` (WHICH model backs this turn: id + ANTHROPIC_* env + subagent model +
     // effective write permission + price deck) was resolved above from the per-turn `model`
     // field or, absent it, the stored default — moved into the task here. For the ambient
@@ -1498,6 +1522,15 @@ pub async fn start_turn(
         };
         // ONE CONTENT-FREE LINE PER TURN in the activity ledger, written when the task ends
         // however it ends, beside the timing record above.
+        // THE TURN'S EGRESS TIER, filed under its job id for the gateway to sign into the
+        // token, and forgotten when the task ends. Scheduled turns take their job's tier
+        // (`closed` unless the entry says otherwise), every client turn `[sandbox]
+        // egress_phone`. See `proxy::tier`.
+        let turn_tier = egress_tier
+            .clone()
+            .unwrap_or_else(|| crate::proxy::wiring::tier_for_origin(&cfg, &origin));
+        let tier_label = turn_tier.label();
+        let _tier = crate::proxy::tier::file_tier(&jid, turn_tier);
         let _activity = crate::activity::TurnRecorder::start(
             crate::activity::global(&cfg),
             jobs.clone(),
@@ -1506,7 +1539,10 @@ pub async fn start_turn(
             &active.id,
             crate::gateway::capability_label(turn_capability(&active)),
             &origin,
-        );
+        )
+        // The tier per turn, in the ledger whatever the flags say (it is what the turn WOULD
+        // be held to; `[proxy] egress` decides whether it is).
+        .with_tier(Some(tier_label));
 
         // Where the driver records the session id each spawned child reports on its first
         // line. THE authority on which sessions this turn owns — the terminal step binds
@@ -3058,6 +3094,17 @@ pub fn app(state: AppState) -> Router {
         // LIVE USAGE AND QUOTA per billing account. Calls a provider only when a scope's
         // snapshot is older than its TTL; there is no timer behind it. See `quota`.
         .route("/jesse/usage", get(jesse_usage))
+        // THE ACTIVITY LEDGER, read back: the content-free lines of a time range (at most
+        // `ACTIVITY_QUERY_CAP`, 10 000, with `truncated`), and the same range as a short
+        // Markdown digest that leads with what failed or was refused. See `activity_query`.
+        .route(
+            "/jesse/activity",
+            get(crate::activity_query::jesse_activity),
+        )
+        .route(
+            "/jesse/activity/digest",
+            get(crate::activity_query::jesse_activity_digest),
+        )
         .route("/jesse/persona", get(jesse_persona))
         .route("/jesse/model", post(jesse_set_model))
         // THE AWAY PROFILE: bridge state the phone can set and that expires by itself. It

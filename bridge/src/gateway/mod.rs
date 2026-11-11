@@ -405,6 +405,54 @@ pub struct TurnSpec {
     /// upstream gets: that is still exactly its row's environment column. For a caller that
     /// runs several turns at once with different values (the containment battery's rows).
     pub env_overlay: BTreeMap<String, String>,
+    /// What the proxies need signed into the token. Default (all empty) with both proxies off,
+    /// which is then byte-for-byte the token this step found.
+    pub proxy: ProxyClaims,
+}
+
+/// The proxy half of a turn's claims.
+#[derive(Debug, Clone, Default)]
+pub struct ProxyClaims {
+    /// The turn's egress tier. `None` signs an empty tier claim (both proxies off).
+    pub tier: Option<crate::proxy::Egress>,
+    /// The model proxy route for the turn's model. Empty when the model proxy is off.
+    pub route: String,
+    /// The registry id the model proxy meters this turn under. Opaque to the gateway: the
+    /// caller supplies it. Empty when the model proxy is off.
+    pub metered: String,
+    /// Open a gateway turn (and mint a token) even when no gateway server is admitted: a proxy
+    /// validates the token. `false` with both proxies off.
+    pub required: bool,
+    /// Whether the tier hides EVERY `egress`-class tool (`[proxy] egress = true`), or only the
+    /// ones granted in the same change that introduced tiers ([`TIER_GATED_TOOLS`]). With
+    /// the egress proxy off, the tools a turn could reach before tiers existed stay exactly
+    /// as they were.
+    pub filter_all_egress: bool,
+}
+
+/// `egress`-class tools that are hidden on any tier that does not admit egress tools EVEN WITH
+/// THE EGRESS PROXY OFF, because they were granted in the change that introduced tiers and on
+/// the strength of them: iMCP's `maps_directions` and `maps_eta` take a free-text origin and
+/// destination that an unattended turn could use as an exfiltration channel. Server, tool.
+pub const TIER_GATED_TOOLS: &[(&str, &str)] = &[("imcp", "maps_directions"), ("imcp", "maps_eta")];
+
+/// Remove from `servers` every tool `tier` does not admit. A no-op when `tier` admits egress
+/// tools. With `all_egress` false only [`TIER_GATED_TOOLS`] are removed.
+pub fn filter_by_tier(servers: &mut [Admitted], tier: &crate::proxy::Egress, all_egress: bool) {
+    if tier.admits_egress_tools() {
+        return;
+    }
+    for a in servers.iter_mut() {
+        let row = a.server.row;
+        let name = a.server.name.clone();
+        a.tools.retain(|tool| {
+            if all_egress {
+                row.class_of(tool) != crate::mcpservers::ToolClass::Egress
+            } else {
+                !TIER_GATED_TOOLS.contains(&(name.as_str(), tool.as_str()))
+            }
+        });
+    }
 }
 
 /// Where a child reaches one server.
@@ -624,13 +672,24 @@ impl Gateway {
                 spec.job_id
             ));
         }
+        let mut spec = spec;
+        if let Some(tier) = &spec.proxy.tier {
+            filter_by_tier(&mut spec.servers, tier, spec.proxy.filter_all_egress);
+        }
         let mut servers: Vec<String> = spec.servers.iter().map(|a| a.server.name.clone()).collect();
         servers.sort();
         let claims = Claims {
             job: spec.job_id.clone(),
             cap: capability_label(spec.capability).to_string(),
             servers,
-            tier: String::new(),
+            tier: spec
+                .proxy
+                .tier
+                .as_ref()
+                .map(|t| t.label().to_string())
+                .unwrap_or_default(),
+            route: spec.proxy.route.clone(),
+            metered: spec.proxy.metered.clone(),
             exp: token::now_secs() + spec.deadline.as_secs() + TOKEN_GRACE_SECS,
         };
         let token = self.key.sign(&claims);
@@ -644,6 +703,7 @@ impl Gateway {
             spec.harness_env_value,
             spec.env_overlay,
             dir.clone(),
+            spec.proxy.tier.clone(),
         ));
         {
             let mut live = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
@@ -769,6 +829,45 @@ impl Gateway {
                 })
             })
             .collect()
+    }
+}
+
+impl crate::proxy::TurnAuthority for Gateway {
+    fn egress_turn(&self, job: &str, token: &str) -> Option<crate::proxy::EgressTurn> {
+        let claims = self.key.verify_signed(token, token::now_secs()).ok()?;
+        if claims.job != job {
+            return None;
+        }
+        let session = self.session(job)?;
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            session.token().as_bytes(),
+            token.as_bytes(),
+        )) {
+            return None;
+        }
+        let tier = session.egress_tier()?.clone();
+        Some(crate::proxy::EgressTurn {
+            job_id: claims.job,
+            tier,
+        })
+    }
+
+    fn model_turn(&self, token: &str, route: &str) -> Option<crate::proxy::ModelTurn> {
+        let claims = self
+            .key
+            .verify_route(token, route, token::now_secs())
+            .ok()?;
+        let session = self.session(&claims.job)?;
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            session.token().as_bytes(),
+            token.as_bytes(),
+        )) {
+            return None;
+        }
+        Some(crate::proxy::ModelTurn {
+            job_id: claims.job,
+            model: claims.metered,
+        })
     }
 }
 
@@ -996,11 +1095,15 @@ pub fn child_config_for_turn(cfg: &crate::Config, rendered: &str, job_id: &str) 
 /// Open the gateway turn a SPAWNED child needs: its servers admitted from the same config and
 /// allowlist its argv was built from, one socket each. `None` when the gateway is off or the
 /// child loads no gateway server. `harness_env_value` is opaque here (see [`TurnSpec`]).
+///
+/// `proxy` is what the caller decided for the proxies ([`crate::proxy::wiring::proxy_claims`]):
+/// the tier, the route and metering id, and whether a token is required with no server.
 pub async fn open_for_child(
     cfg: &crate::Config,
     req: &crate::TurnRequest<'_>,
     harness_env_value: &str,
     deadline: Duration,
+    proxy: ProxyClaims,
 ) -> Result<Option<TurnGuard>, String> {
     let Some(gw) = global(cfg) else {
         return Ok(None);
@@ -1009,10 +1112,13 @@ pub async fn open_for_child(
     let set = crate::McpSet::from_config(req.mcp_config).unwrap_or(crate::McpSet::None);
     let allowed = crate::row_allowed_tools(cfg, req.capability, set);
     let servers = admitted_servers(&cfg.gateway, &rendered, req.capability, allowed)?;
-    if servers.is_empty() {
+    // A turn with no gateway server still needs a token when a proxy is on: the proxies
+    // validate it. With both proxies off this is exactly the early return it always was.
+    if servers.is_empty() && !proxy.required {
         return Ok(None);
     }
     gw.open_turn(TurnSpec {
+        proxy,
         job_id: req.turn_id.to_string(),
         capability: req.capability,
         servers,
@@ -1037,6 +1143,7 @@ pub async fn open_for_probe_child(
     deadline: Duration,
     extra_grants: &str,
     env_overlay: BTreeMap<String, String>,
+    proxy: ProxyClaims,
 ) -> Result<Option<TurnGuard>, String> {
     let Some(gw) = global(cfg) else {
         return Ok(None);
@@ -1048,10 +1155,11 @@ pub async fn open_for_probe_child(
         crate::row_allowed_tools(cfg, req.capability, set)
     );
     let servers = admitted_servers(&cfg.gateway, &rendered, req.capability, &allowed)?;
-    if servers.is_empty() {
+    if servers.is_empty() && !proxy.required {
         return Ok(None);
     }
     gw.open_turn(TurnSpec {
+        proxy,
         job_id: req.turn_id.to_string(),
         capability: req.capability,
         servers,

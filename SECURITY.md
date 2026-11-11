@@ -258,7 +258,8 @@ the four and answers any other request itself with method-not-found (Claude Code
 every server with `server/discover`).
 
 Each turn gets a token: an HMAC-SHA256 over the job id, the capability, the granted server set,
-a tier field (empty) and an expiry of the turn deadline plus 60 s, under a key generated at boot
+the turn's egress tier (0.203.0; see "The model proxy and the egress proxy"), the model proxy
+route and metering id when the model proxy is on, and an expiry of the turn deadline plus 60 s, under a key generated at boot
 and never written down. The unix socket path is the Studio's access control (a `0700` directory
 per turn under `<state_dir>/gw/`, or `[gateway] socket_dir`). The optional TCP listener
 (`[gateway] listen`, off by default and never set on the Studio in this step) checks the token
@@ -272,9 +273,17 @@ is revoked with its session, and the directory is removed; a startup sweep remov
 `<state_dir>/activity/YYYY-MM-DD.jsonl`, `0600`, one line per turn (`kind: "turn"`: job id,
 harness, model id, capability, origin `phone` or `schedule:<id>`, start, end, outcome) and per
 gateway call (`kind: "tool_call"`: job id, server, tool, duration, `ok`, `refused`, `failed` or
-`truncated`, request and response byte counts). Every string field is an identifier or the
-word `_invalid`; no field can hold an argument, a body or a URL path
-(`activity::tests::no_field_of_any_kind_can_carry_content`). Pruned at 90 days.
+`truncated`, request and response byte counts). Since 0.203.0 also `model_call` (job id, route,
+model id, the provider's four token counts, cost in micro-dollars, status), `egress` (job id,
+tier, HOST, port, `read`/`send`, bytes out and in, `allowed`/`refused` and a reason code),
+`vault_write` (job id, vault-relative path, operation; written where the write-lock broker
+grants a lock) and `commit` (job id, hash, file count), and a turn line carries its tier. Every
+string field is an identifier or the word `_invalid` (a path keeps only identifier-shaped
+components); no field can hold an argument, a body, a URL or a header
+(`activity::tests::no_field_of_any_kind_can_carry_content` walks every kind). Pruned at 90 days.
+`GET /jesse/activity?since=&until=` returns at most 10,000 lines (stated in the reply);
+`GET /jesse/activity/digest?since=` and `jesse-bridge activity-digest --since` render the
+overnight digest from the same lines.
 
 ### Residuals
 
@@ -293,6 +302,160 @@ word `_invalid`; no field can hold an argument, a body or a URL path
   the iMCP app before direct turns run with the gateway on, or the first one raises its prompt.
 - **Results are capped per server** (8 MiB, 32 MiB for `browser` and `house`); a larger result
   is withheld as a tool error and recorded `truncated`.
+
+## The model proxy and the egress proxy (0.203.0; off by default)
+
+`[proxy] model = true` and `[proxy] egress = true` make the bridge the route to a model and to
+the open web. Both are off by default and the Studio behaves exactly as before until the flags
+are flipped. Both need `[gateway] enabled = true` (the boot refuses otherwise): the credential a
+child holds is the gateway's turn token, and the proxies validate it. `bridge/src/proxy/` is
+the code.
+
+**On the Studio both are voluntary.** A child that ignores its base URL or its proxy variables
+goes around them, and a child runs as the bridge's own user. The tiers below are advisory until
+the child runs in a pod whose network admits only the bridge; there a NetworkPolicy makes the
+proxies the only route.
+
+### The model proxy
+
+Served on `[proxy] model_listen` (default `127.0.0.1:8767`) under `/model/<route>/`. A child's
+base URL is `<model_child_url>/model/<route>` and its only credential is the turn token, signed
+for that route: a token for one route is a 401 on every other. The proxy checks the token
+(signature, expiry, route, the turn still open), removes the child's `authorization`,
+`x-api-key`, `chatgpt-account-id` and hop-by-hop headers, sets the real credential, forwards the
+body byte for byte, and streams the response back unchanged. It never pools, caches or rewrites
+a prompt.
+
+| Route | Upstream | Credential (read at call time, never logged) |
+|---|---|---|
+| `anthropic-subscription` | `https://api.anthropic.com` | the long-lived token `claude setup-token` prints, from `[proxy] subscription_token_file` or the variable `subscription_token_env`; else the CLI's own stored login (`security find-generic-password -a $USER -s "Claude Code-credentials"`). `Authorization: Bearer`, and `oauth-2025-04-20` added to `anthropic-beta` |
+| `anthropic-api` | `https://api.anthropic.com` | `x-api-key` from the variable `[proxy] anthropic_api_key_env`. Nothing uses it by default |
+| `fireworks` | `https://api.fireworks.ai/inference` (Anthropic and OpenAI surfaces) | the model's own `JESSE_MODEL_*_AUTH_TOKEN` |
+| `local` | `[proxy] local_url` (default `http://127.0.0.1:9100`; an `https://` URL with `[proxy] local_client_cert` presents that client certificate and pins its CA) | the model's own key, if any |
+| `openai-chatgpt` | `https://chatgpt.com/backend-api/codex` | `tokens.access_token` and `tokens.account_id` from Codex's canonical `auth.json` |
+
+**What was measured (2026-11-11).** Claude Code 2.1.322 on the subscription sends its request to
+`ANTHROPIC_BASE_URL` with `Authorization: Bearer <OAuth token>` and an `anthropic-beta` list that
+includes `oauth-2025-04-20`; given `ANTHROPIC_AUTH_TOKEN` it sends that instead, never touches
+its stored login, and drops `oauth-2025-04-20` and `extended-cache-ttl-2025-04-11`. Codex 0.153.4
+with a custom provider (`env_key`, no `requires_openai_auth`) sends its ChatGPT request shape to
+`<base_url>/responses` with the turn token as bearer, no `chatgpt-account-id`, and needs no
+`auth.json`. So both logins are proxied: no `subscription-credential-in-child` residual.
+
+**Metering.** Every `POST` to a messages, responses or completions endpoint writes one
+`model_call` line from the provider's own usage block, streamed or not (Anthropic `message_start`
+and the cumulative `message_delta`; OpenAI `response.completed`; chat completions), costed at the
+registry's four rates. A model whose deck lacks any of the four (input, output, cache write,
+cache read) is refused with `unpriced_model` before anything is sent: never counted as free. A
+declared `[[models]]` entry with no `[models.price]` is unpriced unless it is `local`.
+
+### The egress proxy
+
+A forward proxy (`CONNECT` and absolute-form HTTP) on `[proxy] egress_listen` (default
+`127.0.0.1:8768`). A child gets `HTTPS_PROXY`/`HTTP_PROXY` = `http://<job id>:<turn token>@...`,
+`NO_PROXY` naming only the model proxy (and the gateway's TCP listener when set), and the CA
+certificate in every trust variable below. `fetch_url` on a `direct` turn goes through it with
+the same tier and trusts the CA in process.
+
+- **It resolves DNS itself** and refuses any destination that resolves to a private, loopback,
+  link-local, CGNAT or multicast address, on every tier (`private_address`), connecting to the
+  address it checked so a rebinding answer cannot slip past. LAN services are reached only
+  through gateway tools.
+- **No opaque tunnels.** On `allowlist` and `open-logged` turns it terminates TLS with a
+  per-install CA (`<state_dir>/proxy-ca/`, key `0600` in a `0700` directory, never handed to a
+  child; children get only `<state_dir>/proxy-ca-cert.pem`). A `CONNECT` whose inner stream is
+  not TLS, or whose client refuses the proxy's certificate, is refused (`opaque`) and the log
+  names the client, so a pinned tool fails loudly. On `closed` nothing passes and nothing is
+  terminated.
+- **Read anywhere, send only to known hosts.** On `open-logged` a request is a `read` when it is
+  `GET`/`HEAD`/`OPTIONS` with no body, a path-plus-query of at most `[egress] read_url_max` bytes
+  (512) and a query of at most `[egress] read_query_max` (256); anything else is a `send`, which
+  goes only to `[egress] send_hosts` or the bridge-owned `<state_dir>/egress-send-hosts.json`. A
+  refused send is a 403 whose body tells the agent that sending to that host needs the owner's
+  approval. `allowlist` turns admit only their hosts, reads and sends alike.
+- **Outbound content check** on `allowlist` and `open-logged`, before a request leaves: the
+  URL (percent-decoded), every header but the credential ones, and the body, in raw, base64,
+  base64url, hex and percent-decoded forms of any token over 24 characters, against canaries
+  (`jesse-bridge canary new --path <vault path>`) and an index of hashed 8-word windows of the
+  vault's text (lowercased, links stripped so fetching a link the vault mentions never matches;
+  rebuilt every `[egress] index_interval_secs` and after each bridge commit). A canary, or 3 or
+  more matching windows (`[egress] fingerprint_threshold`), refuses the request (`canary`,
+  `content_match`) and pushes the turn, the host and the reason to the phone, never the content.
+  The check sends nothing anywhere, logs no matched text and calls no model.
+- **The ledger records the host,** never the URL, headers or body. Each inspected exchange is
+  handed to one recorder hook, which records nothing today (the turn record is a later step).
+
+### Tiers
+
+| Tier | Egress proxy | `egress`-class gateway tools |
+|---|---|---|
+| `closed` | nothing | hidden from `tools/list`, refused on call |
+| `allowlist` | only its hosts (exact, or `.suffix`) | hidden, refused |
+| `open-logged` | any public host to read; sends only to the send list | listed |
+
+Scheduled turns are `closed` unless the `[[schedule]]` entry says `egress = "allowlist"` with
+`hosts = [...]` or `egress = "open"` (an open job is named in a boot warning). Phone and other
+client turns take `[sandbox] egress_phone` (default `open-logged`). The bridge's own one-shots
+(titles, diet extraction, vault QA) are `closed`, which their toolsets already are. A job may run
+a non-frontier model (any `local` kind, any Fireworks entry) only on `closed`: the boot fails
+naming the job otherwise. A startup table prints every job's tier; `/health` and each turn's
+ledger line carry the tier.
+
+With `[proxy] egress = false` the gateway hides only the two tools granted alongside tiers,
+iMCP's `maps_directions` and `maps_eta`, on `closed` and `allowlist` turns, so the grant widens
+nothing a scheduled turn could reach before; every other `egress` tool behaves as before.
+
+### Which clients trust the CA, measured (2026-11-11)
+
+| Client | Honours | Does not honour |
+|---|---|---|
+| Claude Code CLI 2.1.322 (`WebFetch`, model traffic) | `NODE_EXTRA_CA_CERTS` | |
+| Codex 0.153.4 | `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE` | |
+| `/usr/bin/curl` 8.7.1 | `SSL_CERT_FILE`, `CURL_CA_BUNDLE` | |
+| `/usr/bin/git` 2.54 | `GIT_SSL_CAINFO` | `SSL_CERT_FILE` |
+| `pip3` (Xcode Python 3.9) | `PIP_CERT`, `REQUESTS_CA_BUNDLE` | `SSL_CERT_FILE` |
+| `npm` (node 22.20) | `NODE_EXTRA_CA_CERTS`, `NPM_CONFIG_CAFILE` | `SSL_CERT_FILE` |
+| `cargo` 1.99 | `CARGO_HTTP_CAINFO` | `SSL_CERT_FILE` |
+| Python `urllib` (Xcode 3.9) | none measured | `SSL_CERT_FILE`: HTTPS through the proxy fails closed |
+| `direct`'s `fetch_url` (reqwest, rustls) | the CA added in process | |
+
+Every one of them is set on a proxied child. No measured client pins certificates. Two do not
+go through the proxy at all and are recorded as residuals.
+
+### What each harness is constrained to on the Studio
+
+| | Claude Code | Codex | direct |
+|---|---|---|---|
+| Model credential in the child | none: turn token only | none: turn token only, no `auth.json` in its home | n/a (in process; its provider is built per turn against the proxy for uniform metering) |
+| `WebFetch` / `fetch_url` | through the egress proxy (measured) | n/a | through the egress proxy (in process) |
+| Shell tools | through the proxy when they honour `HTTPS_PROXY` | the sandboxed shell was observed going DIRECT (residual) | no shell |
+| Gateway `egress` tools | filtered by tier | filtered by tier | filtered by tier |
+
+### Residuals
+
+- **Voluntary on the Studio.** Anything that ignores proxy variables goes direct: Node 22's
+  built-in `fetch` (measured: it ignores `HTTPS_PROXY`), raw sockets, and any tool that clears its
+  environment. A child also runs as the bridge's user, so it can still read the Keychain and
+  `~/.codex/auth.json` from disk if it tries; the proxies keep credentials out of its
+  environment and its home, not out of the user's reach. The pod is the answer to both.
+- **Codex's sandboxed shell went direct.** With `HTTPS_PROXY` on the `codex exec` process, a
+  `curl` its sandboxed shell ran succeeded with no `CONNECT` reaching the recording proxy. Its
+  model and backend traffic did go through the proxy. Until the pod, a Codex shell command is
+  not held to the tier.
+- **Nothing refreshes the stored logins once every turn is proxied.** The subscription route
+  reads the CLI's stored OAuth token at call time, and the ChatGPT route reads `auth.json`; both
+  are refreshed only when a CLI uses its own login. Before flipping `[proxy] model`, put a
+  `claude setup-token` token in `[proxy] subscription_token_file`. Codex's login has no
+  long-lived equivalent; a `codex login` refresh is the operator's.
+- **`codex-write` has no price table** in the deployed TOML, so the model proxy refuses it
+  (`unpriced_model`) until it states four rates.
+- **The bridge's own model calls are not proxied in this step**: the title one-shot, diet
+  extraction and verification, vault QA (CLI children on the routed backend's credential or the
+  CLI's login), the vision helpers (`vision.rs`, the helper's key), hosted transcription
+  (Fireworks and Gemini keys, `speech/hosted.rs`), the model health probes (`health.rs`, each
+  model's key) and the opt-in shadow capture. They are recorded here and in the PR.
+- **The turn token is in the child's environment** (as its model credential and inside
+  `HTTPS_PROXY`). It is scoped to one turn and one route, and dies with the turn.
 
 ## Agent tool allowlist (in-process boundary)
 
@@ -2215,8 +2378,8 @@ Granted and omitted, enumerated live on 2026-08-10 against the running servers:
 
 **The iMessage line above is the 0.73.0 enumeration and is superseded twice over.** The server
 became `imcp` in 0.76.0 (a different, six-tool surface), and in 0.99.0 the grant on it stopped
-being purely local: `maps_search` is granted and it leaves the host. The current enumeration,
-and the egress decision that goes with it, are below — read those, not this bullet.
+being purely local: `maps_search` is granted and it leaves the host (joined since by
+`maps_directions` and `maps_eta`). The current enumeration, and the egress decision that goes with it, are below — read those, not this bullet.
 
 ### The allowlist is the only boundary on the two message servers
 
@@ -2386,12 +2549,13 @@ results on 2026-08-11. Maps touches no local user data, so the app's per-service
 not gate it. So on this server **the advertised surface is not the enabled surface**, and the
 bridge's allowlist — not the app's toggle — is what decides which Maps tools the child reaches.
 
-Of the six tools iMCP advertises, **two are granted**: `messages_fetch` and `maps_search`.
-**Four are not**: `maps_directions`, `maps_explore`, `maps_eta`, `maps_generate`. All six
-carry `readOnlyHint:true`, including the four that are not granted, which is the standing
-reason annotations are not the boundary — and here it is more than a formality, because the
-tool that was granted carries the same hint as the local database reader while behaving
-completely differently.
+Of the six tools iMCP advertises, **four are granted**: `messages_fetch`, `maps_search`,
+`maps_directions` and `maps_eta` (the last two since per-turn egress tiers; see the next
+section). **Two are not**: `maps_explore` and `maps_generate`, because no workflow asked for
+them. All six carry `readOnlyHint:true`, including the two that are not granted, which is the
+standing reason annotations are not the boundary — and here it is more than a formality,
+because the granted Maps tools carry the same hint as the local database reader while
+behaving completely differently.
 
 **The granted tool is `openWorldHint:true`, and that egress channel is ACCEPTED rather than
 mitigated.** `maps_search` leaves the machine for Apple's map services carrying a query
@@ -2401,13 +2565,36 @@ leaves the host, which is a low-bandwidth exfiltration channel. Nothing in 0.99.
 the allowlist cannot inspect a query, and no filter was added. The trade Jeremy accepted on
 2026-08-27 is one search tool's worth of that channel in exchange for the capability, with
 the other four Maps tools withheld to keep the channel as narrow as it can be while the
-capability exists. `maps_directions` was considered and rejected for this change: route
-planning is a separate request nobody has made, and it would widen the same channel for no
-capability the asked-for job needs.
+capability exists. `maps_directions` was considered and rejected for 0.99.0: route planning
+was a separate request nobody had made, and it would have widened the same channel on every
+turn, attended or not. That changed with per-turn egress tiers, below.
 
 The grant is still pinned **as an exact set** in a test rather than guarded by a denylist —
-the permitted set simply grew from one name to two. Any other iMCP tool name, including one a
-future version starts advertising, still fails the build.
+the permitted set grew from one name to two in 0.99.0 and from two to four with tiers. Any
+other iMCP tool name, including one a future version starts advertising, still fails the
+build.
+
+### iMCP's `maps_directions` and `maps_eta` are GRANTED on every harness, classed `egress`
+
+A phone turn can now get drive times and directions from Apple Maps. `mcp__imcp__maps_directions`
+and `mcp__imcp__maps_eta` are granted on Claude Code (`DEFAULT_ALLOWED_TOOLS`), Codex (its
+per-server `enabled_tools`, read from the same list) and `direct` (whose gateway grant is
+the same per-level list filtered by class, and `egress` is permitted at the `write` level that
+list grants them at), and both are classed `egress` in the
+`imcp` row of `bridge/src/mcpservers.rs`, beside `maps_search`.
+
+**They were withheld only because an unattended turn could use their query strings as an
+exfiltration channel** — each takes a free-text origin and destination that leaves the host
+for Apple, out of a child that also reads attacker-authored message bodies. What changed is
+not the tools but which turns hold them. Every turn now carries an egress tier, and the
+gateway (`filter_by_tier` in `bridge/src/gateway/mod.rs`) hides `egress`-class tools on
+`closed` and `allowlist` turns. These two are named in `TIER_GATED_TOOLS`, so they are hidden
+on those tiers **even with the egress proxy off**. Scheduled jobs default to `closed`, so a
+scheduled scan cannot reach them; an `open-logged` phone turn, attended by the person who asked,
+can. On the turns that hold them the channel is the same shape as `maps_search`'s and is
+accepted rather than mitigated.
+
+`maps_explore` and `maps_generate` stay **out**: no workflow asked for them.
 
 **iMCP advertises no send or compose tool at all.** Where `mac-messages-mcp` had
 `tool_send_message` and the allowlist was the only thing holding it back, sending is now
@@ -3154,8 +3341,8 @@ Slack section above.
 The grant is narrower than the main turn's everywhere, and a test asserts it can never be
 wider: the six Gmail READ tools on each Google instance (not Drive, not Calendar — a sent
 reply is mail), Fastmail's three, Slack's six, WhatsApp's eight, and `messages_fetch` on imcp.
-`maps_search` is granted to the main turn and deliberately **not** here: it leaves the host
-carrying a query string, and a brief has no use for a map.
+`maps_search`, `maps_directions` and `maps_eta` are granted to the main turn and deliberately
+**not** here: they leave the host carrying a query string, and a brief has no use for a map.
 
 **That has been true on Claude Code, and became true on Codex only in 0.145.0.** `Codex::command`
 built the child's `enabled_tools` from `cfg.allowed_tools` — the MAIN TURN's list — rather than

@@ -792,7 +792,73 @@ bearer_env = "SLACK_ADAPTER_TOKEN"
   environment), `--max-result-bytes`, then `-- <command> [args…]`. It is how a vendor server
   becomes a pod; point a row at it with an `[mcp.<name>]` override.
 - **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
-  turn and per gateway call, kept 90 days.
+  turn and per gateway call, kept 90 days. Since 0.203.0 also per model call, egress request,
+  vault write-lock grant and bridge commit (see the proxies section below).
+
+### The model proxy and the egress proxy (`[proxy]`, `[egress]`, `[sandbox]`, 0.203.0)
+
+Off by default; both need `[gateway] enabled = true`. SECURITY.md has the posture, the measured
+facts, the CA trust table and the residuals; `src/proxy/` is the code.
+
+```toml
+[proxy]
+model = true            # default false: children keep today's model wiring
+egress = true           # default false: children reach the web directly, as before
+# model_listen = "127.0.0.1:8767"
+# egress_listen = "127.0.0.1:8768"
+# model_child_url = "http://bridge.jesse:8767"   # what a child is told (the cluster's name)
+# egress_child_addr = "bridge.jesse:8768"
+subscription_token_file = "/Users/<you>/.jesse-bridge/claude-setup-token"  # `claude setup-token`
+# subscription_token_env = "CLAUDE_SETUP_TOKEN"  # or a variable; else the CLI's stored login
+# anthropic_api_key_env = "ANTHROPIC_API_KEY"   # the anthropic-api route (unused by default)
+# local_url = "http://127.0.0.1:9100"           # or https://... with local_client_cert
+# local_client_cert = "local"                   # a [gateway.client_certs] entry
+# codex_auth_file = "/Users/<you>/.codex/auth.json"
+
+[egress]
+send_hosts = ["api.open-meteo.com"]   # where a `send` may go; reads go anywhere public
+# read_url_max = 512
+# read_query_max = 256
+# index_interval_secs = 900
+# fingerprint_threshold = 3
+
+[sandbox]
+egress_phone = "open-logged"          # or "closed"
+
+[[schedule]]
+id = "overnight-currency"
+# ...
+egress = "allowlist"                  # "closed" (the default) | "allowlist" | "open"
+hosts = ["www.ecb.europa.eu", ".frankfurter.dev"]
+```
+
+- **Rollback** is `model = false` / `egress = false` and a restart: children are spawned exactly
+  as before. Neither flag moves `capability_args`.
+- **The model proxy** serves `/model/<route>/` for `anthropic-subscription`, `anthropic-api`,
+  `fireworks`, `local` and `openai-chatgpt`. A child's base URL points there and its credential
+  is the turn token; Codex gets a custom provider and no `auth.json`. Every metered call is a
+  `model_call` line; a model without a four-rate price deck is refused (`unpriced_model`).
+- **The egress proxy** is a forward proxy authenticated by `job:turn-token`. It refuses private
+  destinations on every tier, terminates TLS on `allowlist` and `open-logged` with the
+  per-install CA (`<state_dir>/proxy-ca/`), lets a `read` go to any public host and a `send` only
+  to the send list (`[egress] send_hosts` plus `<state_dir>/egress-send-hosts.json`), checks
+  outbound content against canaries and vault fingerprints, and writes one `egress` line per
+  request with the host only.
+- **Canaries:** `jesse-bridge canary new --path <vault-relative path>` writes one note with a
+  marker and records it in `<state_dir>/canaries.json` (`0600`); it never prints the marker.
+- **Tiers:** scheduled jobs are `closed` unless their entry says otherwise, phone turns take
+  `[sandbox] egress_phone`, the bridge's one-shots are `closed`. A local or Fireworks `model` on a
+  scheduled job needs a `closed` tier, or the boot fails naming the job. The boot prints every
+  job's tier; `/health` lists each running turn's tier under `proxy.turn_tiers`.
+- **The activity digest:** `GET /jesse/activity?since=<rfc3339>[&until=]` (bearer, at most
+  10,000 lines, the cap stated in the reply), `GET /jesse/activity/digest?since=` (Markdown) and
+  `jesse-bridge activity-digest --since <rfc3339> [--until] [--state-dir]` render the overnight
+  report: each scheduled job with its tier, model, harness, outcome, tools per server, egress
+  hosts, model cost, paths written and commits, then one line per phone turn.
+- **Live checks:** `cargo test --test proxy_live -- --ignored --nocapture --test-threads 1`
+  runs one real call per route through the proxy and compares the ledger with the CLI's own
+  usage. `K04_FP_VAULT=... K04_FP_URLS=... [K04_FP_REPLAY=1] cargo test --lib
+  false_positive_rate -- --ignored --nocapture` measures the content check's false positives.
 
 ### Coding agents on the cluster (`[devjob]`, 0.186.0)
 

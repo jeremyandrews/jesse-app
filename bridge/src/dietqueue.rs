@@ -246,7 +246,16 @@ pub async fn append_verified_entries(
         snapshot.rollback();
         return Err(e);
     }
-    if let Err(e) = commit_diet_logs(vault, &date, &commit_stamp_in(zone)).await {
+    let ledger = crate::activity::global(cfg);
+    if let Err(e) = commit_diet_logs(
+        vault,
+        &date,
+        &commit_stamp_in(zone),
+        ledger.as_deref(),
+        DIET_QUEUE_JOB,
+    )
+    .await
+    {
         snapshot.rollback();
         return Err(e);
     }

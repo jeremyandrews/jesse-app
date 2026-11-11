@@ -90,6 +90,32 @@ pub struct TaskRun {
     /// driver that submits to something with a stream fills them (the `bridge` driver);
     /// `None` everywhere else, and `None` for one it could not observe. See `eval/README.md`.
     pub latency: Latency,
+    /// The scratch bridge's activity ledger and this attempt's job ids, for `ledger_no_egress`.
+    /// Only the `bridge` driver has one; `None` everywhere else, and the assertion FAILS on
+    /// `None` rather than passing for want of evidence.
+    pub ledger: Option<LedgerEvidence>,
+}
+
+/// What the `bridge` driver hands the assertion engine about the scratch bridge's activity
+/// ledger (`<state_dir>/activity/YYYY-MM-DD.jsonl`).
+///
+/// **CAPTURED, NOT POINTED AT.** The scratch state dir is a temp dir removed when the bridge
+/// is stopped, which is before any assertion runs, so the driver reads every day file AFTER
+/// the bridge process has exited (nothing can append any more) and BEFORE the dir goes, and
+/// carries the lines here. They are content free by the ledger's construction (identifiers,
+/// enumerations, counts, hosts; never a URL or a body), so they are also persisted beside the
+/// transcript as `<out>/ledgers/<id>.jsonl`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerEvidence {
+    /// The job id of every turn the attempt submitted (`POST /jesse` → `job_id`), in order.
+    pub job_ids: Vec<String>,
+    /// Whether the scratch bridge's egress proxy was ON (`/health` → `proxy.egress`). `None`
+    /// when the bridge did not say. With it off no `egress` line can ever be written, so an
+    /// empty ledger would prove nothing, and `ledger_no_egress` refuses to pass on it.
+    pub egress_proxy: Option<bool>,
+    /// The ledger's lines, every day file in name order, or why they could not be read. A
+    /// ledger directory that does not exist (nothing was recorded) is `Ok` and empty.
+    pub lines: Result<Vec<String>, String>,
 }
 
 /// Submit-relative turn latencies, in milliseconds.
@@ -118,6 +144,7 @@ impl TaskRun {
             lines: Vec::new(),
             error: Some(reason.into()),
             latency: Latency::default(),
+            ledger: None,
         }
     }
 
@@ -136,6 +163,7 @@ impl TaskRun {
             lines,
             error: None,
             latency: Latency::default(),
+            ledger: None,
         }
     }
 }

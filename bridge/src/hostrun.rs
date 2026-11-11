@@ -1687,7 +1687,10 @@ async fn write_report(
     let abs = notes_root.join(rel);
     let turn = format!("hostrun:{run_id}");
     let key = LockKey::Path(resolve_lock_path(&abs, "/"));
-    if !broker.acquire_direct(&key, &turn, "report").await {
+    if !broker
+        .acquire_direct_op(&key, &turn, "report", crate::activity::VaultOp::Write)
+        .await
+    {
         return Err(format!("the write lock on {rel} was not free"));
     }
     let written = write_atomic(&abs, text.as_bytes());

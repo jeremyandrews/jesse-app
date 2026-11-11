@@ -8693,6 +8693,7 @@ async fn today_a_tap_during_a_turn_parks_reads_back_and_replays_at_turn_end() {
             tool_use_id: "call-1".into(),
             target: Some(Some(day.to_string_lossy().into_owned())),
             git: false,
+            tool: None,
         })
         .await;
     assert!(held.allow, "the turn holds the day file's lock");

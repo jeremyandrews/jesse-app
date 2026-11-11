@@ -339,11 +339,23 @@ fn score_attempt(
             &run.answer,
         );
     }
+    // The scratch bridge's activity ledger, kept beside the transcript: it is content free by
+    // construction, and it is the evidence `ledger_no_egress` graded.
+    if let Some(Ok(lines)) = run.ledger.as_ref().map(|l| &l.lines) {
+        let dir = cfg.out_dir.join("ledgers");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut body = lines.join("\n");
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        let _ = std::fs::write(dir.join(format!("{}{suffix}.jsonl", task.id)), body);
+    }
     let (passed, assertion_results) = eval_all(
         &task.assertions,
         parsed,
         &workspace.dir,
         task.persona.as_ref(),
+        run.ledger.as_ref(),
     );
     // A harness error (couldn't even run) is not a legitimate pass.
     let passed = passed && run.error.is_none();

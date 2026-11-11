@@ -2172,7 +2172,11 @@ async fn write_report(
         let rel = report_rel_path(date, slug, |p| sink.notes_root.join(p).exists());
         let abs = sink.notes_root.join(&rel);
         let key = LockKey::Path(resolve_lock_path(&abs, "/"));
-        if !sink.broker.acquire_direct(&key, &turn, "report").await {
+        if !sink
+            .broker
+            .acquire_direct_op(&key, &turn, "report", crate::activity::VaultOp::Write)
+            .await
+        {
             return Err(format!("the write lock on {rel} was not free"));
         }
         // Taken between choosing the name and locking it: choose again.

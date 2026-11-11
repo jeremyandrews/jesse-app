@@ -66,7 +66,7 @@
 //! available; a model that is unconfigured or never turns healthy makes the whole cell NOT
 //! RUN, with the reason, rather than a column of failures.
 
-use super::{BoxFuture, Driver, Latency, PreparedWorkspace, TaskRun};
+use super::{BoxFuture, Driver, Latency, LedgerEvidence, PreparedWorkspace, TaskRun};
 use crate::suite::{Task, Workspace};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -95,8 +95,45 @@ pub trait RunningBridge {
     fn pid(&self) -> Option<u32>;
     /// The last part of the bridge's log, for a harness error.
     fn log_tail(&self) -> String;
-    /// Tear it down. For [`Spawned`], by the PID recorded at spawn.
-    fn stop(self: Box<Self>) -> Result<(), String>;
+    /// Tear it down. For [`Spawned`], by the PID recorded at spawn. Returns what the bridge
+    /// left behind that a grade needs and that would otherwise go with it (its activity
+    /// ledger, read once the process has exited and before its scratch dir is removed).
+    fn stop(self: Box<Self>) -> Result<Leftovers, String>;
+}
+
+/// What a stopped bridge leaves for the grade.
+#[derive(Debug, Default)]
+pub struct Leftovers {
+    /// The activity ledger's lines (`<state_dir>/activity/*.jsonl`, in day order), or why
+    /// they could not be read. `None` for a target that has no ledger to offer.
+    pub activity: Option<Result<Vec<String>, String>>,
+}
+
+/// Every line of every `*.jsonl` day file under `dir`, files in name (= date) order. A
+/// directory that does not exist means nothing was recorded, which is an empty ledger.
+pub fn read_activity(dir: &Path) -> Result<Vec<String>, String> {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("could not list the activity ledger: {e}")),
+    };
+    let mut files: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    for f in files {
+        let body = std::fs::read_to_string(&f)
+            .map_err(|e| format!("could not read an activity day file: {e}"))?;
+        out.extend(
+            body.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string),
+        );
+    }
+    Ok(out)
 }
 
 /// Where a bridge comes from. One implementation today ([`Spawned`]); a remote target that
@@ -311,7 +348,7 @@ impl RunningBridge for SpawnedBridge {
         let lines: Vec<&str> = body.lines().collect();
         redact_home(&lines[lines.len().saturating_sub(15)..].join("\n"))
     }
-    fn stop(mut self: Box<Self>) -> Result<(), String> {
+    fn stop(mut self: Box<Self>) -> Result<Leftovers, String> {
         // By the RECORDED PID: SIGTERM first so the bridge can reap its own children, then
         // SIGKILL if it has not exited within ten seconds. `kill` with a constant argv.
         let _ = Command::new("kill")
@@ -336,7 +373,11 @@ impl RunningBridge for SpawnedBridge {
         if !self.keep_sessions {
             cleanup_sessions(&self.vault);
         }
-        Ok(())
+        // AFTER the exit (nothing can append now) and BEFORE `scratch` drops with `self`.
+        let activity = read_activity(&self.scratch.path().join("state").join("activity"));
+        Ok(Leftovers {
+            activity: Some(activity),
+        })
     }
 }
 
@@ -425,11 +466,11 @@ impl BridgeDriver {
             .map_err(|e| NotRun(format!("could not start a runtime: {e}")))?;
         let outcome = rt.block_on(async {
             let client = http_client()?;
-            let version = wait_ready(&client, &*running, Duration::from_secs(60)).await?;
+            let health = wait_ready(&client, &*running, Duration::from_secs(60)).await?;
             let harness = wait_model(&client, &*running, &model, model_wait).await?;
             Ok::<ModelInfo, String>(ModelInfo {
                 harness,
-                bridge_version: version,
+                bridge_version: version_of(&health),
             })
         });
         let tail = running.log_tail();
@@ -460,23 +501,41 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("could not build the HTTP client: {e}"))
 }
 
-/// Poll `/health` until it answers 200; return the bridge's version.
+/// The bridge's version from a `/health` body.
+fn version_of(health: &Value) -> String {
+    health
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// The `proxy` block of an authenticated `/health` body, without the per-turn tiers: the two
+/// flags, the listeners and the phone tier. `Null` from a bridge that has no proxies.
+fn proxy_of(health: &Value) -> Value {
+    match health.get("proxy") {
+        Some(Value::Object(m)) => Value::Object(
+            m.iter()
+                .filter(|(k, _)| k.as_str() != "turn_tiers")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        _ => Value::Null,
+    }
+}
+
+/// Poll `/health` until it answers 200; return its body.
 async fn wait_ready(
     client: &reqwest::Client,
     b: &dyn RunningBridge,
     limit: Duration,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let deadline = Instant::now() + limit;
     let url = format!("{}/health", b.base_url());
     loop {
         if let Ok(r) = client.get(&url).bearer_auth(b.token()).send().await {
             if r.status().is_success() {
-                let v: Value = r.json().await.unwrap_or(Value::Null);
-                return Ok(v
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string());
+                return Ok(r.json().await.unwrap_or(Value::Null));
             }
         }
         if Instant::now() >= deadline {
@@ -670,6 +729,8 @@ async fn read_stream(
 
 /// One turn's outcome.
 struct TurnOutcome {
+    /// The job id `POST /jesse` returned, which is the id the ledger files the turn under.
+    job_id: String,
     stream: StreamRecord,
     result: Value,
     result_ms: u64,
@@ -743,6 +804,7 @@ impl BridgeDriver {
         };
         let result_ms = stream.latency.result_ms.unwrap_or(polled_ms).min(polled_ms);
         Ok(TurnOutcome {
+            job_id: job,
             stream,
             result,
             result_ms,
@@ -751,12 +813,22 @@ impl BridgeDriver {
 
     async fn drive(&self, task: &Task, b: &dyn RunningBridge) -> Result<TaskRun, String> {
         let client = http_client()?;
-        wait_ready(&client, b, Duration::from_secs(60)).await?;
+        let health = wait_ready(&client, b, Duration::from_secs(60)).await?;
         wait_model(&client, b, &self.model, self.model_wait).await?;
+        let proxy = proxy_of(&health);
+        let mut evidence = LedgerEvidence {
+            job_ids: Vec::new(),
+            egress_proxy: proxy.get("egress").and_then(|e| e.as_bool()),
+            // Filled from the stopped bridge's leftovers by `run_task`.
+            lines: Ok(Vec::new()),
+        };
 
         let conversation_id = uuid_v4()?;
         let mode = task.mode.clone().unwrap_or_else(|| "ask".to_string());
-        let mut lines: Vec<String> = Vec::new();
+        // The proxies this bridge runs with, for a reader of the transcript: flags, listeners
+        // and the phone tier, never a token.
+        let mut lines: Vec<String> =
+            vec![json!({"type": "bridge_proxy", "proxy": proxy}).to_string()];
         let mut session_id: Option<String> = None;
         let mut first_latency: Option<Latency> = None;
         let mut total_ms = 0u64;
@@ -780,6 +852,7 @@ impl BridgeDriver {
                 }
             }
             let out = self.turn(&client, b, body).await?;
+            evidence.job_ids.push(out.job_id.clone());
             total_ms += out.result_ms;
             let mut lat = out.stream.latency;
             lat.result_ms = Some(out.result_ms);
@@ -793,7 +866,7 @@ impl BridgeDriver {
             lines.extend(turn_lines(i, &out));
             let status = out.result.get("status").and_then(|s| s.as_str());
             if status != Some("done") {
-                return Ok(finish(
+                let mut run = finish(
                     lines,
                     total_ms,
                     first_latency.unwrap_or_default(),
@@ -806,15 +879,14 @@ impl BridgeDriver {
                             .map(|e| e.to_string())
                             .unwrap_or_default()
                     )),
-                ));
+                );
+                run.ledger = Some(evidence);
+                return Ok(run);
             }
         }
-        Ok(finish(
-            lines,
-            total_ms,
-            first_latency.unwrap_or_default(),
-            None,
-        ))
+        let mut run = finish(lines, total_ms, first_latency.unwrap_or_default(), None);
+        run.ledger = Some(evidence);
+        Ok(run)
     }
 }
 
@@ -949,7 +1021,17 @@ impl Driver for BridgeDriver {
             let tail = running.log_tail();
             let stopped = running.stop();
             match (outcome, stopped) {
-                (Ok(run), Ok(())) => run,
+                (Ok(mut run), Ok(left)) => {
+                    if let Some(ev) = run.ledger.as_mut() {
+                        ev.lines = left.activity.unwrap_or_else(|| {
+                            Err(format!(
+                                "the {} bridge target keeps no activity ledger",
+                                self.target.kind()
+                            ))
+                        });
+                    }
+                    run
+                }
                 (Ok(mut run), Err(e)) => {
                     run.error
                         .get_or_insert(format!("the bridge did not stop cleanly: {e}"));
@@ -1139,6 +1221,7 @@ mod tests {
                 "usage": {"input_tokens": 100, "output_tokens": 20},
             }),
             result_ms: 1234,
+            job_id: "j1".into(),
         };
         let lines = turn_lines(0, &out);
         let t = crate::transcript::parse(&lines);
@@ -1154,6 +1237,7 @@ mod tests {
             stream: StreamRecord::default(),
             result: json!({"status": "failed", "error": "boom"}),
             result_ms: 10,
+            job_id: "j1".into(),
         };
         let t = crate::transcript::parse(&turn_lines(0, &out));
         assert!(!t.completed);
@@ -1209,9 +1293,22 @@ mod tests {
         fn log_tail(&self) -> String {
             String::new()
         }
-        fn stop(self: Box<Self>) -> Result<(), String> {
+        fn stop(self: Box<Self>) -> Result<Leftovers, String> {
             self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
+            // What a real bridge would have filed for the two jobs this fake hands out, plus
+            // a line for a job that is not the attempt's.
+            let line = |job: &str, kind: &str| {
+                json!({"kind": kind, "v": 1, "job_id": job, "host": "h", "port": 443,
+                       "verdict": "refused", "reason": "tier"})
+                .to_string()
+            };
+            Ok(Leftovers {
+                activity: Some(Ok(vec![
+                    line("j1", "egress"),
+                    line("j2", "turn"),
+                    line("other", "egress"),
+                ])),
+            })
         }
     }
 
@@ -1274,7 +1371,7 @@ mod tests {
                             &mut s,
                             "200 OK",
                             "application/json",
-                            r#"{"ok":true,"version":"9.9.9"}"#,
+                            r#"{"ok":true,"version":"9.9.9","proxy":{"model":true,"egress":true,"egress_phone":"closed","turn_tiers":[{"job_id":"j0","tier":"closed"}]}}"#,
                         ),
                         "/jesse/models" => reply(
                             &mut s,
@@ -1384,6 +1481,50 @@ mod tests {
         assert_eq!(
             crate::transcript::parse(&run.lines).final_answer.as_deref(),
             Some("second turn, session sess-1")
+        );
+        // The ledger evidence: both turns' job ids, the proxy flag from /health, and the
+        // lines the stopped bridge left, captured before its scratch dir went.
+        let ev = run
+            .ledger
+            .as_ref()
+            .expect("the bridge driver always carries evidence");
+        assert_eq!(ev.job_ids, ["j1", "j2"]);
+        assert_eq!(ev.egress_proxy, Some(true));
+        assert_eq!(ev.lines.as_ref().unwrap().len(), 3);
+        let proxy_line = run
+            .lines
+            .iter()
+            .find(|l| l.contains("\"bridge_proxy\""))
+            .expect("a bridge_proxy line");
+        assert!(
+            proxy_line.contains("\"egress_phone\":\"closed\""),
+            "{proxy_line}"
+        );
+        assert!(!proxy_line.contains("turn_tiers"), "{proxy_line}");
+        let graded = crate::assertions::eval_assertion(
+            &crate::suite::Assertion::LedgerNoEgress,
+            &run.transcript,
+            ws.path(),
+            None,
+            run.ledger.as_ref(),
+        );
+        assert!(graded.passed, "{}", graded.detail);
+        assert!(graded.detail.contains("1 refused"), "{}", graded.detail);
+        assert!(graded.detail.contains("other jobs"), "{}", graded.detail);
+    }
+
+    #[test]
+    fn the_activity_ledger_is_read_in_day_order_and_a_missing_one_is_empty() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(read_activity(&d.path().join("activity")), Ok(vec![]));
+        let a = d.path().join("activity");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("2026-11-11.jsonl"), "{\"n\":2}\n\n").unwrap();
+        std::fs::write(a.join("2026-11-10.jsonl"), "{\"n\":1}\n").unwrap();
+        std::fs::write(a.join("notes.txt"), "ignored").unwrap();
+        assert_eq!(
+            read_activity(&a).unwrap(),
+            vec!["{\"n\":1}".to_string(), "{\"n\":2}".to_string()]
         );
     }
 

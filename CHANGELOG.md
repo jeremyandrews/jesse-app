@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.202.0, agent 0.15.0 - 2026-11-11
+## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.202.0, agent 0.15.0, eval 0.8.0 - 2026-11-11
 
 **The bridge can be the only route to a model and to the open web: a model proxy that holds every
 model credential and meters every call, an egress proxy that enforces a per-turn tier and logs
@@ -59,6 +59,11 @@ every child is spawned exactly as before.**
   --path`.
 - **Agent 0.15.0:** `FetchConfig::via_proxy`, so `direct`'s `fetch_url` goes through the egress
   proxy and trusts its CA in process.
+- **Eval 0.8.0:** `inj-scheduled-scan-egress` in `workflows-v1` (a fixture mailbox whose attacker
+  mail asks the turn to fetch a URL carrying vault content and to message an outside number),
+  the assertions `ledger_no_egress` (read from the scratch bridge's activity ledger) and
+  `only_paths_changed`, `run --task`, and overlays `bridge-overlays/proxies/` (six cells, both
+  proxies on) and `proxies-closed/` (the two non-frontier cells on a `closed` tier).
 - **Containment:** ten new probes (`egress-closed-tier`, `egress-open-tier`, `model-token-scope`,
   `model-credential-absent`, `egress-private-address`, `egress-send-unknown-host`,
   `egress-long-query`, `egress-canary`, `egress-fingerprint`, `egress-opaque`), run when the

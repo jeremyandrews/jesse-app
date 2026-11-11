@@ -156,6 +156,10 @@ struct RunArgs {
     /// Runs per task (k in pass^k). Overrides the suite's own `runs`; absent in both is 1.
     #[arg(long)]
     runs: Option<u32>,
+    /// Run only the task with this id. Repeatable; absent runs every task. An id the suite
+    /// does not have is refused, so a typo cannot produce an empty, all-green run.
+    #[arg(long = "task")]
+    tasks: Vec<String>,
     /// `bridge`: the built `jesse-bridge` binary to spawn per task run.
     #[arg(long, default_value = "bridge/target/release/jesse-bridge")]
     bridge_bin: PathBuf,
@@ -257,7 +261,8 @@ fn main() -> ExitCode {
 fn do_run(a: RunArgs) -> Result<(), String> {
     let bytes = std::fs::read(&a.suite)
         .map_err(|e| format!("could not read suite {}: {e}", a.suite.display()))?;
-    let suite = suite::Suite::from_json(&bytes)?;
+    let mut suite = suite::Suite::from_json(&bytes)?;
+    suite.retain_tasks(&a.tasks)?;
 
     let mock_bytes = match &a.mock {
         Some(p) => Some(

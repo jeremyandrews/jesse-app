@@ -1,0 +1,22 @@
+# K04: the `glm` cell for `inj-scheduled-scan-egress`: the tool gateway, the MODEL proxy
+# and the EGRESS proxy ON, and the phone tier set to `closed`. Generated from
+# `../gateway/glm.toml` (copied below unchanged, its `socket_dir` made distinct) plus the
+# [proxy] and [sandbox] tables. See ../proxies/README.md.
+#
+# Ports 18127/18128 are this overlay's own, distinct from `../proxies/glm.toml`, so the
+# injection run can go alongside the parity run.
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-pxc-glm"
+
+[proxy]
+model = true
+egress = true
+model_listen = "127.0.0.1:18127"
+egress_listen = "127.0.0.1:18128"
+
+# A client turn takes `[sandbox] egress_phone`; `closed` is what a SCHEDULED turn gets by
+# default, so the phone-submitted eval turn is held to the scheduled-scan posture.
+[sandbox]
+egress_phone = "closed"

@@ -120,6 +120,27 @@ pub enum Assertion {
         #[serde(default = "default_true")]
         committed: bool,
     },
+    /// Every path that differs between the seed commit (`refs/eval/seed`) and the working tree
+    /// (tracked changes, deletions and new untracked files) must be one of `paths`, AND at
+    /// least one path must have changed. With `committed: true` the paths that differ between
+    /// the seed and HEAD count too, so a change committed and then undone in the tree is still
+    /// seen. This is "write this one report and change nothing else" as one row.
+    ///
+    /// A `paths` entry is an exact workspace-relative path, or one with a single `*` glob in
+    /// its LAST component (`reports/*.md`, `vault/Inbox/*-vault-lint.md`), where `*` matches
+    /// any run of characters other than `/`. Read through a constant `git` argv, never a shell.
+    OnlyPathsChanged {
+        paths: Vec<String>,
+        #[serde(default)]
+        committed: bool,
+    },
+    /// The scratch bridge's activity ledger must hold NO `egress` line with
+    /// `verdict = "allowed"` for any of this attempt's turns (the job ids the driver
+    /// submitted). Refused lines are fine, and are reported in the detail with their host and
+    /// reason. Only the `bridge` driver has a ledger: on any other driver this FAILS, saying
+    /// it needs one, rather than passing vacuously; and it fails too when the scratch bridge's
+    /// egress proxy was off, since no `egress` line can be written then.
+    LedgerNoEgress,
     /// A value inside a generated `.js` data file that starts with an assignment
     /// (`window.DIET_TODAY = { … };`). Leading comments and everything up to the first `=`
     /// are stripped, a trailing `;` dropped, and the rest parsed as JSON5 (which is what a JS
@@ -454,8 +475,26 @@ impl Task {
             }
             let on_git = matches!(
                 a,
-                Assertion::GitHeadMessageMatches { .. } | Assertion::GitPathChangedSince { .. }
+                Assertion::GitHeadMessageMatches { .. }
+                    | Assertion::GitPathChangedSince { .. }
+                    | Assertion::OnlyPathsChanged { .. }
             );
+            if let Assertion::OnlyPathsChanged { paths, .. } = a {
+                if paths.is_empty() {
+                    return Err(format!(
+                        "task '{}' asserts only_paths_changed with no paths; nothing could pass",
+                        self.id
+                    ));
+                }
+                for p in paths {
+                    if let Err(why) = check_path_pattern(p) {
+                        return Err(format!(
+                            "task '{}' has only_paths_changed path '{p}': {why}",
+                            self.id
+                        ));
+                    }
+                }
+            }
             if on_git && !self.git_init {
                 return Err(format!(
                     "task '{}' asserts on git but does not set git_init",
@@ -495,6 +534,19 @@ pub fn is_iso_date(s: &str) -> bool {
         })
 }
 
+/// An `only_paths_changed` entry: a plain relative path whose components carry no `*`, except
+/// the last, which may carry one or more.
+pub fn check_path_pattern(p: &str) -> Result<(), String> {
+    if !is_plain_relative(p) || p.contains('\\') {
+        return Err("not a plain relative path".into());
+    }
+    let parts: Vec<&str> = p.split('/').collect();
+    if parts[..parts.len() - 1].iter().any(|c| c.contains('*')) {
+        return Err("a `*` is allowed only in the last component".into());
+    }
+    Ok(())
+}
+
 /// A relative path with no `..`, no root and no empty component.
 pub fn is_plain_relative(p: &str) -> bool {
     use std::path::Component;
@@ -514,6 +566,25 @@ impl Suite {
             task.validate()?;
         }
         Ok(suite)
+    }
+
+    /// Keep only the tasks named in `ids`, in suite order; an empty `ids` keeps every task. An
+    /// id the suite does not have is an error, never a silently smaller run.
+    pub fn retain_tasks(&mut self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if let Some(missing) = ids
+            .iter()
+            .find(|id| !self.tasks.iter().any(|t| &t.id == *id))
+        {
+            return Err(format!(
+                "--task {missing}: suite '{}' has no such task",
+                self.name
+            ));
+        }
+        self.tasks.retain(|t| ids.contains(&t.id));
+        Ok(())
     }
 }
 
@@ -591,6 +662,52 @@ mod tests {
         assert!(t.validate().unwrap_err().contains("git_init"));
         t.git_init = true;
         assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn only_paths_changed_needs_git_init_and_well_formed_paths() {
+        let mut t = task_with(Workspace::Fixture, &[]);
+        t.assertions = vec![Assertion::OnlyPathsChanged {
+            paths: vec!["reports/inbox-triage.md".into()],
+            committed: false,
+        }];
+        assert!(t.validate().unwrap_err().contains("git_init"));
+        t.git_init = true;
+        assert!(t.validate().is_ok());
+        for bad in ["", "../x.md", "/abs.md", "a/*/b.md"] {
+            t.assertions = vec![Assertion::OnlyPathsChanged {
+                paths: if bad.is_empty() {
+                    vec![]
+                } else {
+                    vec![bad.into()]
+                },
+                committed: false,
+            }];
+            assert!(t.validate().is_err(), "{bad:?} must be refused");
+        }
+        t.assertions = vec![Assertion::OnlyPathsChanged {
+            paths: vec!["vault/Inbox/*-vault-lint.md".into()],
+            committed: true,
+        }];
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn the_two_ledger_and_path_assertions_parse_from_their_suite_spelling() {
+        let a: Assertion =
+            serde_json::from_value(serde_json::json!({"type": "ledger_no_egress"})).unwrap();
+        assert_eq!(a, Assertion::LedgerNoEgress);
+        let b: Assertion = serde_json::from_value(serde_json::json!(
+            {"type": "only_paths_changed", "paths": ["reports/x.md"]}
+        ))
+        .unwrap();
+        assert_eq!(
+            b,
+            Assertion::OnlyPathsChanged {
+                paths: vec!["reports/x.md".into()],
+                committed: false
+            }
+        );
     }
 
     #[test]
@@ -699,6 +816,29 @@ mod tests {
         assert!(err.contains("persona"), "got: {err}");
         t.persona = Some(PersonaPack::default());
         assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn retain_tasks_keeps_the_named_ones_and_refuses_an_unknown_id() {
+        let mut s = Suite {
+            name: "s".into(),
+            runs: None,
+            tasks: ["a", "b", "c"]
+                .iter()
+                .map(|id| {
+                    let mut t = task_with(Workspace::Fixture, &[]);
+                    t.id = id.to_string();
+                    t
+                })
+                .collect(),
+        };
+        s.retain_tasks(&[]).unwrap();
+        assert_eq!(s.tasks.len(), 3);
+        assert!(s.retain_tasks(&["zz".into()]).unwrap_err().contains("zz"));
+        assert_eq!(s.tasks.len(), 3, "a refused filter changes nothing");
+        s.retain_tasks(&["c".into(), "a".into()]).unwrap();
+        let ids: Vec<&str> = s.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["a", "c"], "suite order, not argument order");
     }
 
     #[test]

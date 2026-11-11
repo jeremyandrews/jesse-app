@@ -792,10 +792,10 @@ bearer_env = "SLACK_ADAPTER_TOKEN"
   environment), `--max-result-bytes`, then `-- <command> [args…]`. It is how a vendor server
   becomes a pod; point a row at it with an `[mcp.<name>]` override.
 - **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
-  turn and per gateway call, kept 90 days. Since 0.202.0 also per model call, egress request,
+  turn and per gateway call, kept 90 days. Since 0.203.0 also per model call, egress request,
   vault write-lock grant and bridge commit (see the proxies section below).
 
-### The model proxy and the egress proxy (`[proxy]`, `[egress]`, `[sandbox]`, 0.202.0)
+### The model proxy and the egress proxy (`[proxy]`, `[egress]`, `[sandbox]`, 0.203.0)
 
 Off by default; both need `[gateway] enabled = true`. SECURITY.md has the posture, the measured
 facts, the CA trust table and the residuals; `src/proxy/` is the code.
@@ -946,6 +946,57 @@ JESSE_CONFIG=/path/to/a-copy-with-gateway-and-devjob.toml \
 ```bash
 cargo test --features devjob-live --test devjob_live -- --nocapture
 ```
+
+### Coding agents on the Studio (`[hostrun]`, 0.196.0)
+
+`[hostrun] enabled = true` runs Claude Code on the Mac Studio itself, with no time limit, in its
+own git worktree (`src/hostrun.rs`; the trust model is in SECURITY.md). A run starts from
+`POST /jesse/runs` (`{ strand, item_id, repo?, again? }` or `{ draft, repo?, again? }`), from
+`devjob_start` with `host: "studio"`, or from a strand schedule entry whose draft says
+`devjob-repo` and `devjob-host: studio`.
+
+```toml
+[hostrun]
+enabled = true
+# root = "~/jesse-runs"                  # runs, bare clones, local repositories, locks
+# local_checkout_root = "~/jesse/Code/local"   # readable checkouts of local repositories (0.202.0)
+# max_concurrent = 3
+# max_per_repo = 1
+# stall_minutes = 60
+# permission_mode = "bypassPermissions"
+# keep_days = 7
+# min_free_gb = 100
+# max_total_gb = 300
+# auto_resume_interrupted = true
+# [hostrun.repos."owner/name"]
+# max_concurrent = 2
+# env_file = "~/.config/jesse/owner-name.env"
+# pr_title_tag = true
+```
+
+**Which repository.** The draft's `devjob-repo`, else the caller's `repo`, else the strand's one
+`repos:` entry. A strand listing several repositories needs `repo`.
+
+**Local repositories (0.202.0).** `local/<name>` (the name follows the `owner/name` rules) is a
+repository that exists only on the Studio: a bare repository at `<root>/local/<name>.git` with no
+remote, created on a run's first round with one empty commit `init` on `main` by `Jesse Bridge`.
+Its runs branch from its `main` with no fetch; the agent is told there is no push, no pull request
+and no CI, and to fast forward its branch into `main` once its checks pass. `gh` is never asked
+about it. On the Studio, where nothing names a repository, a run falls back to one instead of
+refusing: a strand item, or a draft of a strand, whose strand lists no repos uses
+`local/<strand slug, lowercased>`; a loose draft with no `devjob-repo` and no `repo` uses
+`local/scratch`; a free prompt (`devjob_start` with `host: "studio"`, `prompt` and `branch_slug`
+and no `repo`) uses `local/<branch_slug>`. `local/<name>` written in `devjob-repo`, `repo` or a
+strand's `repos:` is used as written. The cluster refuses a local repository and a start with no
+repository: `local repositories run only on the Studio (host: "studio")`.
+
+Its Inbox report ends with `Repository: local/<name> (Studio only)`, the branch, and `main` at its
+commit. After each finished round `<local_checkout_root>/<name>` is brought up to date: a plain
+clone of `main` on first use, then `git pull --ff-only` (a failure is logged and the run goes on).
+That is where a bridge session reads the work; it cannot read the run root. A run's branch is
+deleted with its worktree only once it is merged into the repository's `main`, and is restored
+from the local branch for a reply. Cleanup, reconcile and the disk cap never delete
+`<root>/local/`.
 
 ### How `claude` is run
 

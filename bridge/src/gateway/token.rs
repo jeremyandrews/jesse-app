@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_token_from_before_the_route_claim_still_verifies() {
-        // The pre-0.202 claim set: no `route`, no `model`. Serialised without them, so a
+        // The pre-0.203 claim set: no `route`, no `model`. Serialised without them, so a
         // token minted with the model proxy off is byte-identical to the old format.
         let k = TokenKey::generate();
         let t = k.sign(&claims(1_000));

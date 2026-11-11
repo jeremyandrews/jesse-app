@@ -258,7 +258,7 @@ the four and answers any other request itself with method-not-found (Claude Code
 every server with `server/discover`).
 
 Each turn gets a token: an HMAC-SHA256 over the job id, the capability, the granted server set,
-the turn's egress tier (0.202.0; see "The model proxy and the egress proxy"), the model proxy
+the turn's egress tier (0.203.0; see "The model proxy and the egress proxy"), the model proxy
 route and metering id when the model proxy is on, and an expiry of the turn deadline plus 60 s, under a key generated at boot
 and never written down. The unix socket path is the Studio's access control (a `0700` directory
 per turn under `<state_dir>/gw/`, or `[gateway] socket_dir`). The optional TCP listener
@@ -273,7 +273,7 @@ is revoked with its session, and the directory is removed; a startup sweep remov
 `<state_dir>/activity/YYYY-MM-DD.jsonl`, `0600`, one line per turn (`kind: "turn"`: job id,
 harness, model id, capability, origin `phone` or `schedule:<id>`, start, end, outcome) and per
 gateway call (`kind: "tool_call"`: job id, server, tool, duration, `ok`, `refused`, `failed` or
-`truncated`, request and response byte counts). Since 0.202.0 also `model_call` (job id, route,
+`truncated`, request and response byte counts). Since 0.203.0 also `model_call` (job id, route,
 model id, the provider's four token counts, cost in micro-dollars, status), `egress` (job id,
 tier, HOST, port, `read`/`send`, bytes out and in, `allowed`/`refused` and a reason code),
 `vault_write` (job id, vault-relative path, operation; written where the write-lock broker
@@ -303,7 +303,7 @@ overnight digest from the same lines.
 - **Results are capped per server** (8 MiB, 32 MiB for `browser` and `house`); a larger result
   is withheld as a tool error and recorded `truncated`.
 
-## The model proxy and the egress proxy (0.202.0; off by default)
+## The model proxy and the egress proxy (0.203.0; off by default)
 
 `[proxy] model = true` and `[proxy] egress = true` make the bridge the route to a model and to
 the open web. Both are off by default and the Studio behaves exactly as before until the flags
@@ -3117,6 +3117,13 @@ tokens, `JESSE_GITHUB_PAT`, the Slack, UniFi, Home Assistant, Google, Runn, Cloc
 Places keys. What a run can still reach is what `jandrews` reaches without them: the login
 keychain, `~/.claude` (Claude Code's own sign in), `gh`'s stored login and `~/.ssh`. A run pushes
 and opens pull requests with Jeremy's own GitHub identity, exactly as at a desk.
+
+**Local repositories (0.202.0).** A run on `local/<name>` works in a bare repository at
+`<root>/local/<name>.git` that has no remote: the bridge never runs `gh`, `git fetch` or `git push`
+for it and never builds a clone URL, and the cluster refuses it. The agent is told to fast forward
+its branch into the repository's `main`; a run's branch is deleted only once it is in `main`, and
+nothing deletes `<root>/local/`. A plain checkout of `main` at `[hostrun] local_checkout_root`
+(default `~/jesse/Code/local`, refused if it overlaps `root`) is what bridge sessions read.
 
 **An env file's contents reach the agent (0.197.0).** `[hostrun.repos."owner/name"] env_file =
 "<path>"` names a file of `KEY=value` lines (blank lines and `#` comments skipped, `export `

@@ -175,10 +175,13 @@ impl FakeLauncher {
 #[derive(Default)]
 struct FakeForge {
     states: Mutex<BTreeMap<String, PrState>>,
+    /// Every repository the forge was asked about, in order.
+    asked: Mutex<Vec<String>>,
 }
 
 impl Forge for FakeForge {
-    fn pr_state(&self, _repo: &str, branch: &str) -> Option<PrState> {
+    fn pr_state(&self, repo: &str, branch: &str) -> Option<PrState> {
+        lock(&self.asked).push(repo.to_string());
         lock(&self.states).get(branch).copied()
     }
 }
@@ -3039,5 +3042,501 @@ async fn a_report_filed_under_the_inbox_archive_is_served_where_it_now_lives() {
         locate_report(r.svc.notes_root(), &rel),
         rel,
         "a missing note keeps its recorded path"
+    );
+}
+
+// ---- LOCAL REPOSITORIES (0.202.0) -----------------------------------------------------
+
+fn free_in(repo: &str, slug: &str) -> StartRequest {
+    StartRequest {
+        kind: StartKind::Free {
+            repo: repo.into(),
+            prompt: "Write a file.".into(),
+            slug: slug.into(),
+            model: None,
+        },
+        origin: "turn".into(),
+        again: false,
+    }
+}
+
+/// What an agent on a local repository does: commit a file on its branch, then fast forward
+/// the repository's `main` to it.
+fn commit_and_merge(wt: &Path, file: &str, text: &str) {
+    std::fs::write(wt.join(file), text).unwrap();
+    sh(wt, &["add", file]);
+    sh(wt, &["commit", "-q", "-m", file]);
+    sh(wt, &["push", "-q", ".", "HEAD:main"]);
+}
+
+fn has_branch(bare: &Path, branch: &str) -> bool {
+    git::local_branch_exists(bare, branch)
+}
+
+#[test]
+fn a_local_repository_is_local_owner_and_a_valid_name() {
+    for ok in ["local/scratch", "local/ho3-smoke", "local/a.b_c"] {
+        assert!(is_local_repo(ok), "{ok}");
+        assert!(valid_repo(ok), "{ok}");
+    }
+    for no in [
+        "local",
+        "local/",
+        "local/..",
+        "local/a/b",
+        "localx/a",
+        "o/local",
+        "Local/a",
+        "",
+    ] {
+        assert!(!is_local_repo(no), "{no}");
+    }
+    assert_eq!(
+        devjob::local_repo("scratch").as_deref(),
+        Some("local/scratch")
+    );
+    assert_eq!(devjob::local_repo("a b"), None);
+    assert_eq!(strand_local_repo("Jesse-App").unwrap(), "local/jesse-app");
+    // Its bare repository lives under <root>/local, never under <root>/repos.
+    let root = Path::new("/r");
+    assert_eq!(
+        git::bare_path(root, "local/x"),
+        PathBuf::from("/r/local/x.git")
+    );
+    assert_eq!(
+        git::bare_path(root, "o/n"),
+        PathBuf::from("/r/repos/o/n.git")
+    );
+}
+
+#[test]
+fn a_local_repository_is_created_with_one_empty_commit_on_main_and_its_worktree_needs_no_network() {
+    let s = Scratch::new();
+    let root = s.root();
+    let wt = s.base.join("wt");
+    // The URL is never used: nothing is cloned or fetched.
+    let made = git::add_worktree(&root, "local/ho3-x", "", &wt, "ho3-x-branch").unwrap();
+    let bare = root.join("local/ho3-x.git");
+    assert!(bare.join("HEAD").is_file());
+    assert_eq!(made.default_branch, "main");
+    assert_eq!(
+        sh(&bare, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    assert_eq!(sh(&bare, &["rev-parse", "main"]).trim(), made.base_sha);
+    assert_eq!(
+        sh(&bare, &["log", "--format=%an|%cn|%s|%P", "main"]).trim(),
+        "Jesse Bridge|Jesse Bridge|init|"
+    );
+    // The empty tree.
+    assert_eq!(sh(&bare, &["ls-tree", "main"]).trim(), "");
+    // No remote at all.
+    assert_eq!(sh(&bare, &["remote"]).trim(), "");
+    assert_eq!(sh(&wt, &["remote"]).trim(), "");
+    assert_eq!(
+        sh(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "ho3-x-branch"
+    );
+    // A second run on it reuses the repository and its main as it is.
+    commit_and_merge(&wt, "a.txt", "a\n");
+    let main = sh(&bare, &["rev-parse", "main"]).trim().to_string();
+    let wt2 = s.base.join("wt2");
+    let again = git::add_worktree(&root, "local/ho3-x", "", &wt2, "ho3-x-two").unwrap();
+    assert_eq!(again.base_sha, main);
+    assert!(wt2.join("a.txt").is_file());
+    assert_eq!(sh(&bare, &["rev-list", "--count", "main"]).trim(), "2");
+}
+
+#[tokio::test]
+async fn with_nothing_named_a_studio_run_falls_back_to_a_local_repository() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let n = s.notes();
+    // A strand item whose strand lists no repos: local/<strand slug, lowercased>.
+    let a = r.svc.start(asked("None", "NO1", None)).await.unwrap();
+    let rec = r.svc.get(&a.run_id).unwrap();
+    assert_eq!(rec.repo, "local/none");
+    assert!(s.root().join("local/none.git/HEAD").is_file());
+    assert!(!s.root().join("repos/local").exists());
+    // The pure check still refuses it for a plain request, as before.
+    assert!(
+        studio_item(&n, "None", "NO1", OptIn::Request { repo: None })
+            .unwrap_err()
+            .contains("lists no repos")
+    );
+    // A strand listing several repositories is still refused.
+    let e = r.svc.start(asked("Many", "MA1", None)).await.unwrap_err();
+    assert!(e.message().contains("o/n, o/m"), "{}", e.message());
+    assert!(
+        studio_item(&n, "Many", "MA1", OptIn::RequestOrLocal { repo: None })
+            .unwrap_err()
+            .contains("several")
+    );
+    // A strand with one repository keeps it.
+    assert_eq!(
+        studio_item(&n, "One", "ON1", OptIn::RequestOrLocal { repo: None })
+            .unwrap()
+            .repo,
+        "o/n"
+    );
+    // A loose draft: local/scratch.
+    assert_eq!(
+        studio_draft_or_local(&n, "Projects/drafts/loose-fix-prompt.md", None)
+            .unwrap()
+            .repo,
+        "local/scratch"
+    );
+    // A draft of a strand that lists no repos: local/<strand slug>; of one that lists some:
+    // still refused, as before.
+    assert_eq!(
+        studio_draft_or_local(&n, "Projects/drafts/no1-prompt.md", None)
+            .unwrap()
+            .repo,
+        "local/none"
+    );
+    assert!(
+        studio_draft_or_local(&n, "Projects/drafts/on1-prompt.md", None)
+            .unwrap_err()
+            .contains("pass repo")
+    );
+    // A caller's repo still wins over the fallback.
+    assert_eq!(
+        studio_draft_or_local(&n, "Projects/drafts/loose-fix-prompt.md", Some("o/n"))
+            .unwrap()
+            .repo,
+        "o/n"
+    );
+    let d = r
+        .svc
+        .start(StartRequest {
+            kind: StartKind::Draft {
+                draft: "Projects/drafts/loose-fix-prompt.md".into(),
+                repo: None,
+            },
+            origin: "turn".into(),
+            again: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.svc.get(&d.run_id).unwrap().repo, "local/scratch");
+    // A free prompt with no repo: local/<branch_slug>.
+    let f = r.svc.start(free_in("", "one-off")).await.unwrap();
+    assert_eq!(f.run_id, "s-one-off");
+    assert_eq!(r.svc.get("s-one-off").unwrap().repo, "local/one-off");
+    // Through the tool's arguments: host studio with no repo plans a free run with none.
+    let plan =
+        |v: Value| devjob::plan_start(serde_json::from_value(v).unwrap(), devjob::Agent::Claude);
+    assert_eq!(
+        plan(json!({ "host": "studio", "prompt": "p", "branch_slug": "x" })).unwrap(),
+        devjob::StartPlan::Studio {
+            kind: StartKind::Free {
+                repo: String::new(),
+                prompt: "p".into(),
+                slug: "x".into(),
+                model: None
+            },
+            again: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_local_repository_is_honoured_as_written() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    let r = rig(&s);
+    let n = s.notes();
+    // In a strand's repos.
+    std::fs::write(
+        n.join("Strands/Loc.md"),
+        "---\ngroup: tag1\nstate: active\nrepos: [local/kept]\nupdated: 2026-11-09\n---\n# Loc\n\n## Drafts\n\
+         - [ ] **LO1** Local. [[todo-list/Projects/drafts/lo1-prompt]]\n### Done\n",
+    )
+    .unwrap();
+    std::fs::write(
+        n.join("Projects/drafts/lo1-prompt.md"),
+        bare_draft("Loc", "LO1"),
+    )
+    .unwrap();
+    assert_eq!(
+        studio_item(&n, "Loc", "LO1", OptIn::Request { repo: None })
+            .unwrap()
+            .repo,
+        "local/kept"
+    );
+    // As the caller's repo, over a strand that lists one.
+    assert_eq!(
+        studio_item(
+            &n,
+            "One",
+            "ON1",
+            OptIn::RequestOrLocal {
+                repo: Some("local/mine")
+            }
+        )
+        .unwrap()
+        .repo,
+        "local/mine"
+    );
+    // In devjob-repo, from a schedule entry too.
+    std::fs::write(
+        n.join("Projects/drafts/lo1-prompt.md"),
+        draft_in(
+            "Loc",
+            "LO1",
+            "devjob-repo: local/sched\ndevjob-host: studio\n",
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        studio_item(&n, "Loc", "LO1", OptIn::Schedule).unwrap().repo,
+        "local/sched"
+    );
+    let a = r.svc.start(free_in("local/named", "named")).await.unwrap();
+    assert_eq!(r.svc.get(&a.run_id).unwrap().repo, "local/named");
+    assert!(s.root().join("local/named.git/HEAD").is_file());
+}
+
+fn draft_in(strand: &str, id: &str, extra: &str) -> String {
+    format!("---\nstrand: {strand}\nstrand-id: {id}\n{extra}---\n# {id}\n\n## PROMPT\n{SECTION}")
+}
+
+#[test]
+fn the_cluster_refuses_a_local_repository_and_a_start_with_none() {
+    let plan =
+        |v: Value| devjob::plan_start(serde_json::from_value(v).unwrap(), devjob::Agent::Claude);
+    let want = "local repositories run only on the Studio (host: \"studio\")";
+    for v in [
+        json!({ "repo": "local/x", "prompt": "p", "branch_slug": "s" }),
+        json!({ "host": "cluster", "repo": "local/x", "prompt": "p", "branch_slug": "s" }),
+        json!({ "prompt": "p", "branch_slug": "s" }),
+        json!({ "host": "cluster", "prompt": "p", "branch_slug": "s" }),
+    ] {
+        let e = plan(v.clone()).unwrap_err();
+        assert!(e.contains(want), "{v}: {e}");
+    }
+    // The spec check refuses it too, so a cluster schedule entry cannot name one.
+    let e = DevJobSpec::validate(
+        DevJobArgs {
+            repo: Some("local/x".into()),
+            prompt: Some("p".into()),
+            branch_slug: Some("s".into()),
+            ..DevJobArgs::default()
+        },
+        devjob::Agent::Claude,
+    )
+    .unwrap_err();
+    assert_eq!(e, want);
+    // A GitHub repository on the cluster is unchanged.
+    assert!(matches!(
+        plan(json!({ "repo": "a/b", "prompt": "p", "branch_slug": "s" })).unwrap(),
+        devjob::StartPlan::Cluster(_)
+    ));
+}
+
+#[test]
+fn the_generated_section_for_a_local_repository_has_no_push_and_no_pull_request() {
+    let dir = Path::new("/Users/j/jesse-runs/runs/s-x");
+    let place = |repo: &'static str| RunPlace {
+        run_id: "s-x",
+        repo,
+        branch: "s-x",
+        default_branch: "main",
+        run_dir: dir,
+        pr_title_tag: true,
+    };
+    let local = served_prompt("Do it.\n", &place("local/x"));
+    let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
+    assert_eq!(local, expected);
+    assert!(!local.contains("pull request title"));
+    assert!(!local.contains("origin/"));
+    // A GitHub repository's section is the one it always was.
+    let gh = served_prompt("Do it.\n", &place("o/n"));
+    assert!(gh.contains("worktree of o/n on branch s-x, cut from origin/main."));
+    assert!(gh.contains(&generated_paragraph("s-x", true)));
+    assert!(!gh.contains("Studio only"));
+}
+
+#[tokio::test]
+async fn the_watcher_never_asks_the_forge_about_a_local_run_and_no_pull_request_is_no_failure() {
+    let s = Scratch::new();
+    let r = rig(&s);
+    r.svc.start(free_in("", "quiet")).await.unwrap();
+    let dir = r.svc.settings.run_dir("s-quiet");
+    assert_eq!(read_run(&dir).unwrap().repo, "local/quiet");
+    finish_round(&r, "s-quiet", 0, Some("Done, merged into main.\n"), "");
+    r.svc.pass(now_ms()).await;
+    let rec = r.svc.get("s-quiet").unwrap();
+    assert_eq!(rec.status, RunStatus::Reported);
+    assert!(lock(&r.rec.pushes)
+        .iter()
+        .all(|p| !p.0.contains("needs you")));
+    r.svc.cleanup(now_ms());
+    r.svc.cleanup(now_ms() + 8 * DAY_MS);
+    r.svc.pass(now_ms() + 9 * DAY_MS).await;
+    assert!(
+        lock(&r.forge.asked).is_empty(),
+        "{:?}",
+        lock(&r.forge.asked)
+    );
+    // A GitHub run on the same rig still asks.
+    remote_fixture(&s);
+    r.svc.start(free("gh")).await.unwrap();
+    finish_round(&r, "s-gh", 0, Some("ok\n"), "");
+    r.svc.pass(now_ms()).await;
+    r.svc.cleanup(now_ms());
+    assert_eq!(lock(&r.forge.asked).as_slice(), ["o/n".to_string()]);
+}
+
+#[tokio::test]
+async fn cleanup_keeps_an_unmerged_local_branch_and_removes_a_merged_one() {
+    let s = Scratch::new();
+    let mut st = settings(&s);
+    st.max_per_repo = 2;
+    let r = rig_with(&s, st);
+    r.svc
+        .start(free_in("local/keep", "unmerged"))
+        .await
+        .unwrap();
+    r.svc.start(free_in("local/keep", "merged")).await.unwrap();
+    let bare = git::bare_path(&s.root(), "local/keep");
+    let du = r.svc.settings.run_dir("s-unmerged");
+    let dm = r.svc.settings.run_dir("s-merged");
+    let bu = r.svc.get("s-unmerged").unwrap().branch;
+    let bm = r.svc.get("s-merged").unwrap().branch;
+    // One commits and never merges; the other commits and fast forwards main.
+    let wu = du.join(WORKTREE_DIR);
+    std::fs::write(wu.join("draft.txt"), "x\n").unwrap();
+    sh(&wu, &["add", "draft.txt"]);
+    sh(&wu, &["commit", "-q", "-m", "draft"]);
+    commit_and_merge(&dm.join(WORKTREE_DIR), "done.txt", "y\n");
+    finish_round(&r, "s-unmerged", 0, Some("ok\n"), "");
+    finish_round(&r, "s-merged", 0, Some("ok\n"), "");
+    r.svc.pass(now_ms()).await;
+    // At once: the merged one is done with, the unmerged one stays whole.
+    r.svc.cleanup(now_ms());
+    assert!(!dm.join(WORKTREE_DIR).exists());
+    assert!(!has_branch(&bare, &bm), "a merged branch goes");
+    assert!(du.join(WORKTREE_DIR).exists());
+    assert!(has_branch(&bare, &bu));
+    // Past keep_days the unmerged worktree goes, but its branch, the only copy, stays.
+    r.svc.cleanup(now_ms() + 8 * DAY_MS);
+    assert!(!du.join(WORKTREE_DIR).exists());
+    assert!(
+        has_branch(&bare, &bu),
+        "an unmerged local branch is never deleted"
+    );
+    // The local repository itself is never touched, even by the disk cap and reconcile.
+    let mut st = settings(&s);
+    st.max_total_bytes = 0;
+    let r2 = rig_with(&s, st);
+    r2.svc.space_pass(now_ms() + 9 * DAY_MS);
+    r2.svc.reconcile(now_ms() + 9 * DAY_MS);
+    assert!(bare.join("HEAD").is_file());
+    assert!(has_branch(&bare, &bu));
+    // And a reply restores the worktree from the local branch.
+    let rec = r.svc.reply_and_pump("s-unmerged", "go on").await.unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert!(wu.join("draft.txt").is_file());
+}
+
+#[tokio::test]
+async fn a_local_run_end_to_end_creates_merges_and_lands_in_the_readable_checkout() {
+    let s = Scratch::new();
+    let r = rig(&s);
+    // Studio, no repository: local/<branch_slug>.
+    let started = r.svc.start(free_in("", "ho3-smoke")).await.unwrap();
+    let dir = r.svc.settings.run_dir(&started.run_id);
+    let rec = read_run(&dir).unwrap();
+    assert_eq!(rec.repo, "local/ho3-smoke");
+    assert_eq!(rec.default_branch.as_deref(), Some("main"));
+    let bare = s.root().join("local/ho3-smoke.git");
+    assert!(bare.join("HEAD").is_file());
+    let prompt = std::fs::read_to_string(dir.join(PROMPT_MD)).unwrap();
+    assert!(prompt.contains("worktree of local/ho3-smoke (Studio only)"));
+    assert!(prompt.contains(LOCAL_REPO_SENTENCE));
+    // The agent commits on its branch and fast forwards main.
+    let wt = dir.join(WORKTREE_DIR);
+    commit_and_merge(&wt, "result.txt", "first\n");
+    finish_round(&r, &started.run_id, 0, Some("Merged into main.\n"), "");
+    r.svc.pass(now_ms()).await;
+    let main = sh(&bare, &["rev-parse", "main"]).trim().to_string();
+    // The Inbox report names the repository, the branch and main.
+    let rel = format!("Inbox/{}-run-s-ho3-smoke.md", today());
+    let text = std::fs::read_to_string(s.notes().join(&rel)).unwrap();
+    assert!(text.contains("\nrepo: local/ho3-smoke\n"), "{text}");
+    assert!(
+        text.ends_with(&format!(
+            "Merged into main.\n\nRepository: local/ho3-smoke (Studio only)\nBranch: {}\nmain: {main}\n",
+            rec.branch
+        )),
+        "{text}"
+    );
+    // The readable checkout: cloned on first use.
+    let checkout = s.base.join("jesse/Code/local/ho3-smoke");
+    assert_eq!(
+        r.svc.settings.local_checkout("local/ho3-smoke"),
+        Some(checkout.clone())
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("result.txt")).unwrap(),
+        "first\n"
+    );
+    // Merged and clean, the run's worktree and branch are done with at once; main holds the
+    // work, so a reply still continues, cut again from main.
+    assert!(!wt.exists());
+    assert!(!git::local_branch_exists(&bare, &rec.branch));
+    r.svc.reply_and_pump(&started.run_id, "more").await.unwrap();
+    assert!(wt.join("result.txt").is_file());
+    commit_and_merge(&wt, "second.txt", "second\n");
+    finish_round(&r, &started.run_id, 0, Some("Merged again.\n"), "");
+    r.svc.pass(now_ms()).await;
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("second.txt")).unwrap(),
+        "second\n"
+    );
+    assert_eq!(
+        sh(&checkout, &["rev-parse", "HEAD"]).trim(),
+        sh(&bare, &["rev-parse", "main"]).trim()
+    );
+    assert_eq!(
+        r.svc.get(&started.run_id).unwrap().status,
+        RunStatus::Reported
+    );
+}
+
+#[test]
+fn local_checkout_root_defaults_under_home_expands_tilde_and_may_not_overlap_root() {
+    let s = HostRunSettings::from_toml(None, "/Users/j", "claude");
+    assert_eq!(
+        s.local_checkout_root,
+        PathBuf::from("/Users/j/jesse/Code/local")
+    );
+    let t: HostRunToml =
+        toml::from_str("enabled = true\nlocal_checkout_root = \"~/elsewhere\"\n").unwrap();
+    let s = HostRunSettings::from_toml(Some(t), "/Users/j", "claude");
+    assert_eq!(s.local_checkout_root, PathBuf::from("/Users/j/elsewhere"));
+    assert_eq!(s.local_checkout("o/n"), None);
+    assert_eq!(
+        s.local_checkout("local/x"),
+        Some(PathBuf::from("/Users/j/elsewhere/x"))
+    );
+    let sc = Scratch::new();
+    let mut st = settings(&sc);
+    st.local_checkout_root = sc.root().join("checkouts");
+    let p = st.problems();
+    assert!(
+        p.iter()
+            .any(|m| m.contains("local_checkout_root") && m.contains("overlaps")),
+        "{p:?}"
+    );
+    let mut st = settings(&sc);
+    st.local_checkout_root = PathBuf::from("relative/x");
+    let p = st.problems();
+    assert!(
+        p.iter().any(|m| m.contains("not an absolute path")),
+        "{p:?}"
     );
 }

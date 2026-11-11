@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.202.0, agent 0.15.0, eval 0.9.0 - 2026-11-11
+## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.203.0, agent 0.15.0, eval 0.9.0 - 2026-11-11
 
 **The bridge can be the only route to a model and to the open web: a model proxy that holds every
 model credential and meters every call, an egress proxy that enforces a per-turn tier and logs
@@ -68,6 +68,48 @@ every child is spawned exactly as before.**
   `model-credential-absent`, `egress-private-address`, `egress-send-unknown-host`,
   `egress-long-query`, `egress-canary`, `egress-fingerprint`, `egress-opaque`), run when the
   proxies are on.
+
+## [bridge 0.202.0] - 2026-11-11
+
+**A Studio run no longer needs a GitHub repository.** Root cause: repository resolution and
+worktree setup assumed a GitHub remote. A run's repository had to resolve to an `owner/name`
+(else `... has no devjob-repo: pass repo` or `strand ... lists no repos: pass repo`), the
+worktree came from a bare clone of `https://github.com/<owner>/<name>.git` fetched from
+`origin`, a reply's worktree was restored from the branch on `origin`, cleanup deleted the local
+branch on the assumption it had been pushed, and the agent was told to push and open a pull
+request. A one off script, research that writes files or an experiment could not run at all.
+
+- **Added:** `local/<name>`, a repository that exists only on the Studio (`devjob::is_local_repo`).
+  On a run's first round, under the repository lock, `<root>/local/<name>.git` is created if
+  missing (`git init --bare`, `HEAD` at `main`, one empty commit `init` by `Jesse Bridge`) and the
+  run's worktree is cut from its `main` with no fetch. It is never treated as GitHub: no `gh`, no
+  `git push`, no clone URL.
+- **Added:** the fallback, only where the existing order resolves nothing. A strand item or a
+  draft of a strand that lists no repos runs in `local/<strand slug, lowercased>`; a loose draft
+  with no `devjob-repo` and no `repo` in `local/scratch`; a free prompt (`devjob_start`,
+  `host: "studio"`, no `repo`) in `local/<branch_slug>`. A strand listing several repositories is
+  still refused, and `local/<name>` written anywhere is honoured as written. A strand schedule
+  entry whose draft says `devjob-repo: local/<name>` and `devjob-host: studio` runs too.
+- **Added:** the cluster refuses a local repository, and a start with no repository:
+  `local repositories run only on the Studio (host: "studio")` (`plan_start`, and
+  `DevJobSpec::validate`, so a cluster schedule entry is refused too).
+- **Changed:** for a local repository the generated section names it `local/<name> (Studio only)`,
+  cut from `main`, and replaces the pull request title and fetch sentences with: no push, no pull
+  request, no CI; commit, then fast forward the branch into `main` and report the `main` commit.
+- **Changed:** the watcher never asks `gh` about a local run; its worktree and artifacts are done
+  with once its branch is in `main` and the worktree is clean. The Inbox report ends with
+  `Repository: local/<name> (Studio only)`, the branch and `main` at its commit.
+- **Changed:** a local run's branch is deleted with its worktree only when it is already merged
+  into its `main`, and a reply restores the worktree from the local branch. Nothing deletes
+  `<root>/local/`.
+- **Added:** `[hostrun] local_checkout_root` (default `~/jesse/Code/local`, `~` expanded, refused
+  by the boot check when it overlaps `root` or cannot be created). After each finished round of a
+  local run, `<local_checkout_root>/<name>` is cloned on first use, then `git pull --ff-only`; a
+  failure is logged and the run goes on. Bridge sessions read there, never the run root.
+- **Changed:** the `devjob_start` description and its `repo` parameter (optional on the Studio,
+  `local/<name>`, the fallback), `POST /jesse/runs`, a `[hostrun]` section in `bridge/README.md` and
+  `jesse.example.toml`, and SECURITY.md.
+- GitHub repositories behave exactly as before.
 
 ## [bridge 0.201.1] - 2026-11-11
 

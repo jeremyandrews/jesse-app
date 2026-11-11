@@ -2422,8 +2422,17 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     assert!(!log["lines"].as_array().unwrap().is_empty());
 
     let base = s.base.to_string_lossy().into_owned();
+    // The list as the app polls it, before anything is archived.
+    let list = r.svc.list_json();
+    // Then the reported run archived by hand: `?archived=all` carries `archived_at` and
+    // `archived_reason` on it. (`studio-runs-list-0.203.json` is this test's output at bridge
+    // 0.203.0, before either field or the filter counts, and is kept as written then.)
+    r.svc.archive("s-done").unwrap();
+    let with_archived = r.svc.list_json_mode(ArchivedMode::All);
+    assert_eq!(with_archived["counts"]["archived"], 1);
     let files: Vec<(&str, Value)> = vec![
-        ("studio-runs-list.json", r.svc.list_json()),
+        ("studio-runs-list.json", list),
+        ("studio-runs-list-archived.json", with_archived),
         // A run as `run_json` alone serialized it before the Work view: none of its fields.
         (
             "studio-run-needs-you.json",
@@ -3732,3 +3741,5 @@ async fn a_blind_continue_to_a_question_is_refused() {
     // A real answer goes through.
     assert!(r.svc.reply("GD5", "main").is_ok());
 }
+
+mod archive;

@@ -232,7 +232,7 @@ final class StudioRunsModelTests: XCTestCase {
     }
 }
 
-/// The six run calls and the two last look calls, faked. Shared with `WorkSemanticsTests`.
+/// The run calls and the two last look calls, faked. Shared with `WorkSemanticsTests`.
 final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     var list = StudioRunList()
     var listError: (any Error)?
@@ -242,9 +242,45 @@ final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     var started: [(String, String)] = []
     var replies: [(String, String)] = []
 
-    func listRuns() async throws -> StudioRunList {
+    /// What `?archived=only` answers; `list` is what the default answers.
+    var archivedList = StudioRunList()
+    var modes: [StudioRunArchivedMode] = []
+    var archived: [String] = []
+    var unarchived: [String] = []
+    /// A refusal for an archive of these runs, in the bridge's words.
+    var archiveRefusals: [String: String] = [:]
+
+    func listRuns(archived mode: StudioRunArchivedMode) async throws -> StudioRunList {
+        modes.append(mode)
         if let listError { throw listError }
-        return list
+        return mode == .only ? archivedList : list
+    }
+    func archive(id: String) async throws -> StudioRun {
+        if let message = archiveRefusals[id] {
+            throw StudioRunError.refused(status: 409, message: message)
+        }
+        archived.append(id)
+        guard var r = list.runs.first(where: { $0.runID == id }) else {
+            throw StudioRunError.refused(status: 404, message: "no run \"\(id)\"")
+        }
+        if r.status == .needsYou || r.status == .interrupted { r.status = .closed }
+        r.archivedAt = "2026-11-09T17:00:00.000Z"
+        r.archivedReason = "archived by Jeremy"
+        list.runs.removeAll { $0.runID == id }
+        archivedList.runs.insert(r, at: 0)
+        return r
+    }
+    func unarchive(id: String) async throws -> StudioRun {
+        unarchived.append(id)
+        guard var r = archivedList.runs.first(where: { $0.runID == id })
+                ?? list.runs.first(where: { $0.runID == id }) else {
+            throw StudioRunError.refused(status: 404, message: "no run \"\(id)\"")
+        }
+        r.archivedAt = nil
+        r.archivedReason = nil
+        archivedList.runs.removeAll { $0.runID == id }
+        if !list.runs.contains(where: { $0.runID == id }) { list.runs.append(r) }
+        return r
     }
     func startRun(strand: String, itemID: String) async throws -> StudioRunStarted {
         started.append((strand, itemID))

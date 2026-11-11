@@ -24,7 +24,9 @@ final class StudioRunsWireTests: XCTestCase {
         let list = try StudioRunList.decode(from: fixture("studio-runs-list"))
         XCTAssertEqual(list.runs.map(\.runID), ["GD12", "GD10", "s-done", "GD5"])
         XCTAssertEqual(list.runs.map(\.status), [.queued, .paused, .reported, .needsYou])
-        XCTAssertEqual(list.counts, StudioRunCounts(running: 0, queued: 1, needsYou: 1, paused: 1))
+        XCTAssertEqual(list.counts, StudioRunCounts(running: 0, queued: 1, needsYou: 1, paused: 1,
+                                                    needsMe: 1, moving: 2, finished: 1,
+                                                    archived: 0))
         let queued = list.runs[0]
         XCTAssertEqual(queued.waitingFor, "limit")
         XCTAssertEqual(queued.strand, "Gd")
@@ -40,7 +42,7 @@ final class StudioRunsWireTests: XCTestCase {
     /// report's included, which is where the bridge now serves a processed one).
     static let everyStatusList: String = {
         let statuses = ["queued", "running", "needs_you", "reported", "failed", "cancelled",
-                        "interrupted", "paused", "closed"]
+                        "interrupted", "paused", "closed", "rebasing"]
         let runs = statuses.enumerated().map { i, status in
             """
             {"run_id":"R\(i)","strand":\(i % 2 == 0 ? "\"Jesse\"" : "null"),"item_id":null,
@@ -56,10 +58,10 @@ final class StudioRunsWireTests: XCTestCase {
 
     func testAListHoldingEveryStatusDecodesEveryRunWithItsReport() throws {
         let list = try StudioRunList.decode(from: Data(Self.everyStatusList.utf8))
-        XCTAssertEqual(list.runs.count, 9)
+        XCTAssertEqual(list.runs.count, 10)
         XCTAssertEqual(list.runs.map(\.status),
                        [.queued, .running, .needsYou, .reported, .failed, .cancelled,
-                        .interrupted, .paused, .unknown("closed")])
+                        .interrupted, .paused, .closed, .unknown("rebasing")])
         for (i, run) in list.runs.enumerated() {
             XCTAssertEqual(run.runID, "R\(i)")
             XCTAssertEqual(run.latestReportPath,

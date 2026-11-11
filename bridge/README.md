@@ -951,6 +951,27 @@ written to a note.
 - `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
   refused with 409: the run asked a question, and an empty continue would answer it blind.
 
+**Archiving (0.204.0).** A flag on `run.json`, never a move or a delete: the run's directory, log
+and reports stay where they are.
+
+- `archived_at` (RFC 3339) and `archived_reason` on the record, absent until a run is archived and
+  after an unarchive; older records read unchanged.
+- `POST /jesse/runs/:id/archive` (paired device token) refuses a `queued`, `running` or `paused`
+  run with 409 naming its status; a `needs_you` or `interrupted` run is closed first (`closed_reason`
+  `archived by Jeremy`). `POST /jesse/runs/:id/unarchive` clears both fields and nothing else. Both
+  are idempotent and silent (no push, no turn), and answer the run as `GET /jesse/runs/:id` does.
+- `GET /jesse/runs` leaves archived runs out; `?archived=only` serves only them, newest archived
+  first; `?archived=all` serves both. `counts` gains `needs_me` (`needs_you`, `interrupted`,
+  `failed`), `moving` (`queued`, `running`, `paused`), `finished` (everything else not archived)
+  and `archived`, over the whole store in the same scan. A run a reply puts back to work shows in
+  the list again while it is moving or waiting, even with `archived_at` still set.
+- The watcher pass, after closing settled runs, archives every `reported`, `cancelled` or `closed`
+  run not already archived when its Drafts line is ticked (`item ticked`), every report has moved
+  to `Inbox/archive/` (`report archived`), or its last status change is more than
+  `AUTO_ARCHIVE_AFTER_DAYS` (14) days old (`finished over 14 days ago`). Never a `needs_you`,
+  `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts,
+  so an Undo is not taken back by the next pass.
+
 ### How `claude` is run
 
 The bridge runs the turn as:

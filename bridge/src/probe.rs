@@ -3340,6 +3340,7 @@ pub async fn count_server_tools(
     let names: Vec<String> = admitted.iter().map(|a| a.server.name.clone()).collect();
     let guard = match gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: format!("preflight-{}", std::process::id()),
             capability: Capability::Write,
             servers: admitted,
@@ -3630,6 +3631,7 @@ pub async fn direct_gateway_probes(level: &str) -> Vec<ProbeResult> {
     };
     let guard = match gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: format!("direct-probe-{level}"),
             capability,
             servers,

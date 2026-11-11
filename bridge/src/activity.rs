@@ -116,6 +116,146 @@ pub struct ToolCallLine {
     pub response_bytes: u64,
 }
 
+/// One model call through the model proxy ([`crate::proxy::model`]).
+///
+/// Tokens are the provider's own usage block; `cost_micros` is millionths of a dollar at the
+/// registry's four-rate deck, an integer so the line holds no float formatting.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelCallLine {
+    pub job_id: Token,
+    /// `anthropic-subscription`, `anthropic-api`, `fireworks`, `local`, `openai-chatgpt`.
+    pub route: Token,
+    /// The registry id the turn's token names.
+    pub model: Token,
+    pub at_ms: u64,
+    pub duration_ms: u64,
+    /// The upstream's HTTP status (0 when it could not be reached).
+    pub status: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost_micros: u64,
+}
+
+/// Whether an egress request reads or sends ([`crate::proxy::egress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MethodClass {
+    Read,
+    Send,
+    /// A `CONNECT` refused before any inner request was seen.
+    None,
+}
+
+/// The egress proxy's verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressVerdict {
+    Allowed,
+    Refused,
+}
+
+/// Why an egress request was refused. `none` on an allowed line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressReason {
+    None,
+    /// The turn's tier does not admit the host (or anything, on `closed`).
+    Tier,
+    /// The host resolved to a private, loopback, link-local or CGNAT address.
+    PrivateAddress,
+    /// A `send` to a host that is not on the send list.
+    SendHost,
+    /// The outbound content matched vault fingerprints.
+    ContentMatch,
+    /// The outbound content carried a canary.
+    Canary,
+    /// A `CONNECT` whose inner stream is not TLS, or whose client refused the proxy's
+    /// certificate.
+    Opaque,
+    /// No or a bad `Proxy-Authorization`.
+    Auth,
+}
+
+/// One egress request (or one refused `CONNECT`). HOST, never URL, headers or body.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EgressLine {
+    pub job_id: Token,
+    /// `closed`, `allowlist` or `open-logged`.
+    pub tier: Token,
+    pub host: Token,
+    pub port: u64,
+    pub method_class: MethodClass,
+    pub at_ms: u64,
+    pub bytes_out: u64,
+    pub bytes_in: u64,
+    pub verdict: EgressVerdict,
+    pub reason: EgressReason,
+}
+
+/// What a write-lock grant was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultOp {
+    Write,
+    Edit,
+    Delete,
+    Other,
+}
+
+/// One vault path a turn was granted the write lock for. The PATH is vault-relative and kept
+/// only when every component is identifier-shaped ([`VaultPath`]); anything else is
+/// `_invalid`, whole.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VaultWriteLine {
+    pub job_id: Token,
+    pub path: VaultPath,
+    pub op: VaultOp,
+    pub at_ms: u64,
+}
+
+/// One commit the bridge made.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommitLine {
+    pub job_id: Token,
+    /// The commit's hash (hex).
+    pub hash: Token,
+    pub files: u64,
+    pub at_ms: u64,
+}
+
+/// A vault-relative path, kept only when it is a plain relative path whose every component is
+/// a [`Token`] (no spaces, no `..`, no leading `/`), at most [`PATH_MAX`] bytes. Anything else
+/// is [`Token::INVALID`], whole. A path names a file, never its contents; the shape rule is
+/// what keeps a careless caller from writing a sentence here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct VaultPath(String);
+
+/// The longest a [`VaultPath`] may be.
+pub const PATH_MAX: usize = 240;
+
+impl VaultPath {
+    pub fn new(s: &str) -> VaultPath {
+        let ok = !s.is_empty()
+            && s.len() <= PATH_MAX
+            && !s.starts_with('/')
+            && s.split('/').all(|c| {
+                !c.is_empty() && c != "." && c != ".." && Token::new(c).as_str() == c
+            });
+        VaultPath(if ok {
+            s.to_string()
+        } else {
+            Token::INVALID.to_string()
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A ledger line: the kind, its version, and its fields, flattened.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -130,6 +270,26 @@ pub enum ActivityLine {
         #[serde(flatten)]
         line: ToolCallLine,
     },
+    ModelCall {
+        v: u32,
+        #[serde(flatten)]
+        line: ModelCallLine,
+    },
+    Egress {
+        v: u32,
+        #[serde(flatten)]
+        line: EgressLine,
+    },
+    VaultWrite {
+        v: u32,
+        #[serde(flatten)]
+        line: VaultWriteLine,
+    },
+    Commit {
+        v: u32,
+        #[serde(flatten)]
+        line: CommitLine,
+    },
 }
 
 impl ActivityLine {
@@ -142,6 +302,34 @@ impl ActivityLine {
 
     pub fn tool_call(line: ToolCallLine) -> ActivityLine {
         ActivityLine::ToolCall {
+            v: ACTIVITY_SCHEMA,
+            line,
+        }
+    }
+
+    pub fn model_call(line: ModelCallLine) -> ActivityLine {
+        ActivityLine::ModelCall {
+            v: ACTIVITY_SCHEMA,
+            line,
+        }
+    }
+
+    pub fn egress(line: EgressLine) -> ActivityLine {
+        ActivityLine::Egress {
+            v: ACTIVITY_SCHEMA,
+            line,
+        }
+    }
+
+    pub fn vault_write(line: VaultWriteLine) -> ActivityLine {
+        ActivityLine::VaultWrite {
+            v: ACTIVITY_SCHEMA,
+            line,
+        }
+    }
+
+    pub fn commit(line: CommitLine) -> ActivityLine {
+        ActivityLine::Commit {
             v: ACTIVITY_SCHEMA,
             line,
         }

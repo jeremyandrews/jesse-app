@@ -161,6 +161,7 @@ pub async fn direct_tool_set(
     }
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: job_id.to_string(),
             capability,
             servers,

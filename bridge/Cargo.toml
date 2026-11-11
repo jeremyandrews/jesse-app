@@ -219,6 +219,20 @@ chrono-tz = { version = "0.10.4", default-features = false }
 # workspace's member: membership decides which lockfile RESOLVES that crate's own
 # dependencies, not who may depend on it. Verified before this line was written; the resulting
 # lock diff adds `jesse-agent` and the `regex` trio it pulls, and nothing else moves.
+# THE PROXIES (`src/proxy/`, off by default). hyper/hyper-util/http-body-util serve the model
+# proxy and the egress proxy's CONNECT + absolute-form surface (already in the lock through
+# axum and reqwest). rustls/tokio-rustls terminate TLS on allowlist and open-logged turns with
+# the per-install CA, whose leaf certificates rcgen mints per host. All ring-backed, the crypto
+# stack already in the graph. base64 decodes outbound tokens for the content check.
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+http-body-util = "0.1"
+bytes = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto"] }
+webpki-roots = "1"
+base64 = "0.22"
 jesse-agent = { path = "../agent" }
 # --- Recorded-audio transcription (`src/speech`) ---------------------------------
 #

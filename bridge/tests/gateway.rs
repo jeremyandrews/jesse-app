@@ -286,6 +286,7 @@ async fn three_upstreams_from_one_turn_reach_only_granted_tools() {
     let job = "job-three";
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: job.into(),
             capability: Capability::Write,
             servers: vec![
@@ -422,6 +423,7 @@ async fn outside_the_subset_the_gateway_closes_and_the_stub_answers_locally() {
     ));
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: "job-subset".into(),
             capability: Capability::Write,
             servers: vec![admitted(&settings, "gwprobe", &["probe_echo"])],
@@ -533,6 +535,7 @@ async fn the_tcp_listener_refuses_forged_expired_misdirected_and_revoked_tokens(
     let base = format!("http://{addr}");
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: "job-tcp".into(),
             capability: Capability::Write,
             servers: vec![admitted(&settings, "gwprobe", &["probe_echo"])],
@@ -894,6 +897,7 @@ async fn live_claude_code_registers_every_stub_server() {
     ));
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: "job-real".into(),
             capability: Capability::Write,
             servers: vec![
@@ -999,6 +1003,7 @@ async fn direct_set_withholds_a_refused_tool_and_keeps_the_others() {
     ));
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: "job-withhold".into(),
             capability: Capability::Write,
             servers: vec![admitted(

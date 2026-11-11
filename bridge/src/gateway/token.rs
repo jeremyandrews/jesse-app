@@ -30,9 +30,17 @@ pub struct Claims {
     pub cap: String,
     /// The servers this turn may reach through the gateway, sorted.
     pub servers: Vec<String>,
-    /// Reserved for the tier a later step assigns. Empty today, and signed anyway, so filling
-    /// it later is not a format change.
+    /// The turn's egress tier ([`crate::proxy::tier::Egress::label`]): `closed`, `allowlist`
+    /// or `open-logged`. Empty on a token minted with both proxies off. The allowlist's hosts
+    /// are not in the token; the proxy reads them from the turn's live session.
     pub tier: String,
+    /// The model proxy route this turn's model calls must use (`anthropic-subscription`,
+    /// `fireworks`, ...). Empty when the model proxy is off or the turn's model has no route.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub route: String,
+    /// The registry id of the turn's model, for metering. Empty with the model proxy off.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
     /// Unix seconds after which the token is refused.
     pub exp: u64,
 }
@@ -45,6 +53,8 @@ pub enum TokenError {
     BadSignature,
     Expired,
     ServerNotGranted,
+    /// A model proxy request on a route other than the token's.
+    RouteNotGranted,
 }
 
 /// The in-memory signing key.
@@ -82,6 +92,27 @@ impl TokenKey {
     /// Check `token` for `server` at `now` (unix seconds). Returns the claims when every check
     /// passes.
     pub fn verify(&self, token: &str, server: &str, now: u64) -> Result<Claims, TokenError> {
+        let claims = self.verify_signed(token, now)?;
+        if !claims.servers.iter().any(|s| s == server) {
+            return Err(TokenError::ServerNotGranted);
+        }
+        Ok(claims)
+    }
+
+    /// Check `token` for the model proxy route `route`: shape, MAC, expiry, and that the
+    /// token's route is exactly `route`. A token minted for one route is refused on every
+    /// other, and a token with no route (the model proxy was off when it was minted) on all.
+    pub fn verify_route(&self, token: &str, route: &str, now: u64) -> Result<Claims, TokenError> {
+        let claims = self.verify_signed(token, now)?;
+        if claims.route.is_empty() || claims.route != route {
+            return Err(TokenError::RouteNotGranted);
+        }
+        Ok(claims)
+    }
+
+    /// Shape, MAC and expiry only: what the egress proxy checks (it has no server or route to
+    /// scope by; the tier is in the claims).
+    pub fn verify_signed(&self, token: &str, now: u64) -> Result<Claims, TokenError> {
         let mut parts = token.split('.');
         let (Some("v1"), Some(body), Some(tag), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -94,9 +125,6 @@ impl TokenKey {
         let claims: Claims = serde_json::from_slice(&body).map_err(|_| TokenError::Malformed)?;
         if now >= claims.exp {
             return Err(TokenError::Expired);
-        }
-        if !claims.servers.iter().any(|s| s == server) {
-            return Err(TokenError::ServerNotGranted);
         }
         Ok(claims)
     }
@@ -134,6 +162,8 @@ mod tests {
             cap: "write".into(),
             servers: vec!["github".into(), "slack".into()],
             tier: String::new(),
+            route: String::new(),
+            model: String::new(),
             exp,
         }
     }
@@ -155,6 +185,42 @@ mod tests {
             k.verify(&t, "proxmox", 1),
             Err(TokenError::ServerNotGranted)
         );
+    }
+
+    #[test]
+    fn a_model_token_is_scoped_to_its_route() {
+        let k = TokenKey::generate();
+        let mut c = claims(1_000);
+        c.route = "fireworks".into();
+        c.model = "glm".into();
+        let t = k.sign(&c);
+        assert_eq!(k.verify_route(&t, "fireworks", 1).map(|c| c.model), Ok("glm".into()));
+        for other in ["anthropic-subscription", "anthropic-api", "local", "openai-chatgpt", ""] {
+            assert_eq!(
+                k.verify_route(&t, other, 1),
+                Err(TokenError::RouteNotGranted),
+                "{other}"
+            );
+        }
+        // A token minted with no route is refused on every route.
+        let none = k.sign(&claims(1_000));
+        assert_eq!(
+            k.verify_route(&none, "fireworks", 1),
+            Err(TokenError::RouteNotGranted)
+        );
+        assert_eq!(k.verify_route(&t, "fireworks", 1_000), Err(TokenError::Expired));
+    }
+
+    #[test]
+    fn a_token_from_before_the_route_claim_still_verifies() {
+        // The pre-0.202 claim set: no `route`, no `model`. Serialised without them, so a
+        // token minted with the model proxy off is byte-identical to the old format.
+        let k = TokenKey::generate();
+        let t = k.sign(&claims(1_000));
+        let body = t.split('.').nth(1).unwrap();
+        let json = String::from_utf8(unhex(body).unwrap()).unwrap();
+        assert!(!json.contains("route") && !json.contains("model"), "{json}");
+        assert!(k.verify(&t, "slack", 1).is_ok());
     }
 
     #[test]

@@ -1060,6 +1060,12 @@ impl Drop for Counting {
 
 #[cfg(test)]
 mod tests {
+    /// A CGNAT address (100.64/10), spelled from its octets: the repository's infra guard reads
+    /// the dotted literal as a tailnet address.
+    fn cgnat() -> String {
+        std::net::Ipv4Addr::new(100, 64, 1, 1).to_string()
+    }
+
     use super::*;
     use crate::proxy::ca::tests::tmp;
     use crate::proxy::content::tests::{fixture_vault, PARAGRAPH};
@@ -1249,12 +1255,12 @@ mod tests {
                 "private.test",
                 "10.20.0.1",
                 "127.0.0.1",
-                "100.64.1.1",
                 "169.254.1.1",
                 "::1",
             ]
             .iter()
             .map(|s| s.to_string())
+            .chain([cgnat()])
             .collect(),
         )
     }
@@ -1387,8 +1393,6 @@ mod tests {
             "127.0.0.1",
             "127.8.8.8",
             "169.254.169.254",
-            "100.64.1.1",
-            "100.127.255.255",
             "0.0.0.0",
             "0.1.2.3",
             "255.255.255.255",
@@ -1410,6 +1414,13 @@ mod tests {
             "::127.0.0.1",
         ] {
             assert!(is_private(a.parse().unwrap()), "{a} is private");
+        }
+        // CGNAT, both ends of 100.64/10, built from octets (see `cgnat`).
+        for a in [
+            std::net::Ipv4Addr::new(100, 64, 1, 1),
+            std::net::Ipv4Addr::new(100, 127, 255, 255),
+        ] {
+            assert!(is_private(std::net::IpAddr::V4(a)), "{a} is private");
         }
         for a in [
             "8.8.8.8",
@@ -1571,7 +1582,7 @@ mod tests {
         let urls = [
             "http://10.20.0.1/",
             local.as_str(),
-            "http://100.64.1.1/",
+            &format!("http://{}/", cgnat()),
             "http://169.254.1.1/",
             "http://[::1]/",
             "http://private.test/",

@@ -253,21 +253,36 @@ impl SubscriptionLogin {
 
     fn cli_stored_login(&self) -> Result<Secret, String> {
         if cfg!(target_os = "macos") {
-            let out = std::process::Command::new("/usr/bin/security")
-                .args([
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .map_err(|e| format!("could not run /usr/bin/security: {e}"))?;
-            if !out.status.success() {
-                return Err("the Claude Code login is not in the Keychain".into());
+            // THE ACCOUNT FIRST, as the CLI itself asks. Measured on the Studio (2026-11-11):
+            // the Keychain holds TWO `Claude Code-credentials` items, the live login under the
+            // user's account and a stale one under `unknown` whose access token is empty, and an
+            // account-less lookup returns the stale one. The account-less lookup stays as the
+            // fallback for a machine with only one item.
+            let user = lookup_var(&self.vars, "USER").or_else(|| lookup_var(&self.vars, "LOGNAME"));
+            let mut last = Err("the Claude Code login is not in the Keychain".to_string());
+            let mut attempts: Vec<Vec<String>> = Vec::new();
+            if let Some(u) = user.filter(|u| !u.is_empty()) {
+                attempts.push(vec!["-a".into(), u]);
             }
-            parse_claude_credentials(&out.stdout)
+            attempts.push(Vec::new());
+            for extra in attempts {
+                let out = std::process::Command::new("/usr/bin/security")
+                    .arg("find-generic-password")
+                    .args(&extra)
+                    .args(["-s", "Claude Code-credentials", "-w"])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .map_err(|e| format!("could not run /usr/bin/security: {e}"))?;
+                if !out.status.success() {
+                    continue;
+                }
+                match parse_claude_credentials(&out.stdout) {
+                    Ok(s) => return Ok(s),
+                    Err(e) => last = Err(e),
+                }
+            }
+            last
         } else {
             let home = lookup_var(&self.vars, "HOME").ok_or("$HOME is not set")?;
             let path = PathBuf::from(home).join(".claude/.credentials.json");
@@ -752,6 +767,11 @@ async fn handle(State(proxy): State<Arc<ModelProxy>>, req: Request) -> Response 
         }
     };
 
+    let asked_for_events = parts
+        .headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
     let mut headers = outbound_headers(&parts.headers);
     if let Err(e) = call.add_credential(&mut headers).await {
         call.record(0, Usage::default());
@@ -793,10 +813,18 @@ async fn handle(State(proxy): State<Arc<ModelProxy>>, req: Request) -> Response 
     let status = upstream.status();
     let mut out_headers = upstream.headers().clone();
     strip_hop_by_hop(&mut out_headers);
-    let event_stream = out_headers
+    // AN EVENT STREAM BY ITS CONTENT TYPE, or, when the upstream names none, by what the
+    // child asked for. Measured 2026-11-11: the ChatGPT backend answers Codex's
+    // `accept: text/event-stream` request with an SSE body and NO `content-type` at all, and a
+    // meter that read that as a JSON body recorded the call as zero tokens.
+    let content_type = out_headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
+        .map(str::to_ascii_lowercase);
+    let event_stream = match content_type {
+        Some(ct) => ct.contains("text/event-stream"),
+        None => asked_for_events,
+    };
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     tokio::spawn(async move {

@@ -2123,6 +2123,15 @@ impl PriceDeck {
                 .is_some_and(|r| r.is_finite() && r >= 0.0)
     }
 
+    /// A model with no stated price: the badge shows `$0.00` as it always did, but the deck is
+    /// INCOMPLETE (no cache-write rate), so the model proxy refuses to meter it as free.
+    pub const UNPRICED: PriceDeck = PriceDeck {
+        in_per_m: 0.0,
+        cached_per_m: 0.0,
+        cache_write_per_m: None,
+        out_per_m: 0.0,
+    };
+
     /// A free model (the `local` entry): every turn costs `$0.00`.
     pub const ZERO: PriceDeck = PriceDeck {
         in_per_m: 0.0,
@@ -4881,7 +4890,15 @@ pub fn registry_model_from_toml(
             cache_write_per_m: p.cache_write_per_m,
             out_per_m: p.out_per_m.unwrap_or(0.0),
         })
-        .unwrap_or(PriceDeck::ZERO);
+        // NO PRICE TABLE: free only for a `local` model, which costs nothing to call. Any other
+        // entry is UNPRICED — the same zero badge it always showed, but an incomplete deck,
+        // so the model proxy refuses to meter it as free (`unpriced_model`) until the entry
+        // states its four rates.
+        .unwrap_or(if matches!(kind, ModelKind::Local) {
+            PriceDeck::ZERO
+        } else {
+            PriceDeck::UNPRICED
+        });
     let health = t
         .health
         .as_ref()
@@ -5489,6 +5506,25 @@ pub fn export_mcp_server_env() {
 
 #[cfg(test)]
 mod tests {
+
+    /// A declared model with no price table is UNPRICED (refused by the model proxy) unless
+    /// it is `local`, which is free. A partial table missing the cache-write rate is
+    /// incomplete too. Never counted as zero.
+    #[test]
+    fn a_declared_model_without_four_rates_is_unpriced_unless_local() {
+        let hosted =
+            registry_model_from_toml(&model_toml("h", "hosted", None), None, None).unwrap();
+        assert!(!hosted.price.is_complete(), "{:?}", hosted.price);
+        let local = registry_model_from_toml(&model_toml("l", "local", None), None, None).unwrap();
+        assert!(local.price.is_complete(), "{:?}", local.price);
+        let mut partial = model_toml("p", "hosted", None);
+        partial.price = Some(
+            toml::from_str::<PriceToml>("in_per_m = 2.0\ncached_per_m = 0.2\nout_per_m = 10.0")
+                .unwrap(),
+        );
+        let partial = registry_model_from_toml(&partial, None, None).unwrap();
+        assert!(!partial.price.is_complete());
+    }
 
     #[test]
     fn configured_cache_write_rate_reaches_badge_and_agent() {

@@ -258,7 +258,8 @@ the four and answers any other request itself with method-not-found (Claude Code
 every server with `server/discover`).
 
 Each turn gets a token: an HMAC-SHA256 over the job id, the capability, the granted server set,
-a tier field (empty) and an expiry of the turn deadline plus 60 s, under a key generated at boot
+the turn's egress tier (0.202.0; see "The model proxy and the egress proxy"), the model proxy
+route and metering id when the model proxy is on, and an expiry of the turn deadline plus 60 s, under a key generated at boot
 and never written down. The unix socket path is the Studio's access control (a `0700` directory
 per turn under `<state_dir>/gw/`, or `[gateway] socket_dir`). The optional TCP listener
 (`[gateway] listen`, off by default and never set on the Studio in this step) checks the token
@@ -272,9 +273,17 @@ is revoked with its session, and the directory is removed; a startup sweep remov
 `<state_dir>/activity/YYYY-MM-DD.jsonl`, `0600`, one line per turn (`kind: "turn"`: job id,
 harness, model id, capability, origin `phone` or `schedule:<id>`, start, end, outcome) and per
 gateway call (`kind: "tool_call"`: job id, server, tool, duration, `ok`, `refused`, `failed` or
-`truncated`, request and response byte counts). Every string field is an identifier or the
-word `_invalid`; no field can hold an argument, a body or a URL path
-(`activity::tests::no_field_of_any_kind_can_carry_content`). Pruned at 90 days.
+`truncated`, request and response byte counts). Since 0.202.0 also `model_call` (job id, route,
+model id, the provider's four token counts, cost in micro-dollars, status), `egress` (job id,
+tier, HOST, port, `read`/`send`, bytes out and in, `allowed`/`refused` and a reason code),
+`vault_write` (job id, vault-relative path, operation; written where the write-lock broker
+grants a lock) and `commit` (job id, hash, file count), and a turn line carries its tier. Every
+string field is an identifier or the word `_invalid` (a path keeps only identifier-shaped
+components); no field can hold an argument, a body, a URL or a header
+(`activity::tests::no_field_of_any_kind_can_carry_content` walks every kind). Pruned at 90 days.
+`GET /jesse/activity?since=&until=` returns at most 10,000 lines (stated in the reply);
+`GET /jesse/activity/digest?since=` and `jesse-bridge activity-digest --since` render the
+overnight digest from the same lines.
 
 ### Residuals
 
@@ -293,6 +302,160 @@ word `_invalid`; no field can hold an argument, a body or a URL path
   the iMCP app before direct turns run with the gateway on, or the first one raises its prompt.
 - **Results are capped per server** (8 MiB, 32 MiB for `browser` and `house`); a larger result
   is withheld as a tool error and recorded `truncated`.
+
+## The model proxy and the egress proxy (0.202.0; off by default)
+
+`[proxy] model = true` and `[proxy] egress = true` make the bridge the route to a model and to
+the open web. Both are off by default and the Studio behaves exactly as before until the flags
+are flipped. Both need `[gateway] enabled = true` (the boot refuses otherwise): the credential a
+child holds is the gateway's turn token, and the proxies validate it. `bridge/src/proxy/` is
+the code.
+
+**On the Studio both are voluntary.** A child that ignores its base URL or its proxy variables
+goes around them, and a child runs as the bridge's own user. The tiers below are advisory until
+the child runs in a pod whose network admits only the bridge; there a NetworkPolicy makes the
+proxies the only route.
+
+### The model proxy
+
+Served on `[proxy] model_listen` (default `127.0.0.1:8767`) under `/model/<route>/`. A child's
+base URL is `<model_child_url>/model/<route>` and its only credential is the turn token, signed
+for that route: a token for one route is a 401 on every other. The proxy checks the token
+(signature, expiry, route, the turn still open), removes the child's `authorization`,
+`x-api-key`, `chatgpt-account-id` and hop-by-hop headers, sets the real credential, forwards the
+body byte for byte, and streams the response back unchanged. It never pools, caches or rewrites
+a prompt.
+
+| Route | Upstream | Credential (read at call time, never logged) |
+|---|---|---|
+| `anthropic-subscription` | `https://api.anthropic.com` | the long-lived token `claude setup-token` prints, from `[proxy] subscription_token_file` or the variable `subscription_token_env`; else the CLI's own stored login (`security find-generic-password -a $USER -s "Claude Code-credentials"`). `Authorization: Bearer`, and `oauth-2025-04-20` added to `anthropic-beta` |
+| `anthropic-api` | `https://api.anthropic.com` | `x-api-key` from the variable `[proxy] anthropic_api_key_env`. Nothing uses it by default |
+| `fireworks` | `https://api.fireworks.ai/inference` (Anthropic and OpenAI surfaces) | the model's own `JESSE_MODEL_*_AUTH_TOKEN` |
+| `local` | `[proxy] local_url` (default `http://127.0.0.1:9100`; an `https://` URL with `[proxy] local_client_cert` presents that client certificate and pins its CA) | the model's own key, if any |
+| `openai-chatgpt` | `https://chatgpt.com/backend-api/codex` | `tokens.access_token` and `tokens.account_id` from Codex's canonical `auth.json` |
+
+**What was measured (2026-11-11).** Claude Code 2.1.322 on the subscription sends its request to
+`ANTHROPIC_BASE_URL` with `Authorization: Bearer <OAuth token>` and an `anthropic-beta` list that
+includes `oauth-2025-04-20`; given `ANTHROPIC_AUTH_TOKEN` it sends that instead, never touches
+its stored login, and drops `oauth-2025-04-20` and `extended-cache-ttl-2025-04-11`. Codex 0.153.4
+with a custom provider (`env_key`, no `requires_openai_auth`) sends its ChatGPT request shape to
+`<base_url>/responses` with the turn token as bearer, no `chatgpt-account-id`, and needs no
+`auth.json`. So both logins are proxied: no `subscription-credential-in-child` residual.
+
+**Metering.** Every `POST` to a messages, responses or completions endpoint writes one
+`model_call` line from the provider's own usage block, streamed or not (Anthropic `message_start`
+and the cumulative `message_delta`; OpenAI `response.completed`; chat completions), costed at the
+registry's four rates. A model whose deck lacks any of the four (input, output, cache write,
+cache read) is refused with `unpriced_model` before anything is sent: never counted as free. A
+declared `[[models]]` entry with no `[models.price]` is unpriced unless it is `local`.
+
+### The egress proxy
+
+A forward proxy (`CONNECT` and absolute-form HTTP) on `[proxy] egress_listen` (default
+`127.0.0.1:8768`). A child gets `HTTPS_PROXY`/`HTTP_PROXY` = `http://<job id>:<turn token>@...`,
+`NO_PROXY` naming only the model proxy (and the gateway's TCP listener when set), and the CA
+certificate in every trust variable below. `fetch_url` on a `direct` turn goes through it with
+the same tier and trusts the CA in process.
+
+- **It resolves DNS itself** and refuses any destination that resolves to a private, loopback,
+  link-local, CGNAT or multicast address, on every tier (`private_address`), connecting to the
+  address it checked so a rebinding answer cannot slip past. LAN services are reached only
+  through gateway tools.
+- **No opaque tunnels.** On `allowlist` and `open-logged` turns it terminates TLS with a
+  per-install CA (`<state_dir>/proxy-ca/`, key `0600` in a `0700` directory, never handed to a
+  child; children get only `<state_dir>/proxy-ca-cert.pem`). A `CONNECT` whose inner stream is
+  not TLS, or whose client refuses the proxy's certificate, is refused (`opaque`) and the log
+  names the client, so a pinned tool fails loudly. On `closed` nothing passes and nothing is
+  terminated.
+- **Read anywhere, send only to known hosts.** On `open-logged` a request is a `read` when it is
+  `GET`/`HEAD`/`OPTIONS` with no body, a path-plus-query of at most `[egress] read_url_max` bytes
+  (512) and a query of at most `[egress] read_query_max` (256); anything else is a `send`, which
+  goes only to `[egress] send_hosts` or the bridge-owned `<state_dir>/egress-send-hosts.json`. A
+  refused send is a 403 whose body tells the agent that sending to that host needs the owner's
+  approval. `allowlist` turns admit only their hosts, reads and sends alike.
+- **Outbound content check** on `allowlist` and `open-logged`, before a request leaves: the
+  URL (percent-decoded), every header but the credential ones, and the body, in raw, base64,
+  base64url, hex and percent-decoded forms of any token over 24 characters, against canaries
+  (`jesse-bridge canary new --path <vault path>`) and an index of hashed 8-word windows of the
+  vault's text (lowercased, links stripped so fetching a link the vault mentions never matches;
+  rebuilt every `[egress] index_interval_secs` and after each bridge commit). A canary, or 3 or
+  more matching windows (`[egress] fingerprint_threshold`), refuses the request (`canary`,
+  `content_match`) and pushes the turn, the host and the reason to the phone, never the content.
+  The check sends nothing anywhere, logs no matched text and calls no model.
+- **The ledger records the host,** never the URL, headers or body. Each inspected exchange is
+  handed to one recorder hook, which records nothing today (the turn record is a later step).
+
+### Tiers
+
+| Tier | Egress proxy | `egress`-class gateway tools |
+|---|---|---|
+| `closed` | nothing | hidden from `tools/list`, refused on call |
+| `allowlist` | only its hosts (exact, or `.suffix`) | hidden, refused |
+| `open-logged` | any public host to read; sends only to the send list | listed |
+
+Scheduled turns are `closed` unless the `[[schedule]]` entry says `egress = "allowlist"` with
+`hosts = [...]` or `egress = "open"` (an open job is named in a boot warning). Phone and other
+client turns take `[sandbox] egress_phone` (default `open-logged`). The bridge's own one-shots
+(titles, diet extraction, vault QA) are `closed`, which their toolsets already are. A job may run
+a non-frontier model (any `local` kind, any Fireworks entry) only on `closed`: the boot fails
+naming the job otherwise. A startup table prints every job's tier; `/health` and each turn's
+ledger line carry the tier.
+
+With `[proxy] egress = false` the gateway hides only the two tools granted alongside tiers,
+iMCP's `maps_directions` and `maps_eta`, on `closed` and `allowlist` turns, so the grant widens
+nothing a scheduled turn could reach before; every other `egress` tool behaves as before.
+
+### Which clients trust the CA, measured (2026-11-11)
+
+| Client | Honours | Does not honour |
+|---|---|---|
+| Claude Code CLI 2.1.322 (`WebFetch`, model traffic) | `NODE_EXTRA_CA_CERTS` | |
+| Codex 0.153.4 | `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE` | |
+| `/usr/bin/curl` 8.7.1 | `SSL_CERT_FILE`, `CURL_CA_BUNDLE` | |
+| `/usr/bin/git` 2.54 | `GIT_SSL_CAINFO` | `SSL_CERT_FILE` |
+| `pip3` (Xcode Python 3.9) | `PIP_CERT`, `REQUESTS_CA_BUNDLE` | `SSL_CERT_FILE` |
+| `npm` (node 22.20) | `NODE_EXTRA_CA_CERTS`, `NPM_CONFIG_CAFILE` | `SSL_CERT_FILE` |
+| `cargo` 1.99 | `CARGO_HTTP_CAINFO` | `SSL_CERT_FILE` |
+| Python `urllib` (Xcode 3.9) | none measured | `SSL_CERT_FILE`: HTTPS through the proxy fails closed |
+| `direct`'s `fetch_url` (reqwest, rustls) | the CA added in process | |
+
+Every one of them is set on a proxied child. No measured client pins certificates. Two do not
+go through the proxy at all and are recorded as residuals.
+
+### What each harness is constrained to on the Studio
+
+| | Claude Code | Codex | direct |
+|---|---|---|---|
+| Model credential in the child | none: turn token only | none: turn token only, no `auth.json` in its home | n/a (in process; its provider is built per turn against the proxy for uniform metering) |
+| `WebFetch` / `fetch_url` | through the egress proxy (measured) | n/a | through the egress proxy (in process) |
+| Shell tools | through the proxy when they honour `HTTPS_PROXY` | the sandboxed shell was observed going DIRECT (residual) | no shell |
+| Gateway `egress` tools | filtered by tier | filtered by tier | filtered by tier |
+
+### Residuals
+
+- **Voluntary on the Studio.** Anything that ignores proxy variables goes direct: Node 22's
+  built-in `fetch` (measured: it ignores `HTTPS_PROXY`), raw sockets, and any tool that clears its
+  environment. A child also runs as the bridge's user, so it can still read the Keychain and
+  `~/.codex/auth.json` from disk if it tries; the proxies keep credentials out of its
+  environment and its home, not out of the user's reach. The pod is the answer to both.
+- **Codex's sandboxed shell went direct.** With `HTTPS_PROXY` on the `codex exec` process, a
+  `curl` its sandboxed shell ran succeeded with no `CONNECT` reaching the recording proxy. Its
+  model and backend traffic did go through the proxy. Until the pod, a Codex shell command is
+  not held to the tier.
+- **Nothing refreshes the stored logins once every turn is proxied.** The subscription route
+  reads the CLI's stored OAuth token at call time, and the ChatGPT route reads `auth.json`; both
+  are refreshed only when a CLI uses its own login. Before flipping `[proxy] model`, put a
+  `claude setup-token` token in `[proxy] subscription_token_file`. Codex's login has no
+  long-lived equivalent; a `codex login` refresh is the operator's.
+- **`codex-write` has no price table** in the deployed TOML, so the model proxy refuses it
+  (`unpriced_model`) until it states four rates.
+- **The bridge's own model calls are not proxied in this step**: the title one-shot, diet
+  extraction and verification, vault QA (CLI children on the routed backend's credential or the
+  CLI's login), the vision helpers (`vision.rs`, the helper's key), hosted transcription
+  (Fireworks and Gemini keys, `speech/hosted.rs`), the model health probes (`health.rs`, each
+  model's key) and the opt-in shadow capture. They are recorded here and in the PR.
+- **The turn token is in the child's environment** (as its model credential and inside
+  `HTTPS_PROXY`). It is scoped to one turn and one route, and dies with the turn.
 
 ## Agent tool allowlist (in-process boundary)
 

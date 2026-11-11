@@ -337,6 +337,12 @@ pub fn child_env(
         for v in NO_PROXY_VARS {
             set.insert((*v).to_string(), no_proxy.join(","));
         }
+        // The Claude Code CLI's own telemetry, error reporting and registry calls go to
+        // api.anthropic.com, Datadog and the MCP registry through the same proxy (measured: a
+        // `-p` turn made eleven such requests). On a `closed` turn each would be a refusal
+        // line in the ledger and noise in the digest; the CLI's documented switch turns them
+        // off. It changes nothing a turn does.
+        set.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into());
         if let Some(ca) = ca_path {
             for v in CA_TRUST_VARS {
                 set.insert((*v).to_string(), ca.display().to_string());
@@ -941,6 +947,35 @@ mod false_positive_measure {
         std::fs::create_dir_all(&state).unwrap();
         let check = crate::proxy::content::ContentCheck::new(&state, threshold);
         check.set_index(index);
+        // REPLAY MODE: the request targets alone, no network. For a log of real fetches (a
+        // week of turns' WebFetch URLs): each is checked exactly as the read it was.
+        if std::env::var("K04_FP_REPLAY").is_ok() {
+            let (mut n, mut hits) = (0usize, 0usize);
+            for url in urls.lines().map(str::trim).filter(|u| !u.is_empty()) {
+                let Ok(parsed) = reqwest::Url::parse(url) else {
+                    continue;
+                };
+                n += 1;
+                let target = match parsed.query() {
+                    Some(q) => format!("{}?{q}", parsed.path()),
+                    None => parsed.path().to_string(),
+                };
+                let headers = vec![("accept".to_string(), b"text/html,*/*".to_vec())];
+                if check.check(&target, &headers, b"")
+                    != crate::proxy::content::ContentVerdict::Clean
+                {
+                    hits += 1;
+                    eprintln!("REPLAY FP: {}", parsed.host_str().unwrap_or(""));
+                }
+            }
+            eprintln!(
+                "replayed {n} real fetches: {hits} refused by the content check ({:.2}%), \
+                 threshold {threshold}",
+                100.0 * hits as f64 / n.max(1) as f64
+            );
+            let _ = std::fs::remove_dir_all(&state);
+            return;
+        }
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))

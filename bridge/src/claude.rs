@@ -292,20 +292,25 @@ async fn run_stateless_oneshot(
 ) -> Result<(String, ShadowUsage), ApiError> {
     // THE GATEWAY TURN this child's stubs connect to, held until the child is reaped. `None`
     // with the gateway off, or for a child that loads no gateway server.
+    //
+    // THE BRIDGE'S OWN ONE-SHOTS (title, diet extract and verify, vault QA) STAY AS THEY ARE
+    // in this step: no model proxy (their routed backend is applied by the caller and must not
+    // be overridden) and no egress proxy. Their tier is `closed`, which their toolset already
+    // is: `basic` has no tool at all and vault QA has no network tool. So the gateway turn is
+    // opened only for a server, exactly as before the proxies.
     let _gateway = crate::gateway::open_for_child(
         cfg,
         req,
         harness.id(),
         Duration::from_secs(timeout_secs),
-        crate::proxy::wiring::proxy_claims(cfg, req.active, req.turn_id),
+        crate::gateway::ProxyClaims {
+            tier: Some(crate::proxy::Egress::Closed),
+            filter_all_egress: cfg.proxy.egress,
+            ..Default::default()
+        },
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("gateway: {e}")))?;
-    // THE PROXIES (off by default): the turn token, now that it exists, as the child's model
-    // credential and proxy credential. A no-op with both proxies off.
-    if let Some(g) = &_gateway {
-        crate::proxy::wiring::apply_child_env(&mut cmd, cfg, req.active, req.turn_id, g.token());
-    }
     let mut child = jesse_agent::mcp::spawn_serialised(&mut cmd).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

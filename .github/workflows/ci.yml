@@ -73,6 +73,22 @@ jobs:
       - name: Format check
         run: cargo fmt -p jesse-agent --check
 
+      # THE ROOT LOCKFILE'S CVE GATE. `Cargo.lock` at the repository root covers both
+      # `agent/` and `eval/`, and until this step nothing audited it: the bridge job audits
+      # `bridge/Cargo.lock` only, and audit.yml runs that same bridge audit weekly. It lives
+      # in this job because the agent is where reqwest/rustls enter the root graph. Same
+      # prebuilt binary and the same bare `cargo audit` as the bridge job: a vulnerability
+      # fails the step, an informational warning (unsound, unmaintained) is reported and
+      # does not. There is no root ignore list; see `bridge/.cargo/audit.toml` for what an
+      # audited exception has to say before one is added.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Dependency CVE audit (root lockfile)
+        run: cargo audit
+
   # THE EVAL HARNESS. New in D7, and it joins CI at the same time as the `product-v1`
   # suite it validates: the teeth check (good mock scores every task, known-bad mock scores
   # none, on BOTH drivers) lives in `eval/tests/integration.rs` and is worth nothing unless

@@ -14,6 +14,22 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [agent 0.14.1] - 2026-11-11
+
+**The root lockfile no longer pulls in two vulnerable TLS crates, and CI now audits it.**
+`cargo audit` at the repository root (the lockfile for `agent/` and `eval/`) reported two
+vulnerabilities, both reached through `reqwest` 0.12 → `hyper-rustls` / `rustls`. No
+workflow audited that lockfile: the bridge job and `audit.yml` both audit `bridge/` only.
+
+- **Fixed:** RUSTSEC-2026-0382, `rustls-webpki` 0.103.15 → 0.103.16 (certificate
+  verification may accept distrusted intermediates).
+- **Fixed:** RUSTSEC-2026-0381, `webpki-roots` 1.0.9 → 1.0.12 (bundled roots allowed trust
+  in distrusted emSign intermediates).
+- **Added:** a `cargo audit` step at the repository root in the `agent` job of
+  `.github/workflows/ci.yml`, so every PR audits the root lockfile the way the bridge job
+  audits `bridge/`. A vulnerability fails it; informational warnings do not.
+- No code changed. Only `Cargo.lock` was updated (`cargo update -p rustls-webpki -p webpki-roots`).
+
 ## [eval 0.8.0] - 2026-11-11
 
 **The eval harness is a library as well as a binary.** `eval/` now has a `[lib]` target that

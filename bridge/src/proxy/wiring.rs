@@ -352,6 +352,39 @@ pub fn child_env(
     (set, remove)
 }
 
+/// What the egress proxy running in THIS process wrote where, set once by
+/// [`start_egress_proxy_with`]. The child-readable CA certificate is the one a child must be
+/// told about, and it lives under the state directory the PROXY was started with, which is not
+/// always the one a child's config names: the containment battery starts one proxy from a
+/// battery-owned state directory and runs every row with a state directory of its own.
+pub struct RunningEgress {
+    /// The child-readable CA certificate the running proxy wrote ([`ca_child_cert_path`]).
+    pub ca_cert: std::path::PathBuf,
+    /// The running proxy's content check (canaries and the vault fingerprint index).
+    pub content: std::sync::Arc<crate::proxy::content::ContentCheck>,
+    /// Notify to rebuild the fingerprint index now.
+    pub rebuild: std::sync::Arc<tokio::sync::Notify>,
+}
+
+static RUNNING_EGRESS: std::sync::OnceLock<RunningEgress> = std::sync::OnceLock::new();
+
+/// The egress proxy this process started, if any.
+pub fn running_egress() -> Option<&'static RunningEgress> {
+    RUNNING_EGRESS.get()
+}
+
+/// The CA certificate path a child is told to trust: the RUNNING proxy's when this process
+/// started one, else the one under the child's own state directory (a child of a bridge whose
+/// proxy runs elsewhere, e.g. the cluster's).
+pub fn child_ca_path(
+    running: Option<&std::path::Path>,
+    state_dir: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    running
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| state_dir.map(|d| ca_child_cert_path(std::path::Path::new(d))))
+}
+
 /// Layer the proxies' variables onto a built child `Command`, once its turn token exists.
 /// A no-op with both proxies off.
 pub fn apply_child_env(
@@ -364,10 +397,10 @@ pub fn apply_child_env(
     if !cfg.proxy.any() {
         return;
     }
-    let ca = cfg
-        .state_dir
-        .as_deref()
-        .map(|d| ca_child_cert_path(std::path::Path::new(d)));
+    let ca = child_ca_path(
+        running_egress().map(|r| r.ca_cert.as_path()),
+        cfg.state_dir.as_deref(),
+    );
     let (set, remove) = child_env(cfg, active, job_id, token, ca.as_deref());
     for v in remove {
         cmd.env_remove(v);
@@ -646,6 +679,12 @@ pub async fn start_egress_proxy_with(
         vault_text_root(&cfg.vault),
         std::time::Duration::from_secs(cfg.proxy.policy.index_interval_secs.max(60)),
     );
+    // The first proxy a process starts is the one its children are pointed at.
+    let _ = RUNNING_EGRESS.set(RunningEgress {
+        ca_cert: ca.cert_path().to_path_buf(),
+        content: content.clone(),
+        rebuild: rebuild.clone(),
+    });
     // Rebuild the vault index after every commit the bridge records.
     let commits = crate::activity::commit_notify();
     tokio::spawn(async move {
@@ -814,6 +853,20 @@ mod tests {
         }
         assert_eq!(set["NO_PROXY"], "127.0.0.1");
         assert!(!set.contains_key("ANTHROPIC_AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn a_child_is_told_the_running_proxys_ca_before_its_own_state_dir() {
+        let running = std::path::Path::new("/battery/proxy-state/proxy-ca-cert.pem");
+        assert_eq!(
+            child_ca_path(Some(running), Some("/row/state")).as_deref(),
+            Some(running)
+        );
+        assert_eq!(
+            child_ca_path(None, Some("/row/state")),
+            Some(std::path::PathBuf::from("/row/state/proxy-ca-cert.pem"))
+        );
+        assert_eq!(child_ca_path(None, None), None);
     }
 
     #[test]

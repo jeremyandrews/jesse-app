@@ -116,11 +116,40 @@ fn the_record_covers_every_row_the_bridge_actually_spawns() {
     }
 }
 
+/// Whether `row` is EXPECTED to carry `probe_id`: every probe, except a proxy's probes in a
+/// row recorded with that proxy off — which then carries none of them. A row carrying SOME of a
+/// proxy's probes is a record no battery run produces, and fails here by name.
+///
+/// THE MIRROR OF THE GATEWAY'S PROBES, with one difference. The committed records were taken
+/// with the gateway on, so its two probes are simply required; the proxies are off by default
+/// and a record taken with them off is a complete record of what that deployment runs. The
+/// startup gate is unaffected either way: it reads hard-gate STATUSES (`highest_passing_level`),
+/// never which probes are present.
+fn expected_in_row(id: &str, row: &RowResult, probe_id: &str) -> bool {
+    let Some(need) = proxy_probe_need(probe_id) else {
+        return true;
+    };
+    match row_proxy_coverage(row, need) {
+        Ok(carried) => carried,
+        Err(missing) => panic!(
+            "{id} {}: carries some of the {need:?} proxy's probes but not {} — a proxy's \
+             probes are recorded all together or not at all",
+            row.label(),
+            missing.join(", ")
+        ),
+    }
+}
+
 #[test]
 fn every_row_records_every_probe() {
     for (id, r) in spawned_records() {
         for row in &r.rows {
+            let mut expected = 0;
             for p in PROBES {
+                if !expected_in_row(id, row, p.id) {
+                    continue;
+                }
+                expected += 1;
                 let rec = row.probe(p.id).unwrap_or_else(|| {
                     panic!("{id} {}: probe {} was never recorded", row.label(), p.id)
                 });
@@ -134,7 +163,7 @@ fn every_row_records_every_probe() {
             }
             assert_eq!(
                 row.probes.len(),
-                PROBES.len(),
+                expected,
                 "{id} {}: the record carries a probe this build does not define",
                 row.label()
             );
@@ -151,6 +180,9 @@ fn no_probe_is_recorded_in_a_state_the_scoring_rules_could_not_produce() {
                 mcp: McpSet::parse(&row.mcp_set).expect("a known MCP set"),
             };
             for p in PROBES {
+                if !expected_in_row(id, row, p.id) {
+                    continue;
+                }
                 let rec = row.probe(p.id).expect("present, per the test above");
                 let verdict = rec.verdict_enum().expect("a known verdict");
                 // Re-score the recorded verdict from scratch. The status and the

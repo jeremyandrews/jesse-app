@@ -600,8 +600,25 @@ pub async fn start_egress_proxy(
     state: &crate::AppState,
     gw: std::sync::Arc<crate::gateway::Gateway>,
 ) -> Result<Option<std::net::SocketAddr>, String> {
+    start_egress_proxy_with(
+        &state.cfg,
+        gw,
+        std::sync::Arc::new(ApnsRefusalNotifier {
+            apns: state.apns.clone(),
+            devices: state.devices.clone(),
+        }),
+    )
+    .await
+}
+
+/// [`start_egress_proxy`] with the refusal notifier given: the containment battery's (which
+/// has no app state and records the notifications it would have sent).
+pub async fn start_egress_proxy_with(
+    cfg: &crate::Config,
+    gw: std::sync::Arc<crate::gateway::Gateway>,
+    notifier: std::sync::Arc<dyn crate::proxy::RefusalNotifier>,
+) -> Result<Option<std::net::SocketAddr>, String> {
     use std::sync::Arc;
-    let cfg = &state.cfg;
     if !cfg.proxy.egress {
         return Ok(None);
     }
@@ -635,10 +652,7 @@ pub async fn start_egress_proxy(
         crate::proxy::egress::EgressDeps {
             authority: gw.clone(),
             ledger: gw.ledger().cloned(),
-            notifier: Arc::new(ApnsRefusalNotifier {
-                apns: state.apns.clone(),
-                devices: state.devices.clone(),
-            }),
+            notifier,
             recorder: Arc::new(crate::proxy::NoRecorder),
             ca,
             content,

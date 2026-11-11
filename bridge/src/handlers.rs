@@ -3006,6 +3006,13 @@ pub fn app(state: AppState) -> Router {
             "/jesse/runs/:run_id/close",
             post(crate::hostrun::jesse_run_close),
         )
+        // The Work view's one shared timestamp: when the board was last looked at, on any
+        // device. Same auth as the run routes; works whether or not runs are enabled.
+        .route(
+            "/jesse/work/last-look",
+            get(crate::hostrun::work::jesse_work_last_look)
+                .post(crate::hostrun::work::jesse_work_last_look_set),
+        )
         .route("/jesse/strands", get(crate::strands::jesse_strands))
         .route("/jesse/strands/:slug", get(crate::strands::jesse_strand))
         .route(

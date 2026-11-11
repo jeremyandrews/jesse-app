@@ -292,6 +292,10 @@ private struct StrandNoteSheetModifier: ViewModifier {
                     Task { await strands?.load() }
                 }
             }
+            // The audit's findings, which the Work board's rows no longer carry.
+            if let strand = strands?.snapshot?.strand(slug: slug), !strand.findings.isEmpty {
+                StrandFindingsButton(strand: strand)
+            }
         }
     }
 
@@ -309,6 +313,29 @@ private struct StrandNoteSheetModifier: ViewModifier {
             StrandRemoteNoteView(title: title, markdown: markdown,
                                  onToday: AnyView(onToday(slug)),
                                  onOpenLink: onOpenLink) { opener.openedNote = nil }
+        }
+    }
+}
+
+/// `N audit findings`, opening the findings sheet: on the full note, where the bookkeeping
+/// belongs, rather than on every board row.
+struct StrandFindingsButton: View {
+    let strand: Strand
+    @State private var shows = false
+
+    var body: some View {
+        Button {
+            shows = true
+        } label: {
+            Label(strand.findings.count == 1 ? "1 audit finding"
+                                             : "\(strand.findings.count) audit findings",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        .buttonStyle(.borderless)
+        .sheet(isPresented: $shows) {
+            StrandFindingsSheet(strand: strand) { shows = false }
         }
     }
 }

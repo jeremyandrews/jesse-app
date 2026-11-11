@@ -178,19 +178,33 @@ public struct StrandDraft: Decodable, Equatable, Hashable, Identifiable, Sendabl
     public var section: String
     public var checked: Bool
     public var studioRunnable: Bool
+    /// The line's plain title (`work::line_title`): the words before its first colon, cut
+    /// at 57 characters. Nil from a bridge that predates the Work view.
+    public var title: String?
+    /// Whether the Work view may offer `Start` on this line: runnable, not under Later,
+    /// waiting on nothing, its draft aimed at this bridge's machine, and no live run. Nil from
+    /// an older bridge, which the view treats as not startable.
+    public var startable: Bool?
+    /// Why `startable` is false, in the bridge's words. Nil when it is startable.
+    public var startableReason: String?
 
     public init(id: String, text: String = "", section: String = "queue",
-                checked: Bool = false, studioRunnable: Bool = false) {
+                checked: Bool = false, studioRunnable: Bool = false,
+                title: String? = nil, startable: Bool? = nil, startableReason: String? = nil) {
         self.id = id
         self.text = text
         self.section = section
         self.checked = checked
         self.studioRunnable = studioRunnable
+        self.title = title
+        self.startable = startable
+        self.startableReason = startableReason
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, section, checked
+        case id, text, section, checked, title, startable
         case studioRunnable = "studio_runnable"
+        case startableReason = "startable_reason"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -200,6 +214,15 @@ public struct StrandDraft: Decodable, Equatable, Hashable, Identifiable, Sendabl
         section = try c.decodeIfPresent(String.self, forKey: .section) ?? ""
         checked = try c.decodeIfPresent(Bool.self, forKey: .checked) ?? false
         studioRunnable = try c.decodeIfPresent(Bool.self, forKey: .studioRunnable) ?? false
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        startable = try c.decodeIfPresent(Bool.self, forKey: .startable)
+        startableReason = try c.decodeIfPresent(String.self, forKey: .startableReason)
+    }
+
+    /// What the line is called on screen: the bridge's title, else its own text.
+    public var displayTitle: String {
+        if let title, !title.isEmpty { return title }
+        return text
     }
 
     /// An open line the strand's view lists: unchecked and not yet done.

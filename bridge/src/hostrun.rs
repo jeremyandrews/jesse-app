@@ -45,8 +45,9 @@ pub mod git;
 pub mod runner;
 pub mod stream;
 pub mod sys;
+pub mod work;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -1882,6 +1883,8 @@ pub struct HostRuns {
     gate: Mutex<()>,
     wake: tokio::sync::Notify,
     house: Mutex<Housekeeping>,
+    /// Each run's `last_line`, kept while its stream is unchanged.
+    last_lines: work::LastLines,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -1912,6 +1915,7 @@ impl HostRuns {
             gate: Mutex::new(()),
             wake: tokio::sync::Notify::new(),
             house: Mutex::new(Housekeeping::default()),
+            last_lines: work::LastLines::default(),
         }
     }
 
@@ -2465,6 +2469,16 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
+        if text.trim() == CONTINUE_TEXT
+            && self
+                .get(run_id)
+                .is_some_and(|r| r.status == RunStatus::NeedsYou)
+        {
+            return Err(Refusal::State(format!(
+                "{run_id} asked a question and needs an answer: an empty \"{CONTINUE_TEXT}\" \
+                 would answer it blind. Reply with the answer."
+            )));
+        }
         self.queue_round_locked(run_id, text, None)
     }
 
@@ -3416,12 +3430,11 @@ impl HostRuns {
             "needs_you": count(RunStatus::NeedsYou),
             "paused": count(RunStatus::Paused),
         });
+        let mut notes = StrandNotes::default();
+        let served: Vec<Value> = runs.iter().map(|r| self.served(r, &mut notes)).collect();
         let h = lock(&self.house);
         json!({
-            "runs": runs
-                .iter()
-                .map(|r| run_json_located(r, &self.notes_root))
-                .collect::<Vec<_>>(),
+            "runs": served,
             "counts": counts,
             "disk": {
                 "total_bytes": h.last_total_bytes,
@@ -3430,6 +3443,56 @@ impl HostRuns {
             },
             "orphans": h.orphans,
         })
+    }
+
+    /// One run as the routes serve it: [`run_json_located`] plus the Work view's `title`,
+    /// `last_line` (the last non blank line of its readable log) and `report_line` (the first
+    /// line of its newest report). Additive: nothing `run_json` serves changes.
+    pub fn served(&self, r: &RunRecord, notes: &mut StrandNotes) -> Value {
+        let mut v = run_json_located(r, &self.notes_root);
+        let root = &self.notes_root;
+        let dir = self.settings.run_dir(&r.run_id);
+        let title = work::run_title(
+            r,
+            |strand, item| notes.line_title(root, strand, item),
+            || {
+                r.prompt_path
+                    .as_deref()
+                    .and_then(|p| std::fs::read_to_string(root.join(locate_report(root, p))).ok())
+                    .and_then(|src| work::h1_title(&src))
+                    .or_else(|| {
+                        [PROMPT_MD, SECTION_MD].iter().find_map(|n| {
+                            std::fs::read_to_string(dir.join(n))
+                                .ok()
+                                .and_then(|src| work::h1_title(&src))
+                        })
+                    })
+            },
+        );
+        let last_line = if valid_run_id(&r.run_id) {
+            self.last_lines.get(&r.run_id, &dir)
+        } else {
+            None
+        };
+        let report_line = r
+            .rounds
+            .iter()
+            .rev()
+            .find_map(|x| x.report_path.as_deref())
+            .and_then(|rel| std::fs::read_to_string(root.join(locate_report(root, rel))).ok())
+            .or_else(|| std::fs::read_to_string(dir.join(REPORT_MD)).ok())
+            .and_then(|src| work::report_line_of(&src));
+        if let Some(o) = v.as_object_mut() {
+            o.insert("title".into(), json!(title));
+            o.insert("last_line".into(), json!(last_line));
+            o.insert("report_line".into(), json!(report_line));
+        }
+        v
+    }
+
+    /// [`HostRuns::served`] for one run, outside a list.
+    pub fn served_one(&self, r: &RunRecord) -> Value {
+        self.served(r, &mut StrandNotes::default())
     }
 
     /// The readable log of a run, its last `tail` lines.
@@ -3445,6 +3508,32 @@ impl HostRuns {
             &stream::read_stream(&dir),
             tail.clamp(1, LOG_MAX),
         ))
+    }
+}
+
+/// The strand notes one served list has read, by slug, so a list of runs parses each note once.
+#[derive(Default)]
+pub struct StrandNotes {
+    read: HashMap<String, Option<crate::strands::Strand>>,
+}
+
+impl StrandNotes {
+    /// The title of line `item_id` of `Strands/<slug>.md`, if the note and the line are there.
+    pub fn line_title(&mut self, notes_root: &Path, slug: &str, item_id: &str) -> Option<String> {
+        let strand = self.read.entry(slug.to_string()).or_insert_with(|| {
+            if !crate::strands::is_safe_slug(slug) {
+                return None;
+            }
+            let rel = format!("{STRANDS_DIR}/{slug}.md");
+            let src = std::fs::read_to_string(notes_root.join(&rel)).ok()?;
+            Some(parse_strand(slug, &src))
+        });
+        strand
+            .as_ref()?
+            .items
+            .iter()
+            .find(|i| i.id == item_id)
+            .map(|i| work::line_title(&i.raw))
     }
 }
 
@@ -3572,21 +3661,33 @@ pub fn annotate_strands(
             })
             .count();
         obj.insert("runs_needs_you".into(), json!(needs_you as u32));
-        let runnable = |item: &crate::strands::StrandItem| {
-            service.is_some()
-                && studio_item_of(
-                    notes_root,
-                    &strand.slug,
-                    item,
-                    &strand.repos,
-                    OptIn::Request { repo: None },
-                )
-                .is_ok()
+        // `studio_runnable`'s check, kept with its reason: `Ok` is the draft's path.
+        let runnable = |item: &crate::strands::StrandItem| -> Result<String, String> {
+            if service.is_none() {
+                return Err("Runs are not enabled on this bridge.".into());
+            }
+            studio_item_of(
+                notes_root,
+                &strand.slug,
+                item,
+                &strand.repos,
+                OptIn::Request { repo: None },
+            )
+            .map(|s| s.prompt_path)
         };
         let drafts: Vec<Value> = strand
             .items
             .iter()
             .map(|i| {
+                let check = runnable(i);
+                let draft_src = check
+                    .as_ref()
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(notes_root.join(p)).ok());
+                let live = runs.iter().any(|r| {
+                    r.step() == Some((strand.slug.as_str(), i.id.as_str())) && r.status.is_live()
+                });
+                let startable = work::startable(i, &check, draft_src.as_deref(), live);
                 json!({
                     "id": i.id,
                     "text": i.text,
@@ -3597,7 +3698,10 @@ pub fn annotate_strands(
                         StrandSection::Done => "done",
                     },
                     "checked": i.checked,
-                    "studio_runnable": runnable(i),
+                    "studio_runnable": check.is_ok(),
+                    "title": work::line_title(&i.raw),
+                    "startable": startable.is_ok(),
+                    "startable_reason": startable.err(),
                 })
             })
             .collect();
@@ -3734,7 +3838,7 @@ pub async fn jesse_run(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     match svc.get(&run_id) {
-        Some(r) => Ok(Json(run_json_located(&r, svc.notes_root())).into_response()),
+        Some(r) => Ok(Json(svc.served_one(&r)).into_response()),
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
@@ -3770,7 +3874,7 @@ pub async fn jesse_run_reply(
         .reply_and_pump(&run_id, &body.text)
         .await
         .map_err(refusal)?;
-    Ok(Json(run_json_located(&r, svc.notes_root())).into_response())
+    Ok(Json(svc.served_one(&r)).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/cancel`.
@@ -3781,7 +3885,7 @@ pub async fn jesse_run_cancel(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let r = svc.cancel_and_wake(&run_id).await.map_err(refusal)?;
-    Ok(Json(run_json_located(&r, svc.notes_root())).into_response())
+    Ok(Json(svc.served_one(&r)).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/close` with an optional `{ reason }`.

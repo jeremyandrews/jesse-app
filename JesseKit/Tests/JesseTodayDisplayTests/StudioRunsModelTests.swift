@@ -28,9 +28,12 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertEqual(enabled, [.needsYou, .reported, .interrupted])
     }
 
-    func testResumeIsOfferedOnInterruptedAndNeedsYouWithAnEmptyComposerOnly() {
+    /// Resume is the empty continue: a `needs_you` run asked a question, which a blind continue
+    /// would answer (the bridge refuses it with a 409), so only an interrupted run offers it.
+    func testResumeIsOfferedOnInterruptedOnlyWithAnEmptyComposerOnly() {
         let offered = Self.all.filter { StudioRunSemantics.offersResume($0, composer: "") }
-        XCTAssertEqual(offered, [.needsYou, .interrupted])
+        XCTAssertEqual(offered, [.interrupted])
+        XCTAssertFalse(StudioRunSemantics.offersResume(.needsYou, composer: ""))
         XCTAssertTrue(StudioRunSemantics.offersResume(.interrupted, composer: "  \n "))
         XCTAssertFalse(StudioRunSemantics.offersResume(.interrupted, composer: "use main"))
         XCTAssertFalse(StudioRunSemantics.offersResume(.reported, composer: ""))
@@ -70,7 +73,7 @@ final class StudioRunsModelTests: XCTestCase {
         let model = StudioRunDetailModel(runID: "GD5", run: run("GD5", .needsYou),
                                          makeClient: { FakeRuns() })
         XCTAssertTrue(model.isComposerEnabled)
-        XCTAssertTrue(model.showsResume)
+        XCTAssertFalse(model.showsResume, "a question is answered, never continued blind")
         XCTAssertFalse(model.canSend, "nothing typed")
         XCTAssertFalse(model.canCancel)
         model.composer = "main"
@@ -229,8 +232,8 @@ final class StudioRunsModelTests: XCTestCase {
     }
 }
 
-/// The six calls, faked.
-private final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
+/// The six run calls and the two last look calls, faked. Shared with `WorkSemanticsTests`.
+final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     var list = StudioRunList()
     var listError: (any Error)?
     var startResult: Result<StudioRunStarted, any Error> = .failure(StudioRunError.other("unset"))
@@ -262,5 +265,17 @@ private final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     }
     func cancelRun(id: String) async throws -> StudioRun {
         try cancelResult.get()
+    }
+    var lastLookValue: String?
+    var lastLookError: (any Error)?
+    var marks = 0
+    func lastLook() async throws -> WorkLastLook {
+        if let lastLookError { throw lastLookError }
+        return WorkLastLook(lastLook: lastLookValue)
+    }
+    func markLastLook() async throws -> WorkLastLook {
+        marks += 1
+        lastLookValue = "2026-11-09T17:00:00.000Z"
+        return WorkLastLook(lastLook: lastLookValue)
     }
 }

@@ -169,6 +169,14 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
     public var host: String?
     /// Every round's Inbox report, vault relative, oldest first.
     public var reportPaths: [String]
+    /// What the run is called (`work::run_title`): its Drafts line's title, its prompt's
+    /// heading, or its branch, never its id. Nil from a bridge that predates the Work view.
+    public var title: String?
+    /// The last non blank line of its readable log, at most 200 characters. Nil before
+    /// anything is logged, and from an older bridge.
+    public var lastLine: String?
+    /// The first line of its newest report. Nil before a report, and from an older bridge.
+    public var reportLine: String?
 
     public var id: String { runID }
 
@@ -179,7 +187,8 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
                 startedAt: String? = nil, finishedAt: String? = nil,
                 lastEventAt: String? = nil, stalledSince: String? = nil,
                 rounds: [StudioRunRound] = [], model: String? = nil, error: String? = nil,
-                resumeAt: String? = nil, host: String? = nil, reportPaths: [String] = []) {
+                resumeAt: String? = nil, host: String? = nil, reportPaths: [String] = [],
+                title: String? = nil, lastLine: String? = nil, reportLine: String? = nil) {
         self.runID = runID
         self.strand = strand
         self.itemID = itemID
@@ -202,10 +211,13 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         self.resumeAt = resumeAt
         self.host = host
         self.reportPaths = reportPaths
+        self.title = title
+        self.lastLine = lastLine
+        self.reportLine = reportLine
     }
 
     private enum CodingKeys: String, CodingKey {
-        case strand, repo, branch, origin, status, rounds, model, error, host
+        case strand, repo, branch, origin, status, rounds, model, error, host, title
         case runID = "run_id"
         case itemID = "item_id"
         case promptPath = "prompt_path"
@@ -219,6 +231,8 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         case stalledSince = "stalled_since"
         case resumeAt = "resume_at"
         case reportPaths = "report_paths"
+        case lastLine = "last_line"
+        case reportLine = "report_line"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -245,6 +259,9 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         resumeAt = try c.decodeIfPresent(String.self, forKey: .resumeAt)
         host = try c.decodeIfPresent(String.self, forKey: .host)
         reportPaths = try c.decodeIfPresent([String].self, forKey: .reportPaths) ?? []
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        lastLine = try c.decodeIfPresent(String.self, forKey: .lastLine)
+        reportLine = try c.decodeIfPresent(String.self, forKey: .reportLine)
     }
 
     public static func decode(from data: Data) throws -> StudioRun {
@@ -372,6 +389,29 @@ public struct StudioRunLog: Decodable, Equatable, Sendable {
     }
 }
 
+/// `GET`/`POST /jesse/work/last-look`: when the Work board was last looked at, on any device.
+public struct WorkLastLook: Decodable, Equatable, Sendable {
+    /// RFC 3339, or nil before the first look (and from a bridge with no state directory).
+    public var lastLook: String?
+
+    public init(lastLook: String? = nil) {
+        self.lastLook = lastLook
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastLook = "last_look"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lastLook = try c.decodeIfPresent(String.self, forKey: .lastLook)
+    }
+
+    public static func decode(from data: Data) throws -> WorkLastLook {
+        try JSONDecoder().decode(WorkLastLook.self, from: data)
+    }
+}
+
 /// A run route failed.
 public enum StudioRunError: LocalizedError, Equatable, Sendable {
     /// The bridge answered with a refusal; `message` is its own sentence, shown verbatim.
@@ -390,7 +430,8 @@ public enum StudioRunError: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// The six calls. A seam so the screens' models can be driven by a fake in a test.
+/// The six run calls and the two last look calls. A seam so the screens' models can be driven
+/// by a fake in a test.
 public protocol StudioRunsProviding: Sendable {
     func listRuns() async throws -> StudioRunList
     func startRun(strand: String, itemID: String) async throws -> StudioRunStarted
@@ -398,6 +439,10 @@ public protocol StudioRunsProviding: Sendable {
     func runLog(id: String, tail: Int?) async throws -> StudioRunLog
     func replyToRun(id: String, text: String) async throws -> StudioRun
     func cancelRun(id: String) async throws -> StudioRun
+    /// `GET /jesse/work/last-look`.
+    func lastLook() async throws -> WorkLastLook
+    /// `POST /jesse/work/last-look`: the last look becomes now.
+    func markLastLook() async throws -> WorkLastLook
 }
 
 extension JesseBridgeClient: StudioRunsProviding {
@@ -435,6 +480,17 @@ extension JesseBridgeClient: StudioRunsProviding {
         let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/cancel",
                                      method: "POST", body: [String: String]())
         return try runDecode { try StudioRun.decode(from: data) }
+    }
+
+    public func lastLook() async throws -> WorkLastLook {
+        let data = try await runCall("/jesse/work/last-look", method: "GET")
+        return try runDecode { try WorkLastLook.decode(from: data) }
+    }
+
+    public func markLastLook() async throws -> WorkLastLook {
+        let data = try await runCall("/jesse/work/last-look", method: "POST",
+                                     body: [String: String]())
+        return try runDecode { try WorkLastLook.decode(from: data) }
     }
 
     /// One call: the paired request, the bridge's own words for any refusal.

@@ -133,10 +133,12 @@ public enum StudioRunSemantics {
         }
     }
 
-    /// Whether `Resume` is offered: an interrupted or needs-you run, with nothing typed.
+    /// Whether `Resume` is offered: an interrupted run, with nothing typed. Never a
+    /// `needs_you` run: it asked a question, and an empty continue would answer it blind (the
+    /// bridge refuses that one with a 409).
     public static func offersResume(_ status: StudioRunStatus, composer: String) -> Bool {
         switch status {
-        case .needsYou, .interrupted:
+        case .interrupted:
             return composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         default:
             return false
@@ -234,6 +236,17 @@ public final class StudioRunsModel {
     public private(set) var starting: String?
     /// Whether the Today tab's Runs sheet is up. Here so the shell can close it.
     public var presentsList = false
+    /// The shared last look this visit to Work compares against (RFC 3339), as it was when
+    /// Work opened. Posting a new one does not move it, so the visit still shows what was new.
+    public private(set) var lastLook: String?
+    /// Whether the last look has been read from the bridge at all.
+    public private(set) var lastLookLoaded = false
+    @ObservationIgnored private var lastLookReadAt: Date?
+    @ObservationIgnored private var lastLookPostedAt: Date?
+
+    /// How long one visit to Work lasts for the last look: returning from a project inside
+    /// this keeps the line; opening Work after it reads the new last look.
+    public static let visitLength: TimeInterval = 5 * 60
 
     private let makeClient: @MainActor () -> any StudioRunsProviding
     private let now: @Sendable () -> Date
@@ -258,6 +271,33 @@ public final class StudioRunsModel {
         } catch {
             loadError = Self.message(error)
         }
+    }
+
+    /// Read the shared last look, once per visit to Work. Quietly nothing from a bridge that
+    /// predates it: the line simply never shows.
+    public func loadLastLook() async {
+        if let at = lastLookReadAt, now().timeIntervalSince(at) < Self.visitLength,
+           lastLookLoaded { return }
+        do {
+            lastLook = try await makeClient().lastLook().lastLook
+            lastLookLoaded = true
+            lastLookReadAt = now()
+        } catch {
+            lastLookLoaded = false
+        }
+    }
+
+    /// Post the last look (now), once per visit, after this visit's rows have rendered. The
+    /// value this visit compares against is left alone.
+    public func markLastLook() async {
+        if let at = lastLookPostedAt, now().timeIntervalSince(at) < Self.visitLength { return }
+        lastLookPostedAt = now()
+        _ = try? await makeClient().markLastLook()
+    }
+
+    /// The runs that finished since the last look, every project's or one's.
+    public func finishedSinceLastLook(strand: String? = nil) -> [StudioRun] {
+        WorkSemantics.finishedSince(lastLook, in: runs, strand: strand)
     }
 
     /// The runs of one strand, or every run for nil.
@@ -337,10 +377,20 @@ public final class StudioRunDetailModel {
 
     public var status: StudioRunStatus? { run?.status }
 
+    /// Send needs typed (or dictated) text: on a `needs_you` run there is no empty send.
     public var canSend: Bool {
         guard let status, !isSending else { return false }
-        return StudioRunSemantics.canReply(status)
-            && !composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return WorkSemantics.canSend(status, text: composer)
+    }
+
+    /// What the run is called. Never its id once the run is known.
+    public var title: String {
+        run.map(WorkSemantics.title) ?? "Run"
+    }
+
+    /// The question it asks, or its report's first line.
+    public var headline: String? {
+        run.flatMap(WorkSemantics.headline)
     }
 
     public var isComposerEnabled: Bool {
@@ -379,10 +429,24 @@ public final class StudioRunDetailModel {
         }
     }
 
-    public func send() async {
+    /// Send the answer. True when the bridge took it (the composer is then cleared); on a
+    /// refusal the bridge's words are in `alert` and the typed text stays.
+    @discardableResult
+    public func send() async -> Bool {
         let text = composer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        if await post({ try await $0.replyToRun(id: self.runID, text: text) }) { composer = "" }
+        guard !text.isEmpty else { return false }
+        if await post({ try await $0.replyToRun(id: self.runID, text: text) }) {
+            composer = ""
+            return true
+        }
+        return false
+    }
+
+    /// Show a run the list already holds, without a call: a project's Your turn rows are drawn
+    /// from the list, and their detail models must not lag it.
+    public func adopt(_ newer: StudioRun) {
+        guard newer.runID == runID else { return }
+        run = newer
     }
 
     public func resume() async {

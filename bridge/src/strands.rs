@@ -229,6 +229,9 @@ pub struct StrandItem {
     pub date: Option<String>,
     pub checked: bool,
     pub line: usize,
+    /// The line after the checkbox and the optional date, as written: what a served title
+    /// ([`crate::hostrun::work::line_title`]) is derived from. Derived, never written back.
+    pub raw: String,
 }
 
 /// A wiki link whose target has to resolve: one in `**Now:**`, `**Waiting
@@ -722,6 +725,7 @@ fn parse_item(section: StrandSection, line: &str, line_no: usize) -> Option<Stra
         date,
         checked,
         line: line_no,
+        raw: rest.to_string(),
     })
 }
 

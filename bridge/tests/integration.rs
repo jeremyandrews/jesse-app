@@ -11168,3 +11168,86 @@ async fn diet_snapshot_carries_the_patterns_report_with_every_catalogue_question
     assert!(p["energyAudit"]["withheld"].is_string());
     let _ = std::fs::remove_dir_all(&vault);
 }
+
+// ---- GET/POST /jesse/work/last-look ------------------------------------------------------
+//
+// The Work view's one shared timestamp, in the state directory, behind the run routes' auth.
+
+fn last_look_request(method: &str, auth: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri("/jesse/work/last-look");
+    if let Some(a) = auth {
+        b = b.header("authorization", a);
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn last_look_needs_the_paired_token() {
+    let st = AppState::new(test_config());
+    for method in ["GET", "POST"] {
+        for auth in [None, Some("Bearer wrong")] {
+            let resp = app(st.clone())
+                .oneshot(last_look_request(method, auth))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {auth:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn last_look_is_null_then_now_and_survives_a_restart() {
+    let state_parent = std::env::temp_dir().join(format!("jesse-state-{}", random_hex()));
+    let cfg = || Config {
+        state_dir: Some(state_parent.to_string_lossy().into_owned()),
+        ..test_config()
+    };
+    let st = AppState::new(cfg());
+    let resp = app(st.clone())
+        .oneshot(last_look_request("GET", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(body, serde_json::json!({ "last_look": null }));
+
+    let before = chrono::Utc::now();
+    let resp = app(st.clone())
+        .oneshot(last_look_request("POST", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let posted: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let at = posted["last_look"].as_str().unwrap().to_string();
+    let parsed = chrono::DateTime::parse_from_rfc3339(&at).unwrap();
+    assert!(parsed.timestamp_millis() >= before.timestamp_millis() - 1);
+    assert!(state_parent.join("work-last-look.json").is_file());
+
+    // A second device, or the same bridge after a restart, reads the same instant.
+    let resp = app(AppState::new(cfg()))
+        .oneshot(last_look_request("GET", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(body["last_look"], serde_json::json!(at));
+    let _ = std::fs::remove_dir_all(&state_parent);
+}
+
+#[tokio::test]
+async fn last_look_without_a_state_dir_is_null_and_cannot_be_set() {
+    let st = AppState::new(test_config());
+    let resp = app(st.clone())
+        .oneshot(last_look_request("GET", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert!(body["last_look"].is_null());
+    let resp = app(st)
+        .oneshot(last_look_request("POST", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

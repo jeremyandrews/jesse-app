@@ -932,6 +932,25 @@ deleted with its worktree only once it is merged into the repository's `main`, a
 from the local branch for a reply. Cleanup, reconcile and the disk cap never delete
 `<root>/local/`.
 
+**The Work view's fields (0.203.0, `src/hostrun/work.rs`).** All derived on read; nothing is
+written to a note.
+
+- Every run served (`GET /jesse/runs`, `GET /jesse/runs/:id`, a reply's and a cancel's answer)
+  carries `title` (its Drafts line's title, else its prompt's H1 without its leading id, else its
+  branch as words, never its run id), `last_line` (the last non blank line of the readable log,
+  at most 200 characters, or `null`) and `report_line` (the first line of its newest report, or
+  `null`).
+- Every `drafts[]` item of `GET /jesse/strands` carries `title`, `startable` and
+  `startable_reason`. A line's title is its text without the id, any `(waits on: …)` and the
+  wiki links it ends on, Markdown stripped, the words before the first `": "`, cut at 57
+  characters on a word with `…`. `startable` is `studio_runnable` and: not under `### Later`, no
+  `(waits on: …)`, the draft says `devjob-host: studio`, and no live run of the step.
+- `GET /jesse/work/last-look` answers `{ "last_look": "<RFC 3339>" | null }`;
+  `POST /jesse/work/last-look` sets it to now. One value for every device, in
+  `<state_dir>/work-last-look.json`, behind the paired device token.
+- `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
+  refused with 409: the run asked a question, and an empty continue would answer it blind.
+
 ### How `claude` is run
 
 The bridge runs the turn as:

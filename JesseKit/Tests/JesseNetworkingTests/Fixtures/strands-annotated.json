@@ -19,57 +19,81 @@
           "checked": false,
           "id": "GD5",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "Already has a live run.",
           "studio_runnable": true,
-          "text": "Run the thing on the Studio."
+          "text": "Run the thing on the Studio.",
+          "title": "Run the thing on the Studio"
         },
         {
           "checked": true,
           "id": "GD6",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "GD6 is checked",
           "studio_runnable": false,
-          "text": "Checked one."
+          "text": "Checked one.",
+          "title": "Checked one"
         },
         {
           "checked": false,
           "id": "GD7",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "GD7: Projects/drafts/archive/gd7-prompt.md is archived",
           "studio_runnable": false,
-          "text": "Archived one."
+          "text": "Archived one.",
+          "title": "Archived one"
         },
         {
           "checked": false,
           "id": "GD8",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "Projects/drafts/gd8-prompt.md has no ## PROMPT section",
           "studio_runnable": false,
-          "text": "No prompt section."
+          "text": "No prompt section.",
+          "title": "No prompt section"
         },
         {
           "checked": false,
           "id": "GD9",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "Projects/drafts/gd9-prompt.md has no devjob-repo and strand Gd lists no repos: pass repo",
           "studio_runnable": false,
-          "text": "No repository."
+          "text": "No repository.",
+          "title": "No repository"
         },
         {
           "checked": false,
           "id": "GD10",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "Its draft does not set devjob-host to this bridge's machine.",
           "studio_runnable": true,
-          "text": "No host."
+          "text": "No host.",
+          "title": "No host"
         },
         {
           "checked": false,
           "id": "GD11",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "Projects/drafts/gd11-prompt.md is step GD99, not GD11",
           "studio_runnable": false,
-          "text": "Wrong id."
+          "text": "Wrong id.",
+          "title": "Wrong id"
         },
         {
           "checked": false,
           "id": "GD12",
           "section": "queue",
+          "startable": false,
+          "startable_reason": "Its draft does not set devjob-host to this bridge's machine.",
           "studio_runnable": true,
-          "text": "On the cluster."
+          "text": "On the cluster.",
+          "title": "On the cluster"
         }
       ],
       "findings": [

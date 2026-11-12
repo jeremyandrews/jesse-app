@@ -118,7 +118,7 @@ fn a_step_id_in_the_lead_parenthetical_names_the_clause_unless_it_already_does()
 
 #[test]
 fn a_one_word_label_before_the_colon_is_skipped() {
-    // `Next: carta d'identità in town (…) and the health card (…). …`
+    // `Next: the library card in town (…) and the gym pass (…). …`
     assert_eq!(h("Errand"), "The library card in town and the gym pass");
     // `F3 is next: …` keeps the word, and the title names the step.
     assert_eq!(h("Ledger"), "Next: Watch the recorded August walkthrough");
@@ -135,7 +135,7 @@ fn a_one_word_sentence_gives_way_to_the_next_and_mid_ids_go() {
 
 #[test]
 fn a_sentence_naming_today_wins_and_keeps_its_time() {
-    assert_eq!(h("Bid"), "Feedback call set: 17:00 to 17:10 CET, Teams");
+    assert_eq!(h("Bid"), "Feedback call set: 17:00 to 17:10 CET, by video");
     // Any other day, the lead sentence.
     let plain = "Not shortlisted (3 Nov). Feedback call set: Thu 12 Nov 17:00. The rest.";
     assert_eq!(
@@ -204,6 +204,15 @@ fn a_lone_verb_or_a_no_sentence_gives_way_to_the_next() {
         headline("No queued step.", &[], TODAY).as_deref(),
         Some("No queued step")
     );
+    // A lone verb is said over a `Nothing …`, and is what is left when nothing better is.
+    assert_eq!(
+        headline("PR 331 merged. Nothing else.", &[], TODAY).as_deref(),
+        Some("Merged")
+    );
+    assert_eq!(
+        headline("PR 327 merged.", &[], TODAY).as_deref(),
+        Some("Merged")
+    );
 }
 
 #[test]
@@ -220,12 +229,12 @@ fn the_next_title_is_the_lines_whole_first_clause() {
     // The title stops at 57 characters; the text says what the 87 is.
     assert_eq!(
         next_title(
-            "Tape the waist at the navel and record it against the 87 cm decider.",
-            "Tape the waist at the navel and record it against the 87\u{2026}",
+            "Paint the north fence and the side gate and finish with the 87 cm trim.",
+            "Paint the north fence and the side gate and finish with the 87\u{2026}",
             &lines
         )
         .as_deref(),
-        Some("Tape the waist at the navel and record it against the 87 cm decider")
+        Some("Paint the north fence and the side gate and finish with the 87 cm trim")
     );
     // A long head before the colon is the name; a one or two word label keeps its tail.
     assert_eq!(
@@ -294,8 +303,8 @@ fn links_backticks_hashes_and_pr_numbers_leave_the_headline() {
 #[test]
 fn an_abbreviation_does_not_end_the_sentence() {
     assert_eq!(
-        first_sentence("Next is the ask at St. Clare's desk, in person. Then the rest."),
-        "Next is the ask at St. Clare's desk, in person"
+        first_sentence("Next is the ask at the St. Anywhere desk, in person. Then the rest."),
+        "Next is the ask at the St. Anywhere desk, in person"
     );
     assert_eq!(first_sentence("Done. then more"), "Done");
 }
@@ -424,8 +433,51 @@ fn a_machine_leaves_and_jeremy_is_you() {
         Some("The link graph tool you call \"tree search\"")
     );
     assert_eq!(
-        headline("Jeremy's health beyond the diet logging. More.", &[], TODAY).as_deref(),
-        Some("Your health beyond the diet logging")
+        headline("Jeremy's garden beyond the back wall. More.", &[], TODAY).as_deref(),
+        Some("Your garden beyond the back wall")
+    );
+}
+
+#[test]
+fn a_pr_number_takes_only_its_own_and() {
+    assert_eq!(
+        your_action("you: review PR 5 and deploy it.", &[], None, &[]).as_deref(),
+        Some("review and deploy it")
+    );
+    assert_eq!(
+        headline("PRs 9 and 10 merged the fix.", &[], TODAY).as_deref(),
+        Some("Merged the fix")
+    );
+}
+
+#[test]
+fn only_the_name_jeremy_is_you() {
+    assert_eq!(
+        headline("Jeremyson's tool is done.", &[], TODAY).as_deref(),
+        Some("Jeremyson's tool is done")
+    );
+    assert_eq!(
+        headline("Waiting on Jeremy, then shipping.", &[], TODAY).as_deref(),
+        Some("Waiting on you, then shipping")
+    );
+}
+
+#[test]
+fn a_step_gate_falls_back_on_the_title_and_a_remark_verb_is_not_doubled() {
+    let lines = vec![("GD5".to_string(), "Pick a branch".to_string())];
+    assert_eq!(
+        your_action("you: GD5's questions.", &lines, None, &[]).as_deref(),
+        Some("pick a branch")
+    );
+    assert_eq!(
+        your_action(
+            "you: the checklist is yours to run.",
+            &[],
+            Some("Run the checklist"),
+            &[]
+        )
+        .as_deref(),
+        Some("run the checklist")
     );
 }
 

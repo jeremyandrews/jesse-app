@@ -74,11 +74,13 @@ final class WorkRowTextTests: XCTestCase {
     func testAnOlderBridgeFallsBackOnTheGateButANullActionDoesNot() {
         let older = strand(waiting: "you: Create the repo.", servesYourAction: false)
         XCTAssertEqual(text(older)?.line, "For you: create the repo.")
-        // The bridge read the gate and found nothing to say: no raw text on the row.
+        // The bridge read the gate and found nothing to put in words: still his, pointed at the
+        // note, never its raw text.
         let served = strand(waiting: "you: PD2.", servesYourAction: true,
                             nextTitle: "The local gate")
-        XCTAssertEqual(text(served)?.line, "Next: The local gate")
-        XCTAssertEqual(text(served)?.tone, .plain)
+        XCTAssertEqual(text(served)?.line, "For you: see the note")
+        XCTAssertEqual(text(served)?.tone, .you)
+        XCTAssertEqual(WorkSemantics.gateLine(served), "For you: see the note")
     }
 
     func testACountOfQuestionsWithNoRunListedIsStillHis() {
@@ -94,15 +96,22 @@ final class WorkRowTextTests: XCTestCase {
                                                       servesYourAction: false)),
                        "SOC 2 renewal.")
         XCTAssertNil(WorkSemantics.gatePhrase(strand(waiting: "you:", servesYourAction: false)))
+        // The bridge's Next is taken as cleaned, but a stale deadline still goes.
+        XCTAssertEqual(WorkSemantics.nextPhrase(strand(nextTitle: "Ship App 1.0 (214), due Friday")),
+                       "Next: Ship App 1.0 (214)")
     }
 
     func testTheSpokenStateFollowsTheSameRuleAsTheOrangeLine() {
-        // The bridge read the gate and found nothing his: no orange line, and no "Your turn".
+        // A gate the bridge could not word is still his: orange line and "Your turn" both.
         let served = strand(waiting: "you: PD2.", servesYourAction: true)
-        XCTAssertNil(WorkSemantics.action(served, runs: []))
-        XCTAssertNotEqual(WorkSemantics.rowStatus(served, runs: []), .yourTurn)
+        XCTAssertNotNil(WorkSemantics.action(served, runs: []))
+        XCTAssertEqual(WorkSemantics.rowStatus(served, runs: []), .yourTurn)
         let his = strand(yourAction: "read the essays", waiting: "you: read the essays.")
         XCTAssertEqual(WorkSemantics.rowStatus(his, runs: []), .yourTurn)
+        // Someone else's wait is neither.
+        let theirs = strand(waiting: "the vendor: a quote.", servesYourAction: true)
+        XCTAssertNil(WorkSemantics.action(theirs, runs: []))
+        XCTAssertNotEqual(WorkSemantics.rowStatus(theirs, runs: []), .yourTurn)
     }
 
     // MARK: C. What is moving
@@ -145,8 +154,8 @@ final class WorkRowTextTests: XCTestCase {
         XCTAssertEqual(WorkRowText(detail: "Running: Handoff", line: "Next: List",
                                    marker: "Running").fallbackLine, "Running: Handoff")
         // Nothing his, nothing moving: Next, else the headline.
-        XCTAssertEqual(WorkRowText(detail: "177 lbs, a new low", line: "Next: Tape it").fallbackLine,
-                       "Next: Tape it")
+        XCTAssertEqual(WorkRowText(detail: "The fence is half painted", line: "Next: Paint the gate").fallbackLine,
+                       "Next: Paint the gate")
         XCTAssertEqual(WorkRowText(detail: "The wine in the garage").fallbackLine,
                        "The wine in the garage")
     }
@@ -196,11 +205,15 @@ final class WorkRowTextTests: XCTestCase {
     // MARK: D. Nothing his, nothing moving
 
     func testNextSaysWhatComesNextWithoutAsidesOrAStaleDeadline() {
-        let t = text(strand(headline: "Not shortlisted",
-                            nextTitle: "Sign off the services rate card (with the team), due end of today"))
-        XCTAssertEqual(t?.detail, "Not shortlisted")
-        XCTAssertEqual(t?.line, "Next: Sign off the services rate card")
+        let t = text(strand(headline: "Not chosen",
+                            nextTitle: "Sign off the price list, due end of today"))
+        XCTAssertEqual(t?.detail, "Not chosen")
+        XCTAssertEqual(t?.line, "Next: Sign off the price list")
         XCTAssertEqual(t?.tone, .plain)
+        // An older bridge sends no `next_title`: the line's own title, without its aside.
+        let drafts = [StrandDraft(id: "P1", text: "x", section: "queue",
+                                  title: "Sign off the price list (with the team), due today")]
+        XCTAssertEqual(text(strand(drafts: drafts))?.line, "Next: Sign off the price list")
     }
 
     func testAHeadlineThatRepeatsNextGivesWayToIt() {

@@ -36,16 +36,17 @@ pub fn headline(now: &str, lines: &[(String, String)], today: &str) -> Option<St
     let all = sentences(&plain);
     let dated = all.iter().position(|x| mentions_day(x, today));
     // The sentence naming today first, then the rest in order. A one word sentence
-    // (`trovato.rs.`) and a `No …`/`Nothing …` one with more to follow say nothing.
+    // (`trovato.rs.`) and a `No …`/`Nothing …` one say nothing; with nothing better, the first
+    // sentence stands.
     let mut order: Vec<usize> = dated.into_iter().collect();
     order.extend((0..all.len()).filter(|i| Some(*i) != dated));
     let mut first = None;
-    for (n, i) in order.iter().enumerate() {
+    for i in &order {
         let x = all[*i];
         let lower = x.to_lowercase();
-        let more = n + 1 < order.len();
         if x.split_whitespace().count() <= 1
-            || (more && (lower.starts_with("no ") || lower.starts_with("nothing ")))
+            || lower.starts_with("no ")
+            || lower.starts_with("nothing ")
         {
             continue;
         }
@@ -567,7 +568,7 @@ fn first_clause(s: &str) -> &str {
         }
     }
     match s.split_once(": ") {
-        // `Next: carta d'identità …`: a one word label, so the words after it are the clause.
+        // `Next: the library card …`: a one word label, so the words after it are the clause.
         Some((head, tail)) if head.split_whitespace().count() <= 1 => first_clause(tail),
         Some((head, _)) => head,
         None => s,
@@ -757,7 +758,12 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
             continue;
         }
         // The board is his: `Jeremy` on it is `you`.
-        if let Some(rest) = pc.strip_prefix("Jeremy") {
+        // Only the name itself (`Jeremy`, `Jeremy's`, `Jeremy,`), never a word that starts with it.
+        if let Some(rest) = pc.strip_prefix("Jeremy").filter(|r| {
+            r.starts_with('\'')
+                || r.starts_with('\u{2019}')
+                || r.chars().all(|c| !c.is_alphanumeric())
+        }) {
             let you = if out.is_empty() { "You" } else { "you" };
             let rest = match rest {
                 "'s" | "\u{2019}s" => "r".to_string(),
@@ -831,7 +837,14 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
                     if t.ends_with(',') && pieces.get(j) != Some(&"and") {
                         continue;
                     }
-                } else if *t == "and" && numbers > 0 {
+                } else if *t == "and"
+                    && numbers > 0
+                    && pieces.get(j + 1).is_some_and(|n| {
+                        let c = core(n).trim_start_matches('#');
+                        !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit())
+                    })
+                {
+                    // `PRs 9 and 10`; but in `PR 5 and deploy` the `and` is the sentence's.
                     j += 1;
                 } else {
                     break;

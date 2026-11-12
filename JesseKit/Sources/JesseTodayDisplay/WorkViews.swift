@@ -171,8 +171,8 @@ public struct WorkProjectView: View {
                     // what is his to do; the note's whole Waiting on under them.
                     let phrase = WorkSemantics.gatePhrase(strand)
                     VStack(alignment: .leading, spacing: 3) {
-                        if let phrase {
-                            Text("For you: \(phrase)")
+                        if let line = WorkSemantics.gateLine(strand) {
+                            Text(line)
                                 .font(.subheadline.weight(.semibold))
                         }
                         if phrase?.lowercased() != gate.lowercased() {

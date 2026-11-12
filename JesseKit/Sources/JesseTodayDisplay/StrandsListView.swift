@@ -391,8 +391,8 @@ struct StrandRow: View {
     var runBadge: StudioRunBadge? = nil
     /// The words beside the title and under it, or nil for nothing to say.
     var text: WorkRowText? = nil
-    /// `Your turn`, `2 moving` or `Next: …` (`WorkSemantics.rowStatus`): said first to a screen
-    /// reader, so a row's state is heard before its words.
+    /// `Your turn` or `2 moving` (`WorkSemantics.rowStatus`; its `Next: …` is not said, line 2
+    /// says it): said first to a screen reader, so a row's state is heard before its words.
     var spokenStatus: String? = nil
     let isOpening: Bool
     let onOpen: () -> Void
@@ -477,7 +477,8 @@ struct StrandRow: View {
     /// The widest a row's words run, in points: wider than any phone, narrower than a Mac window.
     static let textMaxWidth: CGFloat = 560
 
-    /// One sentence for a screen reader: the title, the status line, and where it sits.
+    /// One sentence for a screen reader: the title, its state, the grey text and line 2 whole
+    /// (never cut), and where it sits.
     var accessibilityLabel: String {
         var parts = [strand.title]
         if let spokenStatus, spokenStatus.hasPrefix("Next:") == false {
@@ -498,26 +499,20 @@ struct StrandRow: View {
 /// truncates as any line does.
 struct WordFitLine: View {
     let text: String
-    /// Fewer words than this is a stub that says nothing: with `minWords` above 1 the line is
-    /// left out rather than cut that short.
-    var minWords = 1
 
     var body: some View {
-        let variants = Self.variants(text, minWords: minWords)
+        let variants = Self.variants(text)
         ViewThatFits(in: .horizontal) {
             ForEach(Array(variants.enumerated()), id: \.offset) { _, v in
                 Text(v).lineLimit(1).fixedSize(horizontal: true, vertical: false)
             }
-            if minWords > 1 {
-                Color.clear.frame(width: 0, height: 0)
-            } else {
-                Text(variants.last ?? text).lineLimit(1)
-            }
+            Text(variants.last ?? text).lineLimit(1)
         }
         .accessibilityLabel(text)
     }
 
-    /// The text, then each shorter run of its first words with `…`, longest first. Trailing
+    /// The text, then each shorter run of its first words with `…`, longest first, none under
+    /// `minWords` words (the grey text beside a title asks for four: fewer is a stub). Trailing
     /// punctuation and a dangling small word are dropped before the `…`.
     static func variants(_ text: String, minWords: Int = 1) -> [String] {
         let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)

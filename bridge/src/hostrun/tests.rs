@@ -1249,6 +1249,41 @@ async fn reconcile_prunes_boots_out_and_reports_but_keeps_an_unknown_directory()
 
 // ---- 4. THE SNAPSHOT AND THE CHAT TOOLS -----------------------------------------------------
 
+#[test]
+fn the_strands_snapshot_gains_the_board_rows_phrases_and_null_without_them() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    // A note with no Now, no Waiting on and nothing queued.
+    std::fs::write(
+        s.notes().join("Strands/Bare.md"),
+        "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Bare\n\n## Drafts\n### Done\n",
+    )
+    .unwrap();
+    let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+    let mut v = serde_json::to_value(&snap).unwrap();
+    annotate_strands(&mut v, &snap, &s.notes(), None, "2026-11-09");
+    let by = |slug: &str| {
+        v["strands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["slug"] == slug)
+            .cloned()
+            .unwrap()
+    };
+    let gd = by("Gd");
+    // `GD6 merged (PR 12): …` around GD6's title; the first gate without its aside or its id;
+    // the first unchecked Queue line, GD5.
+    assert_eq!(gd["headline"], "Merged: Checked one");
+    assert_eq!(gd["your_action"], "pick main or a release branch");
+    assert_eq!(gd["next_title"], "Run the thing on the Studio");
+    let bare = by("Bare");
+    for key in ["headline", "your_action", "next_title"] {
+        assert!(bare.get(key).is_some(), "{key} is always served");
+        assert!(bare[key].is_null(), "{key}: {}", bare[key]);
+    }
+}
+
 #[tokio::test]
 async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     let s = Scratch::new();

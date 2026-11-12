@@ -135,7 +135,8 @@ follows it. It is scrubbed as above.
 
 - **His action:** a waiting run's question, then a cut off run to resume, then a failed run, then
   the note's `your_action`. A bridge before 0.205.0 sends no `your_action`; the app then falls back
-  on the gate's own words.
+  on the gate's own words. A `you:` gate the bridge could not put in words (`you: PR 331`) reads
+  `For you: see the note`, so it is never his without saying so.
 - **What is moving:** the Studio runs (running before paused before queued), then a Drafts line
   under Running that no Studio run covers.
 - **Next:** `next_title`, without parentheticals or a `, due …` tail.

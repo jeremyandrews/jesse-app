@@ -9,7 +9,8 @@ import JesseNetworking
 // moving, what is next. Each row says exactly one of them, in plain words. Step ids, run ids,
 // branches, rounds, audit findings and machine names are never on the first screen.
 
-/// The one status line a Work board row carries, in precedence order.
+/// A project's state in one word, in precedence order: what VoiceOver hears first on a Work
+/// board row (HO2 drew it as the row's status line; since HO5 the row draws `WorkRowText`).
 public enum WorkRowStatus: Equatable, Sendable {
     /// A run waits on the owner, a run was cut off or failed, or the note's Waiting on is a
     /// `you:` gate.
@@ -121,9 +122,10 @@ public enum WorkSemantics {
 
     // MARK: The board row
 
-    /// The row's one status line, or nil for nothing to say. `runs` is every run the list
-    /// holds; with none loaded (`runsLoaded` false) the board falls back on the snapshot's
-    /// own counts.
+    /// The project's state in one word (`WorkRowStatus`), or nil for nothing to say. `runs` is
+    /// every run the list holds; with none loaded (`runsLoaded` false) it falls back on the
+    /// snapshot's own counts. `Your turn` is decided by `action`, the rule the row's orange line
+    /// follows, so the two never disagree.
     public static func rowStatus(_ strand: Strand, runs: [StudioRun],
                                  runsLoaded: Bool = true) -> WorkRowStatus? {
         let needsYou = strand.runsNeedsYou ?? 0
@@ -167,10 +169,15 @@ public enum WorkSemantics {
         if (strand.runsNeedsYou ?? 0) > 0 {
             return "For you: answer a question"
         }
-        if let phrase = gatePhrase(strand) {
-            return "For you: \(phrase)"
-        }
-        return nil
+        return gateLine(strand)
+    }
+
+    /// The note's `you:` gate as the row and the project view both show it: `For you: <phrase>`,
+    /// or, for a gate the bridge could not put in words (`you: PR 331`), `For you: see the note`.
+    /// Nil when the Waiting on is not his.
+    public static func gateLine(_ strand: Strand) -> String? {
+        if let phrase = gatePhrase(strand) { return "For you: \(phrase)" }
+        return youGate(strand) == nil ? nil : "For you: see the note"
     }
 
     /// The note's `you:` action as a phrase: the bridge's `your_action`, else (an older bridge)
@@ -240,8 +247,9 @@ public enum WorkSemantics {
 
     /// The first queued line, as `Next: <title>`. A line under Running is under way, not next.
     public static func nextPhrase(_ strand: Strand) -> String? {
+        // The bridge has cleaned `next_title` already; only a stale `, due …` tail goes here.
         if let title = strand.nextTitle?.trimmingCharacters(in: .whitespaces), !title.isEmpty {
-            return "Next: \(rowTitle(title))"
+            return "Next: \(withoutDue(title))"
         }
         if let first = nextLines(strand, limit: .max).first(where: { $0.section == "queue" }) {
             return "Next: \(rowTitle(first.displayTitle))"
@@ -255,8 +263,7 @@ public enum WorkSemantics {
     /// A Drafts title as the row shows it: no parentheticals (one cut short included) and no
     /// `, due …` tail, whose relative date goes stale on a line nobody has ticked.
     static func rowTitle(_ title: String) -> String {
-        var t = withoutParentheticals(title)
-        if let r = t.range(of: ", due ") { t = String(t[..<r.lowerBound]) }
+        var t = withoutDue(withoutParentheticals(title))
         // A title the bridge cut short (`… doing and…`) loses the small words it stopped on.
         if t.hasSuffix("\u{2026}") {
             var words = t.dropLast().split(separator: " ").map(String.init)
@@ -270,6 +277,12 @@ public enum WorkSemantics {
         }
         t = t.trimmingCharacters(in: .whitespaces)
         return t.isEmpty ? title : t
+    }
+
+    /// `title` without a `, due …` tail.
+    static func withoutDue(_ title: String) -> String {
+        guard let r = title.range(of: ", due ") else { return title }
+        return String(title[..<r.lowerBound])
     }
 
     /// Whether two phrases say the same thing: past a leading `Next:`, they open on the same two

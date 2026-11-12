@@ -65,8 +65,9 @@ final class WorkScreenshotUITests: XCTestCase {
     /// (`UICTContentSizeCategoryXL`), `HO5_PREFIX` names the shots and `HO5_PROJECT` is the title
     /// of the project whose view is taken.
     func testHO5Board() throws {
-        guard env["HO5_PREFIX"] != nil else { throw XCTSkip("HO5 board shots need HO5_PREFIX") }
-        let prefix = env["HO5_PREFIX"] ?? "ho5"
+        guard let prefix = env["HO5_PREFIX"] else {
+            throw XCTSkip("HO5 board shots need HO5_PREFIX")
+        }
         let app = XCUIApplication()
         app.launchEnvironment["JESSE_UITEST_BRIDGE"] = env["HO2_BRIDGE"]
         app.launchEnvironment["JESSE_MUTE"] = "1"

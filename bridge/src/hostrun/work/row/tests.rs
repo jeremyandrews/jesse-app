@@ -135,7 +135,7 @@ fn a_one_word_sentence_gives_way_to_the_next_and_mid_ids_go() {
 
 #[test]
 fn a_sentence_naming_today_wins_and_keeps_its_time() {
-    assert_eq!(h("Bid"), "Feedback call set: 17:00 to 17:10 CET, by video");
+    assert_eq!(h("Bid"), "Feedback call set: 17:00 to 17:10, by video");
     // Any other day, the lead sentence.
     let plain = "Not shortlisted (3 Nov). Feedback call set: Thu 12 Nov 17:00. The rest.";
     assert_eq!(
@@ -479,6 +479,98 @@ fn a_step_gate_falls_back_on_the_title_and_a_remark_verb_is_not_doubled() {
         .as_deref(),
         Some("run the checklist")
     );
+}
+
+#[test]
+fn a_step_id_that_is_the_object_is_named_and_a_remark_verb_waits_for_a_thing() {
+    let lines = vec![
+        ("H2".to_string(), "Hosting build".to_string()),
+        ("GD5".to_string(), "Run the thing".to_string()),
+    ];
+    assert_eq!(
+        your_action("you: review H2.", &lines, None, &[]).as_deref(),
+        Some("review hosting build")
+    );
+    // After a preposition the id only said which; it goes with it.
+    assert_eq!(
+        your_action("you: pick a branch for GD5.", &lines, None, &[]).as_deref(),
+        Some("pick a branch")
+    );
+    // An instruction keeps its own verb; a thing takes the remark's.
+    assert_eq!(
+        your_action(
+            "you: every open line is yours to run.",
+            &[],
+            Some("Write the post"),
+            &[]
+        )
+        .as_deref(),
+        Some("write the post")
+    );
+    assert_eq!(
+        your_action(
+            "you: every open line is yours to run.",
+            &[],
+            Some("The checklist"),
+            &[]
+        )
+        .as_deref(),
+        Some("run the checklist")
+    );
+    // `Jeremy's call` after `For you:`.
+    assert_eq!(
+        your_action("you: Jeremy's call on pricing.", &[], None, &[]).as_deref(),
+        Some("your call on pricing")
+    );
+}
+
+#[test]
+fn more_date_shapes_and_quotes_and_asides() {
+    for now in [
+        "Old news. Call at 2026-11-12 10:00.",
+        "Old news. Call on Nov 12 at 10:00.",
+        "Old news. Call on 12 November at 10:00.",
+    ] {
+        let got = headline(now, &[], TODAY).unwrap();
+        assert!(got.starts_with("Call"), "{now} → {got}");
+        assert!(got.contains("10:00"), "{now} → {got}");
+    }
+    let w = vec![("W1".to_string(), "Blog".to_string())];
+    assert_eq!(
+        headline(
+            "W1 finished: \u{201C}The Bargain\u{201D}, the piece.",
+            &w,
+            TODAY
+        )
+        .as_deref(),
+        Some("Finished: The Bargain")
+    );
+    // An empty quote is no name: the title stands.
+    assert_eq!(
+        headline("W1 finished: \"\", the piece.", &w, TODAY).as_deref(),
+        Some("Finished: Blog")
+    );
+    assert_eq!(
+        headline("Merged the fix (see the long", &[], TODAY).as_deref(),
+        Some("Merged the fix")
+    );
+    assert_eq!(
+        headline("Merged (a (b) c) the fix.", &[], TODAY).as_deref(),
+        Some("Merged the fix")
+    );
+}
+
+#[test]
+fn the_verb_after_you_agrees() {
+    for (now, want) in [
+        ("Jeremy is away.", "You are away"),
+        ("Jeremy has the key.", "You have the key"),
+        ("Jeremy watches it.", "You watch it"),
+        ("Jeremy passes.", "You pass"),
+        ("Jeremy, then us.", "You, then us"),
+    ] {
+        assert_eq!(headline(now, &[], TODAY).as_deref(), Some(want), "{now}");
+    }
 }
 
 #[test]

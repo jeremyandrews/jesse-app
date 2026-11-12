@@ -20,7 +20,8 @@ public enum WorkRowStatus: Equatable, Sendable {
     /// The first open Drafts line's title.
     case next(String)
 
-    /// The words on the row.
+    /// The state as words: what VoiceOver says first on a row (the row itself draws
+    /// `WorkRowText`).
     public var text: String {
         switch self {
         case .yourTurn: return "Your turn"
@@ -29,7 +30,8 @@ public enum WorkRowStatus: Equatable, Sendable {
         }
     }
 
-    /// Drawn in orange: the only status the owner can clear.
+    /// The only state the owner can clear (HO2 drew it in orange; the row's orange line is now
+    /// `WorkRowText.tone`, decided by the same `action`).
     public var isYourTurn: Bool { self == .yourTurn }
 }
 

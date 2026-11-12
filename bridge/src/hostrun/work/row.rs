@@ -1,11 +1,12 @@
-//! **THE WORK BOARD ROW'S WORDS** (0.205.0): two short phrases per strand, derived on read from
-//! what the note already says, so a board row can tell the owner what a project is about right
-//! now and what, if anything, is his to do.
+//! **THE WORK BOARD ROW'S WORDS** (0.205.0): three short phrases per strand, derived on read
+//! from what the note already says, so a board row can tell the owner what a project is about
+//! right now, what, if anything, is his to do, and what comes next.
 //!
 //! - [`headline`]: the lead clause of the note's `**Now:**`, in plain words.
 //! - [`your_action`]: the first action of a `you:` `**Waiting on:**`, in plain words.
+//! - [`next_title`]: the first queued Drafts line, named from its whole text.
 //!
-//! Both are pure: no model is called, nothing is written back, and a note that says nothing
+//! All are pure: no model is called, nothing is written back, and a note that says nothing
 //! usable gives `None`. Step ids, PR numbers and parentheticals are kept off the phrase, because a
 //! row is read at a glance and an id is a label the reader would have to look up. A leading id that
 //! names one of the strand's own lines is replaced by that line's title.
@@ -36,7 +37,7 @@ pub fn headline(now: &str, lines: &[(String, String)], today: &str) -> Option<St
     let all = sentences(&plain);
     let dated = all.iter().position(|x| mentions_day(x, today));
     // The sentence naming today first, then the rest in order. A one word sentence
-    // (`trovato.rs.`) and a `No …`/`Nothing …` one say nothing; with nothing better, the first
+    // (`example.rs.`) and a `No …`/`Nothing …` one say nothing; with nothing better, the first
     // sentence stands.
     let mut order: Vec<usize> = dated.into_iter().collect();
     order.extend((0..all.len()).filter(|i| Some(*i) != dated));
@@ -81,7 +82,8 @@ fn phrase_of(s: &str, dated: bool, lines: &[(String, String)]) -> String {
     }
     let rest = rest
         .trim_start_matches(['\'', '\u{2019}'])
-        .trim_start_matches("s ")
+        .strip_prefix("s ")
+        .unwrap_or(rest)
         .trim();
     let names: Vec<String> = ids.iter().filter_map(|id| title_for(id, lines)).collect();
     if !names.is_empty() && rest.split_whitespace().count() <= SHORT_REST_WORDS {
@@ -109,7 +111,7 @@ fn phrase_of(s: &str, dated: bool, lines: &[(String, String)]) -> String {
 /// instruction (`installing` → `install`) and `whether …` as `decide whether …`. A gate that is a
 /// remark about the note rather than an action (`every open line here is … of yours`, `… only you
 /// can have`, `… is yours to run`) gives way to `next`, the first open Queue line's title, when
-/// there is one. The case is kept as written, so the app can put `You:` in front of it.
+/// there is one. The case is kept as written, so the app can put `For you:` in front of it.
 pub fn your_action(
     waiting: &str,
     lines: &[(String, String)],
@@ -158,12 +160,23 @@ pub fn your_action(
                 .and_then(|(_, rest)| rest.split_whitespace().next())
                 .map(|v| v.trim_matches(|c: char| !c.is_alphabetic()).to_string())
                 .filter(|v| !v.is_empty());
+            // Only before a thing (`the launch checklist`); a line that is already an
+            // instruction (`Write the post`) keeps its own verb.
+            let names_a_thing = n
+                .split_whitespace()
+                .next()
+                .is_some_and(|w| matches!(w.to_lowercase().as_str(), "the" | "a" | "an"));
             return match verb {
-                Some(v) if !n.to_lowercase().starts_with(&v) => finish(&format!("{v} {n}"), false),
+                Some(v) if names_a_thing => finish(&format!("{v} {n}"), false),
                 _ => finish(&n, false),
             };
         }
     }
+    // `Jeremy's call` became `Your call`: after `For you:` it reads `your call`.
+    let phrase = match phrase.strip_prefix("Your ") {
+        Some(rest) => format!("your {rest}"),
+        None => phrase,
+    };
     finish(&imperative(&phrase), false)
 }
 
@@ -463,7 +476,7 @@ const GERUNDS: &[(&str, &str)] = &[
 ];
 
 /// `s` with a capitalized first word lowercased (`Review the draft` → `review the draft`), so a
-/// title reads after `You:`. A word in capitals or with capitals inside (`SOC`, `GitHub`) stays.
+/// title reads after `For you:`. A word in capitals or with capitals inside (`SOC`, `GitHub`) stays.
 fn decapitalize(s: &str) -> String {
     let first = s.split_whitespace().next().unwrap_or("");
     let mut cs = first.chars();
@@ -672,6 +685,18 @@ fn title_for(id: &str, lines: &[(String, String)]) -> Option<String> {
         format!("the {t}")
     } else {
         t
+    };
+    (!t.is_empty()).then_some(t)
+}
+
+/// A step's title as a name inside an action, without recursing into [`scrub`]: [`short_title`],
+/// then a leading id of its own dropped.
+fn name_of(id: &str, lines: &[(String, String)]) -> Option<String> {
+    let (_, title) = lines.iter().find(|(i, _)| i == id)?;
+    let t = short_title(title)?;
+    let t = match t.split_once(' ') {
+        Some((first, rest)) if is_id(core(first), lines) => rest.to_string(),
+        _ => t,
     };
     (!t.is_empty()).then_some(t)
 }
@@ -934,6 +959,12 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
                 || is_filler(pieces[last + 1]);
             if clause_ends && out.last().is_some_and(|w| is_preposition(w)) {
                 out.pop();
+            } else if clause_ends && !branches && !out.is_empty() {
+                // `review H2` in an action: the id is what is to be done to, so its step's name
+                // stands in for it (`review the hosting build`).
+                if let Some(name) = name_of(core(pieces[last]), lines) {
+                    out.push(decapitalize(&name));
+                }
             }
             carry_punctuation(&mut out, pieces[last]);
             i = last + 1;

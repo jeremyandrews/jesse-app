@@ -287,12 +287,10 @@ public struct StrandsListView: View {
     private func row(_ strand: Strand, family: StrandFamily, showsParent: Bool,
                      insideCaption: String? = nil) -> some View {
         let parent = family.parent(of: strand)
-        let text = runs.map {
-            WorkSemantics.rowText(strand, runs: $0.runs, runsLoaded: $0.hasLoaded)
-        } ?? WorkSemantics.rowText(strand, runs: [], runsLoaded: false)
-        let status = runs.map {
-            WorkSemantics.rowStatus(strand, runs: $0.runs, runsLoaded: $0.hasLoaded)
-        } ?? WorkSemantics.rowStatus(strand, runs: [], runsLoaded: false)
+        let all = runs?.runs ?? []
+        let loaded = runs?.hasLoaded ?? false
+        let text = WorkSemantics.rowText(strand, runs: all, runsLoaded: loaded)
+        let status = WorkSemantics.rowStatus(strand, runs: all, runsLoaded: loaded)
         return StrandRow(strand: strand,
                   tone: family.tone(strand.slug),
                   parentTitle: parent?.title,
@@ -302,7 +300,7 @@ public struct StrandsListView: View {
                   onTodayCaption: StrandOnToday.caption(count: onTodayCount(strand.slug)),
                   insideCaption: insideCaption,
                   text: text,
-                  spokenStatus: status?.text,
+                  spokenStatus: status,
                   isOpening: opener.opening == strand.slug,
                   onOpen: {
                       if runs != nil {
@@ -393,7 +391,7 @@ struct StrandRow: View {
     var text: WorkRowText? = nil
     /// `Your turn` or `2 moving` (`WorkSemantics.rowStatus`; its `Next: …` is not said, line 2
     /// says it): said first to a screen reader, so a row's state is heard before its words.
-    var spokenStatus: String? = nil
+    var spokenStatus: WorkRowStatus? = nil
     let isOpening: Bool
     let onOpen: () -> Void
     let onShowFindings: () -> Void
@@ -481,8 +479,9 @@ struct StrandRow: View {
     /// (never cut), and where it sits.
     var accessibilityLabel: String {
         var parts = [strand.title]
-        if let spokenStatus, spokenStatus.hasPrefix("Next:") == false {
-            parts.append(spokenStatus)
+        switch spokenStatus {
+        case .yourTurn, .moving: parts.append(spokenStatus?.text ?? "")
+        case .next, nil: break
         }
         if let detail = text?.detail { parts.append(detail) }
         if let line = text?.line { parts.append(line) }

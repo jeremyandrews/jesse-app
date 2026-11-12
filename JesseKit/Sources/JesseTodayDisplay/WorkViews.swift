@@ -159,8 +159,15 @@ public struct WorkProjectView: View {
 
         let turn = WorkSemantics.yourTurnRuns(slug, in: runs.runs)
         let gate = WorkSemantics.youGate(strand)
-        if !turn.isEmpty || gate != nil {
+        // The snapshot counts a question the runs list does not hold yet: the row says so, and so
+        // does this section.
+        let unlisted = turn.isEmpty && (strand.runsNeedsYou ?? 0) > 0
+        if !turn.isEmpty || gate != nil || unlisted {
             Section {
+                if unlisted {
+                    Text("For you: answer a question")
+                        .font(.subheadline.weight(.semibold))
+                }
                 ForEach(turn, id: \.sectionKey.turn) { run in
                     WorkYourTurnRow(run: run, detail: runs.detailModel(for: run.runID),
                                     onOpen: { openedRun = StudioRunRoute(runID: run.runID) },

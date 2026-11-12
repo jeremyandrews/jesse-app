@@ -10,5 +10,5 @@ updated: 2026-11-11
 
 ## Drafts
 
-- [ ] **X1** Email to the accountant (EN + IT) sending the 2025 return: do the figures need updating. [[todo-list/Projects/drafts/x1-email]]
+- [ ] **X1** Email to the accountant (x2) sending the yearly report: do the figures need updating. [[todo-list/Projects/drafts/x1-email]]
 - [ ] **P3** Phone script for the appointment.

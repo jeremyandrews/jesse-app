@@ -119,7 +119,7 @@ fn a_step_id_in_the_lead_parenthetical_names_the_clause_unless_it_already_does()
 #[test]
 fn a_one_word_label_before_the_colon_is_skipped() {
     // `Next: carta d'identità in town (…) and the health card (…). …`
-    assert_eq!(h("Errand"), "Carta d'identità in town and the health card");
+    assert_eq!(h("Errand"), "The library card in town and the gym pass");
     // `F3 is next: …` keeps the word, and the title names the step.
     assert_eq!(h("Ledger"), "Next: Watch the recorded August walkthrough");
 }
@@ -294,8 +294,8 @@ fn links_backticks_hashes_and_pr_numbers_leave_the_headline() {
 #[test]
 fn an_abbreviation_does_not_end_the_sentence() {
     assert_eq!(
-        first_sentence("Next is the ask for Dr. Rossi, in person. Then the rest."),
-        "Next is the ask for Dr. Rossi, in person"
+        first_sentence("Next is the ask at St. Clare's desk, in person. Then the rest."),
+        "Next is the ask at St. Clare's desk, in person"
     );
     assert_eq!(first_sentence("Done. then more"), "Done");
 }
@@ -371,7 +371,7 @@ fn an_id_list_is_counted_as_drafts() {
 fn a_remark_about_the_note_gives_way_to_the_first_queued_line() {
     assert_eq!(
         a("Household"),
-        "email to the accountant sending the 2025 return"
+        "email to the accountant sending the yearly report"
     );
     // `… is yours to run`: the remark's verb carries over.
     assert_eq!(a("Site"), "run the launch checklist");

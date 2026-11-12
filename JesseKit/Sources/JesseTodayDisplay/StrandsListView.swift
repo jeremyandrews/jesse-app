@@ -80,6 +80,7 @@ public struct StrandsListView: View {
                 opener: StrandOpener,
                 onTodayCount: @escaping (String) -> Int = { _ in 0 },
                 runs: StudioRunsModel? = nil,
+                // For a render of the whole board (the Mac screenshot test): Dormant open.
                 dormantStartsOpen: Bool = false) {
         self.model = model
         self.opener = opener
@@ -414,9 +415,7 @@ struct StrandRow: View {
                     }
                     if let marker = text?.marker {
                         // Only the word fits: when nothing is his, line 2 says what is moving.
-                        rowBody(detail: marker,
-                                line: text?.tone == .you ? text?.line : (text?.detail ?? text?.line),
-                                tone: text?.tone ?? .plain)
+                        rowBody(detail: marker, line: fallbackLine, tone: text?.tone ?? .plain)
                     }
                     rowBody(detail: nil, line: fallbackLine, tone: text?.tone ?? .plain,
                             fitsTitle: true)
@@ -440,13 +439,8 @@ struct StrandRow: View {
         return WordFitLine.variants(detail, minWords: 4)
     }
 
-    /// Line 2 when nothing fits beside the title: his action stays, else what is moving (the
-    /// grey text, when it is a run), else Next, else the grey text.
-    private var fallbackLine: String? {
-        if text?.tone == .you { return text?.line }
-        if text?.marker != nil, let detail = text?.detail { return detail }
-        return text?.line ?? text?.detail
-    }
+    /// Line 2 when the grey text does not fit beside the title (`WorkRowText.fallbackLine`).
+    private var fallbackLine: String? { text?.fallbackLine }
 
     private func rowBody(detail: String?, line: String?, tone: WorkRowText.Tone,
                          fitsTitle: Bool = false) -> some View {

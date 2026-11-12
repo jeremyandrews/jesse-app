@@ -58,6 +58,14 @@ public struct WorkRowText: Equatable, Sendable {
         self.tone = tone
         self.marker = marker
     }
+
+    /// Line 2 when the grey text does not fit beside the title: his action stays; else what is
+    /// moving (the grey text, while it is a run); else Next; else the grey text.
+    public var fallbackLine: String? {
+        if tone == .you { return line }
+        if marker != nil, let detail { return detail }
+        return line ?? detail
+    }
 }
 
 public enum WorkSemantics {
@@ -119,9 +127,8 @@ public enum WorkSemantics {
     public static func rowStatus(_ strand: Strand, runs: [StudioRun],
                                  runsLoaded: Bool = true) -> WorkRowStatus? {
         let needsYou = strand.runsNeedsYou ?? 0
-        let stuck = currentRuns(of: strand.slug, in: runs)
-            .contains { $0.status == .interrupted || $0.status == .failed }
-        if needsYou > 0 || stuck || youGate(strand) != nil {
+        // The board row's own rule (`action`), so the spoken state and the orange line agree.
+        if action(strand, runs: runs) != nil {
             return .yourTurn
         }
         let movingCount = runsLoaded
@@ -175,8 +182,12 @@ public enum WorkSemantics {
         // A bridge that sent `your_action: null` found nothing usable; only an older one, which
         // sends no key, leaves the gate's own words to the app.
         guard !strand.servesYourAction, let gate = youGate(strand) else { return nil }
-        // `youGate` capitalizes for a sentence; after `You:` the words read as written.
-        return gate == "You" ? nil : gate.prefix(1).lowercased() + gate.dropFirst()
+        // `youGate` capitalizes for a sentence; after `For you:` the words read as written. A
+        // first word in capitals (`SOC 2`) stays as it is.
+        guard gate != "You" else { return nil }
+        let first = gate.prefix { $0 != " " }
+        let plainWord = first.count > 1 && first.dropFirst().allSatisfy(\.isLowercase)
+        return plainWord ? gate.prefix(1).lowercased() + gate.dropFirst() : gate
     }
 
     /// What is moving, in words: `Running: Ablation A2`, `+ 1 more` when there are others.
@@ -319,9 +330,10 @@ public enum WorkSemantics {
         // whole width, keeps it.
         if action == nil, let d = detail, let l = line, sameLead(d, l) { detail = nil }
         if detail == nil && line == nil { return nil }
-        let marker = doing.flatMap { d in
-            d.split(separator: ":", maxSplits: 1).first.map(String.init)
-        }
+        // The word for what is moving, only while the grey text is what is moving.
+        let marker = detail != nil && detail == doing
+            ? doing?.split(separator: ":", maxSplits: 1).first.map(String.init)
+            : nil
         return WorkRowText(detail: detail, line: line, tone: action != nil ? .you : .plain,
                            marker: marker)
     }

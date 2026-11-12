@@ -29,7 +29,7 @@ const SHORT_REST_WORDS: usize = 4;
 /// is one word, such as `Next:`, in which case what follows it is kept). A clause that opens on
 /// step ids is reworded around their titles from `lines` (`id`, `title`): `GO123 merged` →
 /// `Merged: arm64 Chromium fallback chain` (dates, times and the title's own words leave the verb;
-/// `running` reads `In progress`, `run is done` reads `Finished`); with a longer remainder the ids
+/// `running` reads `Running`, `run is done` reads `Finished`); with a longer remainder the ids
 /// are dropped (`K04 round 4 stopped in pre-flight again` → `Round 4 stopped in pre-flight again`).
 pub fn headline(now: &str, lines: &[(String, String)], today: &str) -> Option<String> {
     let plain = drop_parens(&lead_id_in_parens(&plain_text(now), lines));
@@ -189,11 +189,11 @@ pub fn next_title(text: &str, title: &str, lines: &[(String, String)]) -> Option
             head
         }
         // Ids later in the tail are cut away with the rest of it.
-        Some((_, tail)) if tail.split(", ").next().is_some() => {
+        Some((_, tail)) => {
             let first = tail.split(", ").next().unwrap_or(tail);
             &clause[..clause.len() - tail.len() + first.len()]
         }
-        _ => clause,
+        None => clause,
     };
     if let Some(t) = finish(&scrub(clause, lines), false) {
         return Some(t);

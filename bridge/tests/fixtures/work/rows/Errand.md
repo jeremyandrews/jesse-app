@@ -5,9 +5,9 @@ updated: 2026-11-11
 ---
 # Errand
 
-**Now:** Next: carta d'identità in town (check the registry first) and the health card (USL volontaria, January is better). Permit still in review.
+**Now:** Next: the library card in town (check the opening hours first) and the gym pass (yearly, January is better). The other form is still in review.
 
 
 ## Drafts
 
-- [ ] **G16** Carta d'identità and health card: researched; call the office.
+- [ ] **G16** Library card and gym pass: researched; call the desk.

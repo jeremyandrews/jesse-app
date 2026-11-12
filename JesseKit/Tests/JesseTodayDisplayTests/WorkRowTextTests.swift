@@ -81,7 +81,84 @@ final class WorkRowTextTests: XCTestCase {
         XCTAssertEqual(text(served)?.tone, .plain)
     }
 
+    func testACountOfQuestionsWithNoRunListedIsStillHis() {
+        // The snapshot says a run waits on him before the runs list has it.
+        XCTAssertEqual(text(strand(needsYou: 1))?.line, "For you: answer a question")
+        // A waiting run with no question line is answered by name.
+        XCTAssertEqual(text(strand(), runs: [run("Q1", .needsYou, title: "Proxy")])?.line,
+                       "For you: answer Proxy")
+    }
+
+    func testAnOlderBridgesGateKeepsAWordInCapitals() {
+        XCTAssertEqual(WorkSemantics.gatePhrase(strand(waiting: "you: SOC 2 renewal.",
+                                                      servesYourAction: false)),
+                       "SOC 2 renewal.")
+        XCTAssertNil(WorkSemantics.gatePhrase(strand(waiting: "you:", servesYourAction: false)))
+    }
+
+    func testTheSpokenStateFollowsTheSameRuleAsTheOrangeLine() {
+        // The bridge read the gate and found nothing his: no orange line, and no "Your turn".
+        let served = strand(waiting: "you: PD2.", servesYourAction: true)
+        XCTAssertNil(WorkSemantics.action(served, runs: []))
+        XCTAssertNotEqual(WorkSemantics.rowStatus(served, runs: []), .yourTurn)
+        let his = strand(yourAction: "read the essays", waiting: "you: read the essays.")
+        XCTAssertEqual(WorkSemantics.rowStatus(his, runs: []), .yourTurn)
+    }
+
     // MARK: C. What is moving
+
+    func testBeforeTheRunsLoadTheSnapshotsCountSaysWhatIsMoving() {
+        let s = Strand(slug: "P", title: "Project", runsActive: 3, runsNeedsYou: 1, drafts: [])
+        let t = WorkSemantics.rowText(s, runs: [], runsLoaded: false)
+        XCTAssertEqual(t?.detail, "2 moving")
+        XCTAssertEqual(t?.marker, "2 moving")
+        let waiting = Strand(slug: "P", title: "Project", runsActive: 1, runsNeedsYou: 1, drafts: [])
+        XCTAssertNil(WorkSemantics.doing(waiting, runs: [], runsLoaded: false))
+    }
+
+    func testTheRunsBesideTheFirstAreCountedByWhatTheyAreDoing() {
+        let two = [run("A", .running, title: "One", created: "2026-11-12T07:00:00.000Z"),
+                   run("B", .running, title: "Two", created: "2026-11-12T06:00:00.000Z")]
+        XCTAssertEqual(WorkSemantics.doing(strand(), runs: two, runsLoaded: true),
+                       "Running: One and 1 more")
+        let paused = [run("A", .running, title: "One"), run("B", .paused, title: "Two")]
+        XCTAssertEqual(WorkSemantics.doing(strand(), runs: paused, runsLoaded: true),
+                       "Running: One, 1 paused")
+        XCTAssertEqual(WorkSemantics.doing(strand(), runs: [run("C", .queued, title: "Three")],
+                                           runsLoaded: true),
+                       "Queued: Three")
+    }
+
+    func testSeveralRunningLinesAreCountedAndTheCutTitleLosesItsEllipsis() {
+        let drafts = [StrandDraft(id: "S1", text: "x", section: "running",
+                                  title: "Targeted rebalance of the pool\u{2026}"),
+                      StrandDraft(id: "S2", text: "y", section: "running", title: "Another")]
+        XCTAssertEqual(WorkSemantics.doing(strand(drafts: drafts), runs: [], runsLoaded: true),
+                       "Running: Targeted rebalance of the pool and 1 more")
+    }
+
+    func testWhenTheGreyTextDoesNotFitLineTwoKeepsTheRightThing() {
+        // His action stays.
+        XCTAssertEqual(WorkRowText(detail: "Two drafted", line: "For you: sign", tone: .you)
+                        .fallbackLine, "For you: sign")
+        // Nothing his and a run moving: the run.
+        XCTAssertEqual(WorkRowText(detail: "Running: Handoff", line: "Next: List",
+                                   marker: "Running").fallbackLine, "Running: Handoff")
+        // Nothing his, nothing moving: Next, else the headline.
+        XCTAssertEqual(WorkRowText(detail: "177 lbs, a new low", line: "Next: Tape it").fallbackLine,
+                       "Next: Tape it")
+        XCTAssertEqual(WorkRowText(detail: "The wine in the garage").fallbackLine,
+                       "The wine in the garage")
+    }
+
+    func testAMarkerOnlyWhileTheGreyTextIsTheRun() {
+        // The run's line repeats Next, so the grey text goes, and so does the marker.
+        let drafts = [StrandDraft(id: "R", text: "x", section: "running", title: "Upstream list"),
+                      StrandDraft(id: "Q", text: "y", section: "queue", title: "Upstream list")]
+        let t = text(strand(drafts: drafts))
+        XCTAssertNil(t?.detail)
+        XCTAssertNil(t?.marker)
+    }
 
     func testARunningRunNamesItselfAndCountsTheQueuedApart() {
         let runs = [run("GO256", .running, title: "Ablation A2"),
@@ -127,12 +204,17 @@ final class WorkRowTextTests: XCTestCase {
     }
 
     func testAHeadlineThatRepeatsNextGivesWayToIt() {
-        let t = text(strand(headline: "Carta d'identità in town and the health card",
-                            nextTitle: "Carta d'identità at town and the health card"))
+        let t = text(strand(headline: "The library card in town and the gym pass",
+                            nextTitle: "The library card at the desk and the gym pass"))
         XCTAssertNil(t?.detail)
-        XCTAssertEqual(t?.line, "Next: Carta d'identità at town and the health card")
+        XCTAssertEqual(t?.line, "Next: The library card at the desk and the gym pass")
         // A one word title inside a headline is not a repeat.
         XCTAssertFalse(WorkSemantics.sameLead("Finished the Blog rewrite", "Next: Blog"))
+        // The same name after a moved verb is.
+        XCTAssertTrue(WorkSemantics.sameLead("Launched: Video handoff", "Next: Video handoff"))
+        // So is a headline that holds a three word Next.
+        XCTAssertTrue(WorkSemantics.sameLead("Proof two of the book is out", "Next: of the book"))
+        XCTAssertFalse(WorkSemantics.sameLead("Anything at all", ""))
     }
 
     func testARunningLineIsNotNext() {
@@ -171,7 +253,10 @@ final class WorkRowTextTests: XCTestCase {
 
     func testACutQuotationStillCloses() {
         let v = WordFitLine.variants("For you: answer \u{201C}Will you grant it now?\u{201D}")
+        XCTAssertTrue(v.contains("For you: answer \u{201C}Will you grant\u{2026}\u{201D}"), "\(v)")
         XCTAssertTrue(v.dropFirst().allSatisfy { $0.hasSuffix("\u{2026}\u{201D}") || !$0.contains("\u{201C}") })
+        // One word cannot be cut on a word.
+        XCTAssertEqual(WordFitLine.variants("Supercalifragilistic"), ["Supercalifragilistic"])
     }
 
     func testAMinimumKeepsStubsOut() {

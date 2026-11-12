@@ -169,12 +169,13 @@ public struct WorkProjectView: View {
                 if let gate {
                     // The row's own words first, so the board and this view never disagree about
                     // what is his to do; the note's whole Waiting on under them.
+                    let phrase = WorkSemantics.gatePhrase(strand)
                     VStack(alignment: .leading, spacing: 3) {
-                        if let phrase = WorkSemantics.gatePhrase(strand) {
+                        if let phrase {
                             Text("For you: \(phrase)")
                                 .font(.subheadline.weight(.semibold))
                         }
-                        if WorkSemantics.gatePhrase(strand)?.lowercased() != gate.lowercased() {
+                        if phrase?.lowercased() != gate.lowercased() {
                             Text(gate)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)

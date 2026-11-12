@@ -269,8 +269,9 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
     /// The first action of a `you:` Waiting on, in plain words and as written
     /// (`work::row::your_action`). Nil from a bridge before 0.205.0, or when the gate is not his.
     public var yourAction: String?
-    /// Whether the bridge sent `your_action` at all, `null` included: false only from a bridge
-    /// before 0.205.0, which is when the app reads the Waiting on itself.
+    /// Whether the bridge sent `your_action` at all, `null` included: false from a bridge before
+    /// 0.205.0 (and, by default, for a strand built in code), which is when the app reads the
+    /// Waiting on itself.
     public var servesYourAction: Bool
     /// The first queued Drafts line's title, cleaned for the row (`work::row::next_title`). Nil
     /// from a bridge before 0.205.0, or with no queued line.
@@ -286,7 +287,7 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
                 runsActive: Int? = nil, runsNeedsYou: Int? = nil,
                 drafts: [StrandDraft]? = nil,
                 headline: String? = nil, yourAction: String? = nil,
-                servesYourAction: Bool = true, nextTitle: String? = nil) {
+                servesYourAction: Bool = false, nextTitle: String? = nil) {
         self.slug = slug
         self.title = title
         self.group = group

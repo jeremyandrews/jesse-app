@@ -442,7 +442,7 @@ fn a_machine_leaves_and_jeremy_is_you() {
 fn a_pr_number_takes_only_its_own_and() {
     assert_eq!(
         your_action("you: review PR 5 and deploy it.", &[], None, &[]).as_deref(),
-        Some("review and deploy it")
+        Some("review the PR and deploy it")
     );
     assert_eq!(
         headline("PRs 9 and 10 merged the fix.", &[], TODAY).as_deref(),
@@ -570,6 +570,56 @@ fn the_verb_after_you_agrees() {
         ("Jeremy, then us.", "You, then us"),
     ] {
         assert_eq!(headline(now, &[], TODAY).as_deref(), Some(want), "{now}");
+    }
+}
+
+#[test]
+fn a_pr_or_a_commit_an_action_is_on_stays_as_what_it_is() {
+    for (gate, want) in [
+        ("you: merge PR 331.", "merge the PR"),
+        ("you: review PRs 9 and 10.", "review the PRs"),
+        ("you: approve pull request 12, then tag.", "approve the PR"),
+        ("you: merge 2b908fb4.", "merge the commit"),
+    ] {
+        assert_eq!(
+            your_action(gate, &[], None, &[]).as_deref(),
+            Some(want),
+            "{gate}"
+        );
+    }
+    // In a headline they only said which, and go.
+    assert_eq!(
+        headline("Merged PR 331 and 2b908fb4 today.", &[], "2026-01-01").as_deref(),
+        Some("Merged and today")
+    );
+}
+
+#[test]
+fn a_gate_with_nothing_left_has_no_action() {
+    // The app reads these as `For you: see the note`.
+    assert_eq!(your_action("you: (only an aside).", &[], None, &[]), None);
+    let lines = vec![("PD2".to_string(), "".to_string())];
+    assert_eq!(your_action("you: PD2.", &lines, None, &[]), None);
+}
+
+#[test]
+fn a_date_led_sentence_for_today_drops_what_led_it_in() {
+    let lines = vec![("H2".to_string(), "Hosting build".to_string())];
+    assert_eq!(
+        headline("Nov 12 \u{2014} H2 merged.", &lines, TODAY).as_deref(),
+        Some("Merged: Hosting build")
+    );
+}
+
+#[test]
+fn a_long_headline_and_next_are_cut_on_a_word() {
+    let long = format!("{}.", "word ".repeat(60).trim_end());
+    for got in [
+        headline(&long, &[], TODAY).unwrap(),
+        next_title(&long, "", &[]).unwrap(),
+    ] {
+        assert!(got.chars().count() <= ROW_PHRASE_MAX + 1, "{got}");
+        assert!(got.ends_with("word\u{2026}"), "{got}");
     }
 }
 

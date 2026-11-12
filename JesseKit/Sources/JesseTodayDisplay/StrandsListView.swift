@@ -519,15 +519,7 @@ struct WordFitLine: View {
         var out = [text]
         var k = words.count - 1
         while k >= max(1, minWords) {
-            var head = Array(words.prefix(k))
-            while head.count > 1, let last = head.last,
-                  dangling.contains(last.lowercased().trimmingCharacters(in: .punctuationCharacters)) {
-                head.removeLast()
-            }
-            var joined = head.joined(separator: " ")
-            while let last = joined.last, ",;:.-\u{2013}\u{2014}\u{201C}(".contains(last) {
-                joined.removeLast()
-            }
+            let joined = trimTail(dropDangling(Array(words.prefix(k))).joined(separator: " "))
             if joined.split(separator: " ").count < minWords { break }
             var candidate = joined + "\u{2026}"
             // A quotation cut short still closes.
@@ -540,10 +532,30 @@ struct WordFitLine: View {
         return out
     }
 
-    /// Small words a cut line should not end on.
+    /// `words` without the small words it ends on (one word always stays).
+    static func dropDangling(_ words: [String]) -> [String] {
+        var out = words
+        while out.count > 1, let last = out.last,
+              dangling.contains(last.lowercased().trimmingCharacters(in: .punctuationCharacters)) {
+            out.removeLast()
+        }
+        return out
+    }
+
+    /// `text` without the punctuation and opening marks a cut can leave at its end.
+    static func trimTail(_ text: String) -> String {
+        var out = text
+        while let last = out.last, ",;:.-\u{2013}\u{2014}\u{201C}( ".contains(last) {
+            out.removeLast()
+        }
+        return out
+    }
+
+    /// Small words a cut line should not end on. The bridge's `is_filler`
+    /// (`bridge/src/hostrun/work/row.rs`) holds the same list; keep the two together.
     static let dangling: Set<String> = [
-        "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the",
-        "to", "with", "per",
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "its", "of", "on", "or",
+        "per", "the", "their", "to", "with",
     ]
 }
 

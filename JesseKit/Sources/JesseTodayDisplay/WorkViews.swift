@@ -165,7 +165,7 @@ public struct WorkProjectView: View {
         if !turn.isEmpty || gate != nil || unlisted {
             Section {
                 if unlisted {
-                    Text("For you: answer a question")
+                    Text(WorkSemantics.answerAQuestion)
                         .font(.subheadline.weight(.semibold))
                 }
                 ForEach(turn, id: \.sectionKey.turn) { run in

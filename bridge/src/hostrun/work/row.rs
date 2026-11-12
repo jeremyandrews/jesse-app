@@ -72,7 +72,10 @@ fn phrase_of(s: &str, dated: bool, lines: &[(String, String)]) -> String {
     let s = if dated {
         // The day is today, so its name and date say nothing; the time stays.
         undated = without_date(s.split("; ").next().unwrap_or(s));
-        undated.as_str()
+        // `12 Nov — H2 merged`: what the date led in with goes with it.
+        undated.trim_start_matches(|c: char| {
+            matches!(c, '-' | ':' | ',' | '\u{2013}' | '\u{2014}') || c.is_whitespace()
+        })
     } else {
         first_clause(s)
     };
@@ -734,10 +737,11 @@ fn is_preposition(w: &str) -> bool {
 }
 
 /// A word a cut title should not end on.
+/// The app's `WordFitLine.dangling` holds the same list; keep the two together.
 fn is_filler(w: &str) -> bool {
     const FILLER: &[&str] = &[
         "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "its", "of", "on", "or",
-        "the", "their", "to", "with",
+        "per", "the", "their", "to", "with",
     ];
     FILLER.contains(&w.trim_end_matches(',').to_lowercase().as_str())
 }
@@ -831,8 +835,12 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
             i += 1;
             continue;
         }
-        // A commit hash, with its possessive.
+        // A commit hash, with its possessive. In an action it is what is acted on, so it reads
+        // as what it is: `merge 2b908fb4` → `merge the commit`.
         if is_hash(core(pc)) {
+            if !branches {
+                out.push("the commit".into());
+            }
             carry_punctuation(&mut out, pc);
             i += 1;
             continue;
@@ -881,6 +889,10 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
                     // `now that PR 1566's prompt is live` → `now that the prompt is live`.
                     out.push("the".into());
                 } else {
+                    // In an action the PR is what is acted on: `merge PR 331` → `merge the PR`.
+                    if !branches {
+                        out.push(if numbers > 1 { "the PRs" } else { "the PR" }.into());
+                    }
                     carry_punctuation(&mut out, last);
                 }
                 i = j;

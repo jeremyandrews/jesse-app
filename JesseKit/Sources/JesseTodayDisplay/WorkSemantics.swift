@@ -5,9 +5,10 @@ import JesseNetworking
 // detail ask, answered from the one strands snapshot and the one runs list, so a test can ask
 // them all.
 //
-// The board answers three things per project, in this order: does anything need me, what is
-// moving, what is next. Each row says exactly one of them, in plain words. Step ids, run ids,
-// branches, rounds, audit findings and machine names are never on the first screen.
+// The board answers three things per project: what it is about now (what is moving, else the
+// note's headline), and what is his to do, else what is next. A row says them in two lines
+// (`rowText`, docs/ho5-work-board-rows.md), in plain words. Step ids, run ids, branches, rounds,
+// audit findings and machine names are never on the first screen.
 
 /// A project's state in one word, in precedence order: what VoiceOver hears first on a Work
 /// board row (HO2 drew it as the row's status line; since HO5 the row draws `WorkRowText`).
@@ -160,7 +161,8 @@ public enum WorkSemantics {
             let title = WorkSemantics.title(run)
             switch run.status {
             case .needsYou:
-                if let q = question(run).map(withoutParentheticals), !q.isEmpty {
+                if let q = question(run).map({ firstSentence(withoutParentheticals($0)) }),
+                   !q.isEmpty {
                     return "For you: answer \u{201C}\(q)\u{201D}"
                 }
                 return "For you: answer \(title)"
@@ -169,10 +171,14 @@ public enum WorkSemantics {
             }
         }
         if (strand.runsNeedsYou ?? 0) > 0 {
-            return "For you: answer a question"
+            return answerAQuestion
         }
         return gateLine(strand)
     }
+
+    /// A question the snapshot counts but the runs list does not hold yet, as the row and the
+    /// project view both say it.
+    public static let answerAQuestion = "For you: answer a question"
 
     /// The note's `you:` gate as the row and the project view both show it: `For you: <phrase>`,
     /// or, for a gate the bridge could not put in words (`you: PR 331`), `For you: see the note`.
@@ -268,17 +274,21 @@ public enum WorkSemantics {
         var t = withoutDue(withoutParentheticals(title))
         // A title the bridge cut short (`… doing and…`) loses the small words it stopped on.
         if t.hasSuffix("\u{2026}") {
-            var words = t.dropLast().split(separator: " ").map(String.init)
-            while words.count > 1, let last = words.last,
-                  WordFitLine.dangling.contains(last.lowercased()
-                    .trimmingCharacters(in: .punctuationCharacters)) {
-                words.removeLast()
-            }
-            t = words.joined(separator: " ")
-                .trimmingCharacters(in: CharacterSet(charactersIn: ",;: ")) + "\u{2026}"
+            let words = WordFitLine.dropDangling(t.dropLast().split(separator: " ").map(String.init))
+            t = WordFitLine.trimTail(words.joined(separator: " ")) + "\u{2026}"
         }
         t = t.trimmingCharacters(in: .whitespaces)
         return t.isEmpty ? title : t
+    }
+
+    /// A run's question up to its first `?` or `. `, at most 30 words: a question is read on the
+    /// row, and the run's view holds the rest.
+    static func firstSentence(_ s: String) -> String {
+        var out = s
+        if let q = out.firstIndex(of: "?") { out = String(out[...q]) }
+        if let r = out.range(of: ". ") { out = String(out[..<r.lowerBound]) + "." }
+        let words = out.split(separator: " ")
+        return words.count > 30 ? words.prefix(30).joined(separator: " ") : out
     }
 
     /// `title` without a `, due …` tail.

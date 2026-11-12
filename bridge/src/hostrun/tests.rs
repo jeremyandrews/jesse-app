@@ -70,7 +70,7 @@ fn remote_fixture(s: &Scratch) {
     assert!(out.status.success());
 }
 
-const NOTE: &str = "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Gd\n\n**Now:** testing\n\n## Drafts\n\
+const NOTE: &str = "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Gd\n\n**Now:** GD6 merged (PR 12): the thing runs. GD5 is next.\n**Waiting on:** you: pick `main` or a release branch for GD5 (asked 9 Nov); then the rest.\n\n## Drafts\n\
 - [ ] **GD5** Run the thing on the Studio. [[todo-list/Projects/drafts/gd5-prompt]]\n\
 - [x] **GD6** Checked one. [[todo-list/Projects/drafts/gd6-prompt]]\n\
 - [ ] **GD7** Archived one. [[todo-list/Projects/drafts/archive/gd7-prompt]]\n\
@@ -1249,6 +1249,57 @@ async fn reconcile_prunes_boots_out_and_reports_but_keeps_an_unknown_directory()
 
 // ---- 4. THE SNAPSHOT AND THE CHAT TOOLS -----------------------------------------------------
 
+#[test]
+fn the_strands_snapshot_gains_the_board_rows_phrases_and_null_without_them() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    // A note with no Now, no Waiting on and nothing queued.
+    std::fs::write(
+        s.notes().join("Strands/Bare.md"),
+        "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Bare\n\n## Drafts\n### Done\n",
+    )
+    .unwrap();
+    std::fs::write(
+        s.notes().join("Strands/Order.md"),
+        "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Order\n\n\
+         **Now:** Shipping.\n**Waiting on:** you: every open line here is yours to do.\n\n\
+         ## Drafts\n\
+         - [x] **OR1** Ticked already.\n\
+         - [ ] **OR2** Under way now. Launched 2026-11-08.\n\
+         - [ ] **OR3** Write the release notes: two pages.\n\
+         ### Later\n- [ ] **OR4** Someday.\n### Done\n",
+    )
+    .unwrap();
+    let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+    let mut v = serde_json::to_value(&snap).unwrap();
+    annotate_strands(&mut v, &snap, &s.notes(), None, "2026-11-09");
+    let by = |slug: &str| {
+        v["strands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["slug"] == slug)
+            .cloned()
+            .unwrap()
+    };
+    let gd = by("Gd");
+    // `GD6 merged (PR 12): …` around GD6's title; the first gate without its aside or its id;
+    // the first unchecked Queue line, GD5.
+    assert_eq!(gd["headline"], "Merged: Checked one");
+    assert_eq!(gd["your_action"], "pick main or a release branch");
+    assert_eq!(gd["next_title"], "Run the thing on the Studio");
+    // Next is the first unticked Queue line, past a ticked one and one under Running, and a
+    // remark gate names it in the same words.
+    let order = by("Order");
+    assert_eq!(order["next_title"], "Write the release notes");
+    assert_eq!(order["your_action"], "write the release notes");
+    let bare = by("Bare");
+    for key in ["headline", "your_action", "next_title"] {
+        assert!(bare.get(key).is_some(), "{key} is always served");
+        assert!(bare[key].is_null(), "{key}: {}", bare[key]);
+    }
+}
+
 #[tokio::test]
 async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     let s = Scratch::new();
@@ -1257,7 +1308,7 @@ async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     let r = rig(&s);
     let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
     let mut v = serde_json::to_value(&snap).unwrap();
-    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
     let gd = &v["strands"][0];
     assert_eq!(gd["runs_active"], 0);
     assert_eq!(gd["runs_needs_you"], 0);
@@ -1272,11 +1323,11 @@ async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     assert_eq!(runnable, vec!["GD5", "GD10", "GD12"]);
     r.svc.start(item("GD5")).await.unwrap();
     let mut v = serde_json::to_value(&snap).unwrap();
-    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
     assert_eq!(v["strands"][0]["runs_active"], 1);
     // With [hostrun] off, nothing is runnable.
     let mut v = serde_json::to_value(&snap).unwrap();
-    annotate_strands(&mut v, &snap, &s.notes(), None);
+    annotate_strands(&mut v, &snap, &s.notes(), None, "2026-11-09");
     assert!(v["strands"][0]["drafts"]
         .as_array()
         .unwrap()
@@ -2414,7 +2465,13 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
     let plain = serde_json::to_value(&snap).unwrap();
     let mut annotated = plain.clone();
-    annotate_strands(&mut annotated, &snap, &s.notes(), Some(&r.svc));
+    annotate_strands(
+        &mut annotated,
+        &snap,
+        &s.notes(),
+        Some(&r.svc),
+        "2026-11-09",
+    );
     // Needs you and paused; a queued run is not counted. One of the two needs Jeremy.
     assert_eq!(annotated["strands"][0]["runs_active"], 2);
     assert_eq!(annotated["strands"][0]["runs_needs_you"], 1);
@@ -2655,7 +2712,7 @@ async fn a_closed_run_is_not_live_not_active_and_no_longer_blocks_a_start() {
     let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
     let annotated = |r: &Rig| {
         let mut v = serde_json::to_value(&snap).unwrap();
-        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
         (
             v["strands"][0]["runs_active"].clone(),
             v["strands"][0]["runs_needs_you"].clone(),
@@ -3682,7 +3739,7 @@ async fn startable_is_runnable_and_studio_and_not_live() {
     let annotate = || {
         let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
         let mut v = serde_json::to_value(&snap).unwrap();
-        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
         v["strands"][0]["drafts"].as_array().unwrap().clone()
     };
     let draft = |all: &[Value], id: &str| all.iter().find(|d| d["id"] == id).unwrap().clone();

@@ -3891,6 +3891,7 @@ pub fn annotate_strands(
     snap: &crate::strands::StrandsSnapshot,
     notes_root: &Path,
     service: Option<&HostRuns>,
+    today: &str,
 ) {
     let Some(list) = value.get_mut("strands").and_then(Value::as_array_mut) else {
         return;
@@ -3965,6 +3966,37 @@ pub fn annotate_strands(
             })
             .collect();
         obj.insert("drafts".into(), json!(drafts));
+        // The board row's three phrases (0.205.0), from the note's own words and its lines'
+        // titles and texts, by id.
+        let (lines, texts): (Vec<_>, Vec<_>) = strand
+            .items
+            .iter()
+            .filter(|i| !i.id.is_empty())
+            .map(|i| {
+                (
+                    (i.id.clone(), work::line_title(&i.raw)),
+                    (i.id.clone(), i.text.clone()),
+                )
+            })
+            .unzip();
+        let headline = strand
+            .now
+            .as_deref()
+            .and_then(|n| work::row::headline(n, &lines, today));
+        // The first unticked Queue line, named once: Next shows it, and a remark gate gives way
+        // to it in the same words.
+        let next = strand
+            .items
+            .iter()
+            .find(|i| !i.checked && i.section == StrandSection::Queue)
+            .and_then(|i| work::row::next_title(&i.text, &work::line_title(&i.raw), &lines));
+        let your_action = strand
+            .waiting
+            .as_ref()
+            .and_then(|w| work::row::your_action(&w.text, &lines, next.as_deref(), &texts));
+        obj.insert("headline".into(), json!(headline));
+        obj.insert("next_title".into(), json!(next));
+        obj.insert("your_action".into(), json!(your_action));
     }
 }
 

@@ -17,12 +17,12 @@
       "findings": [
         {
           "code": "CHECKED-NOT-MOVED",
-          "line": 12,
+          "line": 13,
           "message": "GD6 is checked but still above Done"
         },
         {
           "code": "QUEUE-ARCHIVED",
-          "line": 13,
+          "line": 14,
           "message": "queue link points to an archived prompt: todo-list/Projects/drafts/archive/gd7-prompt"
         }
       ],
@@ -33,14 +33,17 @@
         "text": "Run the thing on the Studio.",
         "waits_on": null
       },
-      "now": "testing",
+      "now": "GD6 merged (PR 12): the thing runs. GD5 is next.",
       "parent": null,
       "repos": [],
       "slug": "Gd",
       "state": "active",
       "title": "Gd",
       "updated": "2026-11-09",
-      "waiting": null
+      "waiting": {
+        "jeremy": true,
+        "text": "you: pick `main` or a release branch for GD5 (asked 9 Nov); then the rest."
+      }
     }
   ]
 }

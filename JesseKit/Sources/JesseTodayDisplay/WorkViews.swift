@@ -159,16 +159,35 @@ public struct WorkProjectView: View {
 
         let turn = WorkSemantics.yourTurnRuns(slug, in: runs.runs)
         let gate = WorkSemantics.youGate(strand)
-        if !turn.isEmpty || gate != nil {
+        // The snapshot counts a question the runs list does not hold yet: the row says so, and so
+        // does this section.
+        let unlisted = turn.isEmpty && (strand.runsNeedsYou ?? 0) > 0
+        if !turn.isEmpty || gate != nil || unlisted {
             Section {
+                if unlisted {
+                    Text(WorkSemantics.answerAQuestion)
+                        .font(.subheadline.weight(.semibold))
+                }
                 ForEach(turn, id: \.sectionKey.turn) { run in
                     WorkYourTurnRow(run: run, detail: runs.detailModel(for: run.runID),
                                     onOpen: { openedRun = StudioRunRoute(runID: run.runID) },
                                     onSent: { Task { await runs.load() } })
                 }
                 if let gate {
-                    Text(gate)
-                        .font(.subheadline)
+                    // The row's own words first, so the board and this view never disagree about
+                    // what is his to do; the note's whole Waiting on under them.
+                    let phrase = WorkSemantics.gatePhrase(strand)
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let line = WorkSemantics.gateLine(strand) {
+                            Text(line)
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        if phrase?.lowercased() != gate.lowercased() {
+                            Text(gate)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             } header: {
                 Text("Your turn").foregroundStyle(.orange)

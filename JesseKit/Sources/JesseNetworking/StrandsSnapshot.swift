@@ -263,6 +263,19 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
     /// Every checkbox line, each with `studio_runnable`. Nil from a bridge that predates
     /// Studio runs, which is different from a note with no lines.
     public var drafts: [StrandDraft]?
+    /// The lead clause of the note's Now in plain words, ids reworded around their titles
+    /// (`work::row::headline`). Nil from a bridge before 0.205.0, or a Now with nothing usable.
+    public var headline: String?
+    /// The first action of a `you:` Waiting on, in plain words and as written
+    /// (`work::row::your_action`). Nil from a bridge before 0.205.0, or when the gate is not his.
+    public var yourAction: String?
+    /// Whether the bridge sent `your_action` at all, `null` included: false from a bridge before
+    /// 0.205.0 (and, by default, for a strand built in code), which is when the app reads the
+    /// Waiting on itself.
+    public var servesYourAction: Bool
+    /// The first queued Drafts line's title, cleaned for the row (`work::row::next_title`). Nil
+    /// from a bridge before 0.205.0, or with no queued line.
+    public var nextTitle: String?
 
     public var id: String { slug }
 
@@ -272,7 +285,9 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
                 counts: StrandCounts = StrandCounts(), findings: [StrandFinding] = [],
                 parent: String? = nil, servesParent: Bool = true,
                 runsActive: Int? = nil, runsNeedsYou: Int? = nil,
-                drafts: [StrandDraft]? = nil) {
+                drafts: [StrandDraft]? = nil,
+                headline: String? = nil, yourAction: String? = nil,
+                servesYourAction: Bool = false, nextTitle: String? = nil) {
         self.slug = slug
         self.title = title
         self.group = group
@@ -289,13 +304,19 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
         self.runsActive = runsActive
         self.runsNeedsYou = runsNeedsYou
         self.drafts = drafts
+        self.headline = headline
+        self.yourAction = yourAction
+        self.servesYourAction = servesYourAction
+        self.nextTitle = nextTitle
     }
 
     private enum CodingKeys: String, CodingKey {
         case slug, title, group, state, updated, repos, now, waiting, next, counts, findings,
-             parent, drafts
+             parent, drafts, headline
         case runsActive = "runs_active"
         case runsNeedsYou = "runs_needs_you"
+        case yourAction = "your_action"
+        case nextTitle = "next_title"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -320,6 +341,10 @@ public struct Strand: Decodable, Equatable, Hashable, Identifiable, Sendable {
         runsActive = try c.decodeIfPresent(Int.self, forKey: .runsActive)
         runsNeedsYou = try c.decodeIfPresent(Int.self, forKey: .runsNeedsYou)
         drafts = try c.decodeIfPresent([StrandDraft].self, forKey: .drafts)
+        headline = try c.decodeIfPresent(String.self, forKey: .headline)
+        servesYourAction = c.contains(.yourAction)
+        yourAction = try c.decodeIfPresent(String.self, forKey: .yourAction)
+        nextTitle = try c.decodeIfPresent(String.self, forKey: .nextTitle)
     }
 
     /// The vault path of the note itself. One function, because the list, the reader and

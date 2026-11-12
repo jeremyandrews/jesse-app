@@ -10554,7 +10554,8 @@ async fn strands_list_serves_the_contract_json() {
         .find(|t| t["slug"] == "Clean-Strand")
         .unwrap();
     // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served;
-    // `runs_needs_you` joined them in 0.198.0.
+    // `runs_needs_you` joined them in 0.198.0; `headline`, `next_title` and `your_action`, the
+    // board row's phrases, in 0.205.0.
     assert_eq!(
         keys(clean),
         vec![
@@ -10562,7 +10563,9 @@ async fn strands_list_serves_the_contract_json() {
             "drafts",
             "findings",
             "group",
+            "headline",
             "next",
+            "next_title",
             "now",
             "parent",
             "repos",
@@ -10573,6 +10576,7 @@ async fn strands_list_serves_the_contract_json() {
             "title",
             "updated",
             "waiting",
+            "your_action",
         ]
     );
     assert_eq!(clean["runs_active"], 0, "[hostrun] is off in the fixture");

@@ -14,6 +14,18 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.205.0, App 1.0 (214)] - 2026-11-12
+
+**Each Work board row says what the project is about now and what, if anything, is yours to do, in two lines.** Root cause: HO2's row was a title and one status word, and with a `you:` Waiting on in 20 of 32 notes almost every row read only "Your turn": that something was yours, never what, and nothing about the project. Design, corpus, review rounds and the rejected candidates: `docs/ho5-work-board-rows.md`.
+
+- **Added (bridge):** `headline` on every strand of `GET /jesse/strands`: the lead clause of the note's `**Now:**` in plain words, a clause opening on step ids reworded around the step's title (`Merged: arm64 Chromium fallback chain`), the sentence naming today preferred, ids, PR numbers, branches, machine short names, paths and hashes dropped (`hostrun::work::row::headline`).
+- **Added (bridge):** `your_action`: the first action of a `you:` Waiting on, without its asides, lead in or tail; a possessive step id becomes that step, `-ing` verbs read as instructions, a remark about the note gives way to the first queued line (`your_action`).
+- **Added (bridge):** `next_title`: the first queued Drafts line named from its whole text rather than its 57 character title (`next_title`). All three are derived on read, never written to a note, no model call, `null` when the note gives nothing usable.
+- **Changed (app):** a Work board row is the title with what is moving (`Running: Ablation A2, 1 queued`), else the headline, beside it in grey, and under it what is yours in orange (`For you: generate the minisign keypair …`: a run's question, a cut off or failed run, else the note's action), else `Next: …`. A line is fitted on a word, never past two lines; at larger type the grey text steps down to the word `Running`, then to nothing, with what is moving or Next kept on line 2. Lines stop at 560pt on the Mac. A Drafts line under Running with no Studio run counts as moving.
+- **Changed (app):** the project view's Your turn section leads with the row's exact words, the whole Waiting on under them.
+- **Kept:** the colour bar, Dormant collapse, the long press menu, the order and Edit items, the Runs button, Since your last look and the project view; an older bridge (no new fields) still gets the gate's own words on the row.
+- **Added:** bridge unit tests on fifteen sanitised fixture notes of the live line shapes (`bridge/tests/fixtures/work/rows/`) plus the pieces; JesseKit decoding tests from fixtures the bridge's serializers wrote, with the fields (`strands-annotated.json`) and without (`strands-annotated-0.204.json`, the 0.204.0 output); view model tests for use cases A to E and the word fitting.
+
 ## [bridge 0.204.0, App 1.0 (213)] - 2026-11-12
 
 **The runs list has filters (Needs me, Moving, Finished, All, Archived) and an archive, so finished runs leave it by hand or by themselves.** Root cause: `GET /jesse/runs` served every run directory the store had ever held, and the list drew all of them, live first. Closing a run (0.200.0) changed its status but not its place in the list, so nothing ever left it and it only grew.

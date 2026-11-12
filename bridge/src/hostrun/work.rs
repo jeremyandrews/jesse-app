@@ -18,6 +18,8 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use super::{draft_is_studio, stream, RunRecord};
+
+pub mod row;
 use crate::strands::{StrandItem, StrandSection};
 use crate::{check_auth, ApiError, AppState};
 
@@ -227,12 +229,18 @@ fn is_emphasis_underscore(s: &str, i: usize) -> bool {
 /// `s` cut at [`TITLE_MAX`] characters on a word boundary, with `…`, or unchanged when it fits.
 /// A single trailing full stop is dropped either way: a title is not a sentence.
 fn cut(s: &str) -> String {
+    cut_at(s, TITLE_MAX)
+}
+
+/// `s` cut at `max` characters on a word boundary, with `…`, or unchanged when it fits. A single
+/// trailing full stop is dropped either way.
+fn cut_at(s: &str, max: usize) -> String {
     let s = s.trim();
-    if s.chars().count() <= TITLE_MAX {
+    if s.chars().count() <= max {
         return s.strip_suffix('.').unwrap_or(s).trim_end().to_string();
     }
-    let prefix: String = s.chars().take(TITLE_MAX).collect();
-    let next = s.chars().nth(TITLE_MAX);
+    let prefix: String = s.chars().take(max).collect();
+    let next = s.chars().nth(max);
     let at_boundary = next.is_some_and(char::is_whitespace);
     let head = if at_boundary {
         prefix.as_str()

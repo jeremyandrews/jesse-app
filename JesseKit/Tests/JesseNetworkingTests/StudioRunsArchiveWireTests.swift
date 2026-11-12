@@ -77,3 +77,15 @@ final class StudioRunsArchiveWireTests: XCTestCase {
                        [URLQueryItem(name: "archived", value: "all")])
     }
 }
+
+/// A run id reaches the bridge as written: a free run's `s-…` id with its hyphens.
+final class StudioRunPathTests: XCTestCase {
+    func testARunIdKeepsItsHyphensAndDotsAndEscapesOnlyTheRest() {
+        XCTAssertEqual(JesseBridgeClient.runPathEscaped("s-tidewater-woodcuts-e17"),
+                       "s-tidewater-woodcuts-e17")
+        XCTAssertEqual(JesseBridgeClient.runPathEscaped("HO1b"), "HO1b")
+        XCTAssertEqual(JesseBridgeClient.runPathEscaped("a_b.c~d"), "a_b.c~d")
+        XCTAssertEqual(JesseBridgeClient.runPathEscaped("../x"), "..%2Fx")
+        XCTAssertEqual(JesseBridgeClient.runPathEscaped("a b"), "a%20b")
+    }
+}

@@ -135,7 +135,8 @@ public struct StudioRunRoute: Hashable, Identifiable, Sendable {
 }
 
 /// The rows under the filter bar: Needs me, Moving, Finished and All as segments with their
-/// counts, Archived as a toolbar item (five segments with counts truncate on an iPhone), the
+/// counts, Archived as a toolbar item on an iPhone (five segments with counts truncate there)
+/// and a fifth segment on the Mac, the
 /// last choice remembered across launches. A row that is not moving swipes to Archive (a
 /// context menu on the Mac too); under Archived, to Unarchive. An archive takes the row out at
 /// once, with an Undo banner for five seconds.
@@ -188,28 +189,36 @@ struct StudioRunsList: View {
             }
         }
         .animation(.default, value: model.undo)
+        #if os(iOS)
+        // The filter bar sits under the navigation bar; a large title would scroll behind it.
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
         .toolbar {
+            #if os(iOS)
             ToolbarItem(placement: Self.archivedPlacement) {
                 Button {
                     filter = filter == .archived ? .initial : .archived
                 } label: {
-                    Label(StudioRunFilter.archived.label(
-                        count: model.count(filter: .archived, strand: strand)),
-                          systemImage: filter == .archived ? "archivebox.fill" : "archivebox")
-                        .labelStyle(.titleAndIcon)
+                    // Words and count drawn as text: a toolbar shows a `Label` as its icon alone.
+                    HStack(spacing: 4) {
+                        Image(systemName: filter == .archived ? "archivebox.fill" : "archivebox")
+                        Text(StudioRunFilter.archived.label(
+                            count: model.count(filter: .archived, strand: strand)))
+                            .monospacedDigit()
+                    }
                 }
                 .accessibilityIdentifier("studio-runs-archived")
                 .accessibilityAddTraits(filter == .archived ? .isSelected : [])
                 .accessibilityHint(filter == .archived ? "Shows every run again"
                                                        : "Shows the archived runs")
             }
+            #endif
             if filter == .finished {
                 ToolbarItem(placement: Self.archiveAllPlacement) {
                     Button {
                         confirmsArchiveAll = true
                     } label: {
-                        Label("Archive all finished", systemImage: "archivebox")
-                            .labelStyle(.titleAndIcon)
+                        Text("Archive all finished")
                     }
                     .disabled(runs.isEmpty)
                 }
@@ -276,8 +285,8 @@ struct StudioRunsList: View {
     #endif
 }
 
-/// Needs me, Moving, Finished and All, each with its count. Under Archived no segment is
-/// chosen; picking one leaves Archived.
+/// Needs me, Moving, Finished and All, each with its count, and Archived too on the Mac. On
+/// an iPhone no segment is chosen under Archived; picking one leaves it.
 struct StudioRunFilterBar: View {
     let model: StudioRunsModel
     let strand: String?
@@ -285,7 +294,7 @@ struct StudioRunFilterBar: View {
 
     var body: some View {
         Picker("Show", selection: $filter) {
-            ForEach(StudioRunFilter.segments, id: \.self) { f in
+            ForEach(StudioRunFilter.barSegments, id: \.self) { f in
                 Text(f.label(count: model.count(filter: f, strand: strand)))
                     .tag(f)
             }
@@ -323,8 +332,8 @@ struct StudioRunUndoBanner: View {
         .shadow(radius: 4, y: 2)
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isStaticText)
+        // Its own element so Undo stays a button VoiceOver (and a test) can reach.
+        .accessibilityElement(children: .contain)
     }
 }
 

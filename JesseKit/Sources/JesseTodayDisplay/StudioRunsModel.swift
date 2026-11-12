@@ -246,6 +246,15 @@ public enum StudioRunFilter: String, CaseIterable, Equatable, Sendable {
     /// The segmented control's segments; `archived` is a toolbar item of its own, since five
     /// segments with their counts truncate on an iPhone.
     public static let segments: [StudioRunFilter] = [.needsMe, .moving, .finished, .all]
+    /// What the bar draws on this platform: the four segments on an iPhone, and Archived as a
+    /// fifth on the Mac, where the width is there.
+    public static var barSegments: [StudioRunFilter] {
+        #if os(macOS)
+        return segments + [.archived]
+        #else
+        return segments
+        #endif
+    }
 
     /// A remembered raw value, or the default for none or a word this build does not know.
     public static func restored(_ raw: String?) -> StudioRunFilter {

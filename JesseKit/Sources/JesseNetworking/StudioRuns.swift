@@ -531,13 +531,13 @@ extension JesseBridgeClient: StudioRunsProviding {
     }
 
     public func archive(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/archive",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/archive",
                                      method: "POST", body: [String: String]())
         return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func unarchive(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/unarchive",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/unarchive",
                                      method: "POST", body: [String: String]())
         return try runDecode { try StudioRun.decode(from: data) }
     }
@@ -549,25 +549,25 @@ extension JesseBridgeClient: StudioRunsProviding {
     }
 
     public func getRun(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))", method: "GET")
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))", method: "GET")
         return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func runLog(id: String, tail: Int? = nil) async throws -> StudioRunLog {
         let query = tail.map { [URLQueryItem(name: "tail", value: String($0))] } ?? []
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/log", method: "GET",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/log", method: "GET",
                                      query: query)
         return try runDecode { try StudioRunLog.decode(from: data) }
     }
 
     public func replyToRun(id: String, text: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/reply",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/reply",
                                      method: "POST", body: ["text": text])
         return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func cancelRun(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/cancel",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/cancel",
                                      method: "POST", body: [String: String]())
         return try runDecode { try StudioRun.decode(from: data) }
     }
@@ -599,6 +599,16 @@ extension JesseBridgeClient: StudioRunsProviding {
             throw StudioRunError.refused(status: http.statusCode, message: Self.bodyText(data))
         }
         return data
+    }
+
+    /// A run id as one path segment. Only what is not an RFC 3986 unreserved character is
+    /// escaped: the shared `pathEscaped` turns `-` into `%2D`, which the bridge's router does not
+    /// decode, so every free run (`s-…`) answered "no run" to its detail, log, reply, cancel and
+    /// archive.
+    static func runPathEscaped(_ id: String) -> String {
+        var unreserved = CharacterSet.alphanumerics
+        unreserved.insert(charactersIn: "-._~")
+        return id.addingPercentEncoding(withAllowedCharacters: unreserved) ?? id
     }
 
     private func runDecode<T>(_ decode: () throws -> T) throws -> T {

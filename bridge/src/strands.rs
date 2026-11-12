@@ -1574,6 +1574,7 @@ pub async fn jesse_strands(
         &snap,
         &notes_root(&st.cfg),
         st.cfg.hostrun.service().as_deref(),
+        &today,
     );
     Ok(strands_response(&headers, value, &generated_at))
 }

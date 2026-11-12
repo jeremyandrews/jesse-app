@@ -32,6 +32,34 @@ public enum WorkRowStatus: Equatable, Sendable {
     public var isYourTurn: Bool { self == .yourTurn }
 }
 
+/// What a Work board row says beside its title and under it.
+public struct WorkRowText: Equatable, Sendable {
+    /// How the second line is drawn.
+    public enum Tone: Equatable, Sendable {
+        /// Something is his to do: orange.
+        case you
+        /// Anything else: secondary.
+        case plain
+    }
+
+    /// Beside the title, in secondary, or nil.
+    public var detail: String?
+    /// The second line, or nil.
+    public var line: String?
+    public var tone: Tone
+    /// The one word for what is moving (`Running`), kept beside the title when the grey text
+    /// does not fit there; nil when nothing moves.
+    public var marker: String?
+
+    public init(detail: String? = nil, line: String? = nil, tone: Tone = .plain,
+                marker: String? = nil) {
+        self.detail = detail
+        self.line = line
+        self.tone = tone
+        self.marker = marker
+    }
+}
+
 public enum WorkSemantics {
 
     // MARK: Which runs belong where
@@ -109,6 +137,193 @@ public enum WorkSemantics {
             return .next(next.text)
         }
         return nil
+    }
+
+    // MARK: The board row's words (HO5)
+
+    /// What is his to do on this project, in the words the row shows, or nil: a run's question,
+    /// a run to resume, a failed run, else the note's `you:` action. The project view's Your turn
+    /// section leads with the same words.
+    public static func action(_ strand: Strand, runs: [StudioRun]) -> String? {
+        if let run = yourTurnRuns(strand.slug, in: runs).first {
+            let title = WorkSemantics.title(run)
+            switch run.status {
+            case .needsYou:
+                if let q = question(run).map(withoutParentheticals), !q.isEmpty {
+                    return "For you: answer \u{201C}\(q)\u{201D}"
+                }
+                return "For you: answer \(title)"
+            case .interrupted: return "For you: resume \(title)"
+            default: return "For you: see why \(title) failed"
+            }
+        }
+        if (strand.runsNeedsYou ?? 0) > 0 {
+            return "For you: answer a question"
+        }
+        if let phrase = gatePhrase(strand) {
+            return "For you: \(phrase)"
+        }
+        return nil
+    }
+
+    /// The note's `you:` action as a phrase: the bridge's `your_action`, else (an older bridge)
+    /// the gate's own words.
+    public static func gatePhrase(_ strand: Strand) -> String? {
+        if let a = strand.yourAction?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty {
+            return a
+        }
+        // A bridge that sent `your_action: null` found nothing usable; only an older one, which
+        // sends no key, leaves the gate's own words to the app.
+        guard !strand.servesYourAction, let gate = youGate(strand) else { return nil }
+        // `youGate` capitalizes for a sentence; after `You:` the words read as written.
+        return gate == "You" ? nil : gate.prefix(1).lowercased() + gate.dropFirst()
+    }
+
+    /// What is moving, in words: `Running: Ablation A2`, `+ 1 more` when there are others.
+    public static func doing(_ strand: Strand, runs: [StudioRun], runsLoaded: Bool) -> String? {
+        guard runsLoaded else {
+            let n = max(0, (strand.runsActive ?? 0) - (strand.runsNeedsYou ?? 0))
+            return n > 0 ? "\(n) moving" : nil
+        }
+        let rank: (StudioRunStatus) -> Int = { $0 == .running ? 0 : ($0 == .paused ? 1 : 2) }
+        let live = moving(strand.slug, in: runs)
+            .enumerated()
+            .sorted { (rank($0.element.status), $0.offset) < (rank($1.element.status), $1.offset) }
+            .map(\.element)
+        guard let first = live.first else { return runningLine(strand, runs: runs) }
+        let word: String
+        switch first.status {
+        case .queued: word = "Queued"
+        case .paused: word = "Paused"
+        default: word = "Running"
+        }
+        // The others by what they are doing: a queued run is not running.
+        let others = live.dropFirst()
+        var more = ""
+        let sameKind = others.filter { $0.status == first.status }.count
+        if sameKind > 0 { more += " and \(sameKind) more" }
+        let queued = others.filter { $0.status == .queued && first.status != .queued }.count
+        if queued > 0 { more += ", \(queued) queued" }
+        let paused = others.filter { $0.status == .paused && first.status != .paused }.count
+        if paused > 0 { more += ", \(paused) paused" }
+        return "\(word): \(rowTitle(title(first)))\(more)"
+    }
+
+    /// A line the note files under Running with no Studio run of its own (work under way on
+    /// the cluster, by hand, in another session), as `Running: <title>`.
+    static func runningLine(_ strand: Strand, runs: [StudioRun]) -> String? {
+        let lines = (strand.drafts ?? []).filter { draft in
+            draft.isOpen && draft.section == "running"
+                && !runs.contains { $0.strand == strand.slug && $0.itemID == draft.id }
+        }
+        guard let first = lines.first else { return nil }
+        var title = rowTitle(first.displayTitle)
+        var more = ""
+        if lines.count > 1 {
+            // `… raidz2-3… and 4 more` reads as two cuts: the count says there is more.
+            if title.hasSuffix("\u{2026}") { title.removeLast() }
+            more = " and \(lines.count - 1) more"
+        }
+        return "Running: \(title)\(more)"
+    }
+
+    /// The first queued line, as `Next: <title>`. A line under Running is under way, not next.
+    public static func nextPhrase(_ strand: Strand) -> String? {
+        if let title = strand.nextTitle?.trimmingCharacters(in: .whitespaces), !title.isEmpty {
+            return "Next: \(rowTitle(title))"
+        }
+        if let first = nextLines(strand, limit: .max).first(where: { $0.section == "queue" }) {
+            return "Next: \(rowTitle(first.displayTitle))"
+        }
+        if strand.drafts == nil, let next = strand.next, !next.text.isEmpty {
+            return "Next: \(next.text)"
+        }
+        return nil
+    }
+
+    /// A Drafts title as the row shows it: no parentheticals (one cut short included) and no
+    /// `, due …` tail, whose relative date goes stale on a line nobody has ticked.
+    static func rowTitle(_ title: String) -> String {
+        var t = withoutParentheticals(title)
+        if let r = t.range(of: ", due ") { t = String(t[..<r.lowerBound]) }
+        // A title the bridge cut short (`… doing and…`) loses the small words it stopped on.
+        if t.hasSuffix("\u{2026}") {
+            var words = t.dropLast().split(separator: " ").map(String.init)
+            while words.count > 1, let last = words.last,
+                  WordFitLine.dangling.contains(last.lowercased()
+                    .trimmingCharacters(in: .punctuationCharacters)) {
+                words.removeLast()
+            }
+            t = words.joined(separator: " ")
+                .trimmingCharacters(in: CharacterSet(charactersIn: ",;: ")) + "\u{2026}"
+        }
+        t = t.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? title : t
+    }
+
+    /// Whether two phrases say the same thing: past a leading `Next:`, they open on the same two
+    /// words, the first ends in the second after its colon, or the first holds the second
+    /// (when the second is three words or more).
+    static func sameLead(_ a: String, _ b: String) -> Bool {
+        let body: (String) -> String = { text in
+            var t = text.lowercased()
+            if t.hasPrefix("next:") { t = String(t.dropFirst(5)) }
+            return t.trimmingCharacters(in: .whitespaces)
+        }
+        let (x, y) = (body(a), body(b))
+        let words: (String) -> [String] = {
+            $0.split(separator: " ").prefix(2).map {
+                $0.trimmingCharacters(in: .punctuationCharacters)
+            }
+        }
+        if words(x) == words(y) { return true }
+        let tail: (String) -> String = { t in
+            t.split(separator: ":", maxSplits: 1).last.map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? t
+        }
+        // A one or two word title (`Blog`) is inside many a headline without repeating it.
+        let long = y.split(separator: " ").count >= 3
+        return !y.isEmpty && (tail(x) == y || (long && x.contains(y)))
+    }
+
+    /// `s` without its parentheticals: a run's question names job labels and paths in them.
+    static func withoutParentheticals(_ s: String) -> String {
+        var out = ""
+        var depth = 0
+        for ch in s {
+            if ch == "(" {
+                if depth == 0 { while out.last == " " { out.removeLast() } }
+                depth += 1
+            } else if ch == ")" && depth > 0 {
+                depth -= 1
+            } else if depth == 0 {
+                out.append(ch)
+            }
+        }
+        return out.split(separator: " ").joined(separator: " ")
+            .replacingOccurrences(of: " ,", with: ",")
+            .replacingOccurrences(of: " ?", with: "?")
+    }
+
+    /// The row's words (docs/ho5-work-board-rows.md): beside the title, what is moving, else the
+    /// note's headline; under it, what is his to do, else Next. Nil for nothing to say.
+    public static func rowText(_ strand: Strand, runs: [StudioRun],
+                               runsLoaded: Bool = true) -> WorkRowText? {
+        let action = action(strand, runs: runs)
+        let doing = doing(strand, runs: runs, runsLoaded: runsLoaded)
+        let headline = strand.headline?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let next = nextPhrase(strand)
+        var detail = doing ?? headline
+        let line = action ?? next
+        // The headline and the Next line saying one thing twice: the line, which has the
+        // whole width, keeps it.
+        if action == nil, let d = detail, let l = line, sameLead(d, l) { detail = nil }
+        if detail == nil && line == nil { return nil }
+        let marker = doing.flatMap { d in
+            d.split(separator: ":", maxSplits: 1).first.map(String.init)
+        }
+        return WorkRowText(detail: detail, line: line, tone: action != nil ? .you : .plain,
+                           marker: marker)
     }
 
     // MARK: Next

@@ -32,8 +32,8 @@ import JesseVault
 
 // ## Work (bridge 0.203.0)
 //
-// The segment reads **Work**. A row is the project's title and ONE plain status line
-// (`WorkSemantics.rowStatus`): Your turn, N moving, or Next: <title>. A tap pushes the
+// The segment reads **Work**. A row is two lines (HO5, `WorkSemantics.rowText`): the project's
+// title with what it is about right now beside it, then what is his to do, else Next. A tap pushes the
 // project's short view (`WorkProjectView`); the full note, with its Drafts block and Run on
 // Studio, is one tap further, behind Full note. A board with no runs model (a preview, a
 // shell without runs) still opens the note directly, as before.
@@ -79,11 +79,13 @@ public struct StrandsListView: View {
     public init(model: StrandsModel,
                 opener: StrandOpener,
                 onTodayCount: @escaping (String) -> Int = { _ in 0 },
-                runs: StudioRunsModel? = nil) {
+                runs: StudioRunsModel? = nil,
+                dormantStartsOpen: Bool = false) {
         self.model = model
         self.opener = opener
         self.onTodayCount = onTodayCount
         self.runs = runs
+        self._collapsed = State(initialValue: dormantStartsOpen ? [] : ["dormant"])
     }
 
     public var body: some View {
@@ -284,6 +286,9 @@ public struct StrandsListView: View {
     private func row(_ strand: Strand, family: StrandFamily, showsParent: Bool,
                      insideCaption: String? = nil) -> some View {
         let parent = family.parent(of: strand)
+        let text = runs.map {
+            WorkSemantics.rowText(strand, runs: $0.runs, runsLoaded: $0.hasLoaded)
+        } ?? WorkSemantics.rowText(strand, runs: [], runsLoaded: false)
         let status = runs.map {
             WorkSemantics.rowStatus(strand, runs: $0.runs, runsLoaded: $0.hasLoaded)
         } ?? WorkSemantics.rowStatus(strand, runs: [], runsLoaded: false)
@@ -295,7 +300,8 @@ public struct StrandsListView: View {
                   referenceDay: model.referenceDay,
                   onTodayCaption: StrandOnToday.caption(count: onTodayCount(strand.slug)),
                   insideCaption: insideCaption,
-                  status: status,
+                  text: text,
+                  spokenStatus: status?.text,
                   isOpening: opener.opening == strand.slug,
                   onOpen: {
                       if runs != nil {
@@ -362,9 +368,10 @@ public enum StrandNoteSource: Equatable, Identifiable, Sendable {
 
 // MARK: - The row
 
-/// One project on the Work board: its group's colour bar, its title in bold, and exactly one
-/// plain status line (`WorkSemantics.rowStatus`). No Now prose, no audit triangle, no age: on
-/// every row at once they carried no signal. The findings are in the full note's sheet.
+/// One project on the Work board: its group's colour bar and at most two lines
+/// (`WorkSemantics.rowText`, docs/ho5-work-board-rows.md). Line 1 is the title in bold with what
+/// the project is about right now beside it in grey; line 2 is what is his to do in orange, else
+/// Next. No audit triangle and no age: the findings are in the full note's sheet.
 struct StrandRow: View {
     let strand: Strand
     /// The strand's family tone, resolved for the current appearance by `StrandTone`:
@@ -381,8 +388,11 @@ struct StrandRow: View {
     /// `N inside`, on a collapsed `Tree` parent only: read aloud.
     var insideCaption: String? = nil
     var runBadge: StudioRunBadge? = nil
-    /// The one status line, or nil for nothing to say.
-    var status: WorkRowStatus? = nil
+    /// The words beside the title and under it, or nil for nothing to say.
+    var text: WorkRowText? = nil
+    /// `Your turn`, `2 moving` or `Next: …` (`WorkSemantics.rowStatus`): said first to a screen
+    /// reader, so a row's state is heard before its words.
+    var spokenStatus: String? = nil
     let isOpening: Bool
     let onOpen: () -> Void
     let onShowFindings: () -> Void
@@ -395,26 +405,24 @@ struct StrandRow: View {
             // it is the only vertical mark on the row.
             TodayProjectAccentBar(strandTone: tone)
             Button(action: onOpen) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(strand.title)
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if isOpening {
-                            ProgressView()
-                                .controlSize(.mini)
-                        }
-                        Spacer(minLength: 0)
+                // The widest arrangement that fits on one line beside the title: the grey text
+                // cut on a word (never under four), else just the word for what is moving, else
+                // the title alone, with the grey text moved under it when nothing is his to do.
+                ViewThatFits(in: .horizontal) {
+                    ForEach(Array(detailVariants.enumerated()), id: \.offset) { _, variant in
+                        rowBody(detail: variant, line: text?.line, tone: text?.tone ?? .plain)
                     }
-                    if let status {
-                        Text(status.text)
-                            .font(.subheadline)
-                            .foregroundStyle(status.isYourTurn ? AnyShapeStyle(.orange)
-                                                               : AnyShapeStyle(.secondary))
-                            .lineLimit(1)
+                    if let marker = text?.marker {
+                        // Only the word fits: when nothing is his, line 2 says what is moving.
+                        rowBody(detail: marker,
+                                line: text?.tone == .you ? text?.line : (text?.detail ?? text?.line),
+                                tone: text?.tone ?? .plain)
                     }
+                    rowBody(detail: nil, line: fallbackLine, tone: text?.tone ?? .plain,
+                            fitsTitle: true)
                 }
+                // A wide Mac window does not stretch a line past what reads at a glance.
+                .frame(maxWidth: Self.textMaxWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(.rect)
             }
@@ -426,14 +434,129 @@ struct StrandRow: View {
         .accessibilityHint("Opens the project")
     }
 
+    /// The grey text beside the title, whole and then cut shorter on a word, never under four.
+    private var detailVariants: [String] {
+        guard let detail = text?.detail else { return [] }
+        return WordFitLine.variants(detail, minWords: 4)
+    }
+
+    /// Line 2 when nothing fits beside the title: his action stays, else what is moving (the
+    /// grey text, when it is a run), else Next, else the grey text.
+    private var fallbackLine: String? {
+        if text?.tone == .you { return text?.line }
+        if text?.marker != nil, let detail = text?.detail { return detail }
+        return text?.line ?? text?.detail
+    }
+
+    private func rowBody(detail: String?, line: String?, tone: WorkRowText.Tone,
+                         fitsTitle: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(strand.title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: !fitsTitle, vertical: false)
+                if let detail {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                if isOpening {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+            if let line {
+                WordFitLine(text: line)
+                    .font(.subheadline)
+                    .foregroundStyle(tone == .you ? AnyShapeStyle(.orange)
+                                                  : AnyShapeStyle(.secondary))
+                    // Line 2 takes whatever width there is; only line 1 decides the fit.
+                    .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// The widest a row's words run, in points: wider than any phone, narrower than a Mac window.
+    static let textMaxWidth: CGFloat = 560
+
     /// One sentence for a screen reader: the title, the status line, and where it sits.
     var accessibilityLabel: String {
         var parts = [strand.title]
-        if let status { parts.append(status.text) }
+        if let spokenStatus, spokenStatus.hasPrefix("Next:") == false {
+            parts.append(spokenStatus)
+        }
+        if let detail = text?.detail { parts.append(detail) }
+        if let line = text?.line { parts.append(line) }
         if let parentTitle { parts.append(StrandsSemantics.parentCaption(parentTitle)) }
         if let insideCaption { parts.append(insideCaption) }
         return parts.joined(separator: ", ")
     }
+}
+
+// MARK: - One line, cut on a word
+
+/// One line of text that never ends mid word: the whole text when it fits, else the longest
+/// run of its first words that fits, with `…`. The last resort (one word that does not fit)
+/// truncates as any line does.
+struct WordFitLine: View {
+    let text: String
+    /// Fewer words than this is a stub that says nothing: with `minWords` above 1 the line is
+    /// left out rather than cut that short.
+    var minWords = 1
+
+    var body: some View {
+        let variants = Self.variants(text, minWords: minWords)
+        ViewThatFits(in: .horizontal) {
+            ForEach(Array(variants.enumerated()), id: \.offset) { _, v in
+                Text(v).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+            }
+            if minWords > 1 {
+                Color.clear.frame(width: 0, height: 0)
+            } else {
+                Text(variants.last ?? text).lineLimit(1)
+            }
+        }
+        .accessibilityLabel(text)
+    }
+
+    /// The text, then each shorter run of its first words with `…`, longest first. Trailing
+    /// punctuation and a dangling small word are dropped before the `…`.
+    static func variants(_ text: String, minWords: Int = 1) -> [String] {
+        let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard words.count > 1 else { return [text] }
+        var out = [text]
+        var k = words.count - 1
+        while k >= max(1, minWords) {
+            var head = Array(words.prefix(k))
+            while head.count > 1, let last = head.last,
+                  dangling.contains(last.lowercased().trimmingCharacters(in: .punctuationCharacters)) {
+                head.removeLast()
+            }
+            var joined = head.joined(separator: " ")
+            while let last = joined.last, ",;:.-\u{2013}\u{2014}\u{201C}(".contains(last) {
+                joined.removeLast()
+            }
+            if joined.split(separator: " ").count < minWords { break }
+            var candidate = joined + "\u{2026}"
+            // A quotation cut short still closes.
+            if candidate.contains("\u{201C}") && !candidate.contains("\u{201D}") {
+                candidate += "\u{201D}"
+            }
+            if out.last != candidate { out.append(candidate) }
+            k -= 1
+        }
+        return out
+    }
+
+    /// Small words a cut line should not end on.
+    static let dangling: Set<String> = [
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the",
+        "to", "with", "per",
+    ]
 }
 
 // MARK: - A group heading

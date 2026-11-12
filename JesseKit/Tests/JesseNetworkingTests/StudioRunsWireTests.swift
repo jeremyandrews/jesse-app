@@ -177,6 +177,11 @@ final class StudioRunsWireTests: XCTestCase {
         stripped.runsActive = nil
         stripped.runsNeedsYou = nil
         stripped.drafts = nil
+        // The board row's fields (0.205.0) are annotations too.
+        stripped.headline = nil
+        stripped.yourAction = nil
+        stripped.servesYourAction = false
+        stripped.nextTitle = nil
         XCTAssertEqual(gd, stripped)
     }
 

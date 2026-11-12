@@ -3891,6 +3891,7 @@ pub fn annotate_strands(
     snap: &crate::strands::StrandsSnapshot,
     notes_root: &Path,
     service: Option<&HostRuns>,
+    today: &str,
 ) {
     let Some(list) = value.get_mut("strands").and_then(Value::as_array_mut) else {
         return;
@@ -3965,6 +3966,38 @@ pub fn annotate_strands(
             })
             .collect();
         obj.insert("drafts".into(), json!(drafts));
+        // The board row's two phrases (0.205.0), from the note's own words and its lines' titles.
+        let lines: Vec<(String, String)> = strand
+            .items
+            .iter()
+            .filter(|i| !i.id.is_empty())
+            .map(|i| (i.id.clone(), work::line_title(&i.raw)))
+            .collect();
+        let texts: Vec<(String, String)> = strand
+            .items
+            .iter()
+            .filter(|i| !i.id.is_empty())
+            .map(|i| (i.id.clone(), i.text.clone()))
+            .collect();
+        let headline = strand
+            .now
+            .as_deref()
+            .and_then(|n| work::row::headline(n, &lines, today));
+        let first_queued = strand
+            .items
+            .iter()
+            .find(|i| !i.checked && i.section == StrandSection::Queue);
+        let next_title = first_queued.map(|i| work::line_title(&i.raw));
+        let your_action = strand
+            .waiting
+            .as_ref()
+            .and_then(|w| work::row::your_action(&w.text, &lines, next_title.as_deref(), &texts));
+        let next = first_queued.and_then(|i| {
+            work::row::next_title(&i.text, next_title.as_deref().unwrap_or(""), &lines)
+        });
+        obj.insert("headline".into(), json!(headline));
+        obj.insert("next_title".into(), json!(next));
+        obj.insert("your_action".into(), json!(your_action));
     }
 }
 

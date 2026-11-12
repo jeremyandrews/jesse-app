@@ -72,6 +72,32 @@ final class MacWorkScreenshotTests: XCTestCase {
         print("HO2-SHOT \(url.path)")
     }
 
+    /// HO5: the whole Work board as the Mac draws it, every row, Dormant expanded, at a window
+    /// height that holds them all.
+    func testHO5MacBoard() async throws {
+        guard let prefix = ProcessInfo.processInfo.environment["HO5_PREFIX"] else {
+            throw XCTSkip("HO5 board shots need HO5_PREFIX")
+        }
+        let make: @MainActor () -> JesseBridgeClient = { [config] in
+            JesseBridgeClient(config: config!)
+        }
+        let strands = StrandsModel(makeClient: make)
+        await strands.refresh()
+        let runs = StudioRunsModel(makeClient: make)
+        await runs.loadLastLook()
+        await runs.load()
+        let opener = StrandOpener()
+        try await render(NavigationStack {
+            StrandsListView(model: strands, opener: opener, runs: runs, dormantStartsOpen: true)
+                .navigationTitle("Work")
+        }, "\(prefix)-mac-board.png", width: 1_000, height: 2_000)
+        if let slug = ProcessInfo.processInfo.environment["HO5_PROJECT_SLUG"] {
+            try await render(NavigationStack {
+                WorkProjectView(slug: slug, strands: strands, runs: runs, opener: opener)
+            }, "\(prefix)-mac-project-\(slug).png", height: 1_000)
+        }
+    }
+
     func testHO2MacShots() async throws {
         let make: @MainActor () -> JesseBridgeClient = { [config] in
             JesseBridgeClient(config: config!)

@@ -60,6 +60,62 @@ final class WorkScreenshotUITests: XCTestCase {
         return app
     }
 
+    /// HO5: the whole board, screen by screen down to its last row (Dormant expanded), then one
+    /// project's view. `HO5_SIZE` picks a Dynamic Type size
+    /// (`UICTContentSizeCategoryXL`), `HO5_PREFIX` names the shots and `HO5_PROJECT` is the title
+    /// of the project whose view is taken.
+    func testHO5Board() throws {
+        guard env["HO5_PREFIX"] != nil else { throw XCTSkip("HO5 board shots need HO5_PREFIX") }
+        let prefix = env["HO5_PREFIX"] ?? "ho5"
+        let app = XCUIApplication()
+        app.launchEnvironment["JESSE_UITEST_BRIDGE"] = env["HO2_BRIDGE"]
+        app.launchEnvironment["JESSE_MUTE"] = "1"
+        app.launchArguments += ["-\(TodayViewPreferencesKey.segment)", "strands"]
+        if let size = env["HO5_SIZE"] {
+            app.launchArguments += ["-UIPreferredContentSizeCategoryName", size]
+        }
+        app.launch()
+        let today = app.tabBars.buttons["Today"]
+        XCTAssertTrue(today.waitForExistence(timeout: 30))
+        today.tap()
+        XCTAssertTrue(app.navigationBars.buttons["Runs"].waitForExistence(timeout: 30))
+        XCTAssertTrue(element(app, beginningWith: "\(env["HO5_FIRST_ROW"] ?? "Writing"), ")
+            .waitForExistence(timeout: 30), "the board's rows")
+        sleep(3)
+        // Dormant opens, so every row is on some screen.
+        let dormant = app.buttons["Dormant"].firstMatch
+        var page = 1
+        var last = ""
+        while page <= 12 {
+            // The rows on screen, by their labels: the same set twice means the end.
+            let seen = app.buttons.allElementsBoundByIndex
+                .filter { $0.isHittable && $0.label.contains(", ") }
+                .map { $0.label }.joined(separator: "|")
+            if seen == last { break }
+            last = seen
+            shot("\(prefix)-board-\(page)")
+            page += 1
+            app.swipeUp(velocity: .slow)
+            sleep(1)
+        }
+        if dormant.exists && dormant.isHittable {
+            dormant.tap()
+            sleep(1)
+            app.swipeUp(velocity: .slow)
+            sleep(1)
+            shot("\(prefix)-board-\(page)-dormant")
+        }
+        guard let project = env["HO5_PROJECT"] else { return }
+        for _ in 0..<12 { app.swipeDown(velocity: .fast) }
+        let row = element(app, beginningWith: "\(project), ")
+        var tries = 0
+        while !(row.exists && row.isHittable) && tries < 12 { app.swipeUp(); tries += 1 }
+        XCTAssertTrue(row.waitForExistence(timeout: 30), "the row of \(project)")
+        row.tap()
+        sleep(3)
+        shot("\(prefix)-project-\(project)")
+    }
+
     func testWorkScreens() throws {
         let prefix = env["HO2_PREFIX"] ?? "ios"
         let app = launch()

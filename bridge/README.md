@@ -951,6 +951,28 @@ written to a note.
 - `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
   refused with 409: the run asked a question, and an empty continue would answer it blind.
 
+**The board row's phrases (0.205.0, `src/hostrun/work/row.rs`).** Three more fields on every
+strand of `GET /jesse/strands`, derived on read from what the note already says, so a Work board
+row can say what a project is about and what is the owner's to do. No model call, nothing written
+back, `null` when the note gives nothing usable. Design and rules: `docs/ho5-work-board-rows.md`.
+
+- `headline`: the lead clause of `**Now:**` in plain words (Markdown, parentheticals and PR
+  numbers gone; a bare build number such as `(213)` kept). The sentence naming today's date wins
+  (its weekday and date dropped, its time kept), else the first of more than one word that is not
+  a `No …` remark or a lone verb. A clause opening on step ids is reworded around the step's title
+  (`GO123 merged` → `Merged: arm64 Chromium fallback chain`), or the quoted name after its colon.
+  Branch names, machine short names (`ks1`), paths, commit hashes and other ids are dropped; a run
+  of ids reads `N drafts`; `Jeremy` reads `you`.
+- `your_action`: the first action of a `you:` `**Waiting on:**`: the first gate (cut at `; `), its
+  first sentence, a lead in (`for S23, Part 0:`) and a tail (`, which …`, `, and …`, `, then …`,
+  `boarded …`) dropped. A gate opening on a step's possessive id is that step, from its whole text;
+  leading `-ing` verbs read as instructions; `whether …` reads `decide whether …`; a branch reads as
+  its kind (`on the release branch`). A gate that is a remark about the note (`… of yours`, `… only
+  you can have`, `… is yours to run`) gives way to the first queued line (with the remark's verb).
+  The case is kept as written. `null` for any gate that is not `you:`.
+- `next_title`: the first queued Drafts line, named from its whole text (its first clause; a one
+  or two word label keeps the first clause of its tail), scrubbed as above.
+
 **Archiving (0.204.0).** A flag on `run.json`, never a move or a delete: the run's directory, log
 and reports stay where they are.
 

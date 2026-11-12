@@ -3006,6 +3006,15 @@ pub fn app(state: AppState) -> Router {
             "/jesse/runs/:run_id/close",
             post(crate::hostrun::jesse_run_close),
         )
+        // A flag on the run, never a move or a delete: the list leaves archived runs out.
+        .route(
+            "/jesse/runs/:run_id/archive",
+            post(crate::hostrun::jesse_run_archive),
+        )
+        .route(
+            "/jesse/runs/:run_id/unarchive",
+            post(crate::hostrun::jesse_run_unarchive),
+        )
         // The Work view's one shared timestamp: when the board was last looked at, on any
         // device. Same auth as the run routes; works whether or not runs are enabled.
         .route(

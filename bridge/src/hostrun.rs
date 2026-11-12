@@ -47,7 +47,7 @@ pub mod stream;
 pub mod sys;
 pub mod work;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -142,6 +142,17 @@ pub const CLOSED_REPORT_ARCHIVED: &str = "report archived";
 pub const MAX_CLOSE_REASON_BYTES: usize = 500;
 /// Where an archived Inbox report goes, under the notes directory.
 pub const INBOX_ARCHIVE_DIR: &str = "Inbox/archive";
+/// `archived_reason` when Jeremy archives a run, and the `closed_reason` of a `needs_you` or
+/// `interrupted` run his archive closes first.
+pub const ARCHIVED_BY_JEREMY: &str = "archived by Jeremy";
+/// `archived_reason` when the run's Drafts line is checked or sits under `### Done`.
+pub const ARCHIVED_ITEM_TICKED: &str = "item ticked";
+/// `archived_reason` when every report of the run has moved to `Inbox/archive/`.
+pub const ARCHIVED_REPORT_ARCHIVED: &str = "report archived";
+/// A finished run is archived by itself this many days after its last status change.
+pub const AUTO_ARCHIVE_AFTER_DAYS: u64 = 14;
+/// `archived_reason` when the run finished more than [`AUTO_ARCHIVE_AFTER_DAYS`] ago.
+pub const ARCHIVED_AGED: &str = "finished over 14 days ago";
 
 /// The environment a run may see, by name. Everything else (every bridge secret, the APNs key,
 /// the gateway's credentials, the model tokens) is stripped. `JESSE_RUN_ID`, `JESSE_RUN_REPORT`
@@ -600,6 +611,25 @@ impl RunStatus {
         )
     }
 
+    /// Not queued, running or paused (those are refused), nor waiting on Jeremy or cut off
+    /// (an archive closes those first): what may carry `archived_at` and leave the list.
+    pub fn is_archivable(self) -> bool {
+        self.is_terminal()
+    }
+
+    /// Needs Jeremy: waiting on him, cut off, or failed. The list's `needs_me` count.
+    pub fn needs_me(self) -> bool {
+        matches!(
+            self,
+            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+        )
+    }
+
+    /// Queued, running or paused: the list's `moving` count.
+    pub fn is_moving(self) -> bool {
+        !self.is_finished()
+    }
+
     /// Waiting on Jeremy with nothing running: what the automatic closes may settle.
     pub fn is_settleable(self) -> bool {
         matches!(self, RunStatus::NeedsYou | RunStatus::Interrupted)
@@ -727,6 +757,15 @@ pub struct RunRecord {
     /// When the run was closed (RFC 3339). Only while `closed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
+    /// When the run left the runs list (RFC 3339): archived by Jeremy or by the watcher. A flag
+    /// only: the run's directory, log and reports stay where they are. Absent from records
+    /// written before 0.204.0, and after an unarchive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    /// Why it was archived: [`ARCHIVED_BY_JEREMY`], [`ARCHIVED_ITEM_TICKED`],
+    /// [`ARCHIVED_REPORT_ARCHIVED`] or [`ARCHIVED_AGED`]. Set exactly with `archived_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_reason: Option<String>,
 }
 
 impl RunRecord {
@@ -741,6 +780,44 @@ impl RunRecord {
     /// The strand's note slug and the item, when the run is a strand item's.
     pub fn step(&self) -> Option<(&str, &str)> {
         Some((self.strand.as_deref()?, self.item_id.as_deref()?))
+    }
+
+    /// Out of the runs list: archived, and in a status an archive accepts. A run a reply has
+    /// put back in the queue (or that came back waiting on Jeremy) shows again even though
+    /// `archived_at` is still set, so a live run is never hidden.
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some() && self.status.is_archivable()
+    }
+
+    /// When the run's status last changed, for the age rule: when it closed, else when it
+    /// finished, else its last event, else its creation.
+    pub fn settled_at(&self) -> Option<u64> {
+        [&self.closed_at, &self.finished_at]
+            .into_iter()
+            .filter_map(ms_opt)
+            .max()
+            .or_else(|| ms_opt(&self.last_event_at))
+            .or_else(|| ms_of(&self.created_at))
+    }
+}
+
+/// Which runs `GET /jesse/runs` serves: `?archived=` absent (the list), `only` or `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArchivedMode {
+    #[default]
+    Hide,
+    Only,
+    All,
+}
+
+impl ArchivedMode {
+    pub fn parse(s: Option<&str>) -> Result<ArchivedMode, String> {
+        match s {
+            None | Some("") | Some("none") => Ok(ArchivedMode::Hide),
+            Some("only") => Ok(ArchivedMode::Only),
+            Some("all") => Ok(ArchivedMode::All),
+            Some(other) => Err(format!("archived is {other:?}; it is only, all or absent")),
+        }
     }
 }
 
@@ -1734,6 +1811,32 @@ fn close_run(
     Ok(Some(rec))
 }
 
+/// Archive the run in `dir` with `reason` if, read again under its lock, its status is one
+/// `may` accepts. An archived run keeps its first `archived_at` and reason. `Ok(Err(status))`
+/// when its status had moved to one `may` refuses.
+fn archive_run(
+    dir: &Path,
+    reason: &str,
+    may: impl Fn(RunStatus) -> bool,
+    now: u64,
+) -> Result<Result<RunRecord, RunStatus>, String> {
+    let mut refused = None;
+    let rec = update_run(dir, |r| {
+        if !may(r.status) {
+            refused = Some(r.status);
+            return;
+        }
+        if r.archived_at.is_none() {
+            r.archived_at = Some(rfc(now));
+            r.archived_reason = Some(reason.to_string());
+        }
+    })?;
+    Ok(match refused {
+        Some(s) => Err(s),
+        None => Ok(rec),
+    })
+}
+
 /// Whether the strand item's Drafts line is checked or under `### Done`. `None` when the note or
 /// the line can no longer be found, which settles nothing.
 pub fn item_ticked(notes_root: &Path, slug: &str, item_id: &str) -> Option<bool> {
@@ -1885,6 +1988,10 @@ pub struct HostRuns {
     house: Mutex<Housekeeping>,
     /// Each run's `last_line`, kept while its stream is unchanged.
     last_lines: work::LastLines,
+    /// Runs Jeremy unarchived since this bridge started: the automatic archive leaves them
+    /// alone, so an Undo is not taken back by the next watcher pass. Not run state; a restart
+    /// forgets it, and the rules apply again.
+    unarchived: Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -1916,6 +2023,7 @@ impl HostRuns {
             wake: tokio::sync::Notify::new(),
             house: Mutex::new(Housekeeping::default()),
             last_lines: work::LastLines::default(),
+            unarchived: Mutex::new(HashSet::new()),
         }
     }
 
@@ -2754,6 +2862,124 @@ impl HostRuns {
         out
     }
 
+    // ---- ARCHIVING ---------------------------------------------------------------------
+
+    /// Take a run out of the runs list. Refuses a queued, running or paused run; closes a
+    /// `needs_you` or `interrupted` run first ([`HostRuns::close`] with
+    /// [`ARCHIVED_BY_JEREMY`]). Idempotent: an archived run is answered as it is. A flag only:
+    /// nothing of the run is moved or deleted. Silent: no push and no turn.
+    pub fn archive(&self, run_id: &str) -> Result<RunRecord, Refusal> {
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        if rec.status.is_moving() {
+            return Err(Refusal::State(format!(
+                "{run_id} is {}; a queued, running or paused run cannot be archived",
+                rec.status.label()
+            )));
+        }
+        if rec.status.is_settleable() {
+            self.close(run_id, Some(ARCHIVED_BY_JEREMY))?;
+        }
+        lock(&self.unarchived).remove(run_id);
+        let _gate = lock(&self.gate);
+        match archive_run(
+            &self.settings.run_dir(run_id),
+            ARCHIVED_BY_JEREMY,
+            RunStatus::is_archivable,
+            now_ms(),
+        ) {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(s)) => Err(Refusal::State(format!(
+                "{run_id} is {}; a queued, running or paused run cannot be archived",
+                s.label()
+            ))),
+            Err(e) => Err(Refusal::Internal(e)),
+        }
+    }
+
+    /// Put a run back in the runs list: clears `archived_at` and `archived_reason` and nothing
+    /// else. Idempotent. The automatic archive leaves it alone until the bridge restarts.
+    pub fn unarchive(&self, run_id: &str) -> Result<RunRecord, Refusal> {
+        if self.get(run_id).is_none() {
+            return Err(Refusal::NotFound(format!("no run {run_id:?}")));
+        }
+        let _gate = lock(&self.gate);
+        lock(&self.unarchived).insert(run_id.to_string());
+        update_run(&self.settings.run_dir(run_id), |r| {
+            r.archived_at = None;
+            r.archived_reason = None;
+        })
+        .map_err(Refusal::Internal)
+    }
+
+    /// [`HostRuns::archive`] or [`HostRuns::unarchive`], off the async runtime.
+    pub async fn archive_blocking(
+        self: &Arc<Self>,
+        run_id: &str,
+        archived: bool,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if archived {
+                this.archive(&id)
+            } else {
+                this.unarchive(&id)
+            }
+        })
+        .await
+        .map_err(|e| Refusal::Internal(format!("the archive task failed: {e}")))?
+    }
+
+    /// Why the watcher would archive `r` now, if it would: its Drafts line is ticked, its
+    /// reports have all moved to `Inbox/archive/`, or it finished more than
+    /// [`AUTO_ARCHIVE_AFTER_DAYS`] ago. Never a run that is moving, waits on Jeremy, was cut
+    /// off or failed, nor one already archived.
+    pub fn auto_archive_reason(&self, r: &RunRecord, now: u64) -> Option<&'static str> {
+        if r.archived_at.is_some() || !r.status.is_archivable() || r.status.needs_me() {
+            return None;
+        }
+        if r.step()
+            .and_then(|(slug, id)| item_ticked(&self.notes_root, slug, id))
+            == Some(true)
+        {
+            return Some(ARCHIVED_ITEM_TICKED);
+        }
+        if reports_archived(&self.notes_root, r) {
+            return Some(ARCHIVED_REPORT_ARCHIVED);
+        }
+        let age = now.saturating_sub(r.settled_at()?);
+        (age > AUTO_ARCHIVE_AFTER_DAYS * DAY_MS).then_some(ARCHIVED_AGED)
+    }
+
+    /// The watcher's archiving, after [`HostRuns::close_settled`]: every run
+    /// [`HostRuns::auto_archive_reason`] names, except those Jeremy unarchived since the bridge
+    /// started. Silent. Returns each run archived and why.
+    pub fn archive_settled(&self, now: u64) -> Vec<(String, String)> {
+        let held = lock(&self.unarchived).clone();
+        let _gate = lock(&self.gate);
+        let mut out = Vec::new();
+        for (dir, r) in self.runs() {
+            if held.contains(&r.run_id) {
+                continue;
+            }
+            let Some(reason) = self.auto_archive_reason(&r, now) else {
+                continue;
+            };
+            let may = |s: RunStatus| s.is_archivable() && !s.needs_me();
+            match archive_run(&dir, reason, may, now) {
+                Ok(Ok(_)) => {
+                    eprintln!("jesse-bridge: hostrun {}: archived ({reason})", r.run_id);
+                    out.push((r.run_id.clone(), reason.to_string()))
+                }
+                Ok(Err(_)) => {}
+                Err(e) => eprintln!("jesse-bridge: hostrun {}: not archived: {e}", r.run_id),
+            }
+        }
+        out
+    }
+
     // ---- THE WATCHER -------------------------------------------------------------------
 
     /// The synchronous half of a pass over running runs: escalate a cancel, notice an
@@ -3088,6 +3314,8 @@ impl HostRuns {
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
         let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || this.archive_settled(now)).await;
+        let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;
         self.send_effects(effects).await;
@@ -3415,21 +3643,47 @@ impl HostRuns {
 
     // ---- READING ---------------------------------------------------------------------
 
-    /// `GET /jesse/runs`.
-    pub fn list_json(&self) -> Value {
-        let mut runs: Vec<RunRecord> = self.runs().into_iter().map(|(_, r)| r).collect();
-        runs.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then(b.run_id.cmp(&a.run_id))
-        });
-        let count = |s: RunStatus| runs.iter().filter(|r| r.status == s).count();
+    /// `GET /jesse/runs`: every run not archived ([`ArchivedMode::Hide`]), live and newest
+    /// first by creation; only the archived ones, newest archived first; or all of them.
+    /// `counts` covers the whole store in the one scan, whatever the mode: the running,
+    /// queued, needs_you and paused tallies as before, and the app's four filters, `needs_me`
+    /// (needs_you, interrupted, failed), `moving` (queued, running, paused), `finished`
+    /// (everything else not archived) and `archived`.
+    pub fn list_json_mode(&self, mode: ArchivedMode) -> Value {
+        let all: Vec<RunRecord> = self.runs().into_iter().map(|(_, r)| r).collect();
+        let (archived, open): (Vec<&RunRecord>, Vec<&RunRecord>) =
+            all.iter().partition(|r| r.is_archived());
+        let count = |s: RunStatus| open.iter().filter(|r| r.status == s).count();
+        let needs_me = open.iter().filter(|r| r.status.needs_me()).count();
+        let moving = open.iter().filter(|r| r.status.is_moving()).count();
         let counts = json!({
             "running": count(RunStatus::Running),
             "queued": count(RunStatus::Queued),
             "needs_you": count(RunStatus::NeedsYou),
             "paused": count(RunStatus::Paused),
+            "needs_me": needs_me,
+            "moving": moving,
+            "finished": open.len() - needs_me - moving,
+            "archived": archived.len(),
         });
+        let mut runs: Vec<&RunRecord> = match mode {
+            ArchivedMode::Hide => open,
+            ArchivedMode::Only => archived,
+            ArchivedMode::All => all.iter().collect(),
+        };
+        if mode == ArchivedMode::Only {
+            runs.sort_by(|a, b| {
+                b.archived_at
+                    .cmp(&a.archived_at)
+                    .then(b.run_id.cmp(&a.run_id))
+            });
+        } else {
+            runs.sort_by(|a, b| {
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then(b.run_id.cmp(&a.run_id))
+            });
+        }
         let mut notes = StrandNotes::default();
         let served: Vec<Value> = runs.iter().map(|r| self.served(r, &mut notes)).collect();
         let h = lock(&self.house);
@@ -3443,6 +3697,11 @@ impl HostRuns {
             },
             "orphans": h.orphans,
         })
+    }
+
+    /// `GET /jesse/runs` with no `archived`: the list without archived runs.
+    pub fn list_json(&self) -> Value {
+        self.list_json_mode(ArchivedMode::Hide)
     }
 
     /// One run as the routes serve it: [`run_json_located`] plus the Work view's `title`,
@@ -3793,6 +4052,12 @@ impl CloseBody {
     }
 }
 
+/// `GET /jesse/runs?archived=only|all`.
+#[derive(Deserialize, Default)]
+pub struct ListQuery {
+    pub archived: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct LogQuery {
     pub tail: Option<usize>,
@@ -3801,10 +4066,13 @@ pub struct LogQuery {
 /// `GET /jesse/runs`.
 pub async fn jesse_runs(
     State(st): State<AppState>,
+    Query(q): Query<ListQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
-    let v = tokio::task::spawn_blocking(move || svc.list_json())
+    let mode =
+        ArchivedMode::parse(q.archived.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let v = tokio::task::spawn_blocking(move || svc.list_json_mode(mode))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(v).into_response())
@@ -3902,6 +4170,32 @@ pub async fn jesse_run_close(
         .await
         .map_err(refusal)?;
     Ok(Json(run_json(&r)).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/archive`: the run as the routes serve it, now archived. 409 for
+/// a queued, running or paused run.
+pub async fn jesse_run_archive(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let r = svc.archive_blocking(&run_id, true).await.map_err(refusal)?;
+    Ok(Json(svc.served_one(&r)).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/unarchive`: the run as the routes serve it, back in the list.
+pub async fn jesse_run_unarchive(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let r = svc
+        .archive_blocking(&run_id, false)
+        .await
+        .map_err(refusal)?;
+    Ok(Json(svc.served_one(&r)).into_response())
 }
 
 #[cfg(test)]

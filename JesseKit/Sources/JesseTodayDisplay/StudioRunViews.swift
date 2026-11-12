@@ -134,21 +134,29 @@ public struct StudioRunRoute: Hashable, Identifiable, Sendable {
     public init(runID: String) { self.runID = runID }
 }
 
-/// The rows: live runs first, then the rest, newest first.
+/// The rows under the filter bar: Needs me, Moving, Finished and All as segments with their
+/// counts, Archived as a toolbar item on an iPhone (five segments with counts truncate there)
+/// and a fifth segment on the Mac, the
+/// last choice remembered across launches. A row that is not moving swipes to Archive (a
+/// context menu on the Mac too); under Archived, to Unarchive. An archive takes the row out at
+/// once, with an Undo banner for five seconds.
 struct StudioRunsList: View {
     @Bindable var model: StudioRunsModel
     let strand: String?
+    @AppStorage(StudioRunFilter.storageKey) private var filter: StudioRunFilter = .initial
+    @State private var confirmsArchiveAll = false
 
     var body: some View {
-        let runs = model.runs(strand: strand)
+        let runs = model.runs(filter: filter, strand: strand)
+        let loaded = filter == .archived ? model.hasLoadedArchived : model.hasLoaded
         List {
             if let error = model.loadError {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
-            if runs.isEmpty, model.hasLoaded {
-                Text(strand == nil ? "No runs on this bridge." : "No runs for this project.")
+            if runs.isEmpty, loaded {
+                Text(filter.emptyLine)
                     .foregroundStyle(.secondary)
             } else if runs.isEmpty, model.loadError == nil {
                 ProgressView().frame(maxWidth: .infinity)
@@ -157,18 +165,175 @@ struct StudioRunsList: View {
                 NavigationLink(value: StudioRunRoute(runID: run.runID)) {
                     StudioRunRow(run: run, now: model.currentDate)
                 }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    actions(for: run)
+                }
+                .contextMenu {
+                    actions(for: run)
+                }
             }
         }
-        .refreshable { await model.load() }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            StudioRunFilterBar(model: model, strand: strand, filter: $filter)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let undo = model.undo {
+                StudioRunUndoBanner(undo: undo) {
+                    Task { await model.undoArchive() }
+                }
+                .task(id: undo.id) {
+                    try? await Task.sleep(for: .seconds(StudioRunsModel.undoSeconds))
+                    model.dismissUndo(undo.id)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.default, value: model.undo)
+        #if os(iOS)
+        // The filter bar sits under the navigation bar; a large title would scroll behind it.
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            #if os(iOS)
+            ToolbarItem(placement: Self.archivedPlacement) {
+                Button {
+                    filter = filter == .archived ? .initial : .archived
+                } label: {
+                    // Words and count drawn as text: a toolbar shows a `Label` as its icon alone.
+                    HStack(spacing: 4) {
+                        Image(systemName: filter == .archived ? "archivebox.fill" : "archivebox")
+                        Text(StudioRunFilter.archived.label(
+                            count: model.count(filter: .archived, strand: strand)))
+                            .monospacedDigit()
+                    }
+                }
+                .accessibilityIdentifier("studio-runs-archived")
+                .accessibilityAddTraits(filter == .archived ? .isSelected : [])
+                .accessibilityHint(filter == .archived ? "Shows every run again"
+                                                       : "Shows the archived runs")
+            }
+            #endif
+            if filter == .finished {
+                ToolbarItem(placement: Self.archiveAllPlacement) {
+                    Button {
+                        confirmsArchiveAll = true
+                    } label: {
+                        Text("Archive all finished")
+                    }
+                    .disabled(runs.isEmpty)
+                }
+            }
+        }
+        .confirmationDialog(Self.archiveAllQuestion(runs.count), isPresented: $confirmsArchiveAll,
+                            titleVisibility: .visible) {
+            Button(Self.archiveAllButton(runs.count)) {
+                Task { await model.archiveAllFinished(strand: strand) }
+            }
+            Button("Keep them", role: .cancel) {}
+        } message: {
+            Text("They leave the list. Nothing is deleted, and Archived still shows them.")
+        }
+        .refreshable {
+            await model.load()
+            if filter == .archived { await model.loadArchived() }
+        }
         // Every 15 seconds while the list is on screen, and never otherwise: the task ends
-        // with the view.
-        .task {
+        // with the view, and starts again when the filter turns to or from Archived.
+        .task(id: filter == .archived) {
             while !Task.isCancelled {
                 await model.load()
+                if filter == .archived { await model.loadArchived() }
                 try? await Task.sleep(for: .seconds(15))
             }
         }
         .studioRunAlert($model.alert)
+    }
+
+    @ViewBuilder
+    private func actions(for run: StudioRun) -> some View {
+        if StudioRunSemantics.canUnarchive(run) {
+            Button {
+                Task { await model.unarchive(run) }
+            } label: {
+                Label("Unarchive", systemImage: "tray.and.arrow.up")
+            }
+            .tint(.blue)
+        } else if StudioRunSemantics.canArchive(run) {
+            Button {
+                Task { await model.archive(run) }
+            } label: {
+                Label("Archive", systemImage: "archivebox")
+            }
+            .tint(.indigo)
+        }
+    }
+
+    static func archiveAllQuestion(_ n: Int) -> String {
+        n == 1 ? "Archive 1 finished run?" : "Archive \(n) finished runs?"
+    }
+
+    static func archiveAllButton(_ n: Int) -> String {
+        n == 1 ? "Archive 1 run" : "Archive \(n) runs"
+    }
+
+    #if os(iOS)
+    static let archivedPlacement: ToolbarItemPlacement = .topBarLeading
+    static let archiveAllPlacement: ToolbarItemPlacement = .bottomBar
+    #else
+    static let archivedPlacement: ToolbarItemPlacement = .automatic
+    static let archiveAllPlacement: ToolbarItemPlacement = .automatic
+    #endif
+}
+
+/// Needs me, Moving, Finished and All, each with its count, and Archived too on the Mac. On
+/// an iPhone no segment is chosen under Archived; picking one leaves it.
+struct StudioRunFilterBar: View {
+    let model: StudioRunsModel
+    let strand: String?
+    @Binding var filter: StudioRunFilter
+
+    var body: some View {
+        Picker("Show", selection: $filter) {
+            ForEach(StudioRunFilter.barSegments, id: \.self) { f in
+                Text(f.label(count: model.count(filter: f, strand: strand)))
+                    .tag(f)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .accessibilityIdentifier("studio-runs-filter")
+    }
+}
+
+/// `Archived "…". Undo`, along the bottom for five seconds.
+struct StudioRunUndoBanner: View {
+    let undo: StudioRunUndo
+    let onUndo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "archivebox.fill")
+                .foregroundStyle(.secondary)
+            Text(undo.text)
+                .font(.subheadline)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Button("Undo", action: onUndo)
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("studio-runs-undo")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.regularMaterial, in: .rect(cornerRadius: 12))
+        .shadow(radius: 4, y: 2)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        // Its own element so Undo stays a button VoiceOver (and a test) can reach.
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -321,6 +486,27 @@ public struct StudioRunDetailView: View {
                 try? await Task.sleep(for: .seconds(5))
                 if Task.isCancelled { return }
                 await model.refresh()
+            }
+        }
+        .toolbar {
+            if model.canArchive {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await model.archive() }
+                    } label: {
+                        Label("Archive", systemImage: "archivebox")
+                    }
+                    .accessibilityIdentifier("studio-run-archive")
+                }
+            } else if model.canUnarchive {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await model.unarchive() }
+                    } label: {
+                        Label("Unarchive", systemImage: "tray.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("studio-run-unarchive")
+                }
             }
         }
         .confirmationDialog("Cancel this run?", isPresented: $confirmsCancel,

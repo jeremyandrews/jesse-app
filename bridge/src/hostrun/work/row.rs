@@ -108,7 +108,7 @@ fn phrase_of(s: &str, dated: bool, lines: &[(String, String)]) -> String {
 /// `you:` (any case) is dropped, then the text is made plain, parentheticals are dropped (a bare
 /// build number stays), the first gate is kept (cut at `; `) and its first sentence, a lead in
 /// such as `for S23, Part 0:` goes, and so does a trailing `, which …`, `, and …` or `boarded …`.
-/// Ids are scrubbed as in [`headline`]: a run of two or more becomes `N items`. A gate that opens
+/// Ids are scrubbed as in [`headline`]: a run of two or more becomes `N drafts`. A gate that opens
 /// on a step's id (`OT2's five questions`) is that step, named from its whole text in `texts`
 /// (`id`, `text`) as [`next_title`] names a line. A leading `-ing` verb reads as an
 /// instruction (`installing` → `install`) and `whether …` as `decide whether …`. A gate that is a
@@ -155,6 +155,9 @@ pub fn your_action(
     .iter()
     .any(|m| lower.contains(m));
     if remark {
+        // The line's first clause: `Email the accountant the return, received today` asks for
+        // the email, not the history.
+        let next = next.map(|n| n.split(", ").next().unwrap_or(n));
         if let Some(n) = next.and_then(short_title) {
             let n = decapitalize(&scrub(&n, lines));
             // `… is yours to run`: the remark's own verb tells what to do with the line.
@@ -221,6 +224,8 @@ pub fn next_title(text: &str, title: &str, lines: &[(String, String)]) -> Option
 /// The verb of a short remainder after leading ids, capitalized, without the dates, times and
 /// words the title already says; `None` when nothing is left.
 fn verb_of(rest: &str, name: &str) -> Option<String> {
+    // `H2 merged, H3 next`: only the first clause is the verb, and an id in it names nothing.
+    let rest = rest.split(", ").next().unwrap_or(rest);
     let lower = rest.to_lowercase();
     if lower.starts_with("running") {
         return Some("Running".into());
@@ -240,6 +245,7 @@ fn verb_of(rest: &str, name: &str) -> Option<String> {
         .split_whitespace()
         .filter(|w| *w != "is")
         .filter(|w| !is_date_word(w))
+        .filter(|w| !looks_like_id(core(w)))
         .filter(|w| {
             let c = w.to_lowercase();
             let c = c.trim_matches(|ch: char| !ch.is_alphanumeric());
@@ -248,6 +254,11 @@ fn verb_of(rest: &str, name: &str) -> Option<String> {
         .collect();
     let verb = words.join(" ");
     let verb = verb.trim_matches(|c: char| matches!(c, ',' | ':' | ';') || c.is_whitespace());
+    // A preposition a dropped time hung from (`merged at`) goes too.
+    let verb = match verb.rsplit_once(' ') {
+        Some((head, last)) if is_preposition(last) => head,
+        _ => verb,
+    };
     (!verb.is_empty()).then(|| capitalize(verb))
 }
 
@@ -280,6 +291,17 @@ fn without_date(s: &str) -> String {
         let c = clean(w);
         MONTHS.iter().any(|(short, long)| c == *short || c == *long)
     };
+    let is_iso_date = |w: &str| {
+        let c = clean(w);
+        c.len() == 10
+            && c.chars().enumerate().all(|(i, ch)| {
+                if i == 4 || i == 7 {
+                    ch == '-'
+                } else {
+                    ch.is_ascii_digit()
+                }
+            })
+    };
     let is_day_number = |w: &str| {
         let c = clean(w);
         !c.is_empty() && c.len() <= 2 && c.chars().all(|ch| ch.is_ascii_digit())
@@ -295,7 +317,7 @@ fn without_date(s: &str) -> String {
                     && is_month(words[i - 1])
                     && !words[i - 1].ends_with(':')
                     && !(i > 1 && is_day_number(words[i - 2]))));
-        if weekday || is_month(w) || beside_month {
+        if weekday || is_month(w) || beside_month || is_iso_date(w) {
             // A colon the date carried stays with the words before it.
             if w.ends_with(':') {
                 if let Some(prev) = out.last_mut() {
@@ -746,20 +768,24 @@ fn is_filler(w: &str) -> bool {
     FILLER.contains(&w.trim_end_matches(',').to_lowercase().as_str())
 }
 
-/// Ids and PR numbers out of a phrase. A run of two or more ids (each perhaps with a version,
-/// `W9 v2`) becomes `N items`; a lone id goes with its possessive; `PR 828`, `PRs 9 and 10`,
-/// `pull request 133` and `PR #317` go entirely.
+/// Ids, PR numbers, hashes, paths, branches and machine names out of a phrase for a headline or a
+/// title. A run of two or more ids (each perhaps with a version, `W9 v2`) becomes `N drafts`
+/// (`N Blog drafts` when they share a title); a lone id goes with its possessive, and with a
+/// preposition it ends a clause on; `PR 828` and `PRs 9 and 10` read `the PR` / `the PRs` (`PR
+/// 1566's prompt`: `the prompt`); a hash, `on release-0.19` and `on ks1` go; a path reads as its
+/// file name and a URL as its host; `Jeremy` reads `you`.
 fn scrub(s: &str, lines: &[(String, String)]) -> String {
-    scrub_with(s, lines, true)
-}
-
-/// [`scrub`] for an action: a branch name stays, because there it is what the action is on
-/// (`branch protection on release-0.19`).
-fn scrub_action(s: &str, lines: &[(String, String)]) -> String {
     scrub_with(s, lines, false)
 }
 
-fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
+/// [`scrub`] for an action, where what is named is what the action is on, so it keeps a form:
+/// `on release-0.19` reads `on the release branch`, a hash `the commit`, and a lone id at the end
+/// of a clause its step's name (`review H2` → `review hosting build`).
+fn scrub_action(s: &str, lines: &[(String, String)]) -> String {
+    scrub_with(s, lines, true)
+}
+
+fn scrub_with(s: &str, lines: &[(String, String)], action: bool) -> String {
     let pieces: Vec<&str> = s.split_whitespace().collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0usize;
@@ -768,7 +794,7 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
         // `on release-0.19`: in a headline a branch says only where, so it goes; in an action it
         // is what the action is on, so it reads as the kind of branch it is.
         if pc.eq_ignore_ascii_case("on") && pieces.get(i + 1).is_some_and(|n| is_branch(core(n))) {
-            if !branches {
+            if action {
                 let kind = if core(pieces[i + 1]).starts_with("release") {
                     "on the release branch"
                 } else {
@@ -838,7 +864,7 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
         // A commit hash, with its possessive. In an action it is what is acted on, so it reads
         // as what it is: `merge 2b908fb4` → `merge the commit`.
         if is_hash(core(pc)) {
-            if !branches {
+            if action {
                 out.push("the commit".into());
             }
             carry_punctuation(&mut out, pc);
@@ -889,8 +915,9 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
                     // `now that PR 1566's prompt is live` → `now that the prompt is live`.
                     out.push("the".into());
                 } else {
-                    // In an action the PR is what is acted on: `merge PR 331` → `merge the PR`.
-                    if !branches {
+                    // `merge PR 331` → `merge the PR`; `waiting on PR 331` → `waiting on the PR`.
+                    // A headline that opens on one (`PR 327 merged`) only said which, so it goes.
+                    if action || !out.is_empty() {
                         out.push(if numbers > 1 { "the PRs" } else { "the PR" }.into());
                     }
                     carry_punctuation(&mut out, last);
@@ -971,7 +998,7 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
                 || is_filler(pieces[last + 1]);
             if clause_ends && out.last().is_some_and(|w| is_preposition(w)) {
                 out.pop();
-            } else if clause_ends && !branches && !out.is_empty() {
+            } else if clause_ends && action && !out.is_empty() {
                 // `review H2` in an action: the id is what is to be done to, so its step's name
                 // stands in for it (`review the hosting build`).
                 if let Some(name) = name_of(core(pieces[last]), lines) {
@@ -985,7 +1012,7 @@ fn scrub_with(s: &str, lines: &[(String, String)], branches: bool) -> String {
         out.push(pieces[i].to_string());
         i += 1;
     }
-    tidy(&out.join(" "))
+    tidy(&out.join(" ").replace("the PR and the PR", "the PRs"))
         .trim_start_matches([',', ';', ':', ' '])
         .to_string()
 }

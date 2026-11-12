@@ -296,7 +296,7 @@ fn links_backticks_hashes_and_pr_numbers_leave_the_headline() {
     let now = "[[todo-list/Projects/Thing|The thing]] shipped in `2b908fb` with PR 1602 merged.";
     assert_eq!(
         headline(now, &[], TODAY).as_deref(),
-        Some("The thing shipped in with merged")
+        Some("The thing shipped in with the PR merged")
     );
 }
 
@@ -590,7 +590,7 @@ fn a_pr_or_a_commit_an_action_is_on_stays_as_what_it_is() {
     // In a headline they only said which, and go.
     assert_eq!(
         headline("Merged PR 331 and 2b908fb4 today.", &[], "2026-01-01").as_deref(),
-        Some("Merged and today")
+        Some("Merged the PR and today")
     );
 }
 
@@ -621,6 +621,37 @@ fn a_long_headline_and_next_are_cut_on_a_word() {
         assert!(got.chars().count() <= ROW_PHRASE_MAX + 1, "{got}");
         assert!(got.ends_with("word\u{2026}"), "{got}");
     }
+}
+
+#[test]
+fn common_now_shapes_with_ids_prs_and_iso_dates() {
+    let lines = vec![
+        ("H2".to_string(), "Hosting build".to_string()),
+        ("H3".to_string(), "Trust minimum".to_string()),
+    ];
+    // Only the first clause is the verb, and the id in the second names nothing.
+    assert_eq!(
+        headline("H2 merged, H3 next.", &lines, TODAY).as_deref(),
+        Some("Merged: Hosting build")
+    );
+    // A PR a headline is waiting on stays as what it is.
+    assert_eq!(
+        headline("Waiting on PR 331.", &[], TODAY).as_deref(),
+        Some("Waiting on the PR")
+    );
+    assert_eq!(
+        your_action("you: review PR 331 and PR 332.", &[], None, &[]).as_deref(),
+        Some("review the PRs")
+    );
+    // An ISO date naming today leaves with the dash it led in with, and a time's `at` goes too.
+    assert_eq!(
+        headline("2026-11-12 \u{2014} H2 merged.", &lines, TODAY).as_deref(),
+        Some("Merged: Hosting build")
+    );
+    assert_eq!(
+        headline("H2 merged at 13:39.", &lines, TODAY).as_deref(),
+        Some("Merged: Hosting build")
+    );
 }
 
 #[test]

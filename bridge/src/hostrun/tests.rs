@@ -1259,6 +1259,17 @@ fn the_strands_snapshot_gains_the_board_rows_phrases_and_null_without_them() {
         "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Bare\n\n## Drafts\n### Done\n",
     )
     .unwrap();
+    std::fs::write(
+        s.notes().join("Strands/Order.md"),
+        "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Order\n\n\
+         **Now:** Shipping.\n**Waiting on:** you: every open line here is yours to do.\n\n\
+         ## Drafts\n\
+         - [x] **OR1** Ticked already.\n\
+         - [ ] **OR2** Under way now. Launched 2026-11-08.\n\
+         - [ ] **OR3** Write the release notes: two pages.\n\
+         ### Later\n- [ ] **OR4** Someday.\n### Done\n",
+    )
+    .unwrap();
     let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
     let mut v = serde_json::to_value(&snap).unwrap();
     annotate_strands(&mut v, &snap, &s.notes(), None, "2026-11-09");
@@ -1277,6 +1288,11 @@ fn the_strands_snapshot_gains_the_board_rows_phrases_and_null_without_them() {
     assert_eq!(gd["headline"], "Merged: Checked one");
     assert_eq!(gd["your_action"], "pick main or a release branch");
     assert_eq!(gd["next_title"], "Run the thing on the Studio");
+    // Next is the first unticked Queue line, past a ticked one and one under Running, and a
+    // remark gate names it in the same words.
+    let order = by("Order");
+    assert_eq!(order["next_title"], "Write the release notes");
+    assert_eq!(order["your_action"], "write the release notes");
     let bare = by("Bare");
     for key in ["headline", "your_action", "next_title"] {
         assert!(bare.get(key).is_some(), "{key} is always served");

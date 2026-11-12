@@ -204,15 +204,9 @@ fn a_lone_verb_or_a_no_sentence_gives_way_to_the_next() {
         headline("No queued step.", &[], TODAY).as_deref(),
         Some("No queued step")
     );
-    // A lone verb is said over a `Nothing …`, and is what is left when nothing better is.
-    assert_eq!(
-        headline("PR 331 merged. Nothing else.", &[], TODAY).as_deref(),
-        Some("Merged")
-    );
-    assert_eq!(
-        headline("PR 327 merged.", &[], TODAY).as_deref(),
-        Some("Merged")
-    );
+    // A lone verb names nothing: with nothing better there is no headline, and Next says it.
+    assert_eq!(headline("PR 331 merged. Nothing else.", &[], TODAY), None);
+    assert_eq!(headline("PR 327 merged.", &[], TODAY), None);
 }
 
 #[test]
@@ -446,7 +440,7 @@ fn a_pr_number_takes_only_its_own_and() {
     );
     assert_eq!(
         headline("PRs 9 and 10 merged the fix.", &[], TODAY).as_deref(),
-        Some("Merged the fix")
+        Some("The PRs merged the fix")
     );
 }
 
@@ -489,7 +483,7 @@ fn a_step_id_that_is_the_object_is_named_and_a_remark_verb_waits_for_a_thing() {
     ];
     assert_eq!(
         your_action("you: review H2.", &lines, None, &[]).as_deref(),
-        Some("review hosting build")
+        Some("review the hosting build")
     );
     // After a preposition the id only said which; it goes with it.
     assert_eq!(
@@ -652,6 +646,38 @@ fn common_now_shapes_with_ids_prs_and_iso_dates() {
         headline("H2 merged at 13:39.", &lines, TODAY).as_deref(),
         Some("Merged: Hosting build")
     );
+}
+
+#[test]
+fn a_subject_a_headline_opens_on_stays_as_what_it_is() {
+    assert_eq!(
+        headline("PR 331 is open for the login fix.", &[], TODAY).as_deref(),
+        Some("The PR is open for the login fix")
+    );
+    assert_eq!(
+        headline("XQ12 is running on the cluster.", &[], TODAY).as_deref(),
+        Some("The step is running on the cluster")
+    );
+    // A dated sentence for today loses the `on` its date hung from.
+    assert_eq!(
+        headline("Shipped 1.0 (213) to TestFlight on 12 Nov.", &[], TODAY).as_deref(),
+        Some("Shipped 1.0 (213) to TestFlight")
+    );
+}
+
+#[test]
+fn an_action_on_a_step_names_it_after_on_and_at() {
+    let lines = vec![("H2".to_string(), "Hosting build".to_string())];
+    assert_eq!(
+        your_action("you: decide on H2.", &lines, None, &[]).as_deref(),
+        Some("decide on the hosting build")
+    );
+    assert_eq!(
+        your_action("you: look at H2.", &lines, None, &[]).as_deref(),
+        Some("look at the hosting build")
+    );
+    // A bare reference is no action.
+    assert_eq!(your_action("you: PR 331.", &[], None, &[]), None);
 }
 
 #[test]

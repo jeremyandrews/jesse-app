@@ -41,7 +41,6 @@ pub fn headline(now: &str, lines: &[(String, String)], today: &str) -> Option<St
     // sentence stands.
     let mut order: Vec<usize> = dated.into_iter().collect();
     order.extend((0..all.len()).filter(|i| Some(*i) != dated));
-    let mut first = None;
     for i in &order {
         let x = all[*i];
         let lower = x.to_lowercase();
@@ -56,12 +55,14 @@ pub fn headline(now: &str, lines: &[(String, String)], today: &str) -> Option<St
         if phrase.split_whitespace().count() >= 2 {
             return finish(&phrase, true);
         }
-        first.get_or_insert(phrase);
     }
-    finish(
-        &first.or_else(|| all.first().map(|x| phrase_of(x, false, lines)))?,
-        true,
-    )
+    // Nothing better: the first sentence, unless it too is a lone verb (`PR 327 merged`), which
+    // names nothing and leaves the row to its Next.
+    let fallback = phrase_of(all.first()?, false, lines);
+    if fallback.split_whitespace().count() < 2 {
+        return None;
+    }
+    finish(&fallback, true)
 }
 
 /// One sentence's headline phrase (see [`headline`]).
@@ -73,9 +74,14 @@ fn phrase_of(s: &str, dated: bool, lines: &[(String, String)]) -> String {
         // The day is today, so its name and date say nothing; the time stays.
         undated = without_date(s.split("; ").next().unwrap_or(s));
         // `12 Nov — H2 merged`: what the date led in with goes with it.
-        undated.trim_start_matches(|c: char| {
+        let t = undated.trim_start_matches(|c: char| {
             matches!(c, '-' | ':' | ',' | '\u{2013}' | '\u{2014}') || c.is_whitespace()
-        })
+        });
+        // `… to TestFlight on 12 Nov`: the `on` the date hung from goes with it.
+        match t.trim_end().rsplit_once(' ') {
+            Some((head, last)) if is_preposition(last) => head,
+            _ => t,
+        }
     } else {
         first_clause(s)
     };
@@ -98,9 +104,22 @@ fn phrase_of(s: &str, dated: bool, lines: &[(String, String)]) -> String {
             Some(verb) => format!("{verb}: {name}"),
             None => name,
         }
+    } else if names.is_empty() && starts_with_a_verb_of_state(rest) {
+        // `XQ12 is running on the cluster`, XQ12 none of this strand's lines: the subject stays
+        // as what it is rather than vanishing.
+        format!("The step {}", scrub(rest, lines))
     } else {
         capitalize(&scrub(rest, lines))
     }
+}
+
+/// Whether a remainder opens on a verb that needs its subject (`is running`, `has a fix`).
+fn starts_with_a_verb_of_state(rest: &str) -> bool {
+    let first = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+    matches!(
+        first.as_str(),
+        "is" | "are" | "was" | "were" | "has" | "had" | "needs" | "waits" | "stays" | "remains"
+    )
 }
 
 /// The first action of a `you:` `**Waiting on:**`, or `None` when the gate is not the owner's.
@@ -177,6 +196,10 @@ pub fn your_action(
                 _ => finish(&n, false),
             };
         }
+    }
+    // `you: PR 331` names a thing and no action: the app says `see the note`.
+    if matches!(phrase.as_str(), "the PR" | "the PRs" | "the commit") {
+        return None;
     }
     // `Jeremy's call` became `Your call`: after `For you:` it reads `your call`.
     let phrase = match phrase.strip_prefix("Your ") {
@@ -715,7 +738,8 @@ fn title_for(id: &str, lines: &[(String, String)]) -> Option<String> {
 }
 
 /// A step's title as a name inside an action, without recursing into [`scrub`]: [`short_title`],
-/// then a leading id of its own dropped.
+/// a leading id of its own dropped, lowercased as a title is after a verb, with `the` in front
+/// unless it has its own (`review the hosting build`).
 fn name_of(id: &str, lines: &[(String, String)]) -> Option<String> {
     let (_, title) = lines.iter().find(|(i, _)| i == id)?;
     let t = short_title(title)?;
@@ -723,7 +747,18 @@ fn name_of(id: &str, lines: &[(String, String)]) -> Option<String> {
         Some((first, rest)) if is_id(core(first), lines) => rest.to_string(),
         _ => t,
     };
-    (!t.is_empty()).then_some(t)
+    if t.is_empty() {
+        return None;
+    }
+    let t = decapitalize(&t);
+    let first = t.split_whitespace().next().unwrap_or("").to_lowercase();
+    Some(
+        if matches!(first.as_str(), "the" | "a" | "an" | "this" | "that") {
+            t
+        } else {
+            format!("the {t}")
+        },
+    )
 }
 
 /// A served title as a name: parentheticals dropped; one cut at its limit loses its `…`, the
@@ -915,9 +950,11 @@ fn scrub_with(s: &str, lines: &[(String, String)], action: bool) -> String {
                     // `now that PR 1566's prompt is live` → `now that the prompt is live`.
                     out.push("the".into());
                 } else {
-                    // `merge PR 331` → `merge the PR`; `waiting on PR 331` → `waiting on the PR`.
-                    // A headline that opens on one (`PR 327 merged`) only said which, so it goes.
-                    if action || !out.is_empty() {
+                    // `merge PR 331` → `merge the PR`; `waiting on PR 331` → `waiting on the PR`;
+                    // `PR 331 is open for the fix` → `the PR is open for the fix`. A headline that
+                    // opens on one before a lone verb (`PR 327 merged`) only said which: it goes.
+                    let lone_verb = out.is_empty() && pieces.len().saturating_sub(j) <= 1;
+                    if action || !lone_verb {
                         out.push(if numbers > 1 { "the PRs" } else { "the PR" }.into());
                     }
                     carry_punctuation(&mut out, last);
@@ -996,14 +1033,19 @@ fn scrub_with(s: &str, lines: &[(String, String)], action: bool) -> String {
             let clause_ends = last + 1 == pieces.len()
                 || pieces[last].ends_with([',', ';', ':', '.'])
                 || is_filler(pieces[last + 1]);
-            if clause_ends && out.last().is_some_and(|w| is_preposition(w)) {
+            // In an action an id at the end of a clause is what is to be done to (`review H2`,
+            // `decide on H2`): its step's name stands in for it. After `for`, `of`, `in` and
+            // the like it only said which (`a branch for GD5`), and goes with its preposition.
+            let which = out
+                .last()
+                .is_some_and(|w| is_preposition(w) && !matches!(w.as_str(), "on" | "at"));
+            let name = (clause_ends && action && !out.is_empty() && !which)
+                .then(|| name_of(core(pieces[last]), lines))
+                .flatten();
+            if let Some(name) = name {
+                out.push(name);
+            } else if clause_ends && out.last().is_some_and(|w| is_preposition(w)) {
                 out.pop();
-            } else if clause_ends && action && !out.is_empty() {
-                // `review H2` in an action: the id is what is to be done to, so its step's name
-                // stands in for it (`review the hosting build`).
-                if let Some(name) = name_of(core(pieces[last]), lines) {
-                    out.push(decapitalize(&name));
-                }
             }
             carry_punctuation(&mut out, pieces[last]);
             i = last + 1;

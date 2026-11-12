@@ -30,7 +30,7 @@ import JesseVault
 // stamp to guard a write with, and a second write path to the same lines is how two
 // spellings of "tick a box" end up disagreeing.
 
-// ## Work (bridge 0.203.0)
+// ## Work (bridge 0.203.0; the two line row, 0.205.0)
 //
 // The segment reads **Work**. A row is two lines (HO5, `WorkSemantics.rowText`): the project's
 // title with what it is about right now beside it, then what is his to do, else Next. A tap pushes the
@@ -406,7 +406,8 @@ struct StrandRow: View {
             Button(action: onOpen) {
                 // The widest arrangement that fits on one line beside the title: the grey text
                 // cut on a word (never under four), else just the word for what is moving, else
-                // the title alone, with the grey text moved under it when nothing is his to do.
+                // the title alone. In the last two, line 2 is `WorkRowText.fallbackLine`: his
+                // action, else what is moving, else Next, else the headline.
                 ViewThatFits(in: .horizontal) {
                     ForEach(Array(detailVariants.enumerated()), id: \.offset) { _, variant in
                         rowBody(detail: variant, line: text?.line, tone: text?.tone ?? .plain)

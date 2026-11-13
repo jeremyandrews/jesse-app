@@ -497,6 +497,12 @@ struct StrandRow: View {
 /// One line of text that never ends mid word: the whole text when it fits, else the longest
 /// run of its first words that fits, with `…`. The last resort (one word that does not fit)
 /// truncates as any line does.
+///
+/// The `View` conformance makes the type MainActor, and with it every static member that is
+/// not marked otherwise. The four string helpers below are pure and `WorkSemantics.rowTitle`
+/// (nonisolated) calls two of them, so they are `nonisolated`: a newer Swift only warns about
+/// the call from a nonisolated context, Xcode 26.6 rejects it, and PR 333 shipped a red
+/// nightly through that difference.
 struct WordFitLine: View {
     let text: String
 
@@ -514,7 +520,7 @@ struct WordFitLine: View {
     /// The text, then each shorter run of its first words with `…`, longest first, none under
     /// `minWords` words (the grey text beside a title asks for four: fewer is a stub). Trailing
     /// punctuation and a dangling small word are dropped before the `…`.
-    static func variants(_ text: String, minWords: Int = 1) -> [String] {
+    nonisolated static func variants(_ text: String, minWords: Int = 1) -> [String] {
         let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard words.count > 1 else { return [text] }
         var out = [text]
@@ -534,7 +540,7 @@ struct WordFitLine: View {
     }
 
     /// `words` without the small words it ends on (one word always stays).
-    static func dropDangling(_ words: [String]) -> [String] {
+    nonisolated static func dropDangling(_ words: [String]) -> [String] {
         var out = words
         while out.count > 1, let last = out.last,
               dangling.contains(last.lowercased().trimmingCharacters(in: .punctuationCharacters)) {
@@ -544,7 +550,7 @@ struct WordFitLine: View {
     }
 
     /// `text` without the punctuation and opening marks a cut can leave at its end.
-    static func trimTail(_ text: String) -> String {
+    nonisolated static func trimTail(_ text: String) -> String {
         var out = text
         while let last = out.last, ",;:.-\u{2013}\u{2014}\u{201C}( ".contains(last) {
             out.removeLast()
@@ -554,7 +560,7 @@ struct WordFitLine: View {
 
     /// Small words a cut line should not end on. The bridge's `is_filler`
     /// (`bridge/src/hostrun/work/row.rs`) holds the same list; keep the two together.
-    static let dangling: Set<String> = [
+    nonisolated static let dangling: Set<String> = [
         "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "its", "of", "on", "or",
         "per", "the", "their", "to", "with",
     ]

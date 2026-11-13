@@ -4,17 +4,15 @@
 //! two runs (the second re-judges nothing).
 
 use serde_json::Value;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+// The one way a test writes a script it will spawn (the ETXTBSY race is described there).
+#[path = "../src/testutil/executable.rs"]
+mod executable;
+
 fn write_exec(path: &Path, body: &str) {
-    let mut f = std::fs::File::create(path).unwrap();
-    f.write_all(body.as_bytes()).unwrap();
-    let mut perms = f.metadata().unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).unwrap();
+    executable::write_executable(path, body);
 }
 
 fn run_audit(home: &Path, log: &Path, fake_claude: &Path, date: &str) -> String {

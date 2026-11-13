@@ -46,10 +46,12 @@ fn runner_bin() -> PathBuf {
     p
 }
 
+// The one way a test writes a script it will spawn (the ETXTBSY race is described there).
+#[path = "../src/testutil/executable.rs"]
+mod executable;
+
 fn write_stub(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    executable::write_executable(path, body);
 }
 
 /// A stub `claude`: three minutes of stream events, then the report and exit 0. It records its

@@ -202,19 +202,31 @@ public struct WorkProjectView: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(moving, id: \.sectionKey.moving) { run in
-                NavigationLink(value: StudioRunRoute(runID: run.runID)) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(WorkSemantics.title(run))
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(2)
-                        if let line = run.lastLine, !line.isEmpty {
-                            Text(line)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
+                #if os(macOS)
+                // A button onto `openedRun`, as the Your turn rows open theirs. On the Mac a
+                // value link does not push from here: this view was itself pushed by an
+                // item binding (`StrandsListView`), and a value link on top of that
+                // presentation never lands, wherever its destination is declared. The row
+                // drew no chevron and a click did nothing.
+                Button {
+                    openedRun = StudioRunRoute(runID: run.runID)
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        movingLabel(run)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
+                    .contentShape(.rect)
                 }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens the run")
+                #else
+                NavigationLink(value: StudioRunRoute(runID: run.runID)) {
+                    movingLabel(run)
+                }
+                #endif
             }
             Button {
                 showsAllRuns = true
@@ -250,6 +262,20 @@ public struct WorkProjectView: View {
                     }
                 }
                 .accessibilityHint("Opens the project's whole note")
+            }
+        }
+    }
+
+    private func movingLabel(_ run: StudioRun) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(WorkSemantics.title(run))
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(2)
+            if let line = run.lastLine, !line.isEmpty {
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
     }

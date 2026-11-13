@@ -14,6 +14,14 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.205.2] - 2026-11-13
+
+**ci.yml is green on main again.** Root cause: RustSec advisory RUSTSEC-2026-0538 (`quinn-udp`: the receive loop can spin after a truncated datagram; fixed in 0.5.16) failed the bridge job's `Dependency CVE audit` on `main` at e45490e. The advisory database is fetched live, so the same lock that passed on the pull request failed on main. No source changed.
+
+- **Fixed (bridge):** `bridge/Cargo.lock`: `quinn-udp` 0.5.14 → 0.5.16 (`cargo update -p quinn-udp`), which also drops the `windows` 0.53 target crates it alone pulled in.
+- **Fixed (root lockfile, agent and eval):** `Cargo.lock`: `quinn-udp` 0.5.15 → 0.5.16 for the same advisory, and `quinn-proto` 0.11.18 → 0.11.19 for RUSTSEC-2026-0523 (MAX_STREAM_DATA can open streams beyond the limit) and RUSTSEC-2026-0524 (a long Retry token can panic or exhaust memory in a client). A current advisory database flags all three in that lock; the agent job's audit passed on main only because it read an older database.
+- `cargo audit` on both lockfiles now reports no vulnerability, only the already allowed `tokio` (RUSTSEC-2026-0386) and `rustix` (RUSTSEC-2026-0486) warnings.
+
 ## [App 1.0 (216)] - 2026-11-13
 
 **Every Studio runs screen works on the Mac: the Runs list shows its runs, and a run opens with its detail, log, report, Reply, Cancel and Archive from every place that offers it.** Root cause: a macOS sheet takes its content's ideal size and a `List` has no ideal height, so `StudioRunsScreen` and `StudioRunDetailScreen` came up collapsed (the Runs sheet 520 by 149 points, the filter bar covering the 84 left to the list; a run's sheet 470 by 113, a title and Done). The runs had loaded; nothing drew them. Separately, a project view's Moving row was a value `NavigationLink` inside a view pushed by an item binding, which macOS never pushes, wherever its destination is declared.

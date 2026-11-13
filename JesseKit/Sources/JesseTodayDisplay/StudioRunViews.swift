@@ -124,6 +124,8 @@ public struct StudioRunsScreen: View {
                     StudioRunDetailView(model: model.detailModel(for: route.runID))
                 }
         }
+        .studioRunSheetFrame()
+        .closesBeforeReport(onDone)
     }
 }
 
@@ -420,7 +422,63 @@ public struct StudioRunDetailScreen: View {
                     }
                 }
         }
+        .studioRunSheetFrame()
+        .closesBeforeReport(onDone)
     }
+}
+
+extension View {
+    /// The size a Runs or run sheet takes on the Mac. A macOS sheet sizes itself to its
+    /// content's ideal size, and a `List` has no ideal height: without this the sheet came up
+    /// about 150 points tall, the filter bar covering what was left of the list, so the Runs
+    /// list showed no rows and a run showed nothing but Done. The Mac's other sheets
+    /// (`MacTodayConversationSheet`, `MacAskSheet`) carry a frame for the same reason. An
+    /// iPhone sheet fills the screen, so nothing changes there.
+    func studioRunSheetFrame() -> some View {
+        #if os(macOS)
+        frame(minWidth: StudioRunSheet.minSize.width, idealWidth: StudioRunSheet.idealSize.width,
+              minHeight: StudioRunSheet.minSize.height, idealHeight: StudioRunSheet.idealSize.height)
+        #else
+        self
+        #endif
+    }
+}
+
+/// Inside a Runs or run sheet on the Mac, `Open report` closes that sheet before the shell
+/// opens the report. The shell closes only the sheets it owns (the Runs list and the strand
+/// note); a project's `All runs` and a Drafts block's run hang from views the shell cannot
+/// reach, and a Mac `TabView` keeps the Today tab alive, so one of them stayed up over the
+/// Vault tab. The iPhone keeps the shell's action as it is.
+private struct ClosesBeforeReport: ViewModifier {
+    @Environment(\.studioRunReport) private var outer
+    let close: () -> Void
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content.environment(\.studioRunReport, outer.map { action in
+            StudioRunReportAction { path in
+                close()
+                action.open(path)
+            }
+        })
+        #else
+        content
+        #endif
+    }
+}
+
+extension View {
+    fileprivate func closesBeforeReport(_ close: @escaping () -> Void) -> some View {
+        modifier(ClosesBeforeReport(close: close))
+    }
+}
+
+/// The Mac's size for a Runs or run sheet.
+enum StudioRunSheet {
+    /// The smallest it is drawn.
+    static let minSize = CGSize(width: 560, height: 520)
+    /// What it opens at, where the window has the room.
+    static let idealSize = CGSize(width: 720, height: 780)
 }
 
 /// A run, question first: its title, the question it asks (or its report's first line), the

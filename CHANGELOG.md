@@ -14,6 +14,15 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (216)] - 2026-11-13
+
+**Every Studio runs screen works on the Mac: the Runs list shows its runs, and a run opens with its detail, log, report, Reply, Cancel and Archive from every place that offers it.** Root cause: a macOS sheet takes its content's ideal size and a `List` has no ideal height, so `StudioRunsScreen` and `StudioRunDetailScreen` came up collapsed (the Runs sheet 520 by 149 points, the filter bar covering the 84 left to the list; a run's sheet 470 by 113, a title and Done). The runs had loaded; nothing drew them. Separately, a project view's Moving row was a value `NavigationLink` inside a view pushed by an item binding, which macOS never pushes, wherever its destination is declared.
+
+- **Fixed (app, Mac):** the Runs and run sheets take a size of their own on the Mac (at least 560 by 520, 720 by 780 where the window has the room), in the shared screens, so the Today toolbar's Runs, a project's All runs, a Drafts block's Runs and live run, and `Run on Studio` all get it. The iPhone is unchanged.
+- **Fixed (app, Mac):** a project view's Moving row opens its run, through the same route the Your turn rows use, with their chevron. The iPhone keeps its link.
+- **Fixed (app, Mac):** `Open report` inside a Runs or run sheet closes that sheet before the Vault tab opens the report. The shell closes only the sheets it owns, so a project's All runs or a Drafts block's run stayed up over the Vault tab.
+- **Added:** `MacStudioRunsPresentationTests`: the real sheets and pushes in a real window kept off every display, served from the bridge's wire fixtures. They assert the sheet's size, that a row is drawn where a click lands, and, read back from the window's drawing with Vision, the run's title, status and log after opening it from the toolbar's list, a Drafts block's live run, the block's Runs list and a project's Moving row. All three fail on 1.0 (215) and pass here. A gated `testShotsAgainstABridge` took the screenshots in `docs/ho6-screenshots/` against a scratch bridge on copies of the run store and Strands notes.
+
 ## [bridge 0.205.1, App 1.0 (215)] - 2026-11-13
 
 **Both CI workflows green again after HO5, each failure fixed where it started.** No change to what the app shows or the bridge serves.

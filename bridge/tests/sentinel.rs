@@ -34,6 +34,11 @@ use jesse_bridge::sentinel::{
 };
 use serde_json::{json, Value};
 
+// The one way a test writes a script it will spawn (the ETXTBSY race is described there).
+#[path = "../src/testutil/executable.rs"]
+mod executable;
+use executable::write_executable;
+
 const BRIDGE_TOKEN: &str = "bridge-token-aaaaaaaaaaaaaaaa";
 const SENTINEL_TOKEN: &str = "sentinel-token-bbbbbbbbbbbbbb";
 
@@ -66,7 +71,6 @@ impl Drop for Scratch {
 ///
 /// Plain POSIX shell: CI's `/bin/sh` is dash, so nothing bash-only appears here.
 fn shim(path: &Path, record: &Path, code: i32, sleep_secs: u32) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let body = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{}exit {code}\n",
         record.display(),
@@ -76,9 +80,7 @@ fn shim(path: &Path, record: &Path, code: i32, sleep_secs: u32) -> PathBuf {
             String::new()
         }
     );
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path.to_path_buf()
+    write_executable(path, body)
 }
 
 fn recorded(record: &Path) -> Vec<String> {
@@ -364,7 +366,6 @@ const TS_GUI_FAILURE: &str =
 /// It checks the exact value rather than "any `TERM`", so it cannot pass on a `TERM` the test
 /// runner inherited from its terminal.
 fn tailscale_shim(path: &Path, record: &Path, status_stdout: &str, app_bundle: bool) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let gate = if app_bundle {
         format!(
             "if [ \"$TERM_PROGRAM\" != 'jesse-sentinel' ]; then printf '%s\\n' '{TS_GUI_FAILURE}'; \
@@ -378,9 +379,7 @@ fn tailscale_shim(path: &Path, record: &Path, status_stdout: &str, app_bundle: b
          printf '%s\\n' '{status_stdout}'\nexit 0\n",
         record.display(),
     );
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path.to_path_buf()
+    write_executable(path, body)
 }
 
 /// The probe runs the app-bundle CLI in CLI mode: through the real spawn path, the fake only
@@ -727,11 +726,10 @@ async fn status_degrades_a_hung_probe_to_unknown_and_still_answers() {
 /// would after the job is booted out: the check must never ask about it, and must be green.
 #[tokio::test]
 async fn services_check_passes_with_only_the_four_remaining_jobs_loaded() {
-    use std::os::unix::fs::PermissionsExt;
     let sc = Scratch::new("four");
     let record = sc.path("launchctl.log");
     let launchctl = sc.path("launchctl");
-    std::fs::write(
+    write_executable(
         &launchctl,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n\
@@ -739,9 +737,7 @@ async fn services_check_passes_with_only_the_four_remaining_jobs_loaded() {
              printf '%s = {{\\n\\tstate = running\\n\\tpid = 4242\\n\\truns = 1\\n}}\\n' \"$2\"\n",
             record.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let (url, _) = start_fake_bridge(json!({ "jobs": [] })).await;
     let mut cfg = config(&sc, &url);
     cfg.bins.launchctl = Some(launchctl);
@@ -1193,7 +1189,6 @@ async fn start_scripted_bridge(st: Scripted) -> String {
 /// build phase sets, so `target/release` lands inside the clone's `bridge/` exactly where the
 /// stage phase looks for it.
 fn cargo_shim(path: &Path, record: &Path, version: &str, code: i32) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let body = format!(
         "#!/bin/sh\n\
          printf '%s\\n' \"$*\" >> '{}'\n\
@@ -1211,9 +1206,7 @@ fn cargo_shim(path: &Path, record: &Path, version: &str, code: i32) -> PathBuf {
          exit {code}\n",
         record.display(),
     );
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path.to_path_buf()
+    write_executable(path, body)
 }
 
 // ---- The world ---------------------------------------------------------------------------
@@ -1369,13 +1362,11 @@ fn previous_map(sen: &Arc<Sentinel>) -> Previous {
 /// Seed `<bin dir>` with a deployment that is already there, so a rollback has somewhere to
 /// go back to. Returns the directory the links point into.
 fn seed_installed(bin_dir: &Path, version: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let old = bin_dir.parent().unwrap().join("already-installed");
     std::fs::create_dir_all(&old).unwrap();
     for name in embedded_deploy_bins() {
         let p = old.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\necho {version}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&p, format!("#!/bin/sh\necho {version}\n"));
         let link = bin_dir.join(name);
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&p, &link).unwrap();
@@ -1605,14 +1596,11 @@ async fn a_healthy_deploy_repoints_the_symlinks_and_records_the_sha() {
 /// A `codesign` that records its argv and exits `sign_code` when asked to sign (`-f`) and
 /// `verify_code` when asked to verify (`-v`), so each half of the signing step can fail alone.
 fn codesign_shim(path: &Path, record: &Path, sign_code: i32, verify_code: i32) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let body = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = -v ]; then exit {verify_code}; fi\nexit {sign_code}\n",
         record.display()
     );
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path.to_path_buf()
+    write_executable(path, body)
 }
 
 /// A world whose sentinel signs with `TEST-IDENTITY` through a `codesign` shim.
@@ -1840,12 +1828,7 @@ async fn a_launcher_the_commit_lists_is_staged_linked_and_rolled_back() {
     )
     .await;
     seed_installed(&w.bin_dir, OLD_VERSION);
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let p = w.bin_dir.join(&launcher);
-        std::fs::write(&p, "#!/bin/sh\necho by hand\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    write_executable(&w.bin_dir.join(&launcher), "#!/bin/sh\necho by hand\n");
     let (status, _) = post_deploy(&sen, json!({ "ref": "main" })).await;
     assert_eq!(status, 202);
     let rec = await_deploy(&sen).await;

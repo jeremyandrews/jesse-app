@@ -1,7 +1,11 @@
 //! Shared helpers for the integration (`app()` router) test target.
 #![allow(dead_code)]
+// The one way a test writes a script it will spawn, shared with the crate's unit tests.
+#[path = "../../src/testutil/executable.rs"]
+mod executable;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+pub use executable::write_executable;
 use jesse_bridge::*;
 use serde_json::Value;
 use std::future::Future;
@@ -425,18 +429,12 @@ pub async fn result_status(app_state: &AppState, job_id: &str) -> Value {
     serde_json::from_str(&body_string(resp).await).unwrap()
 }
 pub fn write_fake_claude(script: &str) -> std::path::PathBuf {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     let n = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
     // A pid+counter name keeps parallel test runs from colliding.
     let path =
         std::env::temp_dir().join(format!("jesse-fake-claude-{}-{}.sh", std::process::id(), n));
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(script.as_bytes()).unwrap();
-    let mut perms = f.metadata().unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    // Never written in this process: see `src/testutil/executable.rs` for the ETXTBSY race.
+    write_executable(&path, script)
 }
 pub fn pid_alive(pid: i32) -> bool {
     // `kill -0` probes for the process without signalling it.

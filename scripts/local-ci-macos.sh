@@ -156,24 +156,69 @@ run_step() {
   fi
 }
 
+# --- Warnings the local compiler would not promote -------------------------
+#
+# A newer Swift than the runner's can DEMOTE a diagnostic the runner reports as an
+# error, and a demoted diagnostic is not one `-warnings-as-errors` (or `-Werror
+# <group>`, or SWIFT_TREAT_WARNINGS_AS_ERRORS) promotes back. PR 333 merged through
+# exactly that gap: a pure string helper on a SwiftUI `View`, which is MainActor
+# by its conformance, was called from a nonisolated function. Xcode 26.6 on the
+# runner rejected it ("call to main actor-isolated static method in a synchronous
+# nonisolated context"); this Studio's Swift 6.4 printed the same text as a
+# warning, the build succeeded, and the gate passed.
+#
+# So every build below runs through this, which fails the step on ANY Swift
+# warning that survived. Under warnings-as-errors a surviving warning is by
+# construction one the toolchain declined to promote, and the runner's older
+# compiler may well make it an error.
+no_surviving_warnings() {
+  log="$(mktemp "${TMPDIR:-/tmp}/local-ci-build.XXXXXX")"
+  "$@" 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$log"
+    return "$rc"
+  fi
+  survived="$(sed $'s/\x1b\\[[0-9;]*m//g' "$log" \
+    | grep -E '^/[^ ]*\.swift:[0-9]+:[0-9]+: warning:' | sort -u)"
+  rm -f "$log"
+  if [ -n "$survived" ]; then
+    echo "" >&2
+    echo "Swift warnings survived warnings-as-errors. This toolchain demoted them; the" >&2
+    echo "runner's may not (see no_surviving_warnings in this script):" >&2
+    printf '%s\n' "$survived" >&2
+    return 1
+  fi
+}
+
 # --- The checks, in ios-ci.yml's order -------------------------------------
 
 # 1. JesseKit local package: JesseCore + JesseNetworking + JesseConversations.
 #    First because it is by far the fastest feedback (seconds, no simulator) and
 #    it is where most of the shared logic lives. Warnings-as-errors, symmetric
 #    with the app build below.
+#
+#    It builds from an EMPTY scratch directory every time, as the runner does. An
+#    incremental build does not recompile, and so does not re-print, a file that
+#    did not change, and a warning in it would slip past no_surviving_warnings.
 jessekit() {
+  kit_scratch="$(mktemp -d "${TMPDIR:-/tmp}/local-ci-jessekit.XXXXXX")"
   if [ "$OLD_HOST" = no ]; then
     ( cd "$ROOT/JesseKit" \
-      && swift build -Xswiftc -warnings-as-errors \
-      && swift test -Xswiftc -warnings-as-errors )
-    return
+      && no_surviving_warnings swift build --scratch-path "$kit_scratch" -Xswiftc -warnings-as-errors \
+      && no_surviving_warnings swift test --scratch-path "$kit_scratch" -Xswiftc -warnings-as-errors )
+    rc=$?
+    rm -rf "$kit_scratch"
+    return $rc
   fi
   # `--build-tests` is what `swift test` would have compiled; a plain build skips
   # the test targets and misses a test file that no longer compiles.
   ( cd "$ROOT/JesseKit" \
-    && swift build -Xswiftc -warnings-as-errors \
-    && swift build --build-tests -Xswiftc -warnings-as-errors ) || return 1
+    && no_surviving_warnings swift build --scratch-path "$kit_scratch" -Xswiftc -warnings-as-errors \
+    && no_surviving_warnings swift build --scratch-path "$kit_scratch" --build-tests -Xswiftc -warnings-as-errors )
+  rc=$?
+  rm -rf "$kit_scratch"
+  [ "$rc" -eq 0 ] || return 1
   jessekit_on_simulator
 }
 
@@ -320,7 +365,7 @@ fresh_bundle() { rm -rf "$ROOT/Jesse/build/$1"; }
 # the run on code you did not touch. Warnings are errors for SHIPPING code (the
 # `build` action) only.
 ios_build() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme Jesse \
       -destination "$IOS_DEST" \
       -derivedDataPath build/DerivedData \
@@ -349,7 +394,7 @@ ios_test() {
 # An older host's compile check of the iOS app: every source, warnings as errors,
 # at the target the app ships, with no simulator to be eligible for.
 ios_build_generic() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme Jesse \
       -destination "generic/platform=iOS Simulator" \
       -derivedDataPath build/DerivedData \
@@ -359,7 +404,7 @@ ios_build_generic() {
 }
 
 watch_build() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme "Jesse Watch App" \
       -destination "$WATCH_DEST" \
       -derivedDataPath build/DerivedDataWatch \
@@ -379,7 +424,7 @@ watch_test() {
 }
 
 mac_build() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme "Jesse Mac" \
       -destination "platform=macOS" \
       -derivedDataPath build/DerivedDataMac \

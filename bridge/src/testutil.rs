@@ -3,6 +3,9 @@
 #![cfg(test)]
 use crate::*;
 
+mod executable;
+pub(crate) use executable::write_executable;
+
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) fn test_config() -> Config {
     Config {
@@ -135,4 +138,74 @@ pub(crate) fn test_state() -> AppState {
 }
 pub(crate) fn temp_jobs_dir() -> PathBuf {
     std::env::temp_dir().join(format!("jesse-jobs-{}", random_hex()))
+}
+
+/// `write_executable`'s own tests. They live here rather than in `testutil/executable.rs`
+/// because that file is also compiled into every integration test target that writes a fake
+/// binary, and a test inside it would run once per target.
+#[cfg(test)]
+mod write_executable_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("jesse-write-exec-{tag}-{}", random_hex()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The shape that failed in CI, many times over: a script written and spawned at once by
+    /// each of several threads, every one of which is also forking children. Writing in this
+    /// process lost this race on Linux with ETXTBSY; every spawn here must succeed.
+    #[test]
+    fn a_script_spawned_the_moment_it_is_written_never_finds_its_file_busy() {
+        let dir = scratch("race");
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for i in 0..40 {
+                        let p = dir.join(format!("fake-{t}-{i}"));
+                        write_executable(&p, format!("#!/bin/sh\nexit {}\n", (t + i) % 2));
+                        let status = std::process::Command::new(&p)
+                            .status()
+                            .unwrap_or_else(|e| panic!("spawn {}: {e:?}", p.display()));
+                        assert_eq!(status.code(), Some((t + i) % 2), "{}", p.display());
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a spawning thread panicked");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// It replaces a script that is already there (and may be running), leaves it 0755, and
+    /// leaves nothing beside it: no staging body, no half placed copy.
+    #[test]
+    fn an_existing_script_is_replaced_whole_and_nothing_is_left_beside_it() {
+        let dir = scratch("replace");
+        let p = dir.join("tool");
+        write_executable(&p, "#!/bin/sh\necho one\n");
+        let running = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("'{}'; sleep 1", p.display()))
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert_eq!(write_executable(&p, "#!/bin/sh\necho two\n"), p);
+        let out = std::process::Command::new(&p).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "two\n");
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["tool".to_string()]);
+        let mut running = running;
+        let _ = running.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

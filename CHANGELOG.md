@@ -14,6 +14,15 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.205.1, App 1.0 (215)] - 2026-11-13
+
+**Both CI workflows green again after HO5, each failure fixed where it started.** No change to what the app shows or the bridge serves.
+
+- **Fixed (app):** the nightly iOS CI could not build JesseKit: `WorkSemantics.rowTitle` (nonisolated) called `WordFitLine.dropDangling` and `trimTail`, pure string helpers that were MainActor only because `WordFitLine` is a SwiftUI `View`. Root cause: Xcode 26.6 on the runner rejects that call; the Studio's Swift 6.4 demotes it to a warning that neither `-warnings-as-errors` nor `-Werror ActorIsolatedCall` promotes, so `scripts/local-ci-macos.sh` passed it. The four helpers are now `nonisolated`; a clean build of JesseKit and the Mac app shows no other such call.
+- **Fixed (gate):** `scripts/local-ci-macos.sh` fails a build step on any Swift warning that survived warnings-as-errors (`no_surviving_warnings`), and builds JesseKit from an empty scratch directory as the runner does, since an incremental build does not re-print an unchanged file's warning. It fails on `main` at `WorkSemantics.swift:277` and passes here.
+- **Fixed (bridge tests):** `codex_session_home::a_turn_cancelled_mid_flight_can_be_retried` failed in ci.yml with ETXTBSY ("Text file busy"). Root cause: a test wrote a fake binary in the test process and spawned it; a child forked by a parallel test between that write's open and its own exec held a copy of the write descriptor (close-on-exec acts only at exec), and Linux refuses to exec a file open for writing. Every test that writes a script it spawns now goes through one helper, `write_executable` (`bridge/src/testutil/executable.rs`): the body is staged, a `cp` child writes the executable, a rename puts it in place, so the test process never holds it open for writing. Changed: `write_fake_claude` (tests/common), `sentinel.rs`'s shims and seeded installs, `shadow_audit.rs`'s `write_exec`, `hostrun_live.rs`'s `write_stub`, and the unit test shims in `startup.rs` and `dietlog.rs`.
+- **Added:** `WordFitIsolationTests` (the helpers and `rowTitle` called from a detached task, in a class that is not `@MainActor`); `write_executable`'s own tests (eight threads writing and at once spawning 320 scripts; a replace leaves 0755 and nothing beside it).
+
 ## [bridge 0.205.0, App 1.0 (214)] - 2026-11-12
 
 **Each Work board row says what the project is about now and what, if anything, is yours to do, in two lines.** Root cause: HO2's row was a title and one status word, and with a `you:` Waiting on in 20 of 32 notes almost every row read only "Your turn": that something was yours, never what, and nothing about the project. Design, corpus, review rounds and the rejected candidates: `docs/ho5-work-board-rows.md`.

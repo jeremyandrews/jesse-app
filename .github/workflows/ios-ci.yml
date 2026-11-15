@@ -162,41 +162,29 @@ jobs:
       # warnings-as-errors symmetric with the app build below. These targets depend on
       # SwiftData/Security (Apple-only), so this runs on the macOS runner rather than the
       # Linux bridge job. Runs first for quick feedback before the longer app build/test.
-      - name: DIAGNOSTIC (temporary) revert check for the default poll wait
-        working-directory: ${{ github.workspace }}/JesseKit
+      - name: DIAGNOSTIC (temporary) the Mac presentation and sidebar tests first
         run: |
           set +e -uo pipefail
-          swift --version
-          FIX="$(git log -1 --format=%H --grep='default poll wait is a function')"
-          git fetch --quiet --deepen=10 origin || true
-          FIX="$(git log -1 --format=%H --grep='default poll wait is a function')"
-          echo "fix commit: $FIX"
-          dump() {
-            I="$(swift build --show-bin-path)"
-            for o in $(find "$I" -name "*.o"); do
-              saddr=""; soff=""
-              read -r saddr soff < <(otool -l "$o" | awk '/sectname __const/{f=1} f&&/segname __TEXT/{g=1} g&&/ addr /{a=$2} g&&/ offset /{print a, $2; exit}')
-              [ -n "${saddr:-}" ] || continue
-              nm -m "$o" 2>/dev/null | grep -E "\(__TEXT,__const\).*(fA3_yANYaYbKcfU_Tu|taskSleep.*Tu)$" | while read -r addr rest; do
-                off=$(( soff + 0x$addr - saddr + 4 ))
-                echo "AFP $(basename "$o") ctx=0x$(xxd -s $off -l 4 -e "$o" | awk '{print $2}') ${rest##* }"
-              done
-            done
-          }
-          T='StudioFirstTranscriberTests/testTheDefaultWaitBetweenPollsFollowsARunToItsEnd$'
-          echo "=== DIAG fix REVERTED"
-          git show "$FIX" -- Sources | git apply -R && git diff --stat
-          swift build --build-tests -Xswiftc -warnings-as-errors 2>&1 | tail -1
-          dump
-          swift test --skip-build --filter "$T" 2>&1 | grep -E "freed pointer|signal code|Test Case|Executed [1-9]" || true
-          swift test --skip-build --filter RecordingRunsTests 2>&1 | grep -E "freed pointer|signal code|Executed [1-9]" || true
-          git checkout -- Sources && git diff --stat
-          echo "=== DIAG fix APPLIED"
-          swift build --build-tests -Xswiftc -warnings-as-errors 2>&1 | tail -1
-          dump
-          swift test --skip-build --filter "$T" 2>&1 | grep -E "freed pointer|signal code|Test Case|Executed [1-9]" || true
-          swift test --skip-build --filter RecordingRunsTests 2>&1 | grep -E "freed pointer|signal code|Executed [1-9]" || true
+          sw_vers
+          xcodebuild test \
+            -scheme "Jesse Mac" \
+            -destination "platform=macOS" \
+            -derivedDataPath build/DerivedDataMacDiag \
+            -only-testing:"Jesse MacTests/MacStudioRunsPresentationTests" \
+            -only-testing:"Jesse MacTests/MacSearchVisibilityTests" \
+            CODE_SIGNING_ALLOWED=NO 2>&1 \
+            | grep -E "JS1-DIAG|MS1-PROBE|Test Case|error:|Executed [0-9]+ tests|\*\* TEST" || true
+          ls -la /tmp/js1-diag || true
           exit 0
+
+      - name: DIAGNOSTIC (temporary) upload the Mac diagnostic images
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: js1-diag
+          path: /tmp/js1-diag
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Build and test JesseKit package (JesseCore + JesseNetworking)
         working-directory: ${{ github.workspace }}/JesseKit

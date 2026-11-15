@@ -46,6 +46,38 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         try await super.tearDown()
     }
 
+    // DIAGNOSTIC (temporary): where "Cancel run" is in the run sheet on this OS.
+    func testDIAGRunSheetLayout() async throws {
+        let out = URL(fileURLWithPath: "/tmp/js1-diag", isDirectory: true)
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let (strands, runs, _) = try models()
+        let host = host(NavigationStack {
+            TodayListView(model: TodayDashboardModel(makeClient: { NoDayClient() }),
+                          strands: strands, strandOpener: StrandOpener(), runs: runs)
+        })
+        try await waitUntil("the board loaded") { runs.hasLoaded }
+        runs.presentsList = true
+        let sheet = try await sheet(of: host)
+        let table = try await table(in: sheet, rows: 4)
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        _ = try? await waitForText(["Log"], in: sheet)
+        try await settle(3)
+        print("JS1-DIAG host \(host.frame) sheet \(sheet.frame) content \(sheet.contentView?.frame ?? .zero)")
+        try? shoot(sheet, out, "run-sheet.png")
+        for b in try text(in: sheet) { print("JS1-DIAG ocr y=\(Int(b.rect.minY))-\(Int(b.rect.maxY)) \(b.string)") }
+        func scrolls(_ v: NSView) -> [NSScrollView] { ((v as? NSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(scrolls) }
+        for s in scrolls(sheet.contentView!) {
+            print("JS1-DIAG scroll frame \(s.frame) doc \(s.documentView?.frame ?? .zero) visible \(s.contentView.bounds) rows \((s.documentView as? NSTableView)?.numberOfRows ?? -1)")
+            if let t = s.documentView as? NSTableView {
+                for r in 0..<t.numberOfRows { print("JS1-DIAG row \(r) \(t.rect(ofRow: r))") }
+                t.scrollRowToVisible(t.numberOfRows - 1)
+            }
+        }
+        try await settle(2)
+        try? shoot(sheet, out, "run-sheet-scrolled.png")
+        for b in try text(in: sheet) { print("JS1-DIAG scrolled ocr y=\(Int(b.rect.minY))-\(Int(b.rect.maxY)) \(b.string)") }
+    }
+
     // MARK: - The entry points
 
     /// The Strands toolbar's Runs button: the list comes up with its rows, and a row opens

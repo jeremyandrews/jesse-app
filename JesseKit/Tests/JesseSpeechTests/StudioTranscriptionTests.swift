@@ -163,6 +163,24 @@ final class StudioFirstTranscriberTests: XCTestCase {
         XCTAssertEqual(reading.fraction, 0.5, accuracy: 0.001)
     }
 
+    /// The wait between polls that both apps get, because neither passes `sleep:`. Every
+    /// other test here injects one, so this is the only one that runs the default, and it
+    /// must call the initializer from THIS module without the argument: that is what
+    /// compiled the default into a second module and, on Swift 6.3.3, linked one module's
+    /// frame size with the other's body. The process aborted with "freed pointer was not
+    /// the last allocation" on the first poll (swiftlang/swift#86204).
+    func testTheDefaultWaitBetweenPollsFollowsARunToItsEnd() async throws {
+        let studio = FakeStudio(upload: .accept(running("queued")), polls: [
+            .success(running("transcribing", fraction: 0.5)),
+            .success(finished),
+        ])
+        let t = StudioFirstTranscriber(studio: studio, onDevice: FakeDevice(),
+                                       pollInterval: .milliseconds(1))
+        let result = try await run(t)
+        XCTAssertEqual(result.text, "La raccolta è giovedì 14.")
+        XCTAssertEqual(studio.pollCount, 2, "it waited, and asked again, twice")
+    }
+
     func testAnUnreachableStudioFallsBackToThisDeviceAndSaysSo() async throws {
         let studio = FakeStudio(upload: .fail(.unavailable("could not connect to the server")))
         let device = FakeDevice()

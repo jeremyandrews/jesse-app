@@ -14,6 +14,11 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [JesseKit: the Studio poll wait is a function, not a default closure] - 2026-11-15
+
+**Root cause:** `StudioFirstTranscriber.init`'s `sleep:` default was an async closure. A public default argument is compiled into every module that calls the initializer without it, and Swift 6.3.3 (Xcode 26.6) gave those weak copies different async frame sizes (swiftlang/swift#86204). The linked copy's frame was too small, so the first poll aborted with "freed pointer was not the last allocation", which killed every `RecordingRunsTests` test. Fix: the default is `nil` and the wait is `taskSleep`; test `testTheDefaultWaitBetweenPollsFollowsARunToItsEnd`.
+
+
 ## [bridge 0.206.1] - 2026-11-15
 
 **CI lints the bridge's default features build too, on a pinned Rust 1.100.0.** Root cause: the `bridge` job ran clippy only on the `containment-probe` build, on whatever stable the `ubuntu-latest` image carried, so a lint that exists only without the feature could land unseen, and a new toolchain's lints could turn `main` red without a commit. Clippy 1.100 (stable 2026-11-09) already reports `needless_range_loop` on seven loops nobody had touched; CI was green only because its runner had not moved yet.

@@ -162,6 +162,45 @@ jobs:
       # warnings-as-errors symmetric with the app build below. These targets depend on
       # SwiftData/Security (Apple-only), so this runs on the macOS runner rather than the
       # Linux bridge job. Runs first for quick feedback before the longer app build/test.
+      - name: DIAGNOSTIC (temporary) isolate the RecordingRunsTests abort
+        working-directory: ${{ github.workspace }}/JesseKit
+        run: |
+          set -uo pipefail
+          swift --version
+          swift build --build-tests -Xswiftc -warnings-as-errors 2>&1 | tail -5
+          TESTS="testARunSurvivesItsComposerGoingAwayAndLandsInTheDraft testOnScreenTheComposerTakesItAsBefore testAComposerBehindALockedScreenGetsItBackOnReturnAndTheDraftHasItMeanwhile testAPersistedRunResumesAfterARelaunchAndDeliversIntoTheDraft testAnUploadAPreviousProcessStartedIsReattachedNotSentTwice testExpiryOfTheBackgroundTimeCancelsNothingAndForgetsNothing testCancelStopsTheStudioRunAndDeletesTheAudioAndTheRecord testAFailureWhileAwayIsKeptUntilTheConversationIsOpened testAFailedRunIsKeptAcrossARelaunchAndRetriedWithTheChosenEngine testAKeptFailureIsSweptAfterADayAndDiscardDeletesItAtOnce testAPushWaitsForItsRunToLand testASecondRecordingCannotTakeOverARunInFlight"
+          for t in $TESTS; do
+            echo "=== DIAG single: $t"
+            swift test -Xswiftc -warnings-as-errors --skip-build --filter "RecordingRunsTests/$t\$" 2>&1 \
+              | grep -E "freed pointer|signal code|Test Case|Executed .* tests" || true
+            echo "=== DIAG end: $t rc=${PIPESTATUS[0]}"
+          done
+          echo "=== DIAG class without the first test"
+          swift test -Xswiftc -warnings-as-errors --skip-build --filter RecordingRunsTests \
+            --skip testAComposerBehindALockedScreenGetsItBackOnReturnAndTheDraftHasItMeanwhile 2>&1 \
+            | grep -E "freed pointer|signal code|Test Case|Executed .* tests" || true
+          echo "=== DIAG other JesseSpeech classes"
+          for c in RecordingAttachmentTests ForegroundSilenceTests StudioTranscriptionTests; do
+            swift test -Xswiftc -warnings-as-errors --skip-build --filter "$c" 2>&1 \
+              | grep -E "freed pointer|signal code|Executed .* tests" || true
+            echo "=== DIAG end: $c"
+          done
+          echo "=== DIAG lldb backtrace of the first test"
+          BUNDLE="$(swift build --show-bin-path)/JesseKitPackageTests.xctest"
+          lldb --batch -o "process launch" -o "thread backtrace all" -k "thread backtrace all" -k "quit 1" \
+            -- "$(xcrun --find xctest)" -XCTest \
+            "JesseSpeechTests.RecordingRunsTests/testAComposerBehindALockedScreenGetsItBackOnReturnAndTheDraftHasItMeanwhile" \
+            "$BUNDLE" 2>&1 | tail -150 || true
+          echo "=== DIAG lldb backtrace of a second test"
+          lldb --batch -o "process launch" -o "thread backtrace all" -k "thread backtrace all" -k "quit 1" \
+            -- "$(xcrun --find xctest)" -XCTest \
+            "JesseSpeechTests.RecordingRunsTests/testOnScreenTheComposerTakesItAsBefore" \
+            "$BUNDLE" 2>&1 | tail -150 || true
+          echo "=== DIAG crash reports"
+          ls -t ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head
+          f="$(ls -t ~/Library/Logs/DiagnosticReports/xctest*.ips 2>/dev/null | head -1)"
+          [ -n "$f" ] && head -c 20000 "$f" || true
+
       - name: Build and test JesseKit package (JesseCore + JesseNetworking)
         working-directory: ${{ github.workspace }}/JesseKit
         run: |

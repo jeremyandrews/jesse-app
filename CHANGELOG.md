@@ -14,6 +14,14 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.205.3] - 2026-11-15
+
+**A failed Studio run stops asking "see why it failed" once its item is ticked or run again.** Root cause: failed runs were never settled, so an archived later run left the failure as the item's current run. Run GO299b failed on 13 Nov, GO299c finished the item and was archived with its ticked line, and the Goose project kept saying "For you: see why GO299b failed" for two days.
+
+- **Fixed (bridge):** `RunStatus::is_settleable` now covers `failed` with `needs_you` and `interrupted`. The watcher's `close_settled` closes a failed run whose line is ticked (`item ticked`, then archived by `archive_settled` the same pass), and a start with `again` closes an earlier failed run of the item (`superseded by <run>`).
+- **Fixed (bridge):** `close_settled` also closes a `needs_you`, `interrupted` or `failed` run that a later run of the same item followed, whatever that run's status, as `superseded by <the newest such run>`. This covers a retry started by hand, without `again`, and a failure whose line is still open.
+- **Unchanged:** a queued, running or paused run is never closed or archived; a failed run with no later run and an open line stays failed and counts in `needs_me`; `report archived` still closes only a `needs_you` run; archiving a failed run by hand still flags it in place with its status kept.
+
 ## [bridge 0.205.2] - 2026-11-13
 
 **ci.yml is green on main again.** Root cause: RustSec advisory RUSTSEC-2026-0538 (`quinn-udp`: the receive loop can spin after a truncated datagram; fixed in 0.5.16) failed the bridge job's `Dependency CVE audit` on `main` at e45490e. The advisory database is fetched live, so the same lock that passed on the pull request failed on main. No source changed.

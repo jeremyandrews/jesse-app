@@ -2587,18 +2587,23 @@ fn closed_is_terminal_not_live_and_serializes_as_closed() {
         serde_json::from_value::<RunStatus>(json!("closed")).unwrap(),
         c
     );
-    // Only the two waiting statuses are settled by the automatic paths.
+    // Only the two waiting statuses and a failed run are settled by the automatic paths.
     for s in [
         RunStatus::Queued,
         RunStatus::Running,
         RunStatus::Paused,
         RunStatus::Reported,
-        RunStatus::Failed,
         RunStatus::Cancelled,
     ] {
         assert!(!s.is_settleable(), "{s:?}");
     }
-    assert!(RunStatus::NeedsYou.is_settleable() && RunStatus::Interrupted.is_settleable());
+    for s in [
+        RunStatus::NeedsYou,
+        RunStatus::Interrupted,
+        RunStatus::Failed,
+    ] {
+        assert!(s.is_settleable(), "{s:?}");
+    }
 }
 
 #[test]
@@ -2681,7 +2686,8 @@ async fn a_plain_start_does_not_supersede_and_a_paused_run_is_never_closed_by_ag
     vault_fixture(&s);
     remote_fixture(&s);
     let r = rig_with(&s, no_auto_resume(&s));
-    // An interrupted run is not live, so a plain start goes ahead, and leaves it as it was.
+    // An interrupted run is not live, so a plain start goes ahead, and leaves it as it was
+    // (the watcher's next pass settles it as superseded by the later run).
     r.svc.start(item("GD5")).await.unwrap();
     to_interrupted(&r, "GD5");
     assert_eq!(r.svc.start(item("GD5")).await.unwrap().run_id, "GD5b");
@@ -2697,7 +2703,7 @@ async fn a_plain_start_does_not_supersede_and_a_paused_run_is_never_closed_by_ag
     assert_eq!(closed_reason(&r, "GD5b"), None);
     assert_eq!(
         closed_reason(&r, "GD5").as_deref(),
-        Some("superseded by GD5c")
+        Some("superseded by GD5b")
     );
 }
 
@@ -3800,3 +3806,4 @@ async fn a_blind_continue_to_a_question_is_refused() {
 }
 
 mod archive;
+mod settle_failed;

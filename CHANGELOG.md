@@ -14,6 +14,15 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.206.1] - 2026-11-15
+
+**CI lints the bridge's default features build too, on a pinned Rust 1.100.0.** Root cause: the `bridge` job ran clippy only on the `containment-probe` build, on whatever stable the `ubuntu-latest` image carried, so a lint that exists only without the feature could land unseen, and a new toolchain's lints could turn `main` red without a commit. Clippy 1.100 (stable 2026-11-09) already reports `needless_range_loop` on seven loops nobody had touched; CI was green only because its runner had not moved yet.
+
+- **Fixed (bridge):** the seven `needless_range_loop` loops, rewritten over iterators with the same elements in the same order. Library: the `24/7` branch of `parse_opening_hours` (`places.rs`) and the always-open branch of `hours_from_google` (`places_google.rs`) set every day through `days.iter_mut()`; `Fft::run`'s bit-reversal permutation (`speech/condition.rs`) walks `rev.iter().enumerate()`, which has exactly `n` entries. Tests: `simple_weekday_range` and `no_day_selector_means_every_day` (`places.rs`) and two `places_google.rs` hours tests walk `days.iter().enumerate()` (with `take(5)` or `skip(1)` where they checked a sub-range). No lint is allowed or lowered.
+- **CI (`ci.yml`, `bridge` job):** the toolchain step installs Rust 1.100.0 (`--profile minimal`, clippy, rustfmt, llvm-tools-preview), makes it the job's default and prints `rustc --version` and `cargo clippy --version`. Moving to a newer Rust is now a pull request that fixes the new lints in the same change. The `agent` and `eval` jobs are unchanged.
+- **CI (`ci.yml`, `bridge` job):** a `Clippy (default features)` step runs `cargo clippy --all-targets -- -D warnings` beside the existing `Clippy` step, which keeps `--features containment-probe`.
+- **Unchanged:** `mcpservers::row()` is lint-free in both builds (the cfg'd `MCP_SERVERS.iter().chain(PROBE_ROWS.iter())` with one `find`). No MCP row, grant, allowlist or containment record moves; the deploy still builds with the host's stable.
+
 ## [bridge 0.206.0] - 2026-11-15
 
 **The bridge can start a patched iMCP helper, so `imcp` answers again on the Studio.** Root cause: iMCP 1.4.1's `imcp-server` connects to the browsed Bonjour *service* endpoint, and mDNSResponder answers that resolve on an OrbStack VM bridge (`bridge104`, ifindex 48, address `192.168.117.0`). The connect scoped to that interface fails with `EADDRNOTAVAIL`. Network.framework's Bonjour resolver then waits for another answer that never comes, and the helper has no connect deadline, so it sits in `.preparing`. The gateway drops it after 60 s and the containment pre-flight finds no tools. Measured 2026-11-15: the stock helper answered 0 of 26 starts; a helper patched to connect over loopback answered 26 of 26 (`tools/list` in 62–128 ms). It was not concurrency: the service resolve took 5–10 ms with 0, 1, 3 or 6 helpers running, and answered on interface 48 every time.

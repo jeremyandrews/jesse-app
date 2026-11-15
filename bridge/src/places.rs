@@ -1052,8 +1052,8 @@ pub fn parse_opening_hours(raw: &str) -> Result<OpeningHours, String> {
         }
         if rule.eq_ignore_ascii_case("24/7") {
             out.always_open = true;
-            for d in 0..7 {
-                out.days[d] = vec![Interval {
+            for day in out.days.iter_mut() {
+                *day = vec![Interval {
                     start: 0,
                     end: 1440,
                 }];
@@ -2527,8 +2527,8 @@ mod tests {
     fn simple_weekday_range() {
         let h = parse_opening_hours("Mo-Fr 08:00-18:00").expect("a simple range parses");
         assert!(!h.always_open);
-        for d in 0..5 {
-            assert_eq!(h.days[d], vec![iv("08:00", "18:00")], "day {d}");
+        for (d, day) in h.days.iter().enumerate().take(5) {
+            assert_eq!(*day, vec![iv("08:00", "18:00")], "day {d}");
         }
         assert!(h.days[5].is_empty(), "Saturday is closed");
         assert!(h.days[6].is_empty(), "Sunday is closed");
@@ -2613,8 +2613,8 @@ mod tests {
     #[test]
     fn no_day_selector_means_every_day() {
         let h = parse_opening_hours("07:00-19:00").expect("parses");
-        for d in 0..7 {
-            assert_eq!(h.days[d], vec![iv("07:00", "19:00")], "day {d}");
+        for (d, day) in h.days.iter().enumerate() {
+            assert_eq!(*day, vec![iv("07:00", "19:00")], "day {d}");
         }
     }
 

@@ -165,7 +165,7 @@ jobs:
       - name: DIAGNOSTIC (temporary) revert check for the default poll wait
         working-directory: ${{ github.workspace }}/JesseKit
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           swift --version
           FIX="$(git log -1 --format=%H --grep='default poll wait is a function')"
           git fetch --quiet --deepen=10 origin || true
@@ -174,7 +174,9 @@ jobs:
           dump() {
             I="$(swift build --show-bin-path)"
             for o in $(find "$I" -name "*.o"); do
+              saddr=""; soff=""
               read -r saddr soff < <(otool -l "$o" | awk '/sectname __const/{f=1} f&&/segname __TEXT/{g=1} g&&/ addr /{a=$2} g&&/ offset /{print a, $2; exit}')
+              [ -n "${saddr:-}" ] || continue
               nm -m "$o" 2>/dev/null | grep -E "\(__TEXT,__const\).*(fA3_yANYaYbKcfU_Tu|taskSleep.*Tu)$" | while read -r addr rest; do
                 off=$(( soff + 0x$addr - saddr + 4 ))
                 echo "AFP $(basename "$o") ctx=0x$(xxd -s $off -l 4 -e "$o" | awk '{print $2}') ${rest##* }"
@@ -194,6 +196,7 @@ jobs:
           dump
           swift test --skip-build --filter "$T" 2>&1 | grep -E "freed pointer|signal code|Test Case|Executed [1-9]" || true
           swift test --skip-build --filter RecordingRunsTests 2>&1 | grep -E "freed pointer|signal code|Executed [1-9]" || true
+          exit 0
 
       - name: Build and test JesseKit package (JesseCore + JesseNetworking)
         working-directory: ${{ github.workspace }}/JesseKit

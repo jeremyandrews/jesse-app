@@ -630,9 +630,13 @@ impl RunStatus {
         !self.is_finished()
     }
 
-    /// Waiting on Jeremy with nothing running: what the automatic closes may settle.
+    /// Waiting on Jeremy, cut off or failed, with nothing running: what the automatic closes
+    /// (a ticked line, a later run of the item) may settle.
     pub fn is_settleable(self) -> bool {
-        matches!(self, RunStatus::NeedsYou | RunStatus::Interrupted)
+        matches!(
+            self,
+            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+        )
     }
 
     /// Not queued, not running and not paused (a paused run continues by itself).
@@ -2240,8 +2244,9 @@ impl HostRuns {
                 .map(|(s, i)| format!(" strand={s} item={i}"))
                 .unwrap_or_default()
         );
-        // A further run of the item settles the earlier ones still waiting on Jeremy: the
-        // question they asked is now the new run's. Queued, running and paused runs go on.
+        // A further run of the item settles the earlier ones still waiting on Jeremy, cut off
+        // or failed: the question they asked is now the new run's. Queued, running and paused
+        // runs go on.
         if req.again {
             if let Some((strand, item_id)) = &step {
                 let reason = superseded_reason(&run_id);
@@ -2827,34 +2832,47 @@ impl HostRuns {
             .map_err(|e| Refusal::Internal(format!("the close task failed: {e}")))?
     }
 
-    /// The watcher's settling: close every `needs_you` or `interrupted` run whose strand item's
-    /// line is ticked ([`CLOSED_ITEM_TICKED`]), and every `needs_you` run whose reports have all
-    /// moved to `Inbox/archive/` ([`CLOSED_REPORT_ARCHIVED`]). Returns each run closed and why.
-    /// Never touches a queued, running or paused run.
+    /// The watcher's settling: close every `needs_you`, `interrupted` or `failed` run whose
+    /// strand item's line is ticked ([`CLOSED_ITEM_TICKED`]) or that a later run of the same
+    /// item followed ([`superseded_reason`] of the newest such run, whatever its status), and
+    /// every `needs_you` run whose reports have all moved to `Inbox/archive/`
+    /// ([`CLOSED_REPORT_ARCHIVED`]). Returns each run closed and why. Never touches a queued,
+    /// running or paused run.
     pub fn close_settled(&self, now: u64) -> Vec<(String, String)> {
         let _gate = lock(&self.gate);
         let mut out = Vec::new();
-        for (dir, r) in self.runs() {
+        // Oldest first (by `created_at`, then id), so a later run of an item is one further on.
+        let runs = self.runs();
+        for (i, (dir, r)) in runs.iter().enumerate() {
             if !r.status.is_settleable() {
                 continue;
             }
+            let newer = || {
+                let step = r.step()?;
+                runs[i + 1..]
+                    .iter()
+                    .rfind(|(_, n)| n.step() == Some(step))
+                    .map(|(_, n)| superseded_reason(&n.run_id))
+            };
             let reason = if r
                 .step()
                 .and_then(|(slug, id)| item_ticked(&self.notes_root, slug, id))
                 == Some(true)
             {
-                CLOSED_ITEM_TICKED
-            } else if r.status == RunStatus::NeedsYou && reports_archived(&self.notes_root, &r) {
-                CLOSED_REPORT_ARCHIVED
+                CLOSED_ITEM_TICKED.to_string()
+            } else if let Some(reason) = newer() {
+                reason
+            } else if r.status == RunStatus::NeedsYou && reports_archived(&self.notes_root, r) {
+                CLOSED_REPORT_ARCHIVED.to_string()
             } else {
                 continue;
             };
-            let may = |s: RunStatus| match reason {
+            let may = |s: RunStatus| match reason.as_str() {
                 CLOSED_REPORT_ARCHIVED => s == RunStatus::NeedsYou,
                 _ => s.is_settleable(),
             };
-            match close_run(&dir, reason, may, now) {
-                Ok(Some(_)) => out.push((r.run_id.clone(), reason.to_string())),
+            match close_run(dir, &reason, may, now) {
+                Ok(Some(_)) => out.push((r.run_id.clone(), reason)),
                 Ok(None) => {}
                 Err(e) => eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id),
             }
@@ -2866,7 +2884,8 @@ impl HostRuns {
 
     /// Take a run out of the runs list. Refuses a queued, running or paused run; closes a
     /// `needs_you` or `interrupted` run first ([`HostRuns::close`] with
-    /// [`ARCHIVED_BY_JEREMY`]). Idempotent: an archived run is answered as it is. A flag only:
+    /// [`ARCHIVED_BY_JEREMY`]); flags a `failed` one, like every other finished run, in place
+    /// with its status kept. Idempotent: an archived run is answered as it is. A flag only:
     /// nothing of the run is moved or deleted. Silent: no push and no turn.
     pub fn archive(&self, run_id: &str) -> Result<RunRecord, Refusal> {
         let rec = self
@@ -2878,7 +2897,7 @@ impl HostRuns {
                 rec.status.label()
             )));
         }
-        if rec.status.is_settleable() {
+        if rec.status.is_settleable() && !rec.status.is_archivable() {
             self.close(run_id, Some(ARCHIVED_BY_JEREMY))?;
         }
         lock(&self.unarchived).remove(run_id);

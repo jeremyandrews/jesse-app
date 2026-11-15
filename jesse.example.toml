@@ -276,7 +276,12 @@ Answer the question I asked, not the one you wish I had asked.
 # [mcp.<name>]: per-deployment overrides of one server row, read only while the gateway is on:
 #   transport = "bridge_stdio" | "http", url, placement = "gateway" | "child" (qmd only), and at
 #   most one of bearer_env = "VAR", header_env = { "header" = "VAR" }, client_cert = "<name>"
-#   (a [gateway.client_certs.<name>] table with cert_file, key_file and ca_file).
+#   (a [gateway.client_certs.<name>] table with cert_file, key_file and ca_file). imcp alone
+#   also takes command = "<absolute path>": another build of the iMCP helper in place of
+#   /Applications/iMCP.app/Contents/MacOS/imcp-server (bridge README, "The iMCP helper").
+#
+# [mcp.imcp]
+# command = "/opt/imcp/imcp-server"
 #
 # [mcp.slack]
 # transport = "http"

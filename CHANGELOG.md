@@ -14,6 +14,16 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.206.0] - 2026-11-15
+
+**The bridge can start a patched iMCP helper, so `imcp` answers again on the Studio.** Root cause: iMCP 1.4.1's `imcp-server` connects to the browsed Bonjour *service* endpoint, and mDNSResponder answers that resolve on an OrbStack VM bridge (`bridge104`, ifindex 48, address `192.168.117.0`). The connect scoped to that interface fails with `EADDRNOTAVAIL`. Network.framework's Bonjour resolver then waits for another answer that never comes, and the helper has no connect deadline, so it sits in `.preparing`. The gateway drops it after 60 s and the containment pre-flight finds no tools. Measured 2026-11-15: the stock helper answered 0 of 26 starts; a helper patched to connect over loopback answered 26 of 26 (`tools/list` in 62–128 ms). It was not concurrency: the service resolve took 5–10 ms with 0, 1, 3 or 6 helpers running, and answered on interface 48 every time.
+
+- **Added (bridge):** `[mcp.imcp] command = "<absolute path>"` replaces the `imcp` row's `/Applications/iMCP.app/Contents/MacOS/imcp-server`. It is applied in `gateway::resolve_row`, so a Claude Code, Codex or `direct` turn's upstream, the containment battery's probe children and its pre-flight (`preflight_admitted`, split out of `count_server_tools`) all start the configured helper. Read only while the gateway is on, like every `[mcp.<name>]` key.
+- **Guarded:** `COMMAND_OVERRIDE_ROWS` is `imcp` alone. A `command` on any other row, or a relative path, stops the bridge at boot, so a config file still cannot point a credentialed server at another binary.
+- **Unchanged:** without the key every path is the installed app's helper. With the gateway off, children start the table's path. The rendered MCP configs and containment records do not move.
+- **Docs:** the bridge README ("The iMCP helper") records the patched helper's provenance: `mattt/iMCP` tag `1.4.1` (`b84f266`), local branch `jesse-local-resolve`, and the patch. SECURITY.md records what the key widens and what it does not.
+- **Tests:** every harness's `imcp` upstream and the pre-flight get the configured path and default to the stock one. The key is refused on other rows and for relative paths. With the `containment-probe` feature, a real pre-flight starts a configured helper and counts its tools.
+
 ## [bridge 0.205.3] - 2026-11-15
 
 **A failed Studio run stops asking "see why it failed" once its item is ticked or run again.** Root cause: failed runs were never settled, so an archived later run left the failure as the item's current run. Run GO299b failed on 13 Nov, GO299c finished the item and was archived with its ticked line, and the Goose project kept saying "For you: see why GO299b failed" for two days.

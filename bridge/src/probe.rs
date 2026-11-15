@@ -3312,8 +3312,7 @@ pub async fn count_server_tools(
     cfg: &Config,
     servers: &[String],
 ) -> Vec<(String, Result<usize, String>)> {
-    use crate::gateway::{resolve_row, Admitted, Gateway, TurnSpec};
-    use crate::mcpservers::Transport;
+    use crate::gateway::{Gateway, TurnSpec};
 
     let mut settings = cfg.gateway.clone();
     settings.child_url = None;
@@ -3323,20 +3322,7 @@ pub async fn count_server_tools(
     let scratch = std::env::temp_dir().join(format!("jesse-preflight-{}", std::process::id()));
     let gw = Arc::new(Gateway::from_config_without_ledger(&pcfg, &scratch));
 
-    let mut out: Vec<(String, Result<usize, String>)> = Vec::new();
-    let mut admitted = Vec::new();
-    for name in servers {
-        match resolve_row(name, &settings) {
-            Ok(r)
-                if r.transport == Transport::InProcess
-                    && !settings.in_process.0.contains_key(name) => {}
-            Ok(r) => admitted.push(Admitted {
-                server: r,
-                tools: Vec::new(),
-            }),
-            Err(e) => out.push((name.clone(), Err(e))),
-        }
-    }
+    let (admitted, mut out) = preflight_admitted(&settings, servers);
     let names: Vec<String> = admitted.iter().map(|a| a.server.name.clone()).collect();
     let guard = match gw
         .open_turn(TurnSpec {
@@ -3386,6 +3372,36 @@ pub async fn count_server_tools(
         (name, r)
     }));
     out
+}
+
+/// One server's pre-flight outcome: its advertised tool count, or why it did not start.
+pub type PreflightCount = (String, Result<usize, String>);
+
+/// The upstreams [`count_server_tools`] starts, each resolved against the deployment's
+/// `[mcp.<name>]` overrides exactly as the gateway resolves it for a turn, and the servers that
+/// would not resolve, with why.
+pub fn preflight_admitted(
+    settings: &crate::gateway::GatewaySettings,
+    servers: &[String],
+) -> (Vec<crate::gateway::Admitted>, Vec<PreflightCount>) {
+    use crate::gateway::{resolve_row, Admitted};
+    use crate::mcpservers::Transport;
+
+    let mut failed = Vec::new();
+    let mut admitted = Vec::new();
+    for name in servers {
+        match resolve_row(name, settings) {
+            Ok(r)
+                if r.transport == Transport::InProcess
+                    && !settings.in_process.0.contains_key(name) => {}
+            Ok(r) => admitted.push(Admitted {
+                server: r,
+                tools: Vec::new(),
+            }),
+            Err(e) => failed.push((name.clone(), Err(e))),
+        }
+    }
+    (admitted, failed)
 }
 
 /// The pre-flight's verdict on what [`count_server_tools`] found. `Err` names every server

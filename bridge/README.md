@@ -794,6 +794,63 @@ bearer_env = "SLACK_ADAPTER_TOKEN"
 - **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
   turn and per gateway call, kept 90 days.
 
+### The iMCP helper (`[mcp.imcp] command`, 0.206.0)
+
+The `imcp` row starts `/Applications/iMCP.app/Contents/MacOS/imcp-server`, the helper inside
+the installed app. A deployment can run another build of the helper instead:
+
+```toml
+[mcp.imcp]
+command = "/opt/imcp/imcp-server"   # an absolute path; imcp only
+```
+
+The gateway resolves every upstream through `resolve_row`, so the path reaches every place the
+helper is started: a Claude Code, Codex or `direct` turn's `imcp` upstream, the containment
+battery's probe children, and its pre-flight. Like every `[mcp.<name>]` key it is read only while
+the gateway is on. With the gateway off, children start the table's path. `imcp` is the only row
+whose command can be configured (`COMMAND_OVERRIDE_ROWS`), and the path must be absolute: a
+relative path, or a `command` on any other row, stops the bridge at boot. Without the key,
+nothing changes.
+
+**Why a patched helper exists.** The stock helper (iMCP 1.4.1) browses `_mcp._tcp` and then
+connects to the browsed *service* endpoint, so Network.framework resolves the service and
+connects on whichever interface mDNSResponder answers on. On the Studio that answer is an
+OrbStack VM bridge (`bridge104`, ifindex 48, address `192.168.117.0`). The scoped connect
+there fails with `EADDRNOTAVAIL`. The Bonjour resolver then waits for another answer that never
+comes, and the helper, which has no connect deadline, stays in `.preparing` and never answers
+`initialize`. Measured 2026-11-15: stock 0 of 26 starts answered within 5 s; the patched helper
+answered 26 of 26, `tools/list` in 62–128 ms. The patch pins the connection to loopback; the
+app always runs on the same Mac.
+
+**Provenance of the patched helper:**
+
+- Repository: `https://github.com/mattt/iMCP`, tag `1.4.1` (`b84f266`), which matches the
+  installed app's `CFBundleShortVersionString` 1.4.1.
+- Local branch `jesse-local-resolve` (not published upstream), two commits:
+  `919ba3b` "Connect to the iMCP app over loopback, not the resolved Bonjour interface" and
+  `e8c2dc7` "Build with Swift 6.4: capture self weakly in the outer state handlers" (1.4.1 does
+  not compile under Swift 6.4 without it; no behaviour change).
+- Built with Xcode 27.2: `xcodebuild -project iMCP.xcodeproj -target imcp-server -configuration
+  Release CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build`, ad-hoc signed.
+  The 2026-11-15 build's SHA-256 is
+  `ede97943536fe9c8ddbd959d9cac1b674695575234206c291ce4557d63e01ede`.
+- The behavioural change, in `CLI/main.swift`'s `MCPService.run()`:
+
+```diff
++                let connectionParameters = parameters.copy()
++                connectionParameters.requiredInterfaceType = .loopback
++
+                 // Create the proxy
+                 let proxy = StdioProxy(
+                     endpoint: endpoint,
+-                    parameters: parameters,
++                    parameters: connectionParameters,
+```
+
+The app still advertises over Bonjour, and the helper still browses for it and takes the port
+from the service, so an app restart on a new port is still found. Only the interface the
+connection uses is fixed.
+
 ### Coding agents on the cluster (`[devjob]`, 0.186.0)
 
 A main turn can start a coding agent on the k3s cluster with one tool call and get a job name

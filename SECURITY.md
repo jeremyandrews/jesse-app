@@ -2360,6 +2360,30 @@ launchd-spawned job in the `gui/501` Aqua domain discovered the service and comp
 `messages_fetch`, matching the interactive read exactly. Anything that changes the bridge's
 launchd domain invalidates that proof.
 
+### The iMCP helper's path is configurable, for `imcp` only (0.206.0)
+
+By default the `imcp` row starts `/Applications/iMCP.app/Contents/MacOS/imcp-server`, the
+helper shipped inside the app. `[mcp.imcp] command = "<absolute path>"` replaces it. The
+Studio uses this to run a locally patched helper that connects to the app over loopback,
+because the stock helper wedges when the Bonjour resolve answers on a VM bridge interface
+(bridge README, "The iMCP helper", has the cause and the patch's provenance).
+
+What this does and does not widen:
+
+- **Only `imcp`.** `COMMAND_OVERRIDE_ROWS` names one row. A `command` on any other row stops the
+  bridge at boot, so a config file still cannot point a credentialed server (Google, GitHub,
+  Slack) at another binary. `imcp` holds no credential and gets no variable beyond `BASE_ENV`.
+  It reads nothing itself: the app does the reading, under its own grant.
+- **Absolute paths only**, so the helper is never resolved off `PATH`.
+- **Gateway on only**, like every `[mcp.<name>]` key. With the gateway off, every child starts
+  the table's path, and the shipped posture cannot be edited from a config file.
+- **The patched helper lives in a directory Jeremy's user can write to, and it is ad-hoc
+  signed.** Anything running as that user could replace it. That is the same trust every
+  `~/.local/bin` server on the Studio already carries. It is not new exposure, but it is not
+  the app bundle's signature either.
+- **The tool surface is unchanged.** The helper proxies whatever the app advertises, and the
+  grant (`messages_fetch`, `maps_search`) is still applied by the gateway.
+
 ### iMessage is only alive while iMCP.app is running — accepted
 
 iMCP.app is a **menubar application in Jeremy's GUI login session**, not a launchd-supervised

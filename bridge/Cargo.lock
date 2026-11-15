@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "jesse-bridge"
-version = "0.205.3"
+version = "0.206.0"
 dependencies = [
  "axum",
  "calamine",

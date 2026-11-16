@@ -14,6 +14,10 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (217)] - 2026-11-16
+
+**Two Mac tests assumed macOS 27; the hosted runner is macOS 26 (iOS CI run 43764732997).** `testARequestFor240LandsAtTheNarrowestSidebar` stood for "narrower than the minimum" with a 250 request, below the 257 minimum on macOS 27 but above the 248 one on macOS 26; it now requests one point under the measured minimum. `testTheDraftsBlockOpensItsRunAndItsRunsList` matched "Runs" exactly, but macOS 26's Vision reads the button's SF Symbol as "• Runs"; an exact match now starts at the first letter or digit.
+
 ## [JesseKit: the Studio poll wait is a function, not a default closure] - 2026-11-15
 
 **Root cause:** `StudioFirstTranscriber.init`'s `sleep:` default was an async closure. A public default argument is compiled into every module that calls the initializer without it, and Swift 6.3.3 (Xcode 26.6) gave those weak copies different async frame sizes (swiftlang/swift#86204). The linked copy's frame was too small, so the first poll aborted with "freed pointer was not the last allocation", which killed every `RecordingRunsTests` test. Fix: the default is `nil` and the wait is `taskSleep`; test `testTheDefaultWaitBetweenPollsFollowsARunToItsEnd`.

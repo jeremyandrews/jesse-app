@@ -510,6 +510,18 @@ public struct StudioRunDetailView: View {
             }
             if let run = model.run {
                 top(run)
+                // Cancel run sits above the Log, not after it. Below the
+                // 280-point Log and Details it was the last row, and where the screen is
+                // short (768 points: a sheet holds about 677) it was scrolled out of sight.
+                if model.canCancel {
+                    Section {
+                        Button(role: .destructive) {
+                            confirmsCancel = true
+                        } label: {
+                            Label("Cancel run", systemImage: "stop.circle")
+                        }
+                    }
+                }
                 Section("Log") {
                     StudioRunLogView(lines: model.lines)
                         .frame(height: 280)
@@ -518,15 +530,6 @@ public struct StudioRunDetailView: View {
                 Section {
                     DisclosureGroup("Details", isExpanded: $showsDetails) {
                         details(run)
-                    }
-                }
-                if model.canCancel {
-                    Section {
-                        Button(role: .destructive) {
-                            confirmsCancel = true
-                        } label: {
-                            Label("Cancel run", systemImage: "stop.circle")
-                        }
                     }
                 }
             } else if model.loadError == nil {
@@ -742,6 +745,19 @@ struct StudioRunLogView: View {
 /// Studio` on a long press (a secondary click on the Mac), a line with a live run shows that
 /// run's status instead, and every other line is just its words.
 ///
+/// The one sheet a Drafts block shows at a time.
+enum DraftsSheet: Identifiable, Hashable {
+    case run(StudioRunRoute)
+    case runs
+
+    var id: String {
+        switch self {
+        case .run(let route): "run:\(route.runID)"
+        case .runs: "runs"
+        }
+    }
+}
+
 /// Nothing at all from a bridge that does not serve `drafts`, or for a strand with no open
 /// line.
 public struct StrandDraftsBlock: View {
@@ -750,8 +766,13 @@ public struct StrandDraftsBlock: View {
     /// Called after a start, so the board's badge catches up.
     var onStarted: () -> Void = {}
 
-    @State private var openedRun: StudioRunRoute?
-    @State private var showsRuns = false
+    /// What the block has up: one of its runs, or its Runs list. ONE optional and ONE `.sheet`,
+    /// not two: with a `.sheet(item:)` for the run and a `.sheet(isPresented:)` for the list on
+    /// the same view, closing a run and pressing Runs presented the list while the run's sheet
+    /// was still being torn down (its `onDisappear` ran after the list appeared), and on macOS
+    /// 26 that second presentation was sometimes dropped: Runs did nothing. One item makes
+    /// the switch from one sheet to the other a single presentation's change.
+    @State private var presented: DraftsSheet?
     @State private var startedLine: String?
 
     public init(strand: Strand, runs: StudioRunsModel, onStarted: @escaping () -> Void = {}) {
@@ -774,7 +795,7 @@ public struct StrandDraftsBlock: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
-                        showsRuns = true
+                        presented = .runs
                     } label: {
                         Label("Runs", systemImage: "desktopcomputer")
                             .font(.caption)
@@ -795,13 +816,15 @@ public struct StrandDraftsBlock: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
             .task { await runs.load() }
-            .sheet(item: $openedRun) { route in
-                StudioRunDetailScreen(model: runs.detailModel(for: route.runID)) {
-                    openedRun = nil
+            .sheet(item: $presented) { sheet in
+                switch sheet {
+                case .run(let route):
+                    StudioRunDetailScreen(model: runs.detailModel(for: route.runID)) {
+                        presented = nil
+                    }
+                case .runs:
+                    StudioRunsScreen(model: runs, strand: strand.slug) { presented = nil }
                 }
-            }
-            .sheet(isPresented: $showsRuns) {
-                StudioRunsScreen(model: runs, strand: strand.slug) { showsRuns = false }
             }
             .studioRunAlert($runs.alert)
         }
@@ -823,7 +846,7 @@ public struct StrandDraftsBlock: View {
                 ProgressView().controlSize(.mini)
             } else if let live {
                 Button {
-                    openedRun = StudioRunRoute(runID: live.runID)
+                    presented = .run(StudioRunRoute(runID: live.runID))
                 } label: {
                     StudioRunStatusLabel(status: live.status, font: .caption2)
                 }
@@ -836,7 +859,7 @@ public struct StrandDraftsBlock: View {
         .contextMenu {
             if let live {
                 Button {
-                    openedRun = StudioRunRoute(runID: live.runID)
+                    presented = .run(StudioRunRoute(runID: live.runID))
                 } label: {
                     Label("Open run \(live.runID)", systemImage: "desktopcomputer")
                 }
@@ -854,7 +877,7 @@ public struct StrandDraftsBlock: View {
         guard let started = await runs.start(strand: strand.slug, itemID: draft.id) else { return }
         startedLine = "Started \(started.runID): \(StudioRunSemantics.label(started.status))"
         onStarted()
-        openedRun = StudioRunRoute(runID: started.runID)
+        presented = .run(StudioRunRoute(runID: started.runID))
     }
 }
 

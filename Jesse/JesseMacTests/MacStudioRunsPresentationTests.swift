@@ -401,6 +401,15 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         }
     }
 
+    /// A control's words without the SF Symbol drawn before them. Vision reads that symbol as
+    /// a character of its own on macOS 26, where the Drafts block's `desktopcomputer` Runs
+    /// button reads "• Runs", and not on macOS 27, where an exact "Runs" matched. An exact
+    /// match is a match on the words: anything before the first letter or digit is the icon.
+    static func label(_ read: String) -> String {
+        guard let first = read.firstIndex(where: { $0.isLetter || $0.isNumber }) else { return read }
+        return String(read[first...])
+    }
+
     /// Wait until every string is drawn in the window; the boxes of each, in order.
     @discardableResult
     private func waitForText(_ strings: [String], in w: NSWindow, exact: Bool = false,
@@ -410,7 +419,7 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         while true {
             seen = try text(in: w).filter { $0.rect.minY > below }
             let boxes = strings.compactMap { want in
-                seen.first { exact ? $0.string == want : $0.string.contains(want) }
+                seen.first { exact ? Self.label($0.string) == want : $0.string.contains(want) }
             }
             if boxes.count == strings.count { return boxes }
             guard Date() < end else {

@@ -14,6 +14,26 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [JesseKit: a thread search pass runs across the cores] - 2026-11-16
+
+**Root cause:** `searchThreads` matched every thread in turn on one core, and a thread with no match is read in full once per search term. `lost keys` with its expansion concepts reads every body seven times. On the hosted macOS 26 runner that took 64 to 98 ms per pass against the 100 ms budget in `testKeystrokeBudgetOnFiveHundredThreads`, and 143 ms in iOS CI run 43855177726, which failed. Fix: the pass splits the threads into 32-thread chunks across the cores, and the full sort keeps the hit order unchanged. A cancelled pass still stops at the next chunk. Locally: 50 to 5 ms for `lost keys`.
+
+## [JesseKit: a Drafts block presents its run and its Runs list from one sheet] - 2026-11-16
+
+**Root cause:** `StrandDraftsBlock` hung two `.sheet` modifiers on one view, one for a run and one for the Runs list. When the run sheet closed and the Runs list was asked for moments later, the Runs sheet sometimes never came up on the hosted macOS 26 runner (iOS CI runs 43771482946 and 43779485347). Fix: one `.sheet(item:)` over `DraftsSheet` (`.run` or `.runs`), so SwiftUI replaces one presentation with the next. Test: `testTheDraftsBlockOpensItsRunAndItsRunsList`.
+
+## [JesseKit: a run's Cancel run sits above its Log] - 2026-11-16
+
+**Root cause:** Cancel run was the last row of a run's page, under the 280-point Log and Details. On a 1024x768 display (the hosted runner) a sheet holds about 677 points, so a run pushed inside the Runs sheet left Cancel run scrolled out of sight (iOS CI runs 43830475376 and 43841362466). Sheet sizing cannot fix this, because the screen sets the limit. Fix: the Cancel run section comes before the Log, on the Mac and the iPhone. Test: `testTheRunsListFromTheToolbarShowsItsRowsAndOpensARun`.
+
+## [App 1.0 (220)] - 2026-11-16
+
+**Two Mac tests assumed macOS 27; the hosted runner is macOS 26 (iOS CI run 43764732997).** `testARequestFor240LandsAtTheNarrowestSidebar` stood for "narrower than the minimum" with a 250 request, below the 257 minimum on macOS 27 but above the 248 one on macOS 26; it now requests one point under the measured minimum. `testTheDraftsBlockOpensItsRunAndItsRunsList` matched "Runs" exactly, but macOS 26's Vision reads the button's SF Symbol as "• Runs"; an exact match now starts at the first letter or digit.
+
+## [JesseKit: the Studio poll wait is a function, not a default closure] - 2026-11-15
+
+**Root cause:** `StudioFirstTranscriber.init`'s `sleep:` default was an async closure. A public default argument is compiled into every module that calls the initializer without it, and Swift 6.3.3 (Xcode 26.6) gave those weak copies different async frame sizes (swiftlang/swift#86204). The linked copy's frame was too small, so the first poll aborted with "freed pointer was not the last allocation", which killed every `RecordingRunsTests` test. Fix: the default is `nil` and the wait is `taskSleep`; test `testTheDefaultWaitBetweenPollsFollowsARunToItsEnd`.
+
 ## [App 1.0 (219)] - 2026-11-16
 
 **The health block's sleep line never presents an older night as last night, and when last night reaches HealthKit after a turn already went out without it, the iPhone sends exactly one automatic turn carrying it.** (#342) On 2026-11-08 the owner woke at 08:36, a health turn at 08:51 carried the previous night as `Sleep (last night)`, and the real night reached the phone about 10:16. Root cause: the Watch hands a night to the phone some time after waking, `SleepReducer.reduce` returns the newest session in the 36 hour lookback, and `DailySummaryFormatter.sleepLine` labelled any non-nap session "last night" without a date; nothing observed sleep, so a night that synced late was never sent.

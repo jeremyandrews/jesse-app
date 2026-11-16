@@ -25,9 +25,14 @@ public struct OfflineLookupSettings: @unchecked Sendable {
     public static let enabledKey = "vault.offlineLookup.enabled"
     public static let measuredPromptKey = "vault.offlineLookup.measuredPromptCharacters"
     /// The app's owner-name setting. NOT a key of this feature's own — it is the app's
-    /// one personalization value, written by the Settings field that `PromptStore` reads
-    /// for the prompts it builds, and declared here because this package cannot see that
-    /// enum and the string must exist exactly once. `PromptStore` reads it back from here.
+    /// one personalization value, which `PromptStore` reads for the prompts it builds, and
+    /// declared here because this package cannot see that enum and the string must exist
+    /// exactly once. `PromptStore` reads it back from here.
+    ///
+    /// WRITTEN IN ONE PLACE: the `ownerName` setter below. The field that calls it is
+    /// `OwnerNameSettingsRows` (Settings › Vault folder › Owner name), embedded in the
+    /// iPhone's `SettingsView` and the Mac's `MacSettingsView`; `PromptStore.ownerName`'s
+    /// setter delegates to the same setter.
     public static let ownerNameKey = "jesse.owner.name"
 
     private let defaults: UserDefaults
@@ -86,10 +91,26 @@ public struct OfflineLookupSettings: @unchecked Sendable {
     /// unset device because it is building a SENTENCE, and handing "the user" to the index
     /// as a keyword would require a note to contain the word "user". A device with no name
     /// set must retrieve exactly as it did before this existed.
+    ///
+    /// SET by `OwnerNameSettingsRows`, the "Owner name" field in the Vault folder section
+    /// of both Settings screens (`SettingsView` on the iPhone, `MacSettingsView` on the
+    /// Mac), and by `PromptStore.ownerName`'s setter, which delegates here. The setter is
+    /// the only code that writes `ownerNameKey`: it stores the trimmed value, and removes
+    /// the key when that is empty, so a cleared field reads back as nil.
     public var ownerName: String? {
-        let value = (defaults.string(forKey: Self.ownerNameKey) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
+        get {
+            let value = (defaults.string(forKey: Self.ownerNameKey) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        nonmutating set {
+            let value = (newValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.isEmpty {
+                defaults.removeObject(forKey: Self.ownerNameKey)
+            } else {
+                defaults.set(value, forKey: Self.ownerNameKey)
+            }
+        }
     }
 
     /// The Settings row's second line.

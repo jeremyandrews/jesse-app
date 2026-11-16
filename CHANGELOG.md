@@ -16,7 +16,7 @@ CI both run it). See the "Versioning" section of `bridge/README.md`.
 
 ## [bridge 0.207.0] - 2026-11-16
 
-**No run the bridge starts can push AI attribution** ([#PR](https://github.com/jeremyandrews/jesse-app/pull/PR)): every Claude Code child gets bridge-owned settings with attribution off and hook-skipping git denied, every spawned git uses bridge-owned `commit-msg`/`pre-push` hooks (chained to the repository's own), and a run whose pushed pull request or commits still carry it ends `needs_you` with an `ATTRIBUTION:` line.
+**No run the bridge starts can push AI attribution** ([#344](https://github.com/jeremyandrews/jesse-app/pull/344)): every Claude Code child gets bridge-owned settings with attribution off and hook-skipping git denied, every spawned git uses bridge-owned `commit-msg`/`pre-push` hooks (chained to the repository's own), and a run whose pushed pull request or commits still carry it ends `needs_you` with an `ATTRIBUTION:` line.
 
 ## [JesseKit: a thread search pass runs across the cores] - 2026-11-16
 

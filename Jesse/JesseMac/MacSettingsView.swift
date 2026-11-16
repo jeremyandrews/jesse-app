@@ -215,6 +215,10 @@ struct MacSettingsView: View {
             // what it would eat here is the number the budget is derived from.
             Text(offlineLookupSettings.description)
                 .font(.caption).foregroundStyle(.secondary)
+            // Settings › Vault folder › Owner name: the field and its caption row, shared
+            // with the iPhone. It writes the key itself when editing ends, as the toggle
+            // above does, not through Save.
+            OwnerNameSettingsRows(settings: offlineLookupSettings)
             if let vaultError {
                 Text(vaultError).font(.callout).foregroundStyle(.red)
             }

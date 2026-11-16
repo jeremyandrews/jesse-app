@@ -113,11 +113,10 @@ final class MacSearchVisibilityTests: XCTestCase {
         controller.sceneBridgingOptions = [.toolbars, .title]
         let frame = NSRect(origin: Self.offscreenOrigin,
                            size: NSSize(width: windowWidth, height: height))
-        let window = OffscreenWindow(contentRect: frame,
-                                     styleMask: [.titled, .closable, .miniaturizable, .resizable,
-                                                 .fullSizeContentView],
-                                     backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(OffscreenWindow.self, contentRect: frame,
+                                    styleMask: [.titled, .closable, .miniaturizable, .resizable,
+                                                .fullSizeContentView],
+                                    backing: .buffered, defer: false)
         window.toolbarStyle = .unified
         window.contentViewController = controller
         window.setFrame(frame, display: false)

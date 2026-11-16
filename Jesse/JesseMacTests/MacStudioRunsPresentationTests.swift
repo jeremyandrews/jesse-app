@@ -297,10 +297,9 @@ final class MacStudioRunsPresentationTests: XCTestCase {
 
     /// A titled window off every display, holding the view.
     private func host<V: View>(_ view: V) -> NSWindow {
-        let w = OffscreenWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: 1_000, height: 860),
-                         styleMask: [.titled, .closable, .resizable], backing: .buffered,
-                         defer: false)
-        w.isReleasedWhenClosed = false
+        let w = makeTestWindow(OffscreenWindow.self, contentRect: NSRect(x: -20_000, y: -20_000, width: 1_000, height: 860),
+                               styleMask: [.titled, .closable, .resizable], backing: .buffered,
+                               defer: false)
         w.contentView = NSHostingView(rootView: view.defaultAppStorage(defaults))
         w.orderFront(nil)
         // Ordering a window in puts it back on a display; it goes back off before anything draws.

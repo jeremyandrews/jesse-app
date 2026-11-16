@@ -154,6 +154,15 @@ jobs:
           xcodebuild -version
           xcode-select -p
 
+      # EVERY STEP RUNS, as in scripts/local-ci-macos.sh, so one nightly reports every
+      # failure rather than the first: Actions otherwise stops a job at its first
+      # failing step, and a failed iOS Test hid the watch and Mac suites. Each build
+      # and test step after this first one carries `if: !cancelled() && <every step
+      # it needs>.outcome == 'success'` (the same map as the local gate: sim ->
+      # Build -> Test, watchsim -> Build (watch) -> Test (watch), Build (mac) -> Test
+      # (mac); the rest need nothing). Never `if: always()` on one: that also runs
+      # after a manual cancel. Any failed step still fails the job.
+      #
       # JesseKit local package: the JesseCore model layer AND the JesseNetworking
       # bridge-client layer (config, wire types, the SSE parser, endpoint construction,
       # error mapping, the diet snapshot models, and the one concrete client both apps
@@ -163,6 +172,7 @@ jobs:
       # SwiftData/Security (Apple-only), so this runs on the macOS runner rather than the
       # Linux bridge job. Runs first for quick feedback before the longer app build/test.
       - name: Build and test JesseKit package (JesseCore + JesseNetworking)
+        id: kit
         working-directory: ${{ github.workspace }}/JesseKit
         run: |
           set -euo pipefail
@@ -173,6 +183,8 @@ jobs:
       # macOS only, so an iOS only compile error in a test (PR 242: an AppKit type in
       # StrandBoardRenderTests) passed every check. Same step as local-ci-macos.sh.
       - name: JesseKit tests compile for iOS
+        id: kit_ios
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}/JesseKit
         run: |
           set -euo pipefail
@@ -184,6 +196,7 @@ jobs:
 
       - name: Resolve simulator destination
         id: sim
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # A hardcoded device name (the README used to say "iPhone 17") may not
@@ -235,6 +248,8 @@ jobs:
       # the (separately accumulated) test-only Swift-6-mode warnings out of scope.
       # The app builds warning-free today, so this is green immediately.
       - name: Build
+        id: build
+        if: ${{ !cancelled() && steps.sim.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcodebuild build \
@@ -247,6 +262,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Test
+        id: test
+        if: ${{ !cancelled() && steps.sim.outcome == 'success' && steps.build.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcodebuild test \
@@ -297,6 +314,7 @@ jobs:
       # Resolve a watchOS simulator the same dynamic way as the iPhone above.
       - name: Resolve watchOS simulator destination
         id: watchsim
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           xcrun simctl list runtimes available
@@ -325,6 +343,8 @@ jobs:
           echo "deployment_target=${RUNTIME_VER}" >> "$GITHUB_OUTPUT"
 
       - name: Build (watch)
+        id: watch_build
+        if: ${{ !cancelled() && steps.watchsim.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcodebuild build \
@@ -336,6 +356,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Test (watch)
+        id: watch_test
+        if: ${{ !cancelled() && steps.watchsim.outcome == 'success' && steps.watch_build.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcodebuild test \
@@ -371,6 +393,8 @@ jobs:
       # symmetric with iOS/watch. The hosted unit tests run UNSIGNED — they only
       # load the test host, so no signing identity is needed on the runner.
       - name: Build (mac)
+        id: mac_build
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           xcodebuild build \
@@ -382,6 +406,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Test (mac)
+        id: mac_test
+        if: ${{ !cancelled() && steps.mac_build.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcodebuild test \

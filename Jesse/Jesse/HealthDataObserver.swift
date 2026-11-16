@@ -2,9 +2,9 @@ import Foundation
 import HealthKit
 import JesseCore
 
-// The HealthKit half of the automatic health turns: two observer queries (body mass and
-// workouts), background delivery for both, and the anchored queries that say what actually
-// arrived. Deliberately thin, like `HealthContextProvider`: it reduces each arrival to plain
+// The HealthKit half of the automatic health turns: three observer queries (body mass,
+// workouts and sleep), background delivery for each, and the anchored queries that say what
+// actually arrived. Deliberately thin, like `HealthContextProvider`: it reduces each arrival to plain
 // dates and identifiers and hands them to `HealthAutoTrigger`, which decides everything.
 //
 // What HealthKit's own documentation says, and what this is built around:
@@ -18,9 +18,10 @@ import JesseCore
 //    without it `enableBackgroundDelivery` fails with `errorAuthorizationDenied`.
 //  * The system wakes the app at most once per the requested frequency, and some types have
 //    an HOURLY maximum it enforces silently (the docs name `stepCount` on iOS as an example,
-//    and give no list for body mass or workouts). `.immediate` is requested; nothing here
-//    depends on getting it. The ledger and the day stamp persist, so an hourly delivery is
-//    only later, never wrong.
+//    and give no list for body mass, workouts or sleep). `.immediate` is requested; nothing
+//    here depends on getting it. The ledger and the day stamps persist, so an hourly delivery
+//    is only later, never wrong. `HealthArchiveObserver` observes the same three types and asks
+//    for the same frequency, because background delivery is one setting per type per app.
 //  * Background delivery does not run on the Simulator at all.
 //
 // Deleted objects come back from an anchored query too. They are counted and logged, never
@@ -47,8 +48,11 @@ final class HealthDataObserver {
     /// two days covers the boundary with room to spare and keeps the first query small.
     nonisolated static let bodyMassWindow: TimeInterval = 2 * 24 * 3600
 
+    /// How far back a sleep sample is worth looking at: the health block's own sleep lookback.
+    nonisolated static let sleepWindow: TimeInterval = 36 * 3600
+
     private enum Kind: String {
-        case bodyMass, workouts
+        case bodyMass, workouts, sleep
         var anchorKey: String { "healthAnchor.\(rawValue)" }
     }
 
@@ -57,23 +61,29 @@ final class HealthDataObserver {
     private let defaults: UserDefaults
     private let onBodyMass: (HealthArrivals<Date>) -> Void
     private let onWorkouts: (HealthArrivals<ObservedWorkout>) -> Void
+    /// Sleep arrivals, reduced to each sample's end. The trigger only needs to know that
+    /// something arrived; it reads the night itself through the health block's own read.
+    private let onSleep: (HealthArrivals<Date>) -> Void
 
     init(defaults: UserDefaults,
          onBodyMass: @escaping (HealthArrivals<Date>) -> Void,
-         onWorkouts: @escaping (HealthArrivals<ObservedWorkout>) -> Void) {
+         onWorkouts: @escaping (HealthArrivals<ObservedWorkout>) -> Void,
+         onSleep: @escaping (HealthArrivals<Date>) -> Void) {
         self.defaults = defaults
         self.onBodyMass = onBodyMass
         self.onWorkouts = onWorkouts
+        self.onSleep = onSleep
     }
 
-    /// Register both observers and ask for background delivery. Idempotent.
+    /// Register the three observers and ask for background delivery. Idempotent.
     func start() {
         guard queries.isEmpty, Self.isAvailable else { return }
         register(HKQuantityType(.bodyMass), kind: .bodyMass)
         register(HKObjectType.workoutType(), kind: .workouts)
+        register(HKCategoryType(.sleepAnalysis), kind: .sleep)
     }
 
-    /// Stop both observers and every background delivery this app asked for.
+    /// Stop the observers and every background delivery this app asked for.
     func stop() {
         for query in queries { store.stop(query) }
         queries = []
@@ -122,6 +132,11 @@ final class HealthDataObserver {
                 log(kind, arrivals)
                 onWorkouts(arrivals)
                 anchor = arrivals.anchor
+            case .sleep:
+                let arrivals = try await Self.fetchSleep(anchor: stored, now: Date())
+                log(kind, arrivals)
+                onSleep(arrivals)
+                anchor = arrivals.anchor
             }
             if let anchor { defaults.set(anchor, forKey: kind.anchorKey) }
         } catch {
@@ -150,6 +165,15 @@ final class HealthDataObserver {
         return try await fetch(.workout(recent), anchor: anchor) {
             ObservedWorkout(id: $0.uuid.uuidString, end: $0.endDate)
         }
+    }
+
+    private nonisolated static func fetchSleep(anchor: Data?, now: Date) async throws
+        -> HealthArrivals<Date> {
+        let recent = HKQuery.predicateForSamples(withStart: now.addingTimeInterval(-sleepWindow),
+                                                 end: nil, options: [])
+        return try await fetch(.categorySample(type: HKCategoryType(.sleepAnalysis),
+                                               predicate: recent),
+                               anchor: anchor) { $0.endDate }
     }
 
     private nonisolated static func fetch<Sample: HKSample, Item: Sendable>(

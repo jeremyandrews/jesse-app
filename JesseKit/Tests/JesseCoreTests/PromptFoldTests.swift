@@ -200,5 +200,6 @@ final class PromptFoldTests: XCTestCase {
     func testEachAutomaticHealthTurnNamesItself() {
         XCTAssertEqual(HealthAutoTurn.morningRefresh.sentFor, PromptSender.healthNewDay)
         XCTAssertEqual(HealthAutoTurn.workoutLog.sentFor, PromptSender.healthWorkoutLog)
+        XCTAssertEqual(HealthAutoTurn.lateSleep.sentFor, PromptSender.healthLateSleep)
     }
 }

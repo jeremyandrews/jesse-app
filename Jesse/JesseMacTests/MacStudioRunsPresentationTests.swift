@@ -318,7 +318,7 @@ final class MacStudioRunsPresentationTests: XCTestCase {
 
     /// A sheet a person can use, never the collapsed strip (520 by 149 points for the Runs
     /// list, 470 by 113 for a run) a sheet with only a `List` in it drew. Literal bounds rather
-    /// than `StudioRunSheet.minSize`, so this reads the same against a build without it.
+    /// than `StudioRunSheet.size`, so this reads the same against a build without it.
     private func assertSheetIsUsable(_ sheet: NSWindow, file: StaticString = #filePath,
                                      line: UInt = #line) {
         XCTAssertGreaterThanOrEqual(sheet.frame.height, 500, "sheet \(sheet.frame)",

@@ -162,19 +162,25 @@ jobs:
       # warnings-as-errors symmetric with the app build below. These targets depend on
       # SwiftData/Security (Apple-only), so this runs on the macOS runner rather than the
       # Linux bridge job. Runs first for quick feedback before the longer app build/test.
-      - name: DIAGNOSTIC (temporary) the Mac presentation and sidebar tests first
+      - name: DIAGNOSTIC (temporary) which earlier Mac test class breaks the Drafts Runs click
         run: |
           set +e -uo pipefail
-          sw_vers
-          xcodebuild test \
-            -scheme "Jesse Mac" \
-            -destination "platform=macOS" \
-            -derivedDataPath build/DerivedDataMacDiag \
-            -only-testing:"Jesse MacTests/MacStudioRunsPresentationTests" \
-            -only-testing:"Jesse MacTests/MacSearchVisibilityTests" \
-            CODE_SIGNING_ALLOWED=NO 2>&1 \
-            | grep -E "JS1-DIAG|MS1-PROBE|Test Case|error:|Executed [0-9]+ tests|\*\* TEST" || true
-          ls -la /tmp/js1-diag || true
+          xcodebuild build-for-testing -scheme "Jesse Mac" -destination "platform=macOS" \
+            -derivedDataPath build/DerivedDataMacDiag CODE_SIGNING_ALLOWED=NO 2>&1 | tail -1
+          D='Jesse MacTests/MacStudioRunsPresentationTests/testTheDraftsBlockOpensItsRunAndItsRunsList'
+          run() {
+            local args=()
+            for c in "$@"; do args+=(-only-testing:"Jesse MacTests/$c"); done
+            xcodebuild test-without-building -scheme "Jesse Mac" -destination "platform=macOS" \
+              -derivedDataPath build/DerivedDataMacDiag ${args[@]+"${args[@]}"} -only-testing:"$D" \
+              CODE_SIGNING_ALLOWED=NO 2>&1 \
+              | grep -E "testTheDraftsBlockOpensItsRunAndItsRunsList\]' (passed|failed)|JS1-DIAG drafts no sheet" \
+              | sed -E 's/windows \[.*//' | cut -c1-160
+          }
+          CLASSES="ComposerKeyActionTests ComposerMarkdownTests ComposerTextViewTests MacAdoptionAndGatingTests MacAttachmentReaderTests MacAttachmentSendTests MacComposerDraftTests MacComposerNoticeLayoutTests MacComposerSendGateTests MacConcurrentRunTests MacConfigStoreTests MacFlagSyncTests MacHealthDashboardTests MacHydrationTests MacLargePasteTests MacMorningRoutineTests MacNotifierSnippetTests MacOfflineRecoveryTests MacOfflineReviewTests MacPairLinkTests MacProvenanceTests MacPruneEmptyTests MacPushIdentityTests MacReplyParserTests MacReplySelectionTests MacRunsFiltersScreenshotTests MacSearchVisibilityTests MacSessionSyncTests MacStudioRunsEveryRunScreenshotTests"
+          echo "=== BISECT alone"; run
+          echo "=== BISECT all earlier classes"; run $CLASSES
+          for c in $CLASSES; do echo "=== BISECT with $c"; run "$c"; done
           exit 0
 
       - name: DIAGNOSTIC (temporary) upload the Mac diagnostic images

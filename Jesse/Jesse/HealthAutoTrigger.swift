@@ -30,7 +30,7 @@ import JesseNetworking
 // MARK: - The one send path
 
 /// **Sends a Health turn the one way, whoever asks for it**: the Start-new-day button, the
-/// body-mass observer, or the workout observer.
+/// body-mass observer, the workout observer, or the sleep observer.
 ///
 /// Fire and forget. The routine runs on the Studio for minutes; this opens a fresh Tell
 /// thread, stages the send through `RunCoordinator` (the same user turn, outbox row and Retry
@@ -99,6 +99,15 @@ enum HealthTurn {
         }
     }
 
+    /// **The late sleep turn.** Online only, staged once: it has no capture queue kind, so a
+    /// read-only model is refused here and the caller keeps its hold for the next settle.
+    /// Returns whether the turn was staged.
+    static func sendLateSleep(model: HealthDashboardModel, coordinator: RunCoordinator,
+                              context: ModelContext) -> Bool {
+        guard !model.isReadOnly else { return false }
+        return send(.lateSleep, origin: .automatic, coordinator: coordinator, context: context)
+    }
+
     /// Open a fresh Tell thread carrying `origin` and stage the turn. Always a NEW thread:
     /// an automatic turn never appends to an existing conversation, and it is an ordinary,
     /// visible, searchable thread that is titled like any other.
@@ -140,6 +149,20 @@ final class HealthAutoTrigger {
     /// or its day has passed.
     static let heldMorningRefreshKey = "healthNewDayHeldDay"
 
+    /// `UserDefaults` key for the diet day on which a turn went out carrying the NOT SYNCED
+    /// sleep line: last night had not reached the phone yet. Written by `JesseClient.send`.
+    nonisolated static let sleepNotSyncedDayKey = "healthSleepNotSyncedDay"
+
+    /// `UserDefaults` key for the diet day on which a turn carried last night's sleep
+    /// (`Sleep (last night): …`). Written by `JesseClient.send` after any such turn, and by
+    /// the late sleep fire the moment it stages its turn.
+    nonisolated static let sleepLastNightSentDayKey = "healthSleepLastNightSentDay"
+
+    /// `UserDefaults` key for the diet day whose late sleep turn is held: it arrived while the
+    /// phone was locked, or while the turn could not be staged. Cleared once staged, once it
+    /// no longer needs to fire, or when its day has passed.
+    static let heldLateSleepKey = "healthLateSleepHeldDay"
+
     private weak var coordinator: RunCoordinator?
     private var model: HealthDashboardModel?
     private var observer: HealthDataObserver?
@@ -154,6 +177,9 @@ final class HealthAutoTrigger {
     private let isPaired: @MainActor () -> Bool
     /// The store an automatic turn is staged in.
     private let context: @MainActor () -> ModelContext
+    /// The newest sleep session, read the way the health block reads it. Injected so a test
+    /// can land last night without HealthKit.
+    private let lastSleep: @MainActor () async -> SleepSummary?
     /// The unlock observer, registered with the HealthKit observers and removed with them.
     private var unlockObserver: NSObjectProtocol?
 
@@ -167,6 +193,9 @@ final class HealthAutoTrigger {
     private var firingDay: String?
     /// Whether a workout-log fire is in progress, for the same reason.
     private var firingWorkouts = false
+    /// Whether a late sleep fire is in progress. Sleep samples arrive in bursts and the fire
+    /// awaits HealthKit and the bridge before it stages, so two arrivals must not both pass.
+    private var firingLateSleep = false
     /// The in-process wake-up for a settling burst. It only helps while the process is alive
     /// (foreground, or the seconds a background wake grants); the persisted ledger and the
     /// other triggers cover every other case.
@@ -179,12 +208,16 @@ final class HealthAutoTrigger {
          isPaired: @escaping @MainActor () -> Bool = { ConfigStore.load().isConfigured },
          context: @escaping @MainActor () -> ModelContext = {
              AppModelContainer.shared.container.mainContext
+         },
+         lastSleep: @escaping @MainActor () async -> SleepSummary? = {
+             (try? await HealthContextProvider.liveSleep()) ?? nil
          }) {
         self.defaults = defaults
         self.now = now
         self.protectedDataAvailable = protectedDataAvailable
         self.isPaired = isPaired
         self.context = context
+        self.lastSleep = lastSleep
     }
 
     /// Hand over the app-scoped coordinator and the one Health model. Called from
@@ -196,7 +229,7 @@ final class HealthAutoTrigger {
 
     // MARK: Registration
 
-    /// Register the two observers, once, if the user has connected Apple Health.
+    /// Register the observers, once, if the user has connected Apple Health.
     ///
     /// "Connected" is the attach-health-context toggle, which the app turns on only after the
     /// HealthKit authorization prompt has been answered. It is also the right gate for a
@@ -211,11 +244,12 @@ final class HealthAutoTrigger {
         let observer = HealthDataObserver(
             defaults: defaults,
             onBodyMass: { [weak self] in self?.receiveBodyMass($0) },
-            onWorkouts: { [weak self] in self?.receiveWorkouts($0) })
+            onWorkouts: { [weak self] in self?.receiveWorkouts($0) },
+            onSleep: { [weak self] in self?.receiveSleep($0) })
         self.observer = observer
         observer.start()
-        // A morning refresh or workout log held because the phone was locked goes out on
-        // unlock, while the process is alive. A suspended process catches up on the next
+        // A morning refresh, workout log or late sleep turn held because the phone was locked
+        // goes out on unlock, while the process is alive. A suspended process catches up on the next
         // foreground instead.
         unlockObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil,
@@ -224,7 +258,7 @@ final class HealthAutoTrigger {
             }
     }
 
-    /// Stop both observers and background delivery — the toggle went off.
+    /// Stop the observers and background delivery — the toggle went off.
     func stop() {
         observer?.stop()
         observer = nil
@@ -330,6 +364,7 @@ final class HealthAutoTrigger {
     func settle() async {
         await settleMorningRefresh()
         await settleWorkouts()
+        await settleLateSleep()
     }
 
     /// Fire for any burst that has settled since it was noticed, from `settle()` and the
@@ -370,6 +405,86 @@ final class HealthAutoTrigger {
         ledger = WorkoutAutoLog.markFired(due, in: ledger, now: now())
         // Anything that landed while this was in flight starts its own settle now.
         if !ledger.pending.isEmpty { _ = evaluate(adding: []) }
+    }
+
+    // MARK: Sleep → the late sleep turn
+
+    /// New sleep samples arrived. If last night has just reached the phone after a turn
+    /// today went out with the not synced line, send it in one automatic turn. Returns at
+    /// once; the fire runs on.
+    func receiveSleep(_ arrivals: HealthArrivals<Date>) {
+        // The first observation ever is a baseline of what was already there, not news.
+        guard !arrivals.isBaseline else { return }
+        Task { await fireLateSleep() }
+    }
+
+    /// Fire a late sleep turn held by a locked phone (or an unreachable bridge), if the hold
+    /// is still for today's diet day. A hold from a day that has rolled is dropped unsent.
+    private func settleLateSleep() async {
+        guard let held = defaults.string(forKey: Self.heldLateSleepKey) else { return }
+        let day = DietDay.stamp(for: now())
+        guard held == day else {
+            defaults.removeObject(forKey: Self.heldLateSleepKey)
+            Log.health.notice("held late sleep turn for \(held) dropped: today is \(day)")
+            return
+        }
+        await fireLateSleep()
+    }
+
+    /// The one late sleep fire, for an arrival and for a settle.
+    ///
+    /// Staged at most once: the sent-day stamp is written in the same synchronous stretch as
+    /// the staging call, so from that moment the outbox row is the only owner of the turn. A
+    /// lock at send time is then the outbox's to retry (`HealthContextLockHold`), and every
+    /// later arrival or settle finds `shouldFire` false. Never captured offline: it has no
+    /// capture queue kind, so it cannot exist as a queued copy and an outbox row at once.
+    private func fireLateSleep() async {
+        guard !firingLateSleep else { return }
+        firingLateSleep = true
+        defer { firingLateSleep = false }
+
+        let day = DietDay.stamp(for: now())
+        // Locked: HealthKit cannot be read, so there is nothing to decide with. Hold the day
+        // and let the unlock, the foreground or the background refresh settle it.
+        guard protectedDataAvailable() else {
+            defaults.set(day, forKey: Self.heldLateSleepKey)
+            Log.health.notice("late sleep check for \(day) held until the phone is unlocked")
+            return
+        }
+        let session = await lastSleep()
+        let isLastNight = session.map {
+            SleepReducer.isLastNight($0, now: now(), timeZone: .current)
+        } ?? false
+        guard HealthLateSleep.shouldFire(
+            sessionIsLastNight: isLastNight,
+            notSyncedDay: defaults.string(forKey: Self.sleepNotSyncedDayKey),
+            lastNightSentDay: defaults.string(forKey: Self.sleepLastNightSentDayKey),
+            today: day)
+        else {
+            defaults.removeObject(forKey: Self.heldLateSleepKey)
+            return
+        }
+        // It should go. Until it is staged, it is held for the next settle.
+        defaults.set(day, forKey: Self.heldLateSleepKey)
+        guard let (coordinator, model) = ready() else { return }
+        // One live fetch, for what it proves: whether the bridge can be reached.
+        await model.load()
+        guard !model.isReadOnly else {
+            Log.health.notice("late sleep turn for \(day) held: the bridge is unreachable")
+            return
+        }
+        // The fetch is a round trip, and the phone can lock during it.
+        guard protectedDataAvailable() else {
+            Log.health.notice("late sleep turn for \(day) held until the phone is unlocked")
+            return
+        }
+        // No await from here to the stamp: staging and recording it are one step.
+        let staged = HealthTurn.sendLateSleep(model: model, coordinator: coordinator,
+                                              context: context())
+        Log.health.notice("automatic late sleep turn for \(day): \(staged ? "sent" : "refused")")
+        guard staged else { return }
+        defaults.set(day, forKey: Self.sleepLastNightSentDayKey)
+        defaults.removeObject(forKey: Self.heldLateSleepKey)
     }
 
     private func armSettle(at date: Date) {

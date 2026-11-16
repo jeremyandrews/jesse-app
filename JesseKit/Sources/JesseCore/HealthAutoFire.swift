@@ -240,7 +240,7 @@ public nonisolated enum HealthTurnRoute: Equatable, Sendable {
     }
 }
 
-/// The two automatic turns and the text each one sends.
+/// The automatic turns and the text each one sends.
 ///
 /// `morningRefresh` returns `HealthNewDay.prompt` ITSELF rather than a copy: the automatic
 /// weigh-in and the button must send byte-identical text, and the thread's `origin` is what
@@ -248,11 +248,14 @@ public nonisolated enum HealthTurnRoute: Equatable, Sendable {
 public enum HealthAutoTurn: Sendable {
     case morningRefresh
     case workoutLog
+    /// Last night's sleep, synced after an earlier health turn today went out without it.
+    case lateSleep
 
     public var prompt: String {
         switch self {
         case .morningRefresh: return HealthNewDay.prompt
         case .workoutLog: return HealthWorkoutLog.prompt
+        case .lateSleep: return HealthLateSleep.prompt
         }
     }
 }

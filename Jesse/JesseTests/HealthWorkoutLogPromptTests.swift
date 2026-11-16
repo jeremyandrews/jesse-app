@@ -30,4 +30,11 @@ final class HealthWorkoutLogPromptTests: XCTestCase {
     func testAutomaticWeighInPromptClassifiesAsHealth() {
         XCTAssertTrue(HealthKeywordClassifier.matches(HealthAutoTurn.morningRefresh.prompt))
     }
+
+    /// The late sleep turn attaches its block the same way: by classifying as health.
+    @MainActor
+    func testLateSleepPromptClassifiesAsHealth() {
+        XCTAssertTrue(HealthKeywordClassifier.matches(HealthLateSleep.prompt))
+        XCTAssertTrue(HealthKeywordClassifier.matches(HealthAutoTurn.lateSleep.prompt))
+    }
 }

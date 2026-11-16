@@ -281,8 +281,9 @@ struct JesseClient: JesseClientProtocol {
         // Resolve the HealthKit block and the diet nutrient rollup concurrently so the
         // extra diet GET doesn't add serial latency, then compose them into the one
         // health_context.
+        let renderedAt = Date()
         async let health = HealthContextResolver.resolution(
-            enabled: attach, provider: healthProvider, now: Date())
+            enabled: attach, provider: healthProvider, now: renderedAt)
         async let dietRollup = dietRollupBlock(enabled: attach)
         // The location channel, resolved concurrently with the health one — the two are
         // independent, and a turn that wants both should not pay for them in series.
@@ -314,7 +315,13 @@ struct JesseClient: JesseClientProtocol {
                                        // bridge writes them to its workout ledger.
                                        workoutRecords: resolved.block != nil
                                            ? resolved.workoutRecords : nil)
-        return try await bridge.sendPrepared(request)
+        let result = try await bridge.sendPrepared(request)
+        // Which sleep line went out, for the late sleep turn's decision. Only once the bridge
+        // has the turn, and only when a block was attached.
+        if resolved.block != nil {
+            HealthSleepStamps.record(resolved.sleep, now: renderedAt)
+        }
+        return result
     }
 
     /// The proactive `location_context` for this turn, or nil. Classifies only when the
@@ -817,12 +824,31 @@ enum BridgeVersionStore {
     }
 }
 
+// MARK: - Which sleep line went out
+
+/// Records, after a turn carrying a health block has been sent, which sleep line it carried:
+/// the not synced line stamps today's diet day in `healthSleepNotSyncedDay`, last night in
+/// `healthSleepLastNightSentDay`. `HealthAutoTrigger` reads both to decide whether last
+/// night's late arrival needs its one automatic turn (`HealthLateSleep.shouldFire`).
+nonisolated enum HealthSleepStamps {
+    static func record(_ state: HealthContextResolver.SleepState, now: Date,
+                       defaults: UserDefaults = .standard) {
+        let key: String
+        switch state {
+        case .notSynced: key = HealthAutoTrigger.sleepNotSyncedDayKey
+        case .lastNight: key = HealthAutoTrigger.sleepLastNightSentDayKey
+        case .unknown: return
+        }
+        defaults.set(DietDay.stamp(for: now), forKey: key)
+    }
+}
+
 // MARK: - Holding a locked Health turn
 
 /// Whether a turn must not be sent because the phone was locked when its health block
-/// was gathered. Only the two Health turns whose whole job is to log what that block
-/// carries: the automatic workout log (its workouts) and the morning refresh (this
-/// morning's weigh-in). Sent without it, either one logs nothing while the day or the
+/// was gathered. Only the Health turns whose whole job is to log what that block
+/// carries: the automatic workout log (its workouts), the morning refresh (this
+/// morning's weigh-in) and the late sleep turn (last night's sleep). Sent without it, either one logs nothing while the day or the
 /// workouts are recorded as done. Every other turn goes out with the locked line and the
 /// agent answers without Health.
 ///
@@ -835,7 +861,8 @@ nonisolated enum HealthContextLockHold {
     static func shouldHold(text: String, locked: Bool) -> Bool {
         guard locked else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return ([HealthWorkoutLog.prompt, HealthNewDay.prompt] + HealthWorkoutLog.previousPrompts)
+        return ([HealthWorkoutLog.prompt, HealthNewDay.prompt, HealthLateSleep.prompt]
+                + HealthWorkoutLog.previousPrompts)
             .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed }
     }
 }

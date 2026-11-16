@@ -14,6 +14,10 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [JesseKit: a thread search pass runs across the cores] - 2026-11-16
+
+**Root cause:** `searchThreads` matched every thread in turn on one core, and a thread with no match is read in full once per search term. `lost keys` with its expansion concepts reads every body seven times. On the hosted macOS 26 runner that took 64 to 98 ms per pass against the 100 ms budget in `testKeystrokeBudgetOnFiveHundredThreads`, and 143 ms in iOS CI run 43855177726, which failed. Fix: the pass splits the threads into 32-thread chunks across the cores, and the full sort keeps the hit order unchanged. A cancelled pass still stops at the next chunk. Locally: 50 to 5 ms for `lost keys`.
+
 ## [JesseKit: a Drafts block presents its run and its Runs list from one sheet] - 2026-11-16
 
 **Root cause:** `StrandDraftsBlock` hung two `.sheet` modifiers on one view, one for a run and one for the Runs list. When the run sheet closed and the Runs list was asked for moments later, the Runs sheet sometimes never came up on the hosted macOS 26 runner (iOS CI runs 43771482946 and 43779485347). Fix: one `.sheet(item:)` over `DraftsSheet` (`.run` or `.runs`), so SwiftUI replaces one presentation with the next. Test: `testTheDraftsBlockOpensItsRunAndItsRunsList`.

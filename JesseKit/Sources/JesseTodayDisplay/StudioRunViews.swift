@@ -434,10 +434,16 @@ extension View {
     /// list showed no rows and a run showed nothing but Done. The Mac's other sheets
     /// (`MacTodayConversationSheet`, `MacAskSheet`) carry a frame for the same reason. An
     /// iPhone sheet fills the screen, so nothing changes there.
+    ///
+    /// `.fitted` is what makes it open at the IDEAL size. Without it macOS 26 opened a run's
+    /// sheet 560 by 677: the minimum width, and the list's own height without the 48-point
+    /// bar above it, so the last row (Cancel run) was under the bottom edge until scrolled.
+    /// macOS 27 kept the minimum width too, and only its height reached the ideal.
     func studioRunSheetFrame() -> some View {
         #if os(macOS)
         frame(minWidth: StudioRunSheet.minSize.width, idealWidth: StudioRunSheet.idealSize.width,
               minHeight: StudioRunSheet.minSize.height, idealHeight: StudioRunSheet.idealSize.height)
+        .presentationSizing(.fitted)
         #else
         self
         #endif

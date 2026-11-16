@@ -48,10 +48,9 @@ final class MacStudioRunsEveryRunScreenshotTests: XCTestCase {
         let host = NSHostingView(rootView: view
             .frame(width: width, height: height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor)))
-        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: width,
-                                                  height: height),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: width,
+                                                        height: height),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = host
         windows.append(window)
         for _ in 0..<40 {

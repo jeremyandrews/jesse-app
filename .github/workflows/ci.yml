@@ -313,3 +313,15 @@ jobs:
       # model nobody chose; an iPhone Duo listed last turned 38 UI tests red.
       - name: Simulator pick rule
         run: bash scripts/test-simulator-pick.sh
+
+      # The local gate's step plumbing (scripts/lib/ci-runner.sh): every step runs,
+      # a step runs only when the steps it needs passed, and the final line names
+      # every failure. Stub steps, no Xcode, so it is checked here on every push.
+      - name: Local gate runner
+        run: bash scripts/test-ci-runner.sh
+
+      # The window trap: a test builds an AppKit window only through makeTestWindow,
+      # which sets isReleasedWhenClosed = false. Source text only, so Linux can check
+      # it on every push; the local gate runs it too.
+      - name: Swift test guards
+        run: bash scripts/swift-test-guards.sh

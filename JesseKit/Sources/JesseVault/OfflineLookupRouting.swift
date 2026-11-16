@@ -99,9 +99,11 @@ public enum OfflineLookupReply {
     ///
     /// Without a name, "my" is dropped and nothing takes its place, so "what's my
     /// birthday" searches for every birthday in the vault. That used to happen silently;
-    /// the reply says so, and says where the fix is.
+    /// the reply says so, and names the field that fixes it (`OwnerNameSettingsRows`, in
+    /// the Vault folder section of Settings on both platforms).
     public static let ownerNameMissing =
-        "No owner name is set in Settings, so \"my\" and \"I\" could not be matched to your notes."
+        "No owner name is set (Settings › Vault folder › Owner name), so \"my\" and \"I\" "
+        + "could not be matched to your notes."
 
     /// `ownerNameMissing` when `question` is about the asker and `ownerName` holds no name,
     /// else nil.

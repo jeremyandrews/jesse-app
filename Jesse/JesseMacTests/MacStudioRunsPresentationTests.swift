@@ -46,55 +46,6 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         try await super.tearDown()
     }
 
-    // DIAGNOSTIC (temporary): how a sheet with a min and ideal frame is sized on this OS.
-    func testDIAGSheetSizingVariants() async throws {
-        func probe<V: View>(_ name: String, _ v: V) async throws {
-            let w = host(Text("x").sheet(isPresented: .constant(true)) { v })
-            let s = try await sheet(of: w)
-            print("JS1-DIAG variant \(name) sheet \(s.frame)")
-            w.endSheet(s); w.contentView = nil; w.close(); window = nil
-        }
-        func list() -> some View {
-            NavigationStack { List { ForEach(0..<14, id: \.self) { Text("Row \($0)") } }.navigationTitle("Run") }
-        }
-        try await probe("plain", list().frame(minWidth: 560, idealWidth: 720, minHeight: 520, idealHeight: 780))
-        try await probe("fitted", list().frame(minWidth: 560, idealWidth: 720, minHeight: 520, idealHeight: 780).presentationSizing(.fitted))
-        try await probe("form", list().frame(minWidth: 560, idealWidth: 720, minHeight: 520, idealHeight: 780).presentationSizing(.form))
-        try await probe("fixed", list().frame(width: 720, height: 780))
-    }
-
-    // DIAGNOSTIC (temporary): where "Cancel run" is in the run sheet on this OS.
-    func testDIAGRunSheetLayout() async throws {
-        let out = URL(fileURLWithPath: "/tmp/js1-diag", isDirectory: true)
-        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-        let (strands, runs, _) = try models()
-        let host = host(NavigationStack {
-            TodayListView(model: TodayDashboardModel(makeClient: { NoDayClient() }),
-                          strands: strands, strandOpener: StrandOpener(), runs: runs)
-        })
-        try await waitUntil("the board loaded") { runs.hasLoaded }
-        runs.presentsList = true
-        let sheet = try await sheet(of: host)
-        let table = try await table(in: sheet, rows: 4)
-        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        _ = try? await waitForText(["Log"], in: sheet)
-        try await settle(3)
-        print("JS1-DIAG host \(host.frame) sheet \(sheet.frame) content \(sheet.contentView?.frame ?? .zero)")
-        try? shoot(sheet, out, "run-sheet.png")
-        for b in try text(in: sheet) { print("JS1-DIAG ocr y=\(Int(b.rect.minY))-\(Int(b.rect.maxY)) \(b.string)") }
-        func scrolls(_ v: NSView) -> [NSScrollView] { ((v as? NSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(scrolls) }
-        for s in scrolls(sheet.contentView!) {
-            print("JS1-DIAG scroll frame \(s.frame) doc \(s.documentView?.frame ?? .zero) visible \(s.contentView.bounds) rows \((s.documentView as? NSTableView)?.numberOfRows ?? -1)")
-            if let t = s.documentView as? NSTableView {
-                for r in 0..<t.numberOfRows { print("JS1-DIAG row \(r) \(t.rect(ofRow: r))") }
-                t.scrollRowToVisible(t.numberOfRows - 1)
-            }
-        }
-        try await settle(2)
-        try? shoot(sheet, out, "run-sheet-scrolled.png")
-        for b in try text(in: sheet) { print("JS1-DIAG scrolled ocr y=\(Int(b.rect.minY))-\(Int(b.rect.maxY)) \(b.string)") }
-    }
-
     // MARK: - The entry points
 
     /// The Strands toolbar's Runs button: the list comes up with its rows, and a row opens
@@ -146,20 +97,8 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         try await waitUntil("the run's sheet closed") { note.attachedSheet == nil }
 
         // The block's own Runs button.
-        // DIAGNOSTIC (temporary)
-        let runsBox = try await waitForText(["Runs"], in: note, exact: true)[0]
-        print("JS1-DIAG drafts click at \(runsBox.rect) note \(note.frame) key \(note.isKeyWindow) sheet \(String(describing: note.attachedSheet))")
-        for b in try text(in: note) { print("JS1-DIAG drafts ocr \(b.rect) \(b.string)") }
-        click(note, at: runsBox)
-        let list: NSWindow
-        do { list = try await sheet(of: note) } catch {
-            let out = URL(fileURLWithPath: "/tmp/js1-diag", isDirectory: true)
-            try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-            try? shoot(note, out, "drafts-note-\(Int(Date().timeIntervalSince1970)).png")
-            print("JS1-DIAG drafts no sheet; note sheet \(String(describing: note.attachedSheet)) windows \(NSApp.windows.map { "\($0.title)|\($0.frame)|\($0.isVisible)" })")
-            for b in try text(in: note) { print("JS1-DIAG drafts after ocr \(b.rect) \(b.string)") }
-            throw error
-        }
+        click(note, at: try await waitForText(["Runs"], in: note, exact: true)[0])
+        let list = try await sheet(of: note)
         assertSheetIsUsable(list)
         let table = try await table(in: list, rows: 3)
         assertRowIsHittable(table, row: 0, in: list)
@@ -318,7 +257,7 @@ final class MacStudioRunsPresentationTests: XCTestCase {
 
     /// A sheet a person can use, never the collapsed strip (520 by 149 points for the Runs
     /// list, 470 by 113 for a run) a sheet with only a `List` in it drew. Literal bounds rather
-    /// than `StudioRunSheet.size`, so this reads the same against a build without it.
+    /// than `StudioRunSheet.minSize`, so this reads the same against a build without it.
     private func assertSheetIsUsable(_ sheet: NSWindow, file: StaticString = #filePath,
                                      line: UInt = #line) {
         XCTAssertGreaterThanOrEqual(sheet.frame.height, 500, "sheet \(sheet.frame)",

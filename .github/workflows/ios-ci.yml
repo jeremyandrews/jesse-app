@@ -162,36 +162,6 @@ jobs:
       # warnings-as-errors symmetric with the app build below. These targets depend on
       # SwiftData/Security (Apple-only), so this runs on the macOS runner rather than the
       # Linux bridge job. Runs first for quick feedback before the longer app build/test.
-      - name: DIAGNOSTIC (temporary) which earlier Mac test class breaks the Drafts Runs click
-        run: |
-          set +e -uo pipefail
-          xcodebuild build-for-testing -scheme "Jesse Mac" -destination "platform=macOS" \
-            -derivedDataPath build/DerivedDataMacDiag CODE_SIGNING_ALLOWED=NO 2>&1 | tail -1
-          D='Jesse MacTests/MacStudioRunsPresentationTests/testTheDraftsBlockOpensItsRunAndItsRunsList'
-          run() {
-            local args=()
-            for c in "$@"; do args+=(-only-testing:"Jesse MacTests/$c"); done
-            xcodebuild test-without-building -scheme "Jesse Mac" -destination "platform=macOS" \
-              -derivedDataPath build/DerivedDataMacDiag ${args[@]+"${args[@]}"} -only-testing:"$D" \
-              CODE_SIGNING_ALLOWED=NO 2>&1 \
-              | grep -E "testTheDraftsBlockOpensItsRunAndItsRunsList\]' (passed|failed)|JS1-DIAG drafts no sheet" \
-              | sed -E 's/windows \[.*//' | cut -c1-160
-          }
-          CLASSES="ComposerKeyActionTests ComposerMarkdownTests ComposerTextViewTests MacAdoptionAndGatingTests MacAttachmentReaderTests MacAttachmentSendTests MacComposerDraftTests MacComposerNoticeLayoutTests MacComposerSendGateTests MacConcurrentRunTests MacConfigStoreTests MacFlagSyncTests MacHealthDashboardTests MacHydrationTests MacLargePasteTests MacMorningRoutineTests MacNotifierSnippetTests MacOfflineRecoveryTests MacOfflineReviewTests MacPairLinkTests MacProvenanceTests MacPruneEmptyTests MacPushIdentityTests MacReplyParserTests MacReplySelectionTests MacRunsFiltersScreenshotTests MacSearchVisibilityTests MacSessionSyncTests MacStudioRunsEveryRunScreenshotTests"
-          echo "=== BISECT alone"; run
-          echo "=== BISECT all earlier classes"; run $CLASSES
-          for c in $CLASSES; do echo "=== BISECT with $c"; run "$c"; done
-          exit 0
-
-      - name: DIAGNOSTIC (temporary) upload the Mac diagnostic images
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: js1-diag
-          path: /tmp/js1-diag
-          if-no-files-found: warn
-          retention-days: 3
-
       - name: Build and test JesseKit package (JesseCore + JesseNetworking)
         working-directory: ${{ github.workspace }}/JesseKit
         run: |
@@ -440,15 +410,6 @@ jobs:
             echo "Expected the mac test suite to run at least one test, got ${total}" >&2
             exit 1
           fi
-
-      - name: DIAGNOSTIC (temporary) upload the full-run Mac diagnostic images
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: js1-diag-full
-          path: /tmp/js1-diag
-          if-no-files-found: warn
-          retention-days: 3
 
       # A failed run otherwise leaves only log text. The result bundles make
       # test failures and simulator flakes diagnosable in Xcode without

@@ -271,6 +271,9 @@ pub struct HostRunSettings {
     /// up to date after each finished round of a run on it.
     pub local_checkout_root: PathBuf,
     pub service: HostRunSlot,
+    /// `<state_dir>/attribution`: the bridge's git hooks and Claude Code settings, which every
+    /// round's agent is pointed at ([`crate::attribution`]). `None` without a state dir.
+    pub attribution_dir: Option<PathBuf>,
 }
 
 impl Default for HostRunSettings {
@@ -358,6 +361,7 @@ impl HostRunSettings {
                 None => Path::new(home).join(DEFAULT_LOCAL_CHECKOUT_ROOT),
             },
             service: HostRunSlot::default(),
+            attribution_dir: None,
         }
     }
 
@@ -2534,10 +2538,18 @@ impl HostRuns {
             let runner = self.settings.runner_path().ok_or_else(|| {
                 format!("the runner {} is missing", self.settings.runner.display())
             })?;
-            let env: Vec<(String, String)> = ENV_ALLOWLIST
+            let mut env: Vec<(String, String)> = ENV_ALLOWLIST
                 .iter()
                 .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
                 .collect();
+            // Where the runner finds the attribution hooks and settings. The runner's own,
+            // not the agent's: it is not on the allowlist the agent's environment is cut to.
+            if let Some(a) = &self.settings.attribution_dir {
+                env.push((
+                    runner::ATTRIBUTION_ENV.to_string(),
+                    a.to_string_lossy().into_owned(),
+                ));
+            }
             let plist = sys::render_plist(&label, &runner, dir, &dir.join(RUNNER_LOG), &env);
             write_atomic(&dir.join(JOB_PLIST), plist.as_bytes())
                 .map_err(|e| format!("could not write job.plist: {e}"))?;
@@ -3143,8 +3155,17 @@ impl HostRuns {
                 return self.pause_for_limit(&dir, &rec, &exit, hit, &sink).await;
             }
         }
-        let report = round_report(&dir, &round);
-        let status = round_status(&round, &exit, &report);
+        let mut report = round_report(&dir, &round);
+        let mut status = round_status(&round, &exit, &report);
+        // NO AI ATTRIBUTION, the backstop: what the round pushed is read back, and a hit makes
+        // the run `needs_you` with the `ATTRIBUTION:` line first, so the Inbox report and the
+        // push both lead with it.
+        let hits = self.attribution_hits(&rec, &report).await;
+        if let Some(line) = crate::attribution::report_line(&hits) {
+            eprintln!("jesse-bridge: hostrun {run_id} round {}: {line}", round.n);
+            report = format!("{line}\n\n{report}");
+            status = RunStatus::NeedsYou;
+        }
         let rel = match round
             .report_path
             .clone()
@@ -3241,6 +3262,50 @@ impl HostRuns {
             }
         })?;
         Ok(())
+    }
+
+    /// The post-run attribution check of one finished round: for a GitHub repository, every
+    /// pull request whose head is the run's branch (and the one the report names) and every
+    /// commit they and the branch carry, read back through the forge; for a local repository,
+    /// the commits its clone holds past the run's base, on the branch and on `main`. One entry
+    /// per offending pull request or commit; none when nothing was pushed.
+    async fn attribution_hits(&self, rec: &RunRecord, report: &str) -> Vec<String> {
+        let forge = self.forge.clone();
+        let rec = rec.clone();
+        let url = pull_request_url(report);
+        let root = self.settings.root.clone();
+        tokio::task::spawn_blocking(move || {
+            if is_local_repo(&rec.repo) {
+                let bare = git::bare_path(&root, &rec.repo);
+                let base = rec
+                    .base_sha
+                    .clone()
+                    .unwrap_or_else(|| git::LOCAL_DEFAULT_BRANCH.to_string());
+                let mut seen = HashSet::new();
+                let mut out = Vec::new();
+                for head in [rec.branch.as_str(), git::LOCAL_DEFAULT_BRANCH] {
+                    if let Some(c) =
+                        crate::attribution::local_commits(&bare, &format!("{base}..{head}"))
+                    {
+                        out.extend(crate::attribution::commit_entries(&c, &mut seen));
+                    }
+                }
+                out
+            } else {
+                let Some(gh) = forge.github() else {
+                    return Vec::new();
+                };
+                crate::attribution::scan_github(
+                    gh,
+                    &rec.repo,
+                    &rec.branch,
+                    rec.default_branch.as_deref().unwrap_or("main"),
+                    url.as_deref(),
+                )
+            }
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// A round ended on the plan's usage limit: the run is `paused` until the reset the event

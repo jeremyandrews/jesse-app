@@ -1843,6 +1843,10 @@ impl Codex {
         if !cfg.gateway.enabled {
             apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
         }
+        // NO AI ATTRIBUTION: every git the child runs uses the bridge's hooks.
+        if let Some(hooks) = crate::attribution::hooks_dir_of(cfg) {
+            crate::attribution::apply_git_env(&mut cmd, &hooks, !cfg.gateway.enabled);
+        }
         Ok(cmd)
     }
 }

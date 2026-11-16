@@ -14,6 +14,10 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.207.0] - 2026-11-16
+
+**No run the bridge starts can push AI attribution** ([#PR](https://github.com/jeremyandrews/jesse-app/pull/PR)): every Claude Code child gets bridge-owned settings with attribution off and hook-skipping git denied, every spawned git uses bridge-owned `commit-msg`/`pre-push` hooks (chained to the repository's own), and a run whose pushed pull request or commits still carry it ends `needs_you` with an `ATTRIBUTION:` line.
+
 ## [JesseKit: a thread search pass runs across the cores] - 2026-11-16
 
 **Root cause:** `searchThreads` matched every thread in turn on one core, and a thread with no match is read in full once per search term. `lost keys` with its expansion concepts reads every body seven times. On the hosted macOS 26 runner that took 64 to 98 ms per pass against the 100 ms budget in `testKeystrokeBudgetOnFiveHundredThreads`, and 143 ms in iOS CI run 43855177726, which failed. Fix: the pass splits the threads into 32-thread chunks across the cores, and the full sort keeps the hit order unchanged. A cancelled pass still stops at the next chunk. Locally: 50 to 5 ms for `lost keys`.

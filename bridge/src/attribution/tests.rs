@@ -786,4 +786,3 @@ fn a_local_repository_is_checked_against_its_own_history() {
         "{hits:?}"
     );
 }
-

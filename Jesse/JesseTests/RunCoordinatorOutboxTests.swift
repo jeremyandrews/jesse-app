@@ -56,10 +56,27 @@ final class RunCoordinatorOutboxTests: XCTestCase {
             }
         }
 
+        /// When true, `result(jobId:)` does not answer until `releaseResult()`. A test sets it
+        /// to hold the turn in the window between the ACK (which deletes the outbox item) and
+        /// the reply landing, so what it asserts there does not depend on scheduling.
+        var holdsResult = false
+        private var resultWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func releaseResult() {
+            holdsResult = false
+            let waiters = resultWaiters
+            resultWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+
         // After a 202 ACK, `consume` polls this — resolve immediately so the turn
-        // completes cleanly (the outbox delete already happened before consume).
+        // completes cleanly (the outbox delete already happened before consume),
+        // unless `holdsResult` is set.
         func result(jobId: String) async throws -> JesseResultState {
-            .done(JesseReply(text: "ok", sessionId: nil))
+            if holdsResult {
+                await withCheckedContinuation { resultWaiters.append($0) }
+            }
+            return .done(JesseReply(text: "ok", sessionId: nil))
         }
         func cancelJob(jobId: String) async throws {}
         func stream(jobId: String) -> AsyncThrowingStream<JesseStreamEvent, Error> {
@@ -225,11 +242,24 @@ final class RunCoordinatorOutboxTests: XCTestCase {
         XCTAssertEqual(outboxItems(context).first?.state, .failed)
         XCTAssertEqual(thread.turns.count, 1, "retry never appends a second user bubble")
 
-        // Retry #2: ACKs → the item is deleted and a reply lands.
+        // Retry #2: ACKs → the item is deleted, and then, separately, a reply lands.
+        //
+        // These are two events, not one. `transmit` deletes the item at the ACK and only
+        // then does `consume` poll for the reply, so there is a window where the item is
+        // gone and the reply is not there yet. This test used to wait for the delete and
+        // count the turns straight away: under the load of the whole JesseTests target it
+        // sometimes counted inside that window and saw 1 turn. The result is held here so
+        // the window is entered every time and asserted, then released.
+        fake.holdsResult = true
         coordinator.retry(itemID: itemID, context: context)
         await waitUntil("the successful retry to delete the item") { self.outboxItems(context).isEmpty }
+        XCTAssertEqual(thread.turns.count, 1,
+                       "the ACK deletes the item before the reply is fetched")
 
+        fake.releaseResult()
+        await waitUntil("the reply to land") { thread.turns.count == 2 }
         XCTAssertEqual(thread.turns.count, 2, "one user turn + the delivered reply")
+        XCTAssertEqual(thread.turns.filter { !$0.isUser }.first?.text, "ok")
         XCTAssertEqual(fake.sendCallCount, 3)
         // The SAME request_id rode every attempt (idempotency across retries).
         let ids = fake.requestIds.compactMap { $0 }

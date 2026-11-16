@@ -571,9 +571,15 @@ public struct JesseBridgeClient: BridgeClientProtocol {
     /// iOS push concern that rides the shared client; the bridge call itself needs no
     /// iOS-only data).
     public func registerDevice(token: String) async throws {
+        try await registerDevice(JesseDeviceRegistration(token: token))
+    }
+
+    /// Register this device with its id, platform and topic, so the bridge keeps it beside
+    /// every other paired device rather than in place of them.
+    public func registerDevice(_ registration: JesseDeviceRegistration) async throws {
         guard var req = authorized("/jesse/device", method: "POST") else { throw JesseError.notConfigured }
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try Self.encodeBody(JesseDeviceRegistration(token: token))
+        req.httpBody = try Self.encodeBody(registration)
         let (data, resp) = try await perform(req)
         guard let http = resp as? HTTPURLResponse else { throw JesseError.decoding }
         guard (200..<300).contains(http.statusCode) else {
@@ -902,7 +908,8 @@ public struct JesseBridgeClient: BridgeClientProtocol {
                                    requestId: String? = nil,
                                    model: String? = nil,
                                    effort: String? = nil,
-                                   sentFor: String? = nil) -> JesseRequest {
+                                   sentFor: String? = nil,
+                                   workoutRecords: [WorkoutRecord]? = nil) -> JesseRequest {
         func nonBlank(_ s: String?) -> String? {
             guard let s, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return s
@@ -948,6 +955,8 @@ public struct JesseBridgeClient: BridgeClientProtocol {
             effort: nonBlank(effort))
         // Who sent this turn when the owner did not type it; blank collapses to nil (typed).
         request.sentFor = nonBlank(sentFor)
+        // Structured workout records ride only with a health block; empty drops the key.
+        request.workoutRecords = (workoutRecords?.isEmpty ?? true) ? nil : workoutRecords
         return request
     }
 

@@ -299,6 +299,16 @@ fn main() {
                     .unwrap()
                     .to_string(),
             ));
+            seen.push((
+                "devjob_close".into(),
+                dj.call(
+                    "devjob_close",
+                    json!({ "run_id": "s-envcheck", "reason": "settled" }),
+                )
+                .await
+                .unwrap()
+                .to_string(),
+            ));
             let run = svc.get("s-envcheck").unwrap();
             seen.push(("run_json".into(), hostrun::run_json(&run).to_string()));
             seen.push(("list_json".into(), svc.list_json().to_string()));
@@ -356,6 +366,7 @@ fn main() {
         "devjob_list",
         "devjob_reply",
         "devjob_cancel",
+        "devjob_close",
         "run_json",
         "list_json",
         "the bridge's stderr",

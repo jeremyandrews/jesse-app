@@ -319,7 +319,7 @@ pub fn eligibility(
         branch_slug: Some("x".into()),
         ..DevJobArgs::default()
     };
-    let one = |args: DevJobArgs| DevJobSpec::validate(args, default_agent).map(|_| ());
+    let one = |args: DevJobArgs| DevJobSpec::validate_on(args, default_agent, studio).map(|_| ());
     let agent = match fm(&src, "devjob-agent") {
         Some(a) => {
             checked("devjob-agent", Agent::parse(&a)).map_err(|e| format!("prompt {path}: {e}"))?
@@ -374,7 +374,7 @@ pub fn eligibility(
         }
         None => t.timeout_minutes,
     };
-    let spec = DevJobSpec::validate(
+    let spec = DevJobSpec::validate_on(
         DevJobArgs {
             repo: Some(repo),
             prompt: Some(prompt_body(&src)),
@@ -386,6 +386,7 @@ pub fn eligibility(
             ..DevJobArgs::default()
         },
         default_agent,
+        studio,
     )
     .map_err(|e| format!("prompt {path}: {e}"))?;
     Ok(Candidate {

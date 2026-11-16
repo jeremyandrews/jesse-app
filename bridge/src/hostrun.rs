@@ -45,13 +45,14 @@ pub mod git;
 pub mod runner;
 pub mod stream;
 pub mod sys;
+pub mod work;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use serde::Serialize;
 
-use crate::devjob::{valid_repo, valid_slug, Notifier};
+use crate::devjob::{is_local_repo, local_repo, valid_repo, valid_slug, Notifier};
 use crate::strandjobs::{fm, DRAFTS_DIR};
 use crate::strands::{parse_strand, resolve_target, StrandSection, ARCHIVE_SEGMENT, STRANDS_DIR};
 use crate::*;
@@ -62,6 +63,11 @@ use self::sys::{Forge, Launcher, PrState};
 
 /// The default `[hostrun] root`, under the bridge user's home.
 pub const DEFAULT_ROOT: &str = "jesse-runs";
+/// The default `[hostrun] local_checkout_root`, under the bridge user's home: where a plain,
+/// readable checkout of each local repository's `main` is kept.
+pub const DEFAULT_LOCAL_CHECKOUT_ROOT: &str = "jesse/Code/local";
+/// The local repository a loose draft that names none goes to.
+pub const LOCAL_SCRATCH: &str = "scratch";
 pub const DEFAULT_MAX_CONCURRENT: usize = 3;
 pub const DEFAULT_MAX_PER_REPO: usize = 1;
 pub const DEFAULT_STALL_MINUTES: u64 = 60;
@@ -126,6 +132,27 @@ pub const TITLE_TAG_OWNER: &str = "jeremyandrews";
 pub const HOST_KEY: &str = "devjob-host";
 /// The `origin` of the agent turns this module sends.
 pub const STUDIO_RUN_ORIGIN: &str = "studio-run";
+/// `closed_reason` when Jeremy closes a run and gives no reason.
+pub const CLOSED_BY_JEREMY: &str = "closed by Jeremy";
+/// `closed_reason` when the run's Drafts line is checked or sits under `### Done`.
+pub const CLOSED_ITEM_TICKED: &str = "item ticked";
+/// `closed_reason` when every report of the run has moved to `Inbox/archive/`.
+pub const CLOSED_REPORT_ARCHIVED: &str = "report archived";
+/// The longest reason a close takes.
+pub const MAX_CLOSE_REASON_BYTES: usize = 500;
+/// Where an archived Inbox report goes, under the notes directory.
+pub const INBOX_ARCHIVE_DIR: &str = "Inbox/archive";
+/// `archived_reason` when Jeremy archives a run, and the `closed_reason` of a `needs_you` or
+/// `interrupted` run his archive closes first.
+pub const ARCHIVED_BY_JEREMY: &str = "archived by Jeremy";
+/// `archived_reason` when the run's Drafts line is checked or sits under `### Done`.
+pub const ARCHIVED_ITEM_TICKED: &str = "item ticked";
+/// `archived_reason` when every report of the run has moved to `Inbox/archive/`.
+pub const ARCHIVED_REPORT_ARCHIVED: &str = "report archived";
+/// A finished run is archived by itself this many days after its last status change.
+pub const AUTO_ARCHIVE_AFTER_DAYS: u64 = 14;
+/// `archived_reason` when the run finished more than [`AUTO_ARCHIVE_AFTER_DAYS`] ago.
+pub const ARCHIVED_AGED: &str = "finished over 14 days ago";
 
 /// The environment a run may see, by name. Everything else (every bridge secret, the APNs key,
 /// the gateway's credentials, the model tokens) is stripped. `JESSE_RUN_ID`, `JESSE_RUN_REPORT`
@@ -192,6 +219,9 @@ pub struct HostRunToml {
     pub label_prefix: Option<String>,
     /// An `interrupted` run gets one automatic round. Default true.
     pub auto_resume_interrupted: Option<bool>,
+    /// Where the readable checkout of each local repository's `main` is kept. Default
+    /// [`DEFAULT_LOCAL_CHECKOUT_ROOT`] under the home; `~` is expanded.
+    pub local_checkout_root: Option<PathBuf>,
 }
 
 /// Where the running [`HostRuns`] lives once `main` has built it.
@@ -237,6 +267,9 @@ pub struct HostRunSettings {
     pub remote_base: String,
     /// `<ns>.jesse-run.`: a run's label is this and its id.
     pub label_prefix: String,
+    /// `<local_checkout_root>/<name>` is a plain checkout of `local/<name>`'s `main`, brought
+    /// up to date after each finished round of a run on it.
+    pub local_checkout_root: PathBuf,
     pub service: HostRunSlot,
 }
 
@@ -320,6 +353,10 @@ impl HostRunSettings {
             label_prefix: t.label_prefix.unwrap_or_else(|| {
                 sys::label_prefix_from(std::env::var("XPC_SERVICE_NAME").ok().as_deref())
             }),
+            local_checkout_root: match t.local_checkout_root {
+                Some(p) => expand_home(&p, home),
+                None => Path::new(home).join(DEFAULT_LOCAL_CHECKOUT_ROOT),
+            },
             service: HostRunSlot::default(),
         }
     }
@@ -373,7 +410,16 @@ impl HostRunSettings {
         format!("{}{run_id}", self.label_prefix)
     }
 
-    /// The clone URL of `owner/name`.
+    /// The readable checkout of a local repository's `main`: `<local_checkout_root>/<name>`.
+    pub fn local_checkout(&self, repo: &str) -> Option<PathBuf> {
+        if !is_local_repo(repo) {
+            return None;
+        }
+        let (_, name) = repo.split_once('/')?;
+        Some(self.local_checkout_root.join(name))
+    }
+
+    /// The clone URL of `owner/name`. Never asked for a local repository, which has none.
     pub fn repo_url(&self, repo: &str) -> String {
         format!("{}{repo}.git", self.remote_base)
     }
@@ -468,6 +514,25 @@ impl HostRunSettings {
         if self.stall_minutes == 0 {
             out.push("[hostrun] stall_minutes must be at least 1".into());
         }
+        let lcr = &self.local_checkout_root;
+        if !lcr.is_absolute() {
+            out.push(format!(
+                "[hostrun] local_checkout_root {} is not an absolute path",
+                lcr.display()
+            ));
+        } else if sys::is_under(lcr, &self.root) || sys::is_under(&self.root, lcr) {
+            // Bridge sessions read the checkout and must not read the run root.
+            out.push(format!(
+                "[hostrun] local_checkout_root {} overlaps root {}",
+                lcr.display(),
+                self.root.display()
+            ));
+        } else if let Err(e) = std::fs::create_dir_all(lcr) {
+            out.push(format!(
+                "[hostrun] local_checkout_root {} is unwritable: {e}",
+                lcr.display()
+            ));
+        }
         out
     }
 }
@@ -500,6 +565,10 @@ pub enum RunStatus {
     Interrupted,
     /// The plan's usage limit ended the round; the run continues by itself at `resume_at`.
     Paused,
+    /// Settled without a reply: superseded by a later run of its item, its Drafts line ticked,
+    /// its report archived, or closed by Jeremy. `closed_reason` says which. Terminal; a reply
+    /// still continues it, as it does a reported run.
+    Closed,
 }
 
 impl RunStatus {
@@ -513,6 +582,7 @@ impl RunStatus {
             RunStatus::Cancelled => "cancelled",
             RunStatus::Interrupted => "interrupted",
             RunStatus::Paused => "paused",
+            RunStatus::Closed => "closed",
         }
     }
 
@@ -533,11 +603,39 @@ impl RunStatus {
         )
     }
 
-    /// Reported, failed or cancelled: done with, unless someone replies.
+    /// Reported, failed, cancelled or closed: done with, unless someone replies.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunStatus::Reported | RunStatus::Failed | RunStatus::Cancelled
+            RunStatus::Reported | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Closed
+        )
+    }
+
+    /// Not queued, running or paused (those are refused), nor waiting on Jeremy or cut off
+    /// (an archive closes those first): what may carry `archived_at` and leave the list.
+    pub fn is_archivable(self) -> bool {
+        self.is_terminal()
+    }
+
+    /// Needs Jeremy: waiting on him, cut off, or failed. The list's `needs_me` count.
+    pub fn needs_me(self) -> bool {
+        matches!(
+            self,
+            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+        )
+    }
+
+    /// Queued, running or paused: the list's `moving` count.
+    pub fn is_moving(self) -> bool {
+        !self.is_finished()
+    }
+
+    /// Waiting on Jeremy, cut off or failed, with nothing running: what the automatic closes
+    /// (a ticked line, a later run of the item) may settle.
+    pub fn is_settleable(self) -> bool {
+        matches!(
+            self,
+            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
         )
     }
 
@@ -656,6 +754,22 @@ pub struct RunRecord {
     /// The repository's `env_file` at creation: its path only, never its contents.
     #[serde(default)]
     pub env_file: Option<String>,
+    /// Why the run was closed: `superseded by <run_id>`, `item ticked`, `report archived`, or
+    /// what Jeremy gave. Only while `closed`; absent from records written before 0.200.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_reason: Option<String>,
+    /// When the run was closed (RFC 3339). Only while `closed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    /// When the run left the runs list (RFC 3339): archived by Jeremy or by the watcher. A flag
+    /// only: the run's directory, log and reports stay where they are. Absent from records
+    /// written before 0.204.0, and after an unarchive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    /// Why it was archived: [`ARCHIVED_BY_JEREMY`], [`ARCHIVED_ITEM_TICKED`],
+    /// [`ARCHIVED_REPORT_ARCHIVED`] or [`ARCHIVED_AGED`]. Set exactly with `archived_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_reason: Option<String>,
 }
 
 impl RunRecord {
@@ -670,6 +784,44 @@ impl RunRecord {
     /// The strand's note slug and the item, when the run is a strand item's.
     pub fn step(&self) -> Option<(&str, &str)> {
         Some((self.strand.as_deref()?, self.item_id.as_deref()?))
+    }
+
+    /// Out of the runs list: archived, and in a status an archive accepts. A run a reply has
+    /// put back in the queue (or that came back waiting on Jeremy) shows again even though
+    /// `archived_at` is still set, so a live run is never hidden.
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some() && self.status.is_archivable()
+    }
+
+    /// When the run's status last changed, for the age rule: when it closed, else when it
+    /// finished, else its last event, else its creation.
+    pub fn settled_at(&self) -> Option<u64> {
+        [&self.closed_at, &self.finished_at]
+            .into_iter()
+            .filter_map(ms_opt)
+            .max()
+            .or_else(|| ms_opt(&self.last_event_at))
+            .or_else(|| ms_of(&self.created_at))
+    }
+}
+
+/// Which runs `GET /jesse/runs` serves: `?archived=` absent (the list), `only` or `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArchivedMode {
+    #[default]
+    Hide,
+    Only,
+    All,
+}
+
+impl ArchivedMode {
+    pub fn parse(s: Option<&str>) -> Result<ArchivedMode, String> {
+        match s {
+            None | Some("") | Some("none") => Ok(ArchivedMode::Hide),
+            Some("only") => Ok(ArchivedMode::Only),
+            Some("all") => Ok(ArchivedMode::All),
+            Some(other) => Err(format!("archived is {other:?}; it is only, all or absent")),
+        }
     }
 }
 
@@ -974,6 +1126,20 @@ pub struct RunPlace<'a> {
 /// The generated section's first paragraph, exactly: where the run is, and that this replaces
 /// whatever machine or directory the prompt names.
 pub fn place_paragraph(p: &RunPlace) -> String {
+    if is_local_repo(p.repo) {
+        return format!(
+            "You are running on the Mac Studio as a Studio run, in a fresh worktree of {} (Studio \
+             only) on branch {}, cut from {}. Wherever the prompt above names another machine, \
+             host, user or directory to work in, this worktree replaces it: do not change \
+             machines, do not stop because the host differs, and do not work in any other \
+             checkout of this repository. If the work needs another repository, clone it under \
+             {}/{EXTRA_DIR}/ and work there.",
+            p.repo,
+            p.branch,
+            p.default_branch,
+            p.run_dir.display()
+        );
+    }
     format!(
         "You are running on the Mac Studio as a Studio run, in a fresh worktree of {} on branch \
          {}, cut from origin/{}. Wherever the prompt above names another machine, host, user or \
@@ -1010,6 +1176,28 @@ pub fn generated_paragraph(run_id: &str, pr_title_tag: bool) -> String {
     )
 }
 
+/// What a local repository's run is told in place of the push, pull request and fetch
+/// sentences, exactly.
+pub const LOCAL_REPO_SENTENCE: &str = "This repository exists only on the Mac Studio and has no \
+remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch \
+push, a pull request, CI or a merge, do this instead: commit on your branch, and once your \
+verification passes, merge your branch into main of this repository with a fast forward (rebase \
+onto main first if it moved), then report the main commit.";
+
+/// [`generated_paragraph`] for a local repository: the same rules, with [`LOCAL_REPO_SENTENCE`]
+/// where the pull request title and the fetch before a merge were.
+pub fn generated_paragraph_local(run_id: &str) -> String {
+    let lower = run_id.to_lowercase();
+    format!(
+        "This run is {run_id}. Start every branch name with {lower}-. {LOCAL_REPO_SENTENCE} Keep \
+         everything you create inside your working directory or the system temporary directory. \
+         When you finish, or stop early, write your complete report back, the same text you \
+         would answer with, to the file named in the environment variable JESSE_RUN_REPORT, \
+         then answer as usual. If you need a decision from Jeremy to continue, stop, make the \
+         first line of that report NEEDS YOU: followed by the one question, and end the run."
+    )
+}
+
 /// The prompt a run is served: the section byte for byte, a blank line, then the generated
 /// section (where the run is, then the run's rules) and nothing else.
 pub fn served_prompt(section: &str, place: &RunPlace) -> String {
@@ -1023,7 +1211,11 @@ pub fn served_prompt(section: &str, place: &RunPlace) -> String {
     s.push_str("### Run ID and report\n\n");
     s.push_str(&place_paragraph(place));
     s.push_str("\n\n");
-    s.push_str(&generated_paragraph(place.run_id, place.pr_title_tag));
+    if is_local_repo(place.repo) {
+        s.push_str(&generated_paragraph_local(place.run_id));
+    } else {
+        s.push_str(&generated_paragraph(place.run_id, place.pr_title_tag));
+    }
     s.push('\n');
     s
 }
@@ -1058,6 +1250,9 @@ pub enum OptIn<'a> {
     /// opt in. The repository is the draft's `devjob-repo`, else `repo`, else the strand's one
     /// `repos:` entry.
     Request { repo: Option<&'a str> },
+    /// [`OptIn::Request`], and where that names no repository because the strand lists none,
+    /// the Studio only `local/<strand slug, lowercased>`. What a run started on the Studio uses.
+    RequestOrLocal { repo: Option<&'a str> },
 }
 
 /// A model id a draft's `devjob-model` may name.
@@ -1075,13 +1270,24 @@ fn check_model(path: &str, model: &Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// The local repository a strand that lists no repos falls back to: `local/<slug, lowercased>`.
+pub fn strand_local_repo(slug: &str) -> Result<String, String> {
+    local_repo(&slug.to_lowercase()).ok_or_else(|| {
+        format!(
+            "strand {slug} lists no repos and its slug makes no local repository name: pass repo"
+        )
+    })
+}
+
 /// The repository a requested run of a draft goes to: the draft's `devjob-repo`, else the
-/// caller's `repo`, else the strand's `repos:` when it lists exactly one.
+/// caller's `repo`, else the strand's `repos:` when it lists exactly one. With `local`, a strand
+/// that lists none gives [`strand_local_repo`] instead of an error.
 fn request_repo(
     path: &str,
     src: &str,
     repo: Option<&str>,
     strand: Option<(&str, &[String])>,
+    local: bool,
 ) -> Result<String, String> {
     if let Some(r) = fm(src, "devjob-repo") {
         if !valid_repo(&r) {
@@ -1103,6 +1309,7 @@ fn request_repo(
         [one] => Err(format!(
             "{path} has no devjob-repo and strand {slug}'s repos entry {one:?} is not owner/name: pass repo"
         )),
+        [] if local => strand_local_repo(slug),
         [] => Err(format!(
             "{path} has no devjob-repo and strand {slug} lists no repos: pass repo"
         )),
@@ -1169,7 +1376,12 @@ pub fn studio_item_of(
             }
             repo
         }
-        OptIn::Request { repo } => request_repo(&path, &src, repo, Some((slug, strand_repos)))?,
+        OptIn::Request { repo } => {
+            request_repo(&path, &src, repo, Some((slug, strand_repos)), false)?
+        }
+        OptIn::RequestOrLocal { repo } => {
+            request_repo(&path, &src, repo, Some((slug, strand_repos)), true)?
+        }
     };
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
@@ -1229,6 +1441,44 @@ pub fn studio_draft(
     draft: &str,
     repo: Option<&str>,
 ) -> Result<StudioDraft, String> {
+    studio_draft_with(notes_root, draft, repo, false)
+}
+
+/// [`studio_draft`], and where neither the draft nor `repo` names a repository, a local one: a
+/// draft of a strand that lists no repos uses `local/<strand slug, lowercased>`, a loose draft
+/// (no strand, or no such strand note) `local/scratch`. A draft of a strand that lists
+/// repositories still needs `repo`. What a run started on the Studio uses.
+pub fn studio_draft_or_local(
+    notes_root: &Path,
+    draft: &str,
+    repo: Option<&str>,
+) -> Result<StudioDraft, String> {
+    studio_draft_with(notes_root, draft, repo, true)
+}
+
+/// The local repository a draft that names none falls back to, or `None` when its strand lists
+/// repositories (so the caller must still pick one).
+fn draft_local_repo(notes_root: &Path, src: &str) -> Result<Option<String>, String> {
+    let Some(slug) = fm(src, "strand").filter(|s| crate::strands::is_safe_slug(s)) else {
+        return Ok(local_repo(LOCAL_SCRATCH));
+    };
+    let Ok(note) = std::fs::read_to_string(notes_root.join(format!("{STRANDS_DIR}/{slug}.md")))
+    else {
+        return Ok(local_repo(LOCAL_SCRATCH));
+    };
+    if parse_strand(&slug, &note).repos.is_empty() {
+        strand_local_repo(&slug).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn studio_draft_with(
+    notes_root: &Path,
+    draft: &str,
+    repo: Option<&str>,
+    local: bool,
+) -> Result<StudioDraft, String> {
     let target = draft.trim();
     let Some(path) = resolve_target(notes_root, target) else {
         return Err(format!("the draft {target:?} does not resolve to a file"));
@@ -1244,7 +1494,15 @@ pub fn studio_draft(
     }
     let src = std::fs::read_to_string(notes_root.join(&path))
         .map_err(|e| format!("{path} is unreadable: {e}"))?;
-    let repo = request_repo(&path, &src, repo, None)?;
+    let local_fallback = if local && repo.is_none() && fm(&src, "devjob-repo").is_none() {
+        draft_local_repo(notes_root, &src)?
+    } else {
+        None
+    };
+    let repo = match local_fallback {
+        Some(r) => r,
+        None => request_repo(&path, &src, repo, None, false)?,
+    };
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
     let Some(section) = prompt_section(&src) else {
@@ -1387,6 +1645,18 @@ pub fn pull_request_url(report: &str) -> Option<String> {
 /// The Inbox note for one finished round: the front matter, then the report verbatim, then the
 /// pull request link when the report names one.
 pub fn render_inbox(rec: &RunRecord, round: u32, status: RunStatus, report: &str) -> String {
+    render_inbox_with(rec, round, status, report, None)
+}
+
+/// [`render_inbox`], and for a local repository, after the report: where the work is, since
+/// there is no pull request to point at. `local_main` is its `main`'s commit now.
+pub fn render_inbox_with(
+    rec: &RunRecord,
+    round: u32,
+    status: RunStatus,
+    report: &str,
+    local_main: Option<&str>,
+) -> String {
     let mut s = format!(
         "---\ndevjob: {}\nrepo: {}\noutcome: {}\n",
         rec.run_id,
@@ -1411,7 +1681,23 @@ pub fn render_inbox(rec: &RunRecord, round: u32, status: RunStatus, report: &str
         }
         s.push_str(&format!("\nPull request: [{url}]({url})\n"));
     }
+    if is_local_repo(&rec.repo) {
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str(&local_footer(rec, local_main));
+    }
     s
+}
+
+/// The lines a local repository's Inbox report ends with.
+pub fn local_footer(rec: &RunRecord, local_main: Option<&str>) -> String {
+    format!(
+        "\nRepository: {} (Studio only)\nBranch: {}\nmain: {}\n",
+        rec.repo,
+        rec.branch,
+        local_main.unwrap_or("unknown")
+    )
 }
 
 /// The first line of a report, trimmed.
@@ -1489,6 +1775,109 @@ async fn write_report(
     let written = write_atomic(&abs, text.as_bytes());
     broker.release_call_direct(&turn, "report");
     written.map_err(|e| format!("could not write {rel}: {e}"))
+}
+
+// ---- CLOSING A SETTLED RUN ----------------------------------------------------------------
+
+/// `superseded by <run_id>`.
+pub fn superseded_reason(run_id: &str) -> String {
+    format!("superseded by {run_id}")
+}
+
+/// Close the run in `dir` with `reason` if, read again under its lock, its status is one `may`
+/// accepts. Silent: one log line, no push and no turn. `Ok(None)` when its status had moved on.
+fn close_run(
+    dir: &Path,
+    reason: &str,
+    may: impl Fn(RunStatus) -> bool,
+    now: u64,
+) -> Result<Option<RunRecord>, String> {
+    let mut closed = false;
+    let rec = update_run(dir, |r| {
+        if !may(r.status) {
+            return;
+        }
+        r.status = RunStatus::Closed;
+        r.closed_reason = Some(reason.to_string());
+        r.closed_at = Some(rfc(now));
+        r.waiting_for = None;
+        r.stalled_since = None;
+        r.resume_at = None;
+        if r.finished_at.is_none() {
+            r.finished_at = Some(rfc(now));
+        }
+        closed = true;
+    })?;
+    if !closed {
+        return Ok(None);
+    }
+    eprintln!("jesse-bridge: hostrun {}: closed ({reason})", rec.run_id);
+    Ok(Some(rec))
+}
+
+/// Archive the run in `dir` with `reason` if, read again under its lock, its status is one
+/// `may` accepts. An archived run keeps its first `archived_at` and reason. `Ok(Err(status))`
+/// when its status had moved to one `may` refuses.
+fn archive_run(
+    dir: &Path,
+    reason: &str,
+    may: impl Fn(RunStatus) -> bool,
+    now: u64,
+) -> Result<Result<RunRecord, RunStatus>, String> {
+    let mut refused = None;
+    let rec = update_run(dir, |r| {
+        if !may(r.status) {
+            refused = Some(r.status);
+            return;
+        }
+        if r.archived_at.is_none() {
+            r.archived_at = Some(rfc(now));
+            r.archived_reason = Some(reason.to_string());
+        }
+    })?;
+    Ok(match refused {
+        Some(s) => Err(s),
+        None => Ok(rec),
+    })
+}
+
+/// Whether the strand item's Drafts line is checked or under `### Done`. `None` when the note or
+/// the line can no longer be found, which settles nothing.
+pub fn item_ticked(notes_root: &Path, slug: &str, item_id: &str) -> Option<bool> {
+    if !crate::strands::is_safe_slug(slug) {
+        return None;
+    }
+    let src = std::fs::read_to_string(notes_root.join(format!("{STRANDS_DIR}/{slug}.md"))).ok()?;
+    let strand = parse_strand(slug, &src);
+    let lines: Vec<_> = strand.items.iter().filter(|i| i.id == item_id).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(
+        lines
+            .iter()
+            .any(|i| i.checked || i.section == StrandSection::Done),
+    )
+}
+
+/// Whether every report of the run is gone from where it was written and at least one of them
+/// is in `Inbox/archive/` under the same name. A run with no report, or a report that is simply
+/// missing, is not archived.
+pub fn reports_archived(notes_root: &Path, rec: &RunRecord) -> bool {
+    let paths: Vec<&str> = rec
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.as_deref())
+        .collect();
+    if paths.is_empty() || paths.iter().any(|p| notes_root.join(p).exists()) {
+        return false;
+    }
+    paths.iter().any(|p| {
+        p.rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty() && *name != ".." && *name != ".")
+            .is_some_and(|name| notes_root.join(INBOX_ARCHIVE_DIR).join(name).is_file())
+    })
 }
 
 // ---- THE SERVICE -------------------------------------------------------------------------
@@ -1601,6 +1990,12 @@ pub struct HostRuns {
     gate: Mutex<()>,
     wake: tokio::sync::Notify,
     house: Mutex<Housekeeping>,
+    /// Each run's `last_line`, kept while its stream is unchanged.
+    last_lines: work::LastLines,
+    /// Runs Jeremy unarchived since this bridge started: the automatic archive leaves them
+    /// alone, so an Undo is not taken back by the next watcher pass. Not run state; a restart
+    /// forgets it, and the rules apply again.
+    unarchived: Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -1631,6 +2026,8 @@ impl HostRuns {
             gate: Mutex::new(()),
             wake: tokio::sync::Notify::new(),
             house: Mutex::new(Housekeeping::default()),
+            last_lines: work::LastLines::default(),
+            unarchived: Mutex::new(HashSet::new()),
         }
     }
 
@@ -1711,7 +2108,7 @@ impl HostRuns {
                 let opt_in = if *scheduled {
                     OptIn::Schedule
                 } else {
-                    OptIn::Request {
+                    OptIn::RequestOrLocal {
                         repo: repo.as_deref(),
                     }
                 };
@@ -1728,7 +2125,7 @@ impl HostRuns {
                 )
             }
             StartKind::Draft { draft, repo } => {
-                let d = studio_draft(&self.notes_root, draft, repo.as_deref())
+                let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
                     .map_err(Refusal::Invalid)?;
                 (
                     format!("s-{}", d.slug),
@@ -1746,7 +2143,13 @@ impl HostRuns {
                 slug,
                 model,
             } => {
-                if !valid_repo(repo) {
+                // A free prompt that names no repository goes to `local/<branch_slug>`.
+                let repo = if repo.trim().is_empty() && valid_slug(slug) {
+                    local_repo(slug).unwrap_or_default()
+                } else {
+                    repo.clone()
+                };
+                if !valid_repo(&repo) {
                     return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
                 }
                 if prompt.trim().is_empty() {
@@ -1766,7 +2169,7 @@ impl HostRuns {
                 }
                 (
                     format!("s-{slug}"),
-                    repo.clone(),
+                    repo,
                     prompt.clone(),
                     None,
                     model.clone(),
@@ -1841,6 +2244,24 @@ impl HostRuns {
                 .map(|(s, i)| format!(" strand={s} item={i}"))
                 .unwrap_or_default()
         );
+        // A further run of the item settles the earlier ones still waiting on Jeremy, cut off
+        // or failed: the question they asked is now the new run's. Queued, running and paused
+        // runs go on.
+        if req.again {
+            if let Some((strand, item_id)) = &step {
+                let reason = superseded_reason(&run_id);
+                for (d, r) in self.runs() {
+                    if r.run_id != run_id
+                        && r.step() == Some((strand.as_str(), item_id.as_str()))
+                        && r.status.is_settleable()
+                    {
+                        if let Err(e) = close_run(&d, &reason, RunStatus::is_settleable, now_ms()) {
+                            eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id);
+                        }
+                    }
+                }
+            }
+        }
         drop(_gate);
         Ok(StartedRun {
             run_id,
@@ -2029,7 +2450,7 @@ impl HostRuns {
                     base = Some(git::add_worktree(
                         &self.settings.root,
                         &rec.repo,
-                        &self.settings.repo_url(&rec.repo),
+                        &self.clone_url(&rec.repo),
                         &worktree,
                         &rec.branch,
                     )?);
@@ -2037,7 +2458,7 @@ impl HostRuns {
                     git::restore_worktree(
                         &self.settings.root,
                         &rec.repo,
-                        &self.settings.repo_url(&rec.repo),
+                        &self.clone_url(&rec.repo),
                         &worktree,
                         &rec.branch,
                     )?;
@@ -2161,6 +2582,16 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
+        if text.trim() == CONTINUE_TEXT
+            && self
+                .get(run_id)
+                .is_some_and(|r| r.status == RunStatus::NeedsYou)
+        {
+            return Err(Refusal::State(format!(
+                "{run_id} asked a question and needs an answer: an empty \"{CONTINUE_TEXT}\" \
+                 would answer it blind. Reply with the answer."
+            )));
+        }
         self.queue_round_locked(run_id, text, None)
     }
 
@@ -2182,10 +2613,11 @@ impl HostRuns {
                 | RunStatus::Failed
                 | RunStatus::Interrupted
                 | RunStatus::Paused
+                | RunStatus::Closed
         ) {
             return Err(Refusal::State(format!(
-                "{run_id} is {}; a reply needs it to be needs_you, reported, failed, interrupted \
-                 or paused",
+                "{run_id} is {}; a reply needs it to be needs_you, reported, failed, interrupted, \
+                 paused or closed",
                 rec.status.label()
             )));
         }
@@ -2215,6 +2647,9 @@ impl HostRuns {
             r.stalled_since = None;
             r.disk_pushed = false;
             r.resume_at = None;
+            // A closed run that is answered is open again.
+            r.closed_reason = None;
+            r.closed_at = None;
             if auto == Some(AUTO_RESTART) {
                 r.restart_resumed = true;
             }
@@ -2338,6 +2773,230 @@ impl HostRuns {
             this.wake();
         });
         Ok(rec)
+    }
+
+    /// Close a run Jeremy has settled: `needs_you`, `interrupted` or `failed` only. `reason`
+    /// defaults to [`CLOSED_BY_JEREMY`]. Silent: no push and no turn.
+    pub fn close(&self, run_id: &str, reason: Option<&str>) -> Result<RunRecord, Refusal> {
+        let reason = match reason.map(str::trim) {
+            None | Some("") => CLOSED_BY_JEREMY.to_string(),
+            Some(r) if r.len() > MAX_CLOSE_REASON_BYTES => {
+                return Err(Refusal::Invalid(format!(
+                    "the reason is {} bytes; the most is {MAX_CLOSE_REASON_BYTES}",
+                    r.len()
+                )))
+            }
+            Some(r) if r.contains(['\n', '\r']) => {
+                return Err(Refusal::Invalid("the reason is one line".into()))
+            }
+            Some(r) => r.to_string(),
+        };
+        let may = |s: RunStatus| {
+            matches!(
+                s,
+                RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+            )
+        };
+        let _gate = lock(&self.gate);
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        let refused = |s: RunStatus| {
+            Refusal::State(format!(
+                "{run_id} is {}; only a needs_you, interrupted or failed run can be closed",
+                s.label()
+            ))
+        };
+        if !may(rec.status) {
+            return Err(refused(rec.status));
+        }
+        match close_run(&self.settings.run_dir(run_id), &reason, may, now_ms()) {
+            Ok(Some(r)) => Ok(r),
+            Ok(None) => Err(refused(
+                self.get(run_id).map(|r| r.status).unwrap_or(rec.status),
+            )),
+            Err(e) => Err(Refusal::Internal(e)),
+        }
+    }
+
+    /// Close, off the async runtime.
+    pub async fn close_blocking(
+        self: &Arc<Self>,
+        run_id: &str,
+        reason: Option<String>,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        tokio::task::spawn_blocking(move || this.close(&id, reason.as_deref()))
+            .await
+            .map_err(|e| Refusal::Internal(format!("the close task failed: {e}")))?
+    }
+
+    /// The watcher's settling: close every `needs_you`, `interrupted` or `failed` run whose
+    /// strand item's line is ticked ([`CLOSED_ITEM_TICKED`]) or that a later run of the same
+    /// item followed ([`superseded_reason`] of the newest such run, whatever its status), and
+    /// every `needs_you` run whose reports have all moved to `Inbox/archive/`
+    /// ([`CLOSED_REPORT_ARCHIVED`]). Returns each run closed and why. Never touches a queued,
+    /// running or paused run.
+    pub fn close_settled(&self, now: u64) -> Vec<(String, String)> {
+        let _gate = lock(&self.gate);
+        let mut out = Vec::new();
+        // Oldest first (by `created_at`, then id), so a later run of an item is one further on.
+        let runs = self.runs();
+        for (i, (dir, r)) in runs.iter().enumerate() {
+            if !r.status.is_settleable() {
+                continue;
+            }
+            let newer = || {
+                let step = r.step()?;
+                runs[i + 1..]
+                    .iter()
+                    .rfind(|(_, n)| n.step() == Some(step))
+                    .map(|(_, n)| superseded_reason(&n.run_id))
+            };
+            let reason = if r
+                .step()
+                .and_then(|(slug, id)| item_ticked(&self.notes_root, slug, id))
+                == Some(true)
+            {
+                CLOSED_ITEM_TICKED.to_string()
+            } else if let Some(reason) = newer() {
+                reason
+            } else if r.status == RunStatus::NeedsYou && reports_archived(&self.notes_root, r) {
+                CLOSED_REPORT_ARCHIVED.to_string()
+            } else {
+                continue;
+            };
+            let may = |s: RunStatus| match reason.as_str() {
+                CLOSED_REPORT_ARCHIVED => s == RunStatus::NeedsYou,
+                _ => s.is_settleable(),
+            };
+            match close_run(dir, &reason, may, now) {
+                Ok(Some(_)) => out.push((r.run_id.clone(), reason)),
+                Ok(None) => {}
+                Err(e) => eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id),
+            }
+        }
+        out
+    }
+
+    // ---- ARCHIVING ---------------------------------------------------------------------
+
+    /// Take a run out of the runs list. Refuses a queued, running or paused run; closes a
+    /// `needs_you` or `interrupted` run first ([`HostRuns::close`] with
+    /// [`ARCHIVED_BY_JEREMY`]); flags a `failed` one, like every other finished run, in place
+    /// with its status kept. Idempotent: an archived run is answered as it is. A flag only:
+    /// nothing of the run is moved or deleted. Silent: no push and no turn.
+    pub fn archive(&self, run_id: &str) -> Result<RunRecord, Refusal> {
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        if rec.status.is_moving() {
+            return Err(Refusal::State(format!(
+                "{run_id} is {}; a queued, running or paused run cannot be archived",
+                rec.status.label()
+            )));
+        }
+        if rec.status.is_settleable() && !rec.status.is_archivable() {
+            self.close(run_id, Some(ARCHIVED_BY_JEREMY))?;
+        }
+        lock(&self.unarchived).remove(run_id);
+        let _gate = lock(&self.gate);
+        match archive_run(
+            &self.settings.run_dir(run_id),
+            ARCHIVED_BY_JEREMY,
+            RunStatus::is_archivable,
+            now_ms(),
+        ) {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(s)) => Err(Refusal::State(format!(
+                "{run_id} is {}; a queued, running or paused run cannot be archived",
+                s.label()
+            ))),
+            Err(e) => Err(Refusal::Internal(e)),
+        }
+    }
+
+    /// Put a run back in the runs list: clears `archived_at` and `archived_reason` and nothing
+    /// else. Idempotent. The automatic archive leaves it alone until the bridge restarts.
+    pub fn unarchive(&self, run_id: &str) -> Result<RunRecord, Refusal> {
+        if self.get(run_id).is_none() {
+            return Err(Refusal::NotFound(format!("no run {run_id:?}")));
+        }
+        let _gate = lock(&self.gate);
+        lock(&self.unarchived).insert(run_id.to_string());
+        update_run(&self.settings.run_dir(run_id), |r| {
+            r.archived_at = None;
+            r.archived_reason = None;
+        })
+        .map_err(Refusal::Internal)
+    }
+
+    /// [`HostRuns::archive`] or [`HostRuns::unarchive`], off the async runtime.
+    pub async fn archive_blocking(
+        self: &Arc<Self>,
+        run_id: &str,
+        archived: bool,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if archived {
+                this.archive(&id)
+            } else {
+                this.unarchive(&id)
+            }
+        })
+        .await
+        .map_err(|e| Refusal::Internal(format!("the archive task failed: {e}")))?
+    }
+
+    /// Why the watcher would archive `r` now, if it would: its Drafts line is ticked, its
+    /// reports have all moved to `Inbox/archive/`, or it finished more than
+    /// [`AUTO_ARCHIVE_AFTER_DAYS`] ago. Never a run that is moving, waits on Jeremy, was cut
+    /// off or failed, nor one already archived.
+    pub fn auto_archive_reason(&self, r: &RunRecord, now: u64) -> Option<&'static str> {
+        if r.archived_at.is_some() || !r.status.is_archivable() || r.status.needs_me() {
+            return None;
+        }
+        if r.step()
+            .and_then(|(slug, id)| item_ticked(&self.notes_root, slug, id))
+            == Some(true)
+        {
+            return Some(ARCHIVED_ITEM_TICKED);
+        }
+        if reports_archived(&self.notes_root, r) {
+            return Some(ARCHIVED_REPORT_ARCHIVED);
+        }
+        let age = now.saturating_sub(r.settled_at()?);
+        (age > AUTO_ARCHIVE_AFTER_DAYS * DAY_MS).then_some(ARCHIVED_AGED)
+    }
+
+    /// The watcher's archiving, after [`HostRuns::close_settled`]: every run
+    /// [`HostRuns::auto_archive_reason`] names, except those Jeremy unarchived since the bridge
+    /// started. Silent. Returns each run archived and why.
+    pub fn archive_settled(&self, now: u64) -> Vec<(String, String)> {
+        let held = lock(&self.unarchived).clone();
+        let _gate = lock(&self.gate);
+        let mut out = Vec::new();
+        for (dir, r) in self.runs() {
+            if held.contains(&r.run_id) {
+                continue;
+            }
+            let Some(reason) = self.auto_archive_reason(&r, now) else {
+                continue;
+            };
+            let may = |s: RunStatus| s.is_archivable() && !s.needs_me();
+            match archive_run(&dir, reason, may, now) {
+                Ok(Ok(_)) => {
+                    eprintln!("jesse-bridge: hostrun {}: archived ({reason})", r.run_id);
+                    out.push((r.run_id.clone(), reason.to_string()))
+                }
+                Ok(Err(_)) => {}
+                Err(e) => eprintln!("jesse-bridge: hostrun {}: not archived: {e}", r.run_id),
+            }
+        }
+        out
     }
 
     // ---- THE WATCHER -------------------------------------------------------------------
@@ -2495,7 +3154,16 @@ impl HostRuns {
             None => {
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
                 let rel = report_rel_path(&date, run_id, round.n);
-                let text = render_inbox(&rec, round.n, status, &report);
+                let local_main = if is_local_repo(&rec.repo) {
+                    let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+                    tokio::task::spawn_blocking(move || git::local_main_sha(&root, &repo))
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                let text = render_inbox_with(&rec, round.n, status, &report, local_main.as_deref());
                 write_report(&self.notes_root, &sink.broker, run_id, &rel, &text).await?;
                 eprintln!(
                     "jesse-bridge: hostrun REPORT {run_id} round {} {} at {rel}",
@@ -2543,6 +3211,21 @@ impl HostRuns {
         }
         if rec.round().is_some_and(|r| r.notified) {
             return Ok(());
+        }
+        // A local repository's readable copy of `main`, once per finished round.
+        if let Some(checkout) = self.settings.local_checkout(&rec.repo) {
+            let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+            let res = tokio::task::spawn_blocking(move || {
+                git::update_local_checkout(&root, &repo, &checkout)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            if let Err(e) = res {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: the readable checkout of {}: {e}",
+                    rec.repo
+                );
+            }
         }
         if let Some(n) = &sink.notifier {
             let title = format!("Run {run_id} {}", status.outcome());
@@ -2647,6 +3330,10 @@ impl HostRuns {
                 eprintln!("jesse-bridge: hostrun {id}: report not written yet: {e}");
             }
         }
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || this.archive_settled(now)).await;
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;
@@ -2762,9 +3449,26 @@ impl HostRuns {
         }
     }
 
+    /// The clone URL for a run's repository: none for a local repository, which has no remote.
+    fn clone_url(&self, repo: &str) -> String {
+        if is_local_repo(repo) {
+            String::new()
+        } else {
+            self.settings.repo_url(repo)
+        }
+    }
+
     /// Whether a finished run's pull request is merged or closed, or its branch (seen on origin
-    /// before) is gone from it. Records a sighting of the branch.
+    /// before) is gone from it. Records a sighting of the branch. A local repository has no
+    /// pull request and the forge is never asked: its run is done with once its branch is in
+    /// its `main` and its worktree holds nothing uncommitted.
     fn merged_or_gone(&self, dir: &Path, rec: &RunRecord) -> bool {
+        if is_local_repo(&rec.repo) {
+            let bare = git::bare_path(&self.settings.root, &rec.repo);
+            let wt = dir.join(WORKTREE_DIR);
+            return git::merged_into_local_main(&bare, &rec.branch) == Some(true)
+                && (!wt.exists() || git::worktree_clean(&wt));
+        }
         if matches!(
             self.forge.pr_state(&rec.repo, &rec.branch),
             Some(PrState::Merged | PrState::Closed)
@@ -2958,24 +3662,52 @@ impl HostRuns {
 
     // ---- READING ---------------------------------------------------------------------
 
-    /// `GET /jesse/runs`.
-    pub fn list_json(&self) -> Value {
-        let mut runs: Vec<RunRecord> = self.runs().into_iter().map(|(_, r)| r).collect();
-        runs.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then(b.run_id.cmp(&a.run_id))
-        });
-        let count = |s: RunStatus| runs.iter().filter(|r| r.status == s).count();
+    /// `GET /jesse/runs`: every run not archived ([`ArchivedMode::Hide`]), live and newest
+    /// first by creation; only the archived ones, newest archived first; or all of them.
+    /// `counts` covers the whole store in the one scan, whatever the mode: the running,
+    /// queued, needs_you and paused tallies as before, and the app's four filters, `needs_me`
+    /// (needs_you, interrupted, failed), `moving` (queued, running, paused), `finished`
+    /// (everything else not archived) and `archived`.
+    pub fn list_json_mode(&self, mode: ArchivedMode) -> Value {
+        let all: Vec<RunRecord> = self.runs().into_iter().map(|(_, r)| r).collect();
+        let (archived, open): (Vec<&RunRecord>, Vec<&RunRecord>) =
+            all.iter().partition(|r| r.is_archived());
+        let count = |s: RunStatus| open.iter().filter(|r| r.status == s).count();
+        let needs_me = open.iter().filter(|r| r.status.needs_me()).count();
+        let moving = open.iter().filter(|r| r.status.is_moving()).count();
         let counts = json!({
             "running": count(RunStatus::Running),
             "queued": count(RunStatus::Queued),
             "needs_you": count(RunStatus::NeedsYou),
             "paused": count(RunStatus::Paused),
+            "needs_me": needs_me,
+            "moving": moving,
+            "finished": open.len() - needs_me - moving,
+            "archived": archived.len(),
         });
+        let mut runs: Vec<&RunRecord> = match mode {
+            ArchivedMode::Hide => open,
+            ArchivedMode::Only => archived,
+            ArchivedMode::All => all.iter().collect(),
+        };
+        if mode == ArchivedMode::Only {
+            runs.sort_by(|a, b| {
+                b.archived_at
+                    .cmp(&a.archived_at)
+                    .then(b.run_id.cmp(&a.run_id))
+            });
+        } else {
+            runs.sort_by(|a, b| {
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then(b.run_id.cmp(&a.run_id))
+            });
+        }
+        let mut notes = StrandNotes::default();
+        let served: Vec<Value> = runs.iter().map(|r| self.served(r, &mut notes)).collect();
         let h = lock(&self.house);
         json!({
-            "runs": runs.iter().map(run_json).collect::<Vec<_>>(),
+            "runs": served,
             "counts": counts,
             "disk": {
                 "total_bytes": h.last_total_bytes,
@@ -2984,6 +3716,61 @@ impl HostRuns {
             },
             "orphans": h.orphans,
         })
+    }
+
+    /// `GET /jesse/runs` with no `archived`: the list without archived runs.
+    pub fn list_json(&self) -> Value {
+        self.list_json_mode(ArchivedMode::Hide)
+    }
+
+    /// One run as the routes serve it: [`run_json_located`] plus the Work view's `title`,
+    /// `last_line` (the last non blank line of its readable log) and `report_line` (the first
+    /// line of its newest report). Additive: nothing `run_json` serves changes.
+    pub fn served(&self, r: &RunRecord, notes: &mut StrandNotes) -> Value {
+        let mut v = run_json_located(r, &self.notes_root);
+        let root = &self.notes_root;
+        let dir = self.settings.run_dir(&r.run_id);
+        let title = work::run_title(
+            r,
+            |strand, item| notes.line_title(root, strand, item),
+            || {
+                r.prompt_path
+                    .as_deref()
+                    .and_then(|p| std::fs::read_to_string(root.join(locate_report(root, p))).ok())
+                    .and_then(|src| work::h1_title(&src))
+                    .or_else(|| {
+                        [PROMPT_MD, SECTION_MD].iter().find_map(|n| {
+                            std::fs::read_to_string(dir.join(n))
+                                .ok()
+                                .and_then(|src| work::h1_title(&src))
+                        })
+                    })
+            },
+        );
+        let last_line = if valid_run_id(&r.run_id) {
+            self.last_lines.get(&r.run_id, &dir)
+        } else {
+            None
+        };
+        let report_line = r
+            .rounds
+            .iter()
+            .rev()
+            .find_map(|x| x.report_path.as_deref())
+            .and_then(|rel| std::fs::read_to_string(root.join(locate_report(root, rel))).ok())
+            .or_else(|| std::fs::read_to_string(dir.join(REPORT_MD)).ok())
+            .and_then(|src| work::report_line_of(&src));
+        if let Some(o) = v.as_object_mut() {
+            o.insert("title".into(), json!(title));
+            o.insert("last_line".into(), json!(last_line));
+            o.insert("report_line".into(), json!(report_line));
+        }
+        v
+    }
+
+    /// [`HostRuns::served`] for one run, outside a list.
+    pub fn served_one(&self, r: &RunRecord) -> Value {
+        self.served(r, &mut StrandNotes::default())
     }
 
     /// The readable log of a run, its last `tail` lines.
@@ -3002,9 +3789,70 @@ impl HostRuns {
     }
 }
 
+/// The strand notes one served list has read, by slug, so a list of runs parses each note once.
+#[derive(Default)]
+pub struct StrandNotes {
+    read: HashMap<String, Option<crate::strands::Strand>>,
+}
+
+impl StrandNotes {
+    /// The title of line `item_id` of `Strands/<slug>.md`, if the note and the line are there.
+    pub fn line_title(&mut self, notes_root: &Path, slug: &str, item_id: &str) -> Option<String> {
+        let strand = self.read.entry(slug.to_string()).or_insert_with(|| {
+            if !crate::strands::is_safe_slug(slug) {
+                return None;
+            }
+            let rel = format!("{STRANDS_DIR}/{slug}.md");
+            let src = std::fs::read_to_string(notes_root.join(&rel)).ok()?;
+            Some(parse_strand(slug, &src))
+        });
+        strand
+            .as_ref()?
+            .items
+            .iter()
+            .find(|i| i.id == item_id)
+            .map(|i| work::line_title(&i.raw))
+    }
+}
+
 /// A run id names one directory under `runs/` and nothing else.
 pub fn valid_run_id(id: &str) -> bool {
     devjob::valid_label_value(id) && !id.contains("..")
+}
+
+/// Where a report the run recorded at `rel` lives now, vault relative.
+///
+/// A report is written to `Inbox/` and its path recorded in `run.json` once. Processing the
+/// Inbox then files a read report under `Inbox/archive/`, and the recorded path names a note
+/// that is no longer there: the app's Report link opened "doesn't exist on the Studio" for
+/// every run whose report had been processed. So the path served is the note's CURRENT one:
+/// the recorded path while it exists, else the same file under the folder's `archive/`, else
+/// the recorded path unchanged (nothing better is known; the app says it is missing).
+pub fn locate_report(notes_root: &Path, rel: &str) -> String {
+    if notes_root.join(rel).is_file() {
+        return rel.to_string();
+    }
+    let p = Path::new(rel);
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+        let archived = parent.join(crate::strands::ARCHIVE_SEGMENT).join(name);
+        if notes_root.join(&archived).is_file() {
+            return archived.to_string_lossy().into_owned();
+        }
+    }
+    rel.to_string()
+}
+
+/// [`run_json`] with every report path resolved to where the note lives now
+/// ([`locate_report`]): what the routes serve.
+pub fn run_json_located(r: &RunRecord, notes_root: &Path) -> Value {
+    let mut v = run_json(r);
+    v["report_paths"] = json!(r
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.as_deref())
+        .map(|rel| locate_report(notes_root, rel))
+        .collect::<Vec<_>>());
+    v
 }
 
 /// One run for the routes and the tools: `run.json`, `host`, and its report paths.
@@ -3062,6 +3910,7 @@ pub fn annotate_strands(
     snap: &crate::strands::StrandsSnapshot,
     notes_root: &Path,
     service: Option<&HostRuns>,
+    today: &str,
 ) {
     let Some(list) = value.get_mut("strands").and_then(Value::as_array_mut) else {
         return;
@@ -3091,21 +3940,33 @@ pub fn annotate_strands(
             })
             .count();
         obj.insert("runs_needs_you".into(), json!(needs_you as u32));
-        let runnable = |item: &crate::strands::StrandItem| {
-            service.is_some()
-                && studio_item_of(
-                    notes_root,
-                    &strand.slug,
-                    item,
-                    &strand.repos,
-                    OptIn::Request { repo: None },
-                )
-                .is_ok()
+        // `studio_runnable`'s check, kept with its reason: `Ok` is the draft's path.
+        let runnable = |item: &crate::strands::StrandItem| -> Result<String, String> {
+            if service.is_none() {
+                return Err("Runs are not enabled on this bridge.".into());
+            }
+            studio_item_of(
+                notes_root,
+                &strand.slug,
+                item,
+                &strand.repos,
+                OptIn::Request { repo: None },
+            )
+            .map(|s| s.prompt_path)
         };
         let drafts: Vec<Value> = strand
             .items
             .iter()
             .map(|i| {
+                let check = runnable(i);
+                let draft_src = check
+                    .as_ref()
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(notes_root.join(p)).ok());
+                let live = runs.iter().any(|r| {
+                    r.step() == Some((strand.slug.as_str(), i.id.as_str())) && r.status.is_live()
+                });
+                let startable = work::startable(i, &check, draft_src.as_deref(), live);
                 json!({
                     "id": i.id,
                     "text": i.text,
@@ -3116,11 +3977,45 @@ pub fn annotate_strands(
                         StrandSection::Done => "done",
                     },
                     "checked": i.checked,
-                    "studio_runnable": runnable(i),
+                    "studio_runnable": check.is_ok(),
+                    "title": work::line_title(&i.raw),
+                    "startable": startable.is_ok(),
+                    "startable_reason": startable.err(),
                 })
             })
             .collect();
         obj.insert("drafts".into(), json!(drafts));
+        // The board row's three phrases (0.205.0), from the note's own words and its lines'
+        // titles and texts, by id.
+        let (lines, texts): (Vec<_>, Vec<_>) = strand
+            .items
+            .iter()
+            .filter(|i| !i.id.is_empty())
+            .map(|i| {
+                (
+                    (i.id.clone(), work::line_title(&i.raw)),
+                    (i.id.clone(), i.text.clone()),
+                )
+            })
+            .unzip();
+        let headline = strand
+            .now
+            .as_deref()
+            .and_then(|n| work::row::headline(n, &lines, today));
+        // The first unticked Queue line, named once: Next shows it, and a remark gate gives way
+        // to it in the same words.
+        let next = strand
+            .items
+            .iter()
+            .find(|i| !i.checked && i.section == StrandSection::Queue)
+            .and_then(|i| work::row::next_title(&i.text, &work::line_title(&i.raw), &lines));
+        let your_action = strand
+            .waiting
+            .as_ref()
+            .and_then(|w| work::row::your_action(&w.text, &lines, next.as_deref(), &texts));
+        obj.insert("headline".into(), json!(headline));
+        obj.insert("next_title".into(), json!(next));
+        obj.insert("your_action".into(), json!(your_action));
     }
 }
 
@@ -3149,7 +4044,9 @@ fn refusal(r: Refusal) -> ApiError {
 }
 
 /// `POST /jesse/runs`: a strand item (`strand` and `item_id`), or a draft by its path
-/// (`draft`). `repo` names the repository when the draft does not.
+/// (`draft`). `repo` names the repository when the draft does not; `local/<name>` is a Studio
+/// only one. With none named, a strand that lists no repos runs in `local/<strand slug>` and a
+/// loose draft in `local/scratch` ([`HostRuns::create`]).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartBody {
@@ -3189,6 +4086,29 @@ pub struct ReplyBody {
     pub text: String,
 }
 
+/// `POST /jesse/runs/:run_id/close`: an optional `{ "reason": "..." }`.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CloseBody {
+    pub reason: Option<String>,
+}
+
+impl CloseBody {
+    /// An empty body is no reason; anything else must be the JSON object.
+    pub fn parse(bytes: &[u8]) -> Result<CloseBody, String> {
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(CloseBody::default());
+        }
+        serde_json::from_slice(bytes).map_err(|e| format!("bad body: {e}"))
+    }
+}
+
+/// `GET /jesse/runs?archived=only|all`.
+#[derive(Deserialize, Default)]
+pub struct ListQuery {
+    pub archived: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct LogQuery {
     pub tail: Option<usize>,
@@ -3197,10 +4117,13 @@ pub struct LogQuery {
 /// `GET /jesse/runs`.
 pub async fn jesse_runs(
     State(st): State<AppState>,
+    Query(q): Query<ListQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
-    let v = tokio::task::spawn_blocking(move || svc.list_json())
+    let mode =
+        ArchivedMode::parse(q.archived.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let v = tokio::task::spawn_blocking(move || svc.list_json_mode(mode))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(v).into_response())
@@ -3234,7 +4157,7 @@ pub async fn jesse_run(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     match svc.get(&run_id) {
-        Some(r) => Ok(Json(run_json(&r)).into_response()),
+        Some(r) => Ok(Json(svc.served_one(&r)).into_response()),
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
@@ -3270,7 +4193,7 @@ pub async fn jesse_run_reply(
         .reply_and_pump(&run_id, &body.text)
         .await
         .map_err(refusal)?;
-    Ok(Json(run_json(&r)).into_response())
+    Ok(Json(svc.served_one(&r)).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/cancel`.
@@ -3281,7 +4204,49 @@ pub async fn jesse_run_cancel(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let r = svc.cancel_and_wake(&run_id).await.map_err(refusal)?;
+    Ok(Json(svc.served_one(&r)).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/close` with an optional `{ reason }`.
+pub async fn jesse_run_close(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let body = CloseBody::parse(&body).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let r = svc
+        .close_blocking(&run_id, body.reason)
+        .await
+        .map_err(refusal)?;
     Ok(Json(run_json(&r)).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/archive`: the run as the routes serve it, now archived. 409 for
+/// a queued, running or paused run.
+pub async fn jesse_run_archive(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let r = svc.archive_blocking(&run_id, true).await.map_err(refusal)?;
+    Ok(Json(svc.served_one(&r)).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/unarchive`: the run as the routes serve it, back in the list.
+pub async fn jesse_run_unarchive(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let r = svc
+        .archive_blocking(&run_id, false)
+        .await
+        .map_err(refusal)?;
+    Ok(Json(svc.served_one(&r)).into_response())
 }
 
 #[cfg(test)]

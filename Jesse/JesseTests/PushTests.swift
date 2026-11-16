@@ -1,5 +1,7 @@
 import XCTest
 import SwiftData
+import UIKit
+import JesseNetworking
 @testable import Jesse
 import JesseCore
 
@@ -102,6 +104,33 @@ final class PushTests: XCTestCase {
         let body = try XCTUnwrap(cap.body)
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(obj["token"] as? String, "abc123devicetoken")
+    }
+
+    func testABareTokenRegistrationSendsOnlyTheTokenAsOlderBridgesExpect() async throws {
+        CapturingProtocol.status = 200
+        let client = CapturingProtocol.makeClient(token: "secret")
+        try await client.registerDevice(token: "abc123devicetoken")
+        let body = try XCTUnwrap(CapturingProtocol.captured?.body)
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(Set(obj.keys), ["token"])
+    }
+
+    @MainActor
+    func testRegisterDeviceNamesThisDeviceItsPlatformAndItsTopic() async throws {
+        // One entry per device on the bridge: the registration says which device it is, so
+        // the phone no longer replaces the Mac's token (or the Mac the phone's).
+        CapturingProtocol.status = 200
+        let client = CapturingProtocol.makeClient(token: "secret")
+        let registration = PushDeviceIdentity.registration(token: "abc123devicetoken")
+        try await client.registerDevice(registration)
+        let body = try XCTUnwrap(CapturingProtocol.captured?.body)
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(obj["token"] as? String, "abc123devicetoken")
+        XCTAssertEqual(obj["platform"] as? String, "ios")
+        XCTAssertEqual(obj["device_id"] as? String,
+                       UIDevice.current.identifierForVendor?.uuidString)
+        XCTAssertFalse((obj["device_id"] as? String ?? "").isEmpty)
+        XCTAssertEqual(obj["topic"] as? String, Bundle.main.bundleIdentifier)
     }
 
     func testRegisterDeviceThrowsOnUnauthorized() async {

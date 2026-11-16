@@ -10,7 +10,11 @@
 # backstop that reports up to a day late, not a gate.
 #
 # Usage:
-#     scripts/local-ci-macos.sh
+#     scripts/local-ci-macos.sh [--fail-fast]
+#
+# The iPhone tests run on the newest standard "iPhone NN Pro" (scripts/simulator-pick.jq).
+# To test on another model, name its device type (from `xcrun simctl list devicetypes`):
+#     JESSE_CI_IPHONE_TYPE=com.apple.CoreSimulator.SimDeviceType.iPhone-17 scripts/local-ci-macos.sh
 #
 # It is also wired as a pre-push hook — install once per clone with:
 #     scripts/install-hooks.sh
@@ -22,8 +26,20 @@
 #                                 guard — the blunt instrument, avoid it
 #     JESSE_SKIP_MAC_CI=1 git push  skip only this script, keep the version guard
 #
-# Exits non-zero on the first failing check and prints a PASS/FAIL/SKIP summary
-# of everything it got through.
+# EVERY STEP RUNS, and one run reports every failing step, not only the first.
+# A step that consumes another step's output (a simulator resolve, a build its
+# test needs) runs only when that step passed, and is otherwise printed as
+# "SKIP (needs <step>, which failed)": a dependency skip, not a host skip, and
+# not counted in the SKIPPED total. After the last step the summary lists every
+# FAIL, the final line is "local-ci-macos: N FAILED (<names>)" when anything
+# failed, and the script exits 1; otherwise it prints ALL CHECKS PASSED and exits
+# 0. The plumbing is scripts/lib/ci-runner.sh, which scripts/test-ci-runner.sh
+# tests without Xcode.
+#
+# FAIL FAST, the old behaviour (stop at the first failing step), is an option:
+#     scripts/local-ci-macos.sh --fail-fast
+#     JESSE_CI_FAIL_FAST=1 scripts/local-ci-macos.sh   (or JESSE_CI_FAIL_FAST=1 git push,
+#                                                    since the hook takes no arguments)
 #
 # AN OLDER HOST (macOS below 26) cannot run everything CI runs, and pretending
 # otherwise made this gate fail on every push from such a machine, so pushes went
@@ -54,6 +70,12 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+# The step plumbing (run_step, skip_step, note_known_skip, record, summary,
+# ci_finish): see the file for what PASS, FAIL and the two kinds of SKIP mean.
+# shellcheck source=lib/ci-runner.sh
+. "$ROOT/scripts/lib/ci-runner.sh"
+ci_parse_args "$@" || exit 2
 
 # --- Toolchain -------------------------------------------------------------
 #
@@ -103,52 +125,40 @@ fi
 #     on macOS, where it is declared.
 KIT_SIM_SKIPS="JesseNetworkingTests/ArtifactFileTypeTests/testPreviewItemCarriesATypeAndATitleForEveryAcceptedMime"
 
-# --- Step plumbing ---------------------------------------------------------
+CI_HOST_DESC="macOS ${HOST_OS}"
 
-RESULTS=""
-STARTED_AT=$SECONDS
-
-summary() {
-  echo ""
-  echo "============================================================"
-  printf '%s' "$RESULTS"
-  echo "============================================================"
-  echo "total: $((SECONDS - STARTED_AT))s"
-}
-
-record() { RESULTS="${RESULTS}  $1  $2 ($3s)
-"; }
-
-SKIPS=0
-
-# A check this host cannot perform, recorded as such rather than as a pass.
-skip_step() {
-  echo ""
-  echo "==> $1"
-  echo "SKIPPED: $2"
-  record "SKIP" "$1 — $2" 0
-  SKIPS=$((SKIPS + 1))
-}
-
-# A test skipped inside a step that otherwise ran.
-note_known_skip() {
-  record "SKIP" "known on this host: $1" 0
-  SKIPS=$((SKIPS + 1))
-}
-
-run_step() {
-  name="$1"; shift
-  echo ""
-  echo "==> ${name}"
-  t0=$SECONDS
-  if "$@"; then
-    record "PASS" "$name" "$((SECONDS - t0))"
-  else
-    record "FAIL" "$name" "$((SECONDS - t0))"
-    summary
-    echo ""
-    echo "local-ci-macos: FAILED at '${name}'." >&2
-    exit 1
+# --- Warnings the local compiler would not promote -------------------------
+#
+# A newer Swift than the runner's can DEMOTE a diagnostic the runner reports as an
+# error, and a demoted diagnostic is not one `-warnings-as-errors` (or `-Werror
+# <group>`, or SWIFT_TREAT_WARNINGS_AS_ERRORS) promotes back. PR 333 merged through
+# exactly that gap: a pure string helper on a SwiftUI `View`, which is MainActor
+# by its conformance, was called from a nonisolated function. Xcode 26.6 on the
+# runner rejected it ("call to main actor-isolated static method in a synchronous
+# nonisolated context"); this Studio's Swift 6.4 printed the same text as a
+# warning, the build succeeded, and the gate passed.
+#
+# So every build below runs through this, which fails the step on ANY Swift
+# warning that survived. Under warnings-as-errors a surviving warning is by
+# construction one the toolchain declined to promote, and the runner's older
+# compiler may well make it an error.
+no_surviving_warnings() {
+  log="$(mktemp "${TMPDIR:-/tmp}/local-ci-build.XXXXXX")"
+  "$@" 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$log"
+    return "$rc"
+  fi
+  survived="$(sed $'s/\x1b\\[[0-9;]*m//g' "$log" \
+    | grep -E '^/[^ ]*\.swift:[0-9]+:[0-9]+: warning:' | sort -u)"
+  rm -f "$log"
+  if [ -n "$survived" ]; then
+    echo "" >&2
+    echo "Swift warnings survived warnings-as-errors. This toolchain demoted them; the" >&2
+    echo "runner's may not (see no_surviving_warnings in this script):" >&2
+    printf '%s\n' "$survived" >&2
+    return 1
   fi
 }
 
@@ -158,18 +168,28 @@ run_step() {
 #    First because it is by far the fastest feedback (seconds, no simulator) and
 #    it is where most of the shared logic lives. Warnings-as-errors, symmetric
 #    with the app build below.
+#
+#    It builds from an EMPTY scratch directory every time, as the runner does. An
+#    incremental build does not recompile, and so does not re-print, a file that
+#    did not change, and a warning in it would slip past no_surviving_warnings.
 jessekit() {
+  kit_scratch="$(mktemp -d "${TMPDIR:-/tmp}/local-ci-jessekit.XXXXXX")"
   if [ "$OLD_HOST" = no ]; then
     ( cd "$ROOT/JesseKit" \
-      && swift build -Xswiftc -warnings-as-errors \
-      && swift test -Xswiftc -warnings-as-errors )
-    return
+      && no_surviving_warnings swift build --scratch-path "$kit_scratch" -Xswiftc -warnings-as-errors \
+      && no_surviving_warnings swift test --scratch-path "$kit_scratch" -Xswiftc -warnings-as-errors )
+    rc=$?
+    rm -rf "$kit_scratch"
+    return $rc
   fi
   # `--build-tests` is what `swift test` would have compiled; a plain build skips
   # the test targets and misses a test file that no longer compiles.
   ( cd "$ROOT/JesseKit" \
-    && swift build -Xswiftc -warnings-as-errors \
-    && swift build --build-tests -Xswiftc -warnings-as-errors ) || return 1
+    && no_surviving_warnings swift build --scratch-path "$kit_scratch" -Xswiftc -warnings-as-errors \
+    && no_surviving_warnings swift build --scratch-path "$kit_scratch" --build-tests -Xswiftc -warnings-as-errors )
+  rc=$?
+  rm -rf "$kit_scratch"
+  [ "$rc" -eq 0 ] || return 1
   jessekit_on_simulator
 }
 
@@ -222,43 +242,57 @@ jessekit_ios_tests_build() {
       CODE_SIGNING_ALLOWED=NO )
 }
 
-# Simulator resolution mirrors the workflow's jq query exactly: newest available
-# runtime for the platform, and a device type that runtime itself declares it
-# supports. The one deliberate difference from CI is REUSE — CI creates a throwaway
-# device per run because its runner is throwaway; creating a new simulator on every
-# push here would leak devices and re-pay first-boot cost each time.
+# Simulator resolution is scripts/simulator-pick.jq, the same file ios-ci.yml reads, so
+# the gate and the nightly pick the same runtime and model. For an iPhone that is the
+# newest standard "iPhone NN Pro" (JESSE_CI_IPHONE_TYPE, a device type identifier,
+# overrides it); the watch keeps the newest runtime's last Apple Watch. The file says why.
+# The one deliberate difference from CI is REUSE — CI creates a throwaway device per
+# run because its runner is throwaway; creating a new simulator on every push here
+# would leak devices and re-pay first-boot cost each time.
 resolve_sim() {
   platform="$1"; family="$2"; sim_name="$3"
+  override=""
+  if [ "$family" = "iPhone" ]; then override="${JESSE_CI_IPHONE_TYPE:-}"; fi
 
   read -r RUNTIME_ID RUNTIME_VER DEVTYPE DEV_NAME < <(
     xcrun simctl list runtimes --json | jq -r \
-      --arg platform "$platform" --arg family "$family" '
-      .runtimes
-      | map(select(.platform == $platform and .isAvailable))
-      | map({
-          id: .identifier,
-          ver: .version,
-          dt: (.supportedDeviceTypes | map(select(.productFamily == $family)) | last)
-        })
-      | map(select(.dt != null))
-      | sort_by(.ver | split(".") | map(tonumber))
-      | last
-      | "\(.id) \(.ver) \(.dt.identifier) \(.dt.name)"
-    '
+      --arg platform "$platform" --arg family "$family" --arg override "$override" \
+      -f "$ROOT/scripts/simulator-pick.jq"
   )
   if [ -z "${RUNTIME_ID:-}" ] || [ "$RUNTIME_ID" = "null" ] || [ -z "${DEVTYPE:-}" ]; then
-    echo "No available ${platform} runtime with a ${family} device type." >&2
-    echo "  Install one via Xcode > Settings > Components." >&2
+    if [ -n "$override" ]; then
+      echo "No available ${platform} runtime supports JESSE_CI_IPHONE_TYPE=${override}." >&2
+      echo "  It must be a device type identifier: xcrun simctl list devicetypes" >&2
+    else
+      echo "No available ${platform} runtime with a ${family} device type." >&2
+      echo "  Install one via Xcode > Settings > Components." >&2
+    fi
     return 1
   fi
+  echo "Device type: ${DEV_NAME} (${DEVTYPE})${override:+, from JESSE_CI_IPHONE_TYPE}"
+  echo "Runtime:     ${platform} ${RUNTIME_VER} (${RUNTIME_ID})"
+
+  # Reuse is by name AND device type. A simulator of this name made by an older rule
+  # (an iPhone Duo, an iPhone 11) is deleted, not reused: reusing by name alone would
+  # keep testing on the model the rule was changed to stop picking.
+  stale="$(
+    xcrun simctl list devices --json \
+      | jq -r --arg rt "$RUNTIME_ID" --arg n "$sim_name" --arg dt "$DEVTYPE" \
+        '(.devices[$rt] // []) | map(select(.name == $n and .deviceTypeIdentifier != $dt)) | .[].udid'
+  )"
+  for old in $stale; do
+    echo "Replacing ${sim_name} ${old}: wrong device type for this rule."
+    xcrun simctl shutdown "$old" >/dev/null 2>&1 || true
+    xcrun simctl delete "$old" || return 1
+  done
 
   UDID="$(
     xcrun simctl list devices --json \
-      | jq -r --arg rt "$RUNTIME_ID" --arg n "$sim_name" \
-        '(.devices[$rt] // []) | map(select(.name == $n and .isAvailable)) | last | .udid // empty'
+      | jq -r --arg rt "$RUNTIME_ID" --arg n "$sim_name" --arg dt "$DEVTYPE" \
+        '(.devices[$rt] // []) | map(select(.name == $n and .deviceTypeIdentifier == $dt and .isAvailable)) | last | .udid // empty'
   )"
   if [ -z "$UDID" ]; then
-    UDID="$(xcrun simctl create "$sim_name" "$DEVTYPE" "$RUNTIME_ID")"
+    UDID="$(xcrun simctl create "$sim_name" "$DEVTYPE" "$RUNTIME_ID")" || return 1
   fi
   xcrun simctl boot "$UDID" >/dev/null 2>&1 || true
   xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || true
@@ -302,7 +336,7 @@ fresh_bundle() { rm -rf "$ROOT/Jesse/build/$1"; }
 # the run on code you did not touch. Warnings are errors for SHIPPING code (the
 # `build` action) only.
 ios_build() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme Jesse \
       -destination "$IOS_DEST" \
       -derivedDataPath build/DerivedData \
@@ -331,7 +365,7 @@ ios_test() {
 # An older host's compile check of the iOS app: every source, warnings as errors,
 # at the target the app ships, with no simulator to be eligible for.
 ios_build_generic() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme Jesse \
       -destination "generic/platform=iOS Simulator" \
       -derivedDataPath build/DerivedData \
@@ -341,7 +375,7 @@ ios_build_generic() {
 }
 
 watch_build() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme "Jesse Watch App" \
       -destination "$WATCH_DEST" \
       -derivedDataPath build/DerivedDataWatch \
@@ -361,7 +395,7 @@ watch_test() {
 }
 
 mac_build() {
-  ( cd "$ROOT/Jesse" && xcodebuild build \
+  ( cd "$ROOT/Jesse" && no_surviving_warnings xcodebuild build \
       -scheme "Jesse Mac" \
       -destination "platform=macOS" \
       -derivedDataPath build/DerivedDataMac \
@@ -380,23 +414,57 @@ mac_test() {
       CODE_SIGNING_ALLOWED=NO )
 }
 
+# Step names, in one place, because a step's needs name other steps exactly.
+S_RUNNER_TESTS="Runner tests (scripts/test-ci-runner.sh)"
+S_SWIFT_GUARDS="Swift test guards (scripts/swift-test-guards.sh)"
+S_KIT_OLD="JesseKit package (host build + tests, warnings-as-errors; tests on iOS sim)"
+S_KIT="JesseKit package (build + test, warnings-as-errors)"
+S_KIT_IOS="JesseKit tests compile for iOS"
+S_IOS_GENERIC="iOS build (generic simulator, warnings-as-errors)"
+S_IOS_SIM="Resolve iOS simulator"
+S_IOS_BUILD="iOS build (warnings-as-errors)"
+S_IOS_TEST="iOS test"
+S_WATCH_SIM="Resolve watchOS simulator"
+S_WATCH_BUILD="watch build (warnings-as-errors)"
+S_WATCH_TEST="watch test"
+S_MAC_BUILD="Mac build (warnings-as-errors)"
+S_MAC_TEST="Mac test"
+S_COUNTS="Test counts (every suite that ran, ran tests)"
+
 # CI's "Report test count" steps are a real gate, not decoration: a suite that
 # silently ran ZERO tests is the failure mode a green xcodebuild does not catch.
 # Same assertion here.
+#
+# It reads ONLY the bundle of a test step that ran in this invocation. Every bundle
+# is cleared before the first step (clear_result_bundles), so one left by an earlier
+# run can never be counted as if it ran now; a suite whose step was skipped is
+# printed as not run. A step that FAILED without writing a bundle (it failed to
+# build, say) is already a FAIL above and is not failed twice here.
 report_counts() {
   rc=0
   if [ "$OLD_HOST" = yes ]; then
     # The iOS and Mac suites did not run here; the JesseKit suite ran on the
     # simulator rather than through `swift test`, so it gets the zero-test check.
-    suites="JesseKitTests:ResultKit.xcresult JesseWatchTests:ResultWatch.xcresult"
+    suites="JesseKitTests|ResultKit.xcresult|${S_KIT_OLD}
+JesseWatchTests|ResultWatch.xcresult|${S_WATCH_TEST}"
   else
-    suites="JesseTests:Result.xcresult JesseWatchTests:ResultWatch.xcresult JesseMacTests:ResultMac.xcresult"
+    suites="JesseTests|Result.xcresult|${S_IOS_TEST}
+JesseWatchTests|ResultWatch.xcresult|${S_WATCH_TEST}
+JesseMacTests|ResultMac.xcresult|${S_MAC_TEST}"
   fi
-  for pair in $suites; do
-    label="${pair%%:*}"; bundle="$ROOT/Jesse/build/${pair#*:}"
+  while IFS='|' read -r label file step; do
+    bundle="$ROOT/Jesse/build/${file}"
+    if ! ci_step_ran "$step"; then
+      echo "${label}: not run ('${step}' did not run in this invocation)"
+      continue
+    fi
     if [ ! -d "$bundle" ]; then
-      echo "No result bundle at ${bundle}" >&2
-      rc=1
+      if [ "$(ci_step_status "$step")" = FAIL ]; then
+        echo "${label}: no result bundle ('${step}' failed before writing one)"
+      else
+        echo "No result bundle at ${bundle}" >&2
+        rc=1
+      fi
       continue
     fi
     s="$(xcrun xcresulttool get test-results summary --path "$bundle")"
@@ -409,39 +477,57 @@ report_counts() {
       echo "Expected ${label} to run at least one test, got ${total}" >&2
       rc=1
     fi
-  done
+  done <<EOF2
+$suites
+EOF2
   return $rc
 }
 
-if [ "$OLD_HOST" = yes ]; then
-  run_step "JesseKit package (host build + tests, warnings-as-errors; tests on iOS sim)" jessekit
-else
-  run_step "JesseKit package (build + test, warnings-as-errors)" jessekit
-  run_step "JesseKit tests compile for iOS"                    jessekit_ios_tests_build
-fi
-if [ "$OLD_HOST" = yes ]; then
-  run_step "iOS build (generic simulator, warnings-as-errors)" ios_build_generic
-  skip_step "iOS test" "no iOS simulator on this host is eligible for JesseKit's iOS minimum"
-else
-  run_step "Resolve iOS simulator"                             resolve_ios_sim
-  run_step "iOS build (warnings-as-errors)"                    ios_build
-  run_step "iOS test"                                          ios_test
-fi
-run_step "Resolve watchOS simulator"                           resolve_watch_sim
-run_step "watch build (warnings-as-errors)"                    watch_build
-run_step "watch test"                                          watch_test
-run_step "Mac build (warnings-as-errors)"                      mac_build
-if [ "$OLD_HOST" = yes ]; then
-  skip_step "Mac test" "xcodebuild cannot run a macOS 26 test host on macOS ${HOST_OS}"
-else
-  run_step "Mac test"                                          mac_test
-fi
-run_step "Test counts (every suite that ran, ran tests)"       report_counts
+clear_result_bundles() {
+  for b in Result.xcresult ResultWatch.xcresult ResultMac.xcresult ResultKit.xcresult; do
+    fresh_bundle "$b"
+  done
+}
 
-summary
-echo ""
-if [ "$SKIPS" -gt 0 ]; then
-  echo "local-ci-macos: ALL CHECKS PASSED, ${SKIPS} SKIPPED on macOS ${HOST_OS} (listed above) — the nightly ios-ci.yml covers those."
-else
-  echo "local-ci-macos: ALL CHECKS PASSED — this is what the nightly would run."
+# --- The run ---------------------------------------------------------------
+#
+# Dependencies (a step runs only when every step it needs PASSED):
+#   macOS 26 host:  Resolve iOS simulator -> iOS build -> iOS test
+#   older host:     iOS build (generic simulator) stands alone; iOS test is a host SKIP
+#   both:           Resolve watchOS simulator -> watch build -> watch test
+#                   Mac build -> Mac test (a host SKIP on an older host)
+#   independent:    the two guards, the JesseKit steps, and Test counts (always runs)
+
+clear_result_bundles
+if [ "$CI_FAIL_FAST" = 1 ]; then
+  echo "local-ci-macos: fail fast: stopping at the first failing step."
 fi
+
+run_step "$S_RUNNER_TESTS"                                     bash "$ROOT/scripts/test-ci-runner.sh"
+run_step "$S_SWIFT_GUARDS"                                     bash "$ROOT/scripts/swift-test-guards.sh" "$ROOT"
+if [ "$OLD_HOST" = yes ]; then
+  run_step "$S_KIT_OLD"                                        jessekit
+else
+  run_step "$S_KIT"                                            jessekit
+  run_step "$S_KIT_IOS"                                        jessekit_ios_tests_build
+fi
+if [ "$OLD_HOST" = yes ]; then
+  run_step "$S_IOS_GENERIC"                                    ios_build_generic
+  skip_step "$S_IOS_TEST" "no iOS simulator on this host is eligible for JesseKit's iOS minimum"
+else
+  run_step "$S_IOS_SIM"                                        resolve_ios_sim
+  run_step --needs "$S_IOS_SIM" "$S_IOS_BUILD"                 ios_build
+  run_step --needs "$S_IOS_SIM" --needs "$S_IOS_BUILD" "$S_IOS_TEST" ios_test
+fi
+run_step "$S_WATCH_SIM"                                        resolve_watch_sim
+run_step --needs "$S_WATCH_SIM" "$S_WATCH_BUILD"               watch_build
+run_step --needs "$S_WATCH_SIM" --needs "$S_WATCH_BUILD" "$S_WATCH_TEST" watch_test
+run_step "$S_MAC_BUILD"                                        mac_build
+if [ "$OLD_HOST" = yes ]; then
+  skip_step "$S_MAC_TEST" "xcodebuild cannot run a macOS 26 test host on macOS ${HOST_OS}"
+else
+  run_step --needs "$S_MAC_BUILD" "$S_MAC_TEST"                mac_test
+fi
+run_step "$S_COUNTS"                                           report_counts
+
+ci_finish

@@ -168,7 +168,7 @@ public enum TodaySegment: String, CaseIterable, Identifiable, Equatable, Hashabl
     public var label: String {
         switch self {
         case .today: return "Today"
-        case .strands: return "Strands"
+        case .strands: return "Work"
         }
     }
 }

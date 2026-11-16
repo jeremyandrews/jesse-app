@@ -279,7 +279,7 @@ fn every_known_macos_dependency_is_caught() {
             "bridge/src/sentinel/mod.rs",
             "resolve_bin(",
         ),
-        ("plutil", "bridge/src/bin/jesse-transcribe.rs", "/usr/bin/"),
+        ("plutil", "bridge/src/plistenv.rs", "/usr/bin/"),
         ("sandbox-exec", "bridge/src/buildsvc.rs", "/usr/bin/"),
         (
             "~/Library defaults in config",

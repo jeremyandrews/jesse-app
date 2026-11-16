@@ -302,4 +302,47 @@ final class VaultAnswererTests: XCTestCase {
     func testTheShippedTimeLimitIsTwentySeconds() {
         XCTAssertEqual(VaultAnswerer.defaultTimeLimit, 20)
     }
+
+    // MARK: - Templates
+
+    /// The 2026-10-01 incident, with the bridge unreachable: "What's the connection to
+    /// Tailscale into my studio at home?" came back as a recovery command copied out of a
+    /// runbook, `<macbook-ip>` and all, citing the runbook AND the remote access note whose
+    /// first line held the address. Both paths were real, and `ping` and `tsmp` were in the
+    /// runbook extract, so every other check passed it. An answer whose key value is an
+    /// unfilled slot has stated no fact: it is a template, and it becomes an abstain.
+    func testACopiedCommandWithAnUnfilledSlotIsAnAbstain() async {
+        let runbook = chunk("Runbooks/Overlay-Wedge.md", line: 22, text: """
+            If the git verb is blocked, check the path first:
+            tailscale ping --tsmp <macbook-ip>
+            """)
+        let remote = chunk("Machines/Remote-Access.md", line: 3,
+                           text: "Tailscale reaches the Studio at 192.0.2.10.")
+        let draft = VaultAnswerDraft(
+            answer: "tailscale ping --tsmp <macbook-ip>",
+            citations: ["Runbooks/Overlay-Wedge.md", "Machines/Remote-Access.md"],
+            abstain: false)
+        let outcome = await VaultAnswerer(generator: ScriptedGenerator(.draft(draft)),
+                                          ownerName: "Jeremy")
+            .answer(question: "What's the connection to Tailscale into my studio at home?",
+                    chunks: [runbook, remote])
+        XCTAssertEqual(outcome, .unanswered(.abstained))
+    }
+
+    /// The rule is about SLOTS, not angle brackets: a comparison has spaces around its
+    /// signs and an address has `@` and `.` in it, and neither is a template.
+    func testAComparisonOrABracketedAddressIsNotASlot() {
+        let kiln = chunk("Workshop/Kiln.md", line: 4, text: """
+            Fire when the kiln reads < 600 and > 200. Bricks from Terrasole \
+            <jeremy@example.com>.
+            """)
+        for answer in ["Fire it when it reads < 600 and > 200.",
+                       "Terrasole, at <jeremy@example.com>."] {
+            let draft = VaultAnswerDraft(answer: answer, citations: ["Workshop/Kiln.md"],
+                                         abstain: false)
+            XCTAssertNotNil(VaultAnswerer.validate(draft, chunks: [kiln],
+                                                   question: "when do I fire the kiln").answer,
+                            answer)
+        }
+    }
 }

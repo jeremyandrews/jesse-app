@@ -1012,7 +1012,7 @@ and read-only). Only the servers named in that config load:
 | `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
 | `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
 | `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
-| `reminders` | Timed reminders, added 2026-11-10 (bridge 0.199.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0199)
+| `reminders` | Timed reminders, added 2026-11-10 (bridge 0.207.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0207)
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -2361,6 +2361,30 @@ launchd-spawned job in the `gui/501` Aqua domain discovered the service and comp
 `messages_fetch`, matching the interactive read exactly. Anything that changes the bridge's
 launchd domain invalidates that proof.
 
+### The iMCP helper's path is configurable, for `imcp` only (0.206.0)
+
+By default the `imcp` row starts `/Applications/iMCP.app/Contents/MacOS/imcp-server`, the
+helper shipped inside the app. `[mcp.imcp] command = "<absolute path>"` replaces it. The
+Studio uses this to run a locally patched helper that connects to the app over loopback,
+because the stock helper wedges when the Bonjour resolve answers on a VM bridge interface
+(bridge README, "The iMCP helper", has the cause and the patch's provenance).
+
+What this does and does not widen:
+
+- **Only `imcp`.** `COMMAND_OVERRIDE_ROWS` names one row. A `command` on any other row stops the
+  bridge at boot, so a config file still cannot point a credentialed server (Google, GitHub,
+  Slack) at another binary. `imcp` holds no credential and gets no variable beyond `BASE_ENV`.
+  It reads nothing itself: the app does the reading, under its own grant.
+- **Absolute paths only**, so the helper is never resolved off `PATH`.
+- **Gateway on only**, like every `[mcp.<name>]` key. With the gateway off, every child starts
+  the table's path, and the shipped posture cannot be edited from a config file.
+- **The patched helper lives in a directory Jeremy's user can write to, and it is ad-hoc
+  signed.** Anything running as that user could replace it. That is the same trust every
+  `~/.local/bin` server on the Studio already carries. It is not new exposure, but it is not
+  the app bundle's signature either.
+- **The tool surface is unchanged.** The helper proxies whatever the app advertises, and the
+  grant (`messages_fetch`, `maps_search`) is still applied by the gateway.
+
 ### iMessage is only alive while iMCP.app is running — accepted
 
 iMCP.app is a **menubar application in Jeremy's GUI login session**, not a launchd-supervised
@@ -2824,7 +2848,7 @@ bridge plist with `plutil -extract` instead. Rotate the token before it expires 
 one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
 --duration=2160h`) and replacing the file; see the k3s README, "Jesse's access to kc1".
 
-## Timed reminders (`reminders`, 0.199.0)
+## Timed reminders (`reminders`, 0.207.0)
 
 "Remind me at 6:45 to start the pancakes" and "every weekday at 7:30 remind me to take the bins
 out" are set from any turn through `reminders`, this repository's own `jesse-reminders-mcp`, the
@@ -2866,8 +2890,8 @@ reaches git, qmd or a turn's file tools.
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 
 `[devjob] enabled = true` (off by default) adds the `devjob` server to the main set: three tools,
-`devjob_start`, `devjob_status` and `devjob_list` (five with `[hostrun]` on: `devjob_reply` and
-`devjob_cancel` steer Studio runs, below), served **inside the bridge process**
+`devjob_start`, `devjob_status` and `devjob_list` (six with `[hostrun]` on: `devjob_reply`,
+`devjob_cancel` and `devjob_close` steer Studio runs, below), served **inside the bridge process**
 (`Transport::InProcess`, `bridge/src/devjob.rs`). A main turn hands it a repository, a prompt and
 an agent; the bridge creates one ConfigMap and one Job in the cluster's `jesse-dev` namespace from
 a copy of `apps/jesse-dev/job-template.yaml` in the k3s repository, watches the run to its end
@@ -2882,7 +2906,7 @@ pushes a notification. A `kind = "devjob"` schedule entry does the same unattend
 | The container holds | the Secret `jesse-dev-agent-keys`: the three agents' API keys and **a GitHub credential (`GH_TOKEN`) that can push branches and open pull requests on any repository that credential reaches** |
 | The container does | clone the repository, run the agent and the test command, push `jesse/<slug>`, open a pull request against `main`. It never merges and never pushes to `main`; that is the entrypoint's rule, on the cluster side |
 | The bridge does | create the ConfigMap and the Job (both labelled `jesse.dev/devjob=true`), resume queued Jobs, read the pod's log, annotate the Job, delete the ConfigMap, write one vault note under the write lock |
-| Classes | `devjob_start`, `devjob_reply` and `devjob_cancel` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
+| Classes | `devjob_start`, `devjob_reply`, `devjob_cancel` and `devjob_close` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
 
 **The tool cannot choose a file path, a namespace, an image or a credential.** Its arguments are
 `repo`, `prompt`, `agent`, `model`, `branch_slug`, `test_command` and `timeout_minutes`, and any
@@ -2971,6 +2995,13 @@ Places keys. What a run can still reach is what `jandrews` reaches without them:
 keychain, `~/.claude` (Claude Code's own sign in), `gh`'s stored login and `~/.ssh`. A run pushes
 and opens pull requests with Jeremy's own GitHub identity, exactly as at a desk.
 
+**Local repositories (0.202.0).** A run on `local/<name>` works in a bare repository at
+`<root>/local/<name>.git` that has no remote: the bridge never runs `gh`, `git fetch` or `git push`
+for it and never builds a clone URL, and the cluster refuses it. The agent is told to fast forward
+its branch into the repository's `main`; a run's branch is deleted only once it is in `main`, and
+nothing deletes `<root>/local/`. A plain checkout of `main` at `[hostrun] local_checkout_root`
+(default `~/jesse/Code/local`, refused if it overlaps `root`) is what bridge sessions read.
+
 **An env file's contents reach the agent (0.197.0).** `[hostrun.repos."owner/name"] env_file =
 "<path>"` names a file of `KEY=value` lines (blank lines and `#` comments skipped, `export `
 allowed, one pair of quotes removed) for the variables that repository's tests need. The runner
@@ -3020,6 +3051,13 @@ default allowlist, classed `write`**, so they reach exactly the turns `devjob_st
 turns, on every harness that renders it) and no read turn. The containment battery's `devjob`
 stand-in lists all five tools, as the real server does on the Studio, and the claude-code and
 direct records were re-recorded with them: only the write rows moved, by these two tools.
+**Since 0.200.0, `POST /jesse/runs/:id/close` (paired device) and `devjob_close` join them**,
+classed and granted exactly as `devjob_cancel`; the battery's stand-in lists six tools and both
+records were re-recorded again, moving only the write rows' grants, by that one tool. A close stops
+nothing and deletes nothing: it marks a `needs_you`, `interrupted` or `failed` run `closed`. The
+watcher closes a waiting run by itself only when a further run of its item supersedes it, its
+Drafts line is ticked, or its report has moved to `Inbox/archive/`, and never a queued, running
+or paused one.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or
@@ -3402,6 +3440,17 @@ cargo run --bin containment-probe            # re-run, compare against the recor
 cargo run --bin containment-probe -- --write # re-run and RE-RECORD (a deliberate act)
 cargo run --bin containment-probe -- --show  # print the record, run nothing
 ```
+
+(All three need `--features containment-probe`, run from `bridge/`.) **The battery takes the
+bridge's environment itself.** Every run but `--show` loads the live bridge's launchd plist
+`EnvironmentVariables` (`~/Library/LaunchAgents/<bridge label>.plist`; `--env-plist
+<path>` for another, `--no-env-plist` for none) before anything starts: the plist wins for every
+variable, and PATH is the plist's followed by any shell entries it lacks. A `--write` whose
+plist cannot be read refuses to start, and a pre-flight stops any run, before a model turn, if
+a server the rows load registers zero tools. Nothing is sourced by hand first. Before 0.200.1 a
+battery run from an interactive shell started nine servers (those that need `node`, `npx`,
+`uvx` or `qmd` from the plist's PATH) with zero tools and could still record a passing gate
+for them.
 
 **The probe world mirrors the real vault's project settings.** The child's cwd is a
 disposable stand-in vault, so Claude Code performs project-scope settings discovery against

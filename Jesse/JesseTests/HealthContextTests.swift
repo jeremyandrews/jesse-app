@@ -33,7 +33,8 @@ final class HealthContextTests: XCTestCase {
     private func fullDaily() -> DailySummary {
         DailySummary(
             sleep: SleepSummary(totalMinutes: 438, deepMinutes: 82, remMinutes: 95,
-                                coreMinutes: 248, awakeMinutes: 18, isNap: false),
+                                coreMinutes: 248, awakeMinutes: 18, isNap: false,
+                                start: date(2026, 7, 3, 23, 30), end: date(2026, 7, 4, 7, 0)),
             restingHeartRateBPM: 52,
             hrvSDNNms: 68,
             hrEvents: [
@@ -77,10 +78,101 @@ final class HealthContextTests: XCTestCase {
     func testSleepNapLabel() {
         let nap = DailySummary(sleep: SleepSummary(totalMinutes: 47, deepMinutes: nil,
                                                    remMinutes: nil, coreMinutes: 47,
-                                                   awakeMinutes: nil, isNap: true))
+                                                   awakeMinutes: nil, isNap: true,
+                                                   start: date(2026, 7, 4, 10, 50),
+                                                   end: date(2026, 7, 4, 11, 37)))
         let line = DailySummaryFormatter.lines(from: nap, now: now, timeZone: utc).first
-        XCTAssertEqual(line, "Sleep (nap): 0.8h total, 47m core")
-        XCTAssertTrue(line!.contains("(nap)"))
+        XCTAssertEqual(line, "Sleep (nap, ended 2026-07-04 11:37): 0.8h total, 47m core")
+        XCTAssertTrue(line!.contains("(nap, ended "))
+    }
+
+    // MARK: - Daily-summary formatter: which night the sleep line names
+
+    /// The 2026-11-08 morning, in the owner's zone: woke 08:36, a turn at 08:51.
+    private let rome = TimeZone(identifier: "Europe/Rome")!
+    private func romeDate(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = rome
+        return cal.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi))!
+    }
+    private func night(endingOn day: Int, at hour: Int, _ minute: Int,
+                       isNap: Bool = false) -> SleepSummary {
+        SleepSummary(totalMinutes: 444, deepMinutes: 61, remMinutes: 102, coreMinutes: 268,
+                     awakeMinutes: 14, isNap: isNap,
+                     start: romeDate(2026, 11, day - 1, 23, 40),
+                     end: romeDate(2026, 11, day, hour, minute))
+    }
+
+    /// Last night keeps exactly the bytes it always had.
+    func testSleepLineForLastNightIsUnchangedByteForByte() {
+        let d = DailySummary(sleep: night(endingOn: 8, at: 8, 36))
+        XCTAssertEqual(DailySummaryFormatter.lines(from: d, now: romeDate(2026, 11, 8, 8, 51),
+                                                   timeZone: rome),
+                       ["Sleep (last night): 7.4h total, 61m deep, 102m REM, 268m core, 14m awake"])
+    }
+
+    /// The previous night, still the newest on the phone at 08:51, is never called last
+    /// night: the line says last night has not synced and dates the one it shows.
+    func testSleepLineForAnOlderNightSaysLastNightHasNotSynced() {
+        let d = DailySummary(sleep: night(endingOn: 7, at: 7, 10))
+        XCTAssertEqual(DailySummaryFormatter.lines(from: d, now: romeDate(2026, 11, 8, 8, 51),
+                                                   timeZone: rome),
+                       ["Sleep: last night not synced from the Watch yet; newest night on the phone ended Sat 2026-11-07 07:10: 7.4h total, 61m deep, 102m REM, 268m core, 14m awake"])
+    }
+
+    /// A nap is dated by its end.
+    func testSleepLineForANapIsDated() {
+        var nap = night(endingOn: 8, at: 14, 25, isNap: true)
+        nap.totalMinutes = 47
+        nap.deepMinutes = nil; nap.remMinutes = nil; nap.awakeMinutes = nil
+        nap.coreMinutes = 47
+        XCTAssertEqual(DailySummaryFormatter.lines(from: DailySummary(sleep: nap),
+                                                   now: romeDate(2026, 11, 8, 15, 0),
+                                                   timeZone: rome),
+                       ["Sleep (nap, ended 2026-11-08 14:25): 0.8h total, 47m core"])
+    }
+
+    /// After a send, the not synced line stamps one day key and last night the other; a turn
+    /// with no night to judge stamps neither.
+    func testSleepStampsRecordWhichLineWentOut() {
+        let suite = "HealthContextTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let at = romeDate(2026, 11, 8, 8, 51)
+        HealthSleepStamps.record(.unknown, now: at, defaults: defaults)
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.sleepNotSyncedDayKey))
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.sleepLastNightSentDayKey))
+        HealthSleepStamps.record(.notSynced, now: at, defaults: defaults)
+        XCTAssertEqual(defaults.string(forKey: HealthAutoTrigger.sleepNotSyncedDayKey),
+                       DietDay.stamp(for: at))
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.sleepLastNightSentDayKey))
+        HealthSleepStamps.record(.lastNight, now: at, defaults: defaults)
+        XCTAssertEqual(defaults.string(forKey: HealthAutoTrigger.sleepLastNightSentDayKey),
+                       DietDay.stamp(for: at))
+    }
+
+    /// The resolver reports which line it rendered, from the same snapshot and clock.
+    func testResolutionCarriesTheSleepState() async {
+        let at = romeDate(2026, 11, 8, 8, 51)
+        func state(_ snap: HealthSnapshot) async -> HealthContextResolver.SleepState {
+            await HealthContextResolver.resolution(enabled: true, provider: FakeProvider(snap: snap),
+                                                   now: at, timeZone: rome).sleep
+        }
+        let fresh = await state(HealthSnapshot(daily: DailySummary(sleep: night(endingOn: 8, at: 8, 36)),
+                                               workouts: []))
+        let stale = await state(HealthSnapshot(daily: DailySummary(sleep: night(endingOn: 7, at: 7, 10)),
+                                               workouts: []))
+        let nap = await state(HealthSnapshot(daily: DailySummary(sleep: night(endingOn: 8, at: 8, 36,
+                                                                              isNap: true)),
+                                             workouts: []))
+        let none = await state(HealthSnapshot(daily: DailySummary(restingHeartRateBPM: 52),
+                                              workouts: []))
+        let locked = await state(.locked)
+        XCTAssertEqual(fresh, .lastNight)
+        XCTAssertEqual(stale, .notSynced)
+        XCTAssertEqual(nap, .unknown)
+        XCTAssertEqual(none, .unknown)
+        XCTAssertEqual(locked, .unknown)
     }
 
     func testHREventsOmittedWhenNoneAndWhenStale() {
@@ -805,6 +897,9 @@ final class HealthContextTests: XCTestCase {
         XCTAssertTrue(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: true))
         XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthNewDay.prompt, locked: false))
         XCTAssertFalse(HealthContextLockHold.shouldHold(text: "How did I sleep?", locked: true))
+        XCTAssertTrue(HealthContextLockHold.shouldHold(text: HealthLateSleep.prompt, locked: true),
+                      "the late sleep turn is held too: sent locked it would log no sleep")
+        XCTAssertFalse(HealthContextLockHold.shouldHold(text: HealthLateSleep.prompt, locked: false))
     }
 
     /// A workout log staged by an older build and replayed after an upgrade carries the old
@@ -862,7 +957,9 @@ final class HealthContextTests: XCTestCase {
         struct Boom: Error {}
         var f = HealthMetricFetches.empty
         f.sleep = { SleepSummary(totalMinutes: 400, deepMinutes: nil, remMinutes: nil,
-                                 coreMinutes: nil, awakeMinutes: nil, isNap: false) }
+                                 coreMinutes: nil, awakeMinutes: nil, isNap: false,
+                                 start: Date(timeIntervalSince1970: 0),
+                                 end: Date(timeIntervalSince1970: 24_000)) }
         f.restingHR = { 52 }
         f.hrv = { throw Boom() }                       // one read fails…
         f.workouts = { throw Boom() }                  // …and so does the workout read

@@ -106,6 +106,9 @@ protocol JesseClientProtocol: FlagSyncing, Sendable {
     func stream(jobId: String) -> AsyncThrowingStream<JesseStreamEvent, Error>
     /// Register (idempotent upsert) this phone's APNs device token with the bridge.
     func registerDevice(token: String) async throws
+    /// The same, naming this device, its platform and its topic, so the bridge keeps it
+    /// beside the Mac rather than in its place.
+    func registerDevice(_ registration: JesseDeviceRegistration) async throws
     /// Ask the bridge to push when `jobId` completes. Best-effort and idempotent.
     func notifyOnComplete(jobId: String) async throws
     /// Ask the bridge to mint a short conversation title from `digest`, persisting it under
@@ -145,6 +148,7 @@ extension JesseClientProtocol {
     // Default no-ops so existing conformers (the test fakes) need not implement the push
     // methods; only the production `JesseClient` does the real calls.
     func registerDevice(token: String) async throws {}
+    func registerDevice(_ registration: JesseDeviceRegistration) async throws {}
     func notifyOnComplete(jobId: String) async throws {}
     // Default no-op so fakes that don't exercise remote deletion behave like a bridge that
     // always succeeds.
@@ -277,8 +281,9 @@ struct JesseClient: JesseClientProtocol {
         // Resolve the HealthKit block and the diet nutrient rollup concurrently so the
         // extra diet GET doesn't add serial latency, then compose them into the one
         // health_context.
+        let renderedAt = Date()
         async let health = HealthContextResolver.resolution(
-            enabled: attach, provider: healthProvider, now: Date())
+            enabled: attach, provider: healthProvider, now: renderedAt)
         async let dietRollup = dietRollupBlock(enabled: attach)
         // The location channel, resolved concurrently with the health one — the two are
         // independent, and a turn that wants both should not pay for them in series.
@@ -305,8 +310,18 @@ struct JesseClient: JesseClientProtocol {
                                        mealCorrectionsAck: mealCorrectionsAck(),
                                        requestId: requestId,
                                        model: model, effort: effort,
-                                       sentFor: sentFor)
-        return try await bridge.sendPrepared(request)
+                                       sentFor: sentFor,
+                                       // Data beside the block, never prompt text: the
+                                       // bridge writes them to its workout ledger.
+                                       workoutRecords: resolved.block != nil
+                                           ? resolved.workoutRecords : nil)
+        let result = try await bridge.sendPrepared(request)
+        // Which sleep line went out, for the late sleep turn's decision. Only once the bridge
+        // has the turn, and only when a block was attached.
+        if resolved.block != nil {
+            HealthSleepStamps.record(resolved.sleep, now: renderedAt)
+        }
+        return result
     }
 
     /// The proactive `location_context` for this turn, or nil. Classifies only when the
@@ -410,7 +425,8 @@ struct JesseClient: JesseClientProtocol {
             locationContextUnavailableReason: channel == .location
                 ? outgoing.unavailableReason : nil,
             mealCorrectionsAck: mealCorrectionsAck(),
-            model: model, effort: effort)
+            model: model, effort: effort,
+            workoutRecords: channel == .health ? outgoing.workoutRecords : nil)
         return try await bridge.sendPrepared(request)
     }
 
@@ -456,6 +472,10 @@ struct JesseClient: JesseClientProtocol {
 
     func registerDevice(token: String) async throws {
         try await bridge.registerDevice(token: token)
+    }
+
+    func registerDevice(_ registration: JesseDeviceRegistration) async throws {
+        try await bridge.registerDevice(registration)
     }
 
     func notifyOnComplete(jobId: String) async throws {
@@ -520,7 +540,8 @@ struct JesseClient: JesseClientProtocol {
                             requestId: UUID? = nil,
                             model: String? = nil,
                             effort: String? = nil,
-                            sentFor: String? = nil) -> JesseRequest {
+                            sentFor: String? = nil,
+                            workoutRecords: [WorkoutRecord]? = nil) -> JesseRequest {
         JesseBridgeClient.makeRequest(
             mode: mode, text: text, sessionId: sessionId,
             conversationId: conversationId, voice: voice,
@@ -539,7 +560,8 @@ struct JesseClient: JesseClientProtocol {
             requestId: requestId?.uuidString,
             // The per-turn model selection; nil/blank drops the field (bridge uses default).
             model: model, effort: effort,
-            sentFor: sentFor)
+            sentFor: sentFor,
+            workoutRecords: workoutRecords)
     }
 
     // MARK: - Pure encode/decode forwards (the wire-contract test surface)
@@ -802,12 +824,31 @@ enum BridgeVersionStore {
     }
 }
 
+// MARK: - Which sleep line went out
+
+/// Records, after a turn carrying a health block has been sent, which sleep line it carried:
+/// the not synced line stamps today's diet day in `healthSleepNotSyncedDay`, last night in
+/// `healthSleepLastNightSentDay`. `HealthAutoTrigger` reads both to decide whether last
+/// night's late arrival needs its one automatic turn (`HealthLateSleep.shouldFire`).
+nonisolated enum HealthSleepStamps {
+    static func record(_ state: HealthContextResolver.SleepState, now: Date,
+                       defaults: UserDefaults = .standard) {
+        let key: String
+        switch state {
+        case .notSynced: key = HealthAutoTrigger.sleepNotSyncedDayKey
+        case .lastNight: key = HealthAutoTrigger.sleepLastNightSentDayKey
+        case .unknown: return
+        }
+        defaults.set(DietDay.stamp(for: now), forKey: key)
+    }
+}
+
 // MARK: - Holding a locked Health turn
 
 /// Whether a turn must not be sent because the phone was locked when its health block
-/// was gathered. Only the two Health turns whose whole job is to log what that block
-/// carries: the automatic workout log (its workouts) and the morning refresh (this
-/// morning's weigh-in). Sent without it, either one logs nothing while the day or the
+/// was gathered. Only the Health turns whose whole job is to log what that block
+/// carries: the automatic workout log (its workouts), the morning refresh (this
+/// morning's weigh-in) and the late sleep turn (last night's sleep). Sent without it, either one logs nothing while the day or the
 /// workouts are recorded as done. Every other turn goes out with the locked line and the
 /// agent answers without Health.
 ///
@@ -820,7 +861,8 @@ nonisolated enum HealthContextLockHold {
     static func shouldHold(text: String, locked: Bool) -> Bool {
         guard locked else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return ([HealthWorkoutLog.prompt, HealthNewDay.prompt] + HealthWorkoutLog.previousPrompts)
+        return ([HealthWorkoutLog.prompt, HealthNewDay.prompt, HealthLateSleep.prompt]
+                + HealthWorkoutLog.previousPrompts)
             .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed }
     }
 }

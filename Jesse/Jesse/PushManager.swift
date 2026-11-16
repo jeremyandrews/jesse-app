@@ -2,6 +2,7 @@ import Combine
 import SwiftUI
 import UIKit
 import UserNotifications
+import JesseNetworking
 import JesseSpeech
 
 // Push notifications: capture the APNs device token, register it with the bridge,
@@ -154,6 +155,25 @@ nonisolated enum PushRegistrationBackoff {
     }
 }
 
+/// Who this phone is to the bridge: the id it is stored under, its platform and its topic.
+///
+/// The bridge used to keep ONE token and replace it on every registration, so the iPhone and
+/// the Mac took turns receiving every push. It now keeps one entry per device, keyed by the
+/// id sent here. `identifierForVendor` is stable for as long as any app of this vendor stays
+/// installed, which is what an entry needs; a reinstall gets a new id, and the old entry is
+/// dropped by the bridge 60 days after its last registration.
+enum PushDeviceIdentity {
+    static let platform = "ios"
+
+    @MainActor
+    static func registration(token: String) -> JesseDeviceRegistration {
+        JesseDeviceRegistration(token: token,
+                                deviceID: UIDevice.current.identifierForVendor?.uuidString,
+                                platform: platform,
+                                topic: Bundle.main.bundleIdentifier)
+    }
+}
+
 /// Owns the device-token lifecycle and authorization request. A single shared
 /// instance; the AppDelegate forwards system callbacks here.
 @MainActor
@@ -171,7 +191,8 @@ final class PushManager {
     private let configProvider: @MainActor () -> JesseConfig
 
     init(register: @escaping @MainActor (JesseConfig, String) async throws -> Void = {
-             try await JesseClient(config: $0).registerDevice(token: $1)
+             try await JesseClient(config: $0)
+                 .registerDevice(PushDeviceIdentity.registration(token: $1))
          },
          sleep: @escaping @MainActor (TimeInterval) async -> Void = {
              try? await Task.sleep(for: .seconds($0))

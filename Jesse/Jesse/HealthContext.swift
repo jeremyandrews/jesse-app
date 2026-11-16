@@ -1,4 +1,6 @@
 import Foundation
+import JesseNetworking
+import JesseCore
 
 // Health context — the pure, Foundation-only core of "attach my recent Apple
 // Health to every turn." Two labeled subsections in one block: a DAILY SUMMARY
@@ -22,7 +24,10 @@ import Foundation
 
 /// One night of sleep, attributed to the wake date. Stage minutes are optional
 /// (a source that reports only "asleep" leaves them nil). `isNap` marks a short,
-/// off-hours session so it is never presented as the night.
+/// off-hours session so it is never presented as the night. `start` and `end` are the
+/// session's span, so the formatter can tell last night from an older one: the Watch can
+/// hand a night to the phone an hour or more after waking, and until it does the newest
+/// session in the lookback is the night before.
 nonisolated struct SleepSummary: Equatable, Sendable {
     var totalMinutes: Double
     var deepMinutes: Double?
@@ -30,6 +35,8 @@ nonisolated struct SleepSummary: Equatable, Sendable {
     var coreMinutes: Double?
     var awakeMinutes: Double?
     var isNap: Bool
+    var start: Date
+    var end: Date
 }
 
 /// A scalar reading paired with the instant it was recorded, for the sparse series
@@ -339,7 +346,20 @@ nonisolated enum SleepReducer {
             remMinutes: rem,
             coreMinutes: core,
             awakeMinutes: awake,
-            isNap: SleepClassifier.isNap(totalMinutes: total, midpoint: midpoint, timeZone: timeZone))
+            isNap: SleepClassifier.isNap(totalMinutes: total, midpoint: midpoint, timeZone: timeZone),
+            start: sStart,
+            end: sEnd)
+    }
+
+    /// Whether `s` is LAST NIGHT for the diet day of `now`: not a nap, and it ended on the
+    /// calendar date that is today's diet day (`HealthLateSleep.endsOnDietDay`). False means
+    /// the newest session on the phone is an older night, because last night has not
+    /// reached HealthKit yet.
+    static func isLastNight(_ s: SleepSummary, now: Date, timeZone: TimeZone) -> Bool {
+        guard !s.isNap else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return HealthLateSleep.endsOnDietDay(end: s.end, now: now, calendar: calendar)
     }
 
     /// The newest contiguous run of samples: walk newest-first by end date and stop
@@ -425,7 +445,7 @@ nonisolated enum DailySummaryFormatter {
     /// The metric lines (no header), in fixed order, omitting unavailable metrics.
     static func lines(from d: DailySummary, now: Date, timeZone: TimeZone) -> [String] {
         var out: [String] = []
-        if let s = d.sleep { out.append(sleepLine(s)) }
+        if let s = d.sleep { out.append(sleepLine(s, now: now, timeZone: timeZone)) }
         if let hr = d.restingHeartRateBPM { out.append("Resting HR: \(int(hr)) bpm") }
         if let hrv = d.hrvSDNNms { out.append("HRV (SDNN): \(int(hrv)) ms") }
         if let ev = hrEventsLine(d.hrEvents, now: now, timeZone: timeZone) { out.append(ev) }
@@ -470,14 +490,25 @@ nonisolated enum DailySummaryFormatter {
 
     // MARK: line builders
 
-    private static func sleepLine(_ s: SleepSummary) -> String {
+    /// The sleep line, in one of three forms. Last night keeps exactly the bytes it always
+    /// had. An OLDER night says that last night has not synced and dates the one it shows,
+    /// so the agent never logs the night before as last night. A nap is dated too.
+    private static func sleepLine(_ s: SleepSummary, now: Date, timeZone: TimeZone) -> String {
         var parts = ["\(oneDecimal(s.totalMinutes / 60))h total"]
         if let d = s.deepMinutes { parts.append("\(int(d))m deep") }
         if let r = s.remMinutes { parts.append("\(int(r))m REM") }
         if let c = s.coreMinutes { parts.append("\(int(c))m core") }
         if let a = s.awakeMinutes { parts.append("\(int(a))m awake") }
-        let label = s.isNap ? "nap" : "last night"
-        return "Sleep (\(label)): " + parts.joined(separator: ", ")
+        let figures = parts.joined(separator: ", ")
+        if s.isNap {
+            return "Sleep (nap, ended \(dayTime(s.end, timeZone))): " + figures
+        }
+        if SleepReducer.isLastNight(s, now: now, timeZone: timeZone) {
+            return "Sleep (last night): " + figures
+        }
+        let ended = fmt("EEE yyyy-MM-dd HH:mm", timeZone).string(from: s.end)
+        return "Sleep: last night not synced from the Watch yet; newest night on the phone ended \(ended): "
+            + figures
     }
 
     private static func hrEventsLine(_ events: [HREventSummary],
@@ -569,6 +600,25 @@ nonisolated enum HealthContextFormatter {
                       workouts: [WorkoutSummary],
                       now: Date,
                       timeZone: TimeZone = .current) -> String? {
+        rendered(daily: daily, workouts: workouts, now: now, timeZone: timeZone).block
+    }
+
+    /// The block for a gathered snapshot plus the workouts whose lines it carries, in
+    /// line order — the exact set the turn's `workout_records` describe. Locked: none.
+    static func rendered(snapshot: HealthSnapshot, now: Date,
+                         timeZone: TimeZone = .current)
+        -> (block: String?, workouts: [WorkoutSummary]) {
+        guard !snapshot.protectedDataUnavailable else { return (lockedLine, []) }
+        return rendered(daily: snapshot.daily, workouts: snapshot.workouts,
+                        now: now, timeZone: timeZone)
+    }
+
+    /// `block(daily:workouts:now:timeZone:)` plus the workouts whose lines made it in.
+    static func rendered(daily: DailySummary,
+                         workouts: [WorkoutSummary],
+                         now: Date,
+                         timeZone: TimeZone = .current)
+        -> (block: String?, workouts: [WorkoutSummary]) {
         // Daily subsection (mandatory when present — never shed by the byte cap).
         let dailyLines = DailySummaryFormatter.lines(from: daily, now: now, timeZone: timeZone)
         var sections: [[String]] = []
@@ -595,6 +645,7 @@ nonisolated enum HealthContextFormatter {
 
         let headerReserve = WorkoutContextFormatter.header(count: candidates.count).utf8.count + 1
         var workoutLines: [String] = []
+        var included: [WorkoutSummary] = []
         var workoutUsed = headerReserve
         for w in candidates {
             let base = WorkoutContextFormatter.baseLine(for: w, timeZone: timeZone)
@@ -608,16 +659,17 @@ nonisolated enum HealthContextFormatter {
                 break // this and every older workout are dropped
             }
             workoutLines.append(fitted)
+            included.append(w)
             workoutUsed += cost(fitted)
         }
         if !workoutLines.isEmpty {
             sections.append([WorkoutContextFormatter.header(count: workoutLines.count)] + workoutLines)
         }
 
-        guard !sections.isEmpty else { return nil }
+        guard !sections.isEmpty else { return (nil, []) }
         // Subsections separated by a blank line; when only the workouts subsection is
         // present this is byte-identical to the pre-daily-summary block.
-        return sections.map { $0.joined(separator: "\n") }.joined(separator: "\n\n")
+        return (sections.map { $0.joined(separator: "\n") }.joined(separator: "\n\n"), included)
     }
 }
 
@@ -646,6 +698,28 @@ nonisolated enum HealthContextResolver {
     struct Resolution: Equatable, Sendable {
         var block: String?
         var locked: Bool
+        /// The workouts the block's lines describe, as structured records (sent as
+        /// `workout_records`). Empty when no block is attached.
+        var workoutRecords: [WorkoutRecord] = []
+        /// Which sleep line the block carries, from the same snapshot and `now` it was
+        /// rendered with. Read after the send to stamp the late sleep turn's two days.
+        var sleep: SleepState = .unknown
+    }
+
+    /// Which sleep line a block carries.
+    enum SleepState: Equatable, Sendable {
+        /// `Sleep (last night): …`
+        case lastNight
+        /// The newest night on the phone is an older one: last night has not synced.
+        case notSynced
+        /// No night to judge: a nap, no session, or a locked phone.
+        case unknown
+
+        static func of(_ snapshot: HealthSnapshot, now: Date, timeZone: TimeZone) -> SleepState {
+            guard !snapshot.protectedDataUnavailable, let s = snapshot.daily.sleep, !s.isNap
+            else { return .unknown }
+            return SleepReducer.isLastNight(s, now: now, timeZone: timeZone) ? .lastNight : .notSynced
+        }
     }
 
     static func resolve(enabled: Bool,
@@ -661,10 +735,16 @@ nonisolated enum HealthContextResolver {
                            timeZone: TimeZone = .current) async -> Resolution {
         guard enabled else { return Resolution(block: nil, locked: false) }
         let snap = await provider.snapshot()
-        let block = HealthContextFormatter.block(snapshot: snap, now: now, timeZone: timeZone)
+        let rendered = HealthContextFormatter.rendered(snapshot: snap, now: now, timeZone: timeZone)
+        let attach = HealthContextPolicy.shouldAttach(enabled: enabled, block: rendered.block)
         return Resolution(
-            block: HealthContextPolicy.shouldAttach(enabled: enabled, block: block) ? block : nil,
-            locked: snap.protectedDataUnavailable)
+            block: attach ? rendered.block : nil,
+            locked: snap.protectedDataUnavailable,
+            workoutRecords: attach
+                ? WorkoutRecordBuilder.records(for: rendered.workouts, timeZone: timeZone,
+                                               capturedAt: now)
+                : [],
+            sleep: attach ? SleepState.of(snap, now: now, timeZone: timeZone) : .unknown)
     }
 }
 

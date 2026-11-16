@@ -197,4 +197,104 @@ final class LookupGateTests: XCTestCase {
                            "the renderer adds the full stop")
         }
     }
+
+    // MARK: - A request addressed to the assistant
+
+    /// 2026-10-17, bridge unreachable: a follow-up to an image the bridge had just made
+    /// was answered from the notes with passport-photo advice. "can you make" asks the
+    /// assistant to DO something, and only the bridge can attempt it. The modal and "you"
+    /// sit in the second sentence, so the rule has to look past the first word.
+    func testTheIncidentSentenceIsRefusedAsAnAddressedRequest() {
+        XCTAssertEqual(LookupGate.rule("That beautiful. But can you make a photo realistic version?"),
+                       .refused(.addressedRequest))
+    }
+
+    func testAModalAddressedToTheAssistantWithAWorkVerbIsRefused() {
+        for request in ["Can you make a poster of Barga?",
+                        "could you draw the house?",
+                        "Would you generate a chart of my weight?",
+                        "will you build me a playlist?",
+                        "Can u make it bigger?"] {
+            XCTAssertEqual(LookupGate.rule(request), .refused(.addressedRequest), request)
+        }
+        XCTAssertEqual(LookupGate.Refusal.addressedRequest.rule, "addressed request")
+        XCTAssertEqual(LookupGate.Refusal.addressedRequest.because,
+                       "it asks the assistant to do something")
+    }
+
+    /// The other half: a polite lookup ("can you tell me", "could you find") is still a
+    /// lookup, `make` alone is not a request ("how do I make pizza dough?" is a cookbook
+    /// question), and a modal whose subject is not "you" is an ordinary yes/no question.
+    func testALookupAddressedToTheAssistantStillPasses() {
+        for question in ["Can you tell me when the school concert is?",
+                         "could you find Aurora's birthday?",
+                         "Can you check what time the KLM flight is?",
+                         "can you look up the router address?",
+                         "how do I make pizza dough?",
+                         "What make is the car?",
+                         "Can the kids swim on Saturday?",
+                         "Can I park at the station?"] {
+            XCTAssertEqual(LookupGate.rule(question), .passed, question)
+        }
+    }
+}
+
+// MARK: - A question about how things are right now
+
+extension LookupGateTests {
+
+    /// 2026-11-10, ~14:56 CET, on the Mac: the bridge was restarting for a deploy, and the
+    /// device answered this with two changelog paragraphs about bridge releases months old.
+    /// No note can know whether things work minutes after a deploy. It passed because it
+    /// ends with a question mark and opens a clause with "are", and nothing refused it.
+    func testTheDeployIncidentSentenceIsRefusedAsLiveState() {
+        let verdict = LookupGate.rule(
+            "It's deployed: are things still working? And, what have we unblocked?")
+        guard case .refused(let refusal) = verdict else {
+            return XCTFail("a question about the world right now must reach the bridge")
+        }
+        XCTAssertEqual(refusal.rule, "live state")
+        XCTAssertEqual(refusal.because,
+                       "it asks how things are right now, which notes cannot know")
+    }
+
+    func testAQuestionAboutThePresentStateOfSomethingIsRefused() {
+        for question in ["Is the bridge still up?",
+                         "is Plex down right now?",
+                         "What's running on the Studio?",
+                         "Did the deploy work?",
+                         "Is CI green yet?",
+                         "is it working now?",
+                         "what is the run doing at the moment?"] {
+            guard case .refused(let refusal) = LookupGate.rule(question) else {
+                XCTFail("passed: \(question)")
+                continue
+            }
+            XCTAssertEqual(refusal.rule, "live state", question)
+        }
+    }
+
+    /// The other half: the same words in a question about the PAST, or about how to do
+    /// something, are a lookup, and so is a present question with no state in it.
+    func testAQuestionAboutTheSameWordsThatNotesCanAnswerStillPasses() {
+        for question in ["When was bridge 0.150 deployed?",
+                         "What does the deploy runbook say about signing?",
+                         "How do I check if the bridge is running?",
+                         "Is the pool outdoor?",
+                         "What is Aurora's birthday?",
+                         "What did the last run report say?"] {
+            XCTAssertEqual(LookupGate.rule(question), .passed, question)
+        }
+    }
+
+    /// "added" is an inflection of the request verb `add`, so the verb rule refuses this
+    /// sentence, before and after the live-state rule existed. What this test pins is that
+    /// the live-state rule does not fire on it: it names no now marker and no state word.
+    func testAPastQuestionAboutAVersionIsNotLiveState() {
+        let question = "Which version added the places server?"
+        XCTAssertEqual(LookupGate.rule(question),
+                       .refused(.request(LookupGate.requestVerbs.first { $0.verb == "add" }!)))
+        XCTAssertFalse(LookupGate.asksAboutLiveState(
+            question.split(whereSeparator: \.isWhitespace)))
+    }
 }

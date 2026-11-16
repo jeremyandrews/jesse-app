@@ -99,42 +99,48 @@ pub async fn push_alert(sen: &Sentinel, kind: AlertKind, window_ms: u64, body: &
         );
         return false;
     };
-    let Some(token) = load_device_token(&sen.cfg.device_json) else {
+    let devices = load_devices(&sen.cfg.device_json);
+    if devices.is_empty() {
         eprintln!(
             "jesse-sentinel: ALERT {} — {body} (no device registered with the bridge, \
              nothing sent)",
             kind.key()
         );
         return false;
-    };
-    // NO BADGE. The sentinel is a separate process watching the bridge from outside; it
-    // has no conversation registry to count, and stamping a made-up number here would
-    // overwrite whatever the bridge's own last push put on the icon. `None` leaves it.
-    match apns
-        .push_payload(&token, build_sentinel_payload(kind, body), None)
-        .await
-    {
-        PushOutcome::Sent => {
-            eprintln!("jesse-sentinel: ALERT {} sent — {body}", kind.key());
-            true
-        }
-        PushOutcome::DeadToken => {
-            eprintln!(
-                "jesse-sentinel: ALERT {} — the bridge's device token is dead (410). NOT \
-                 cleared here: device.json belongs to the bridge, which clears it on its own \
-                 next push. The phone must re-register.",
-                kind.key()
-            );
-            false
-        }
-        PushOutcome::Failed(e) => {
-            eprintln!(
-                "jesse-sentinel: ALERT {} failed: {e} — swallowed",
-                kind.key()
-            );
-            false
+    }
+    // EVERY paired device, each as its own topic, as the bridge's own pushes go. NO BADGE.
+    // The sentinel is a separate process watching the bridge from outside; it has no
+    // conversation registry to count, and stamping a made-up number here would overwrite
+    // whatever the bridge's own last push put on the icon. `None` leaves it.
+    let mut sent = 0;
+    for (id, dev) in &devices {
+        let topic = dev.topic_or(&apns.cfg.topic).to_string();
+        let who = format!(
+            "push sentinel {} -> {} {}",
+            kind.key(),
+            dev.platform_label(),
+            short_device_id(id)
+        );
+        match apns
+            .push_payload_to(&dev.token, &topic, build_sentinel_payload(kind, body), None)
+            .await
+        {
+            PushOutcome::Sent => {
+                sent += 1;
+                eprintln!("{who}: sent");
+            }
+            // NOT removed here: device.json belongs to the bridge, which removes a dead
+            // device on its own next push. Clearing it from two processes is how it gets lost.
+            PushOutcome::DeadToken => eprintln!("{who}: dead (410; the bridge removes it)"),
+            PushOutcome::Failed(e) => eprintln!("{who}: failed ({e})"),
         }
     }
+    eprintln!(
+        "jesse-sentinel: ALERT {} sent to {sent} of {} device(s) — {body}",
+        kind.key(),
+        devices.len()
+    );
+    sent > 0
 }
 
 /// RULE 1 — the bridge is not answering.

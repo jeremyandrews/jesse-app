@@ -666,7 +666,7 @@ mod tests {
     /// servers and `house` carries the configured URL and the token BY NAME; without one it
     /// declares twenty-six (the hosted `clockify` server left in 0.176.0, `runn-rs` came in
     /// 0.180.0, `google-sheets` in 0.182.0, `kubernetes-cloud` in 0.188.0, `reminders` in
-    /// 0.199.0). The placeholder and
+    /// 0.207.0). The placeholder and
     /// the token value are on no argv either way.
     #[test]
     fn a_claude_code_main_turn_carries_house_exactly_when_the_table_is_ready() {

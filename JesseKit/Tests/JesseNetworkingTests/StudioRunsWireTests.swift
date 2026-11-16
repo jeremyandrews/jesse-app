@@ -24,7 +24,9 @@ final class StudioRunsWireTests: XCTestCase {
         let list = try StudioRunList.decode(from: fixture("studio-runs-list"))
         XCTAssertEqual(list.runs.map(\.runID), ["GD12", "GD10", "s-done", "GD5"])
         XCTAssertEqual(list.runs.map(\.status), [.queued, .paused, .reported, .needsYou])
-        XCTAssertEqual(list.counts, StudioRunCounts(running: 0, queued: 1, needsYou: 1, paused: 1))
+        XCTAssertEqual(list.counts, StudioRunCounts(running: 0, queued: 1, needsYou: 1, paused: 1,
+                                                    needsMe: 1, moving: 2, finished: 1,
+                                                    archived: 0))
         let queued = list.runs[0]
         XCTAssertEqual(queued.waitingFor, "limit")
         XCTAssertEqual(queued.strand, "Gd")
@@ -33,6 +35,38 @@ final class StudioRunsWireTests: XCTestCase {
         XCTAssertNil(free.strand)
         XCTAssertNil(free.itemID)
         XCTAssertEqual(free.reportPaths.count, 1)
+    }
+
+    /// One run in every status the bridge has, and one it might grow, each with a report: the
+    /// whole list decodes, no run is dropped, and each keeps its report path (an archived
+    /// report's included, which is where the bridge now serves a processed one).
+    static let everyStatusList: String = {
+        let statuses = ["queued", "running", "needs_you", "reported", "failed", "cancelled",
+                        "interrupted", "paused", "closed", "rebasing"]
+        let runs = statuses.enumerated().map { i, status in
+            """
+            {"run_id":"R\(i)","strand":\(i % 2 == 0 ? "\"Jesse\"" : "null"),"item_id":null,
+             "repo":"o/n","branch":"r\(i)","origin":"turn","status":"\(status)",
+             "created_at":"2026-11-09T2\(i % 10):00:00.000Z","rounds":[{"n":1,
+             "report_path":"Inbox/\(i % 3 == 0 ? "archive/" : "")2026-11-09-run-R\(i).md"}],
+             "host":"studio","report_paths":["Inbox/\(i % 3 == 0 ? "archive/" : "")2026-11-09-run-R\(i).md"]}
+            """
+        }
+        return #"{"runs":["# + runs.joined(separator: ",")
+            + #"],"counts":{"running":1,"queued":1,"needs_you":1,"paused":1},"disk":{},"orphans":[]}"#
+    }()
+
+    func testAListHoldingEveryStatusDecodesEveryRunWithItsReport() throws {
+        let list = try StudioRunList.decode(from: Data(Self.everyStatusList.utf8))
+        XCTAssertEqual(list.runs.count, 10)
+        XCTAssertEqual(list.runs.map(\.status),
+                       [.queued, .running, .needsYou, .reported, .failed, .cancelled,
+                        .interrupted, .paused, .closed, .unknown("rebasing")])
+        for (i, run) in list.runs.enumerated() {
+            XCTAssertEqual(run.runID, "R\(i)")
+            XCTAssertEqual(run.latestReportPath,
+                           "Inbox/\(i % 3 == 0 ? "archive/" : "")2026-11-09-run-R\(i).md")
+        }
     }
 
     func testAPausedRunCarriesResumeAtAndARoundWithItsOutcome() throws {
@@ -143,6 +177,11 @@ final class StudioRunsWireTests: XCTestCase {
         stripped.runsActive = nil
         stripped.runsNeedsYou = nil
         stripped.drafts = nil
+        // The board row's fields (0.205.0) are annotations too.
+        stripped.headline = nil
+        stripped.yourAction = nil
+        stripped.servesYourAction = false
+        stripped.nextTitle = nil
         XCTAssertEqual(gd, stripped)
     }
 

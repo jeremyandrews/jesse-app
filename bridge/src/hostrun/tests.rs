@@ -70,7 +70,7 @@ fn remote_fixture(s: &Scratch) {
     assert!(out.status.success());
 }
 
-const NOTE: &str = "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Gd\n\n**Now:** testing\n\n## Drafts\n\
+const NOTE: &str = "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Gd\n\n**Now:** GD6 merged (PR 12): the thing runs. GD5 is next.\n**Waiting on:** you: pick `main` or a release branch for GD5 (asked 9 Nov); then the rest.\n\n## Drafts\n\
 - [ ] **GD5** Run the thing on the Studio. [[todo-list/Projects/drafts/gd5-prompt]]\n\
 - [x] **GD6** Checked one. [[todo-list/Projects/drafts/gd6-prompt]]\n\
 - [ ] **GD7** Archived one. [[todo-list/Projects/drafts/archive/gd7-prompt]]\n\
@@ -175,10 +175,13 @@ impl FakeLauncher {
 #[derive(Default)]
 struct FakeForge {
     states: Mutex<BTreeMap<String, PrState>>,
+    /// Every repository the forge was asked about, in order.
+    asked: Mutex<Vec<String>>,
 }
 
 impl Forge for FakeForge {
-    fn pr_state(&self, _repo: &str, branch: &str) -> Option<PrState> {
+    fn pr_state(&self, repo: &str, branch: &str) -> Option<PrState> {
+        lock(&self.asked).push(repo.to_string());
         lock(&self.states).get(branch).copied()
     }
 }
@@ -1246,6 +1249,57 @@ async fn reconcile_prunes_boots_out_and_reports_but_keeps_an_unknown_directory()
 
 // ---- 4. THE SNAPSHOT AND THE CHAT TOOLS -----------------------------------------------------
 
+#[test]
+fn the_strands_snapshot_gains_the_board_rows_phrases_and_null_without_them() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    // A note with no Now, no Waiting on and nothing queued.
+    std::fs::write(
+        s.notes().join("Strands/Bare.md"),
+        "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Bare\n\n## Drafts\n### Done\n",
+    )
+    .unwrap();
+    std::fs::write(
+        s.notes().join("Strands/Order.md"),
+        "---\ngroup: tag1\nstate: active\nupdated: 2026-11-09\n---\n# Order\n\n\
+         **Now:** Shipping.\n**Waiting on:** you: every open line here is yours to do.\n\n\
+         ## Drafts\n\
+         - [x] **OR1** Ticked already.\n\
+         - [ ] **OR2** Under way now. Launched 2026-11-08.\n\
+         - [ ] **OR3** Write the release notes: two pages.\n\
+         ### Later\n- [ ] **OR4** Someday.\n### Done\n",
+    )
+    .unwrap();
+    let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+    let mut v = serde_json::to_value(&snap).unwrap();
+    annotate_strands(&mut v, &snap, &s.notes(), None, "2026-11-09");
+    let by = |slug: &str| {
+        v["strands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["slug"] == slug)
+            .cloned()
+            .unwrap()
+    };
+    let gd = by("Gd");
+    // `GD6 merged (PR 12): …` around GD6's title; the first gate without its aside or its id;
+    // the first unchecked Queue line, GD5.
+    assert_eq!(gd["headline"], "Merged: Checked one");
+    assert_eq!(gd["your_action"], "pick main or a release branch");
+    assert_eq!(gd["next_title"], "Run the thing on the Studio");
+    // Next is the first unticked Queue line, past a ticked one and one under Running, and a
+    // remark gate names it in the same words.
+    let order = by("Order");
+    assert_eq!(order["next_title"], "Write the release notes");
+    assert_eq!(order["your_action"], "write the release notes");
+    let bare = by("Bare");
+    for key in ["headline", "your_action", "next_title"] {
+        assert!(bare.get(key).is_some(), "{key} is always served");
+        assert!(bare[key].is_null(), "{key}: {}", bare[key]);
+    }
+}
+
 #[tokio::test]
 async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     let s = Scratch::new();
@@ -1254,7 +1308,7 @@ async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     let r = rig(&s);
     let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
     let mut v = serde_json::to_value(&snap).unwrap();
-    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
     let gd = &v["strands"][0];
     assert_eq!(gd["runs_active"], 0);
     assert_eq!(gd["runs_needs_you"], 0);
@@ -1269,11 +1323,11 @@ async fn the_strands_snapshot_gains_studio_runnable_and_runs_active() {
     assert_eq!(runnable, vec!["GD5", "GD10", "GD12"]);
     r.svc.start(item("GD5")).await.unwrap();
     let mut v = serde_json::to_value(&snap).unwrap();
-    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc));
+    annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
     assert_eq!(v["strands"][0]["runs_active"], 1);
     // With [hostrun] off, nothing is runnable.
     let mut v = serde_json::to_value(&snap).unwrap();
-    annotate_strands(&mut v, &snap, &s.notes(), None);
+    annotate_strands(&mut v, &snap, &s.notes(), None, "2026-11-09");
     assert!(v["strands"][0]["drafts"]
         .as_array()
         .unwrap()
@@ -1846,7 +1900,12 @@ fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
     use crate::harness::direct_gateway_mcp_names;
     use jesse_agent::tools::Level;
     let cfg = crate::testutil::test_config();
-    let names = ["devjob_start", "devjob_reply", "devjob_cancel"];
+    let names = [
+        "devjob_start",
+        "devjob_reply",
+        "devjob_cancel",
+        "devjob_close",
+    ];
     let row = crate::mcpservers::row(devjob::DEVJOB_SERVER).unwrap();
     for t in names {
         assert_eq!(
@@ -1855,7 +1914,7 @@ fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
             "{t} is classed as devjob_start is"
         );
     }
-    // Claude Code: the write grant names all three; the read grant names none.
+    // Claude Code: the write grant names all four; the read grant names none.
     let main = main_mcp_config(&cfg, &ClaudeCode);
     let set = McpSet::from_config(main).unwrap_or(McpSet::None);
     let write = row_allowed_tools(&cfg, Capability::Write, set);
@@ -2406,7 +2465,13 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
     let plain = serde_json::to_value(&snap).unwrap();
     let mut annotated = plain.clone();
-    annotate_strands(&mut annotated, &snap, &s.notes(), Some(&r.svc));
+    annotate_strands(
+        &mut annotated,
+        &snap,
+        &s.notes(),
+        Some(&r.svc),
+        "2026-11-09",
+    );
     // Needs you and paused; a queued run is not counted. One of the two needs Jeremy.
     assert_eq!(annotated["strands"][0]["runs_active"], 2);
     assert_eq!(annotated["strands"][0]["runs_needs_you"], 1);
@@ -2414,11 +2479,32 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     assert!(!log["lines"].as_array().unwrap().is_empty());
 
     let base = s.base.to_string_lossy().into_owned();
+    // The list as the app polls it, before anything is archived.
+    let list = r.svc.list_json();
+    // Then the reported run archived by hand: `?archived=all` carries `archived_at` and
+    // `archived_reason` on it. (`studio-runs-list-0.203.json` is this test's output at bridge
+    // 0.203.0, before either field or the filter counts, and is kept as written then.)
+    r.svc.archive("s-done").unwrap();
+    let with_archived = r.svc.list_json_mode(ArchivedMode::All);
+    assert_eq!(with_archived["counts"]["archived"], 1);
     let files: Vec<(&str, Value)> = vec![
-        ("studio-runs-list.json", r.svc.list_json()),
+        ("studio-runs-list.json", list),
+        ("studio-runs-list-archived.json", with_archived),
+        // A run as `run_json` alone serialized it before the Work view: none of its fields.
         (
             "studio-run-needs-you.json",
             run_json(&r.svc.get("GD5").unwrap()),
+        ),
+        // The same run as the routes serve it now: `title`, `last_line`, `report_line`.
+        (
+            "studio-run-needs-you-served.json",
+            r.svc.served_one(&r.svc.get("GD5").unwrap()),
+        ),
+        // `GET /jesse/work/last-look`'s body, before the first look and after one.
+        ("work-last-look-none.json", work::last_look_json(None)),
+        (
+            "work-last-look.json",
+            work::last_look_json(Some(&rfc(now_ms()))),
         ),
         (
             "studio-run-paused.json",
@@ -2456,3 +2542,1268 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
         );
     }
 }
+
+// ---- SETTLED RUNS CLOSE THEMSELVES (0.200.0) ---------------------------------------------
+
+/// Drive `id`'s current round to `needs_you`.
+async fn to_needs_you(r: &Rig, id: &str) {
+    finish_round(r, id, 0, Some("NEEDS YOU: which one?\n"), "");
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get(id).unwrap().status, RunStatus::NeedsYou);
+}
+
+/// Drive `id`'s current round to `interrupted` (with `auto_resume_interrupted` off).
+fn to_interrupted(r: &Rig, id: &str) {
+    r.launcher.gone(id);
+    r.svc.scan(now_ms() + 11_000);
+    assert_eq!(r.svc.get(id).unwrap().status, RunStatus::Interrupted);
+}
+
+fn again(id: &str) -> StartRequest {
+    StartRequest {
+        again: true,
+        ..item(id)
+    }
+}
+
+fn closed_reason(r: &Rig, id: &str) -> Option<String> {
+    let rec = r.svc.get(id).unwrap();
+    assert_eq!(
+        rec.status == RunStatus::Closed,
+        rec.closed_reason.is_some(),
+        "{id}: closed_reason is set exactly while closed"
+    );
+    rec.closed_reason
+}
+
+#[test]
+fn closed_is_terminal_not_live_and_serializes_as_closed() {
+    let c = RunStatus::Closed;
+    assert_eq!(c.label(), "closed");
+    assert_eq!(c.outcome(), "closed");
+    assert!(c.is_terminal() && c.is_finished() && !c.is_live() && !c.is_settleable());
+    assert_eq!(serde_json::to_value(c).unwrap(), json!("closed"));
+    assert_eq!(
+        serde_json::from_value::<RunStatus>(json!("closed")).unwrap(),
+        c
+    );
+    // Only the two waiting statuses and a failed run are settled by the automatic paths.
+    for s in [
+        RunStatus::Queued,
+        RunStatus::Running,
+        RunStatus::Paused,
+        RunStatus::Reported,
+        RunStatus::Cancelled,
+    ] {
+        assert!(!s.is_settleable(), "{s:?}");
+    }
+    for s in [
+        RunStatus::NeedsYou,
+        RunStatus::Interrupted,
+        RunStatus::Failed,
+    ] {
+        assert!(s.is_settleable(), "{s:?}");
+    }
+}
+
+#[test]
+fn a_record_from_before_closed_still_reads_and_a_closed_one_round_trips() {
+    // Written by bridge 0.198.0: no closed_* keys.
+    let old = include_str!(
+        "../../../JesseKit/Tests/JesseNetworkingTests/Fixtures/studio-run-needs-you.json"
+    );
+    let rec: RunRecord = serde_json::from_str(old).unwrap();
+    assert_eq!(rec.status, RunStatus::NeedsYou);
+    assert_eq!((rec.closed_reason, rec.closed_at), (None, None));
+    // A record that is not closed serializes exactly the keys it did before.
+    let v = serde_json::to_value(RunRecord::default()).unwrap();
+    assert!(v.get("closed_reason").is_none() && v.get("closed_at").is_none());
+    // A closed one round trips through run.json.
+    let s = Scratch::new();
+    let st = settings(&s);
+    fake_run(&st, "GD5", RunStatus::Closed, Some(1_000), 1);
+    let dir = st.run_dir("GD5");
+    update_run(&dir, |r| {
+        r.closed_reason = Some("superseded by GD5b".into());
+        r.closed_at = Some(rfc(2_000));
+    })
+    .unwrap();
+    let back = read_run(&dir).unwrap();
+    assert_eq!(back.status, RunStatus::Closed);
+    assert_eq!(back.closed_reason.as_deref(), Some("superseded by GD5b"));
+    assert_eq!(back.closed_at, Some(rfc(2_000)));
+    let text = std::fs::read_to_string(dir.join(RUN_JSON)).unwrap();
+    assert!(text.contains("\"status\": \"closed\""), "{text}");
+    assert_eq!(serde_json::from_str::<RunRecord>(&text).unwrap(), back);
+}
+
+#[tokio::test]
+async fn again_closes_the_earlier_waiting_runs_of_the_item_and_leaves_live_ones() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    // GD5 asks a question; GD5b supersedes it.
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    let pushes = lock(&r.rec.pushes).len();
+    let turns = lock(&r.rec.turns).len();
+    assert_eq!(r.svc.start(again("GD5")).await.unwrap().run_id, "GD5b");
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some("superseded by GD5b")
+    );
+    assert!(r.svc.get("GD5").unwrap().closed_at.is_some());
+    // GD5b is interrupted; GD5c supersedes it.
+    to_interrupted(&r, "GD5b");
+    assert_eq!(r.svc.start(again("GD5")).await.unwrap().run_id, "GD5c");
+    assert_eq!(r.svc.get("GD5c").unwrap().status, RunStatus::Running);
+    assert_eq!(
+        closed_reason(&r, "GD5b").as_deref(),
+        Some("superseded by GD5c")
+    );
+    // GD5d waits for the repository behind GD5c; GD5e touches neither.
+    let d = r.svc.start(again("GD5")).await.unwrap();
+    assert_eq!((d.run_id.as_str(), d.status), ("GD5d", RunStatus::Queued));
+    r.svc.start(again("GD5")).await.unwrap();
+    assert_eq!(r.svc.get("GD5c").unwrap().status, RunStatus::Running);
+    assert_eq!(r.svc.get("GD5d").unwrap().status, RunStatus::Queued);
+    assert_eq!(closed_reason(&r, "GD5c"), None);
+    assert_eq!(closed_reason(&r, "GD5d"), None);
+    // Closing is silent: the only new turns are the start turns, and no push at all.
+    assert_eq!(lock(&r.rec.pushes).len(), pushes);
+    let new_turns: Vec<String> = lock(&r.rec.turns)[turns..].to_vec();
+    assert!(
+        new_turns.iter().all(|t| t.starts_with("Run GD5")),
+        "{new_turns:?}"
+    );
+    assert_eq!(new_turns.len(), 4);
+}
+
+#[tokio::test]
+async fn a_plain_start_does_not_supersede_and_a_paused_run_is_never_closed_by_again() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    // An interrupted run is not live, so a plain start goes ahead, and leaves it as it was
+    // (the watcher's next pass settles it as superseded by the later run).
+    r.svc.start(item("GD5")).await.unwrap();
+    to_interrupted(&r, "GD5");
+    assert_eq!(r.svc.start(item("GD5")).await.unwrap().run_id, "GD5b");
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Interrupted);
+    // GD5b pauses for the usage limit; a further start with again leaves it paused.
+    let reset_secs = now_ms() / 1000 + 2 * 3600;
+    let limit = LIMIT_FIXTURE.replace(&FIXTURE_RESET_SECS.to_string(), &reset_secs.to_string());
+    finish_round(&r, "GD5b", 1, None, &limit);
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5b").unwrap().status, RunStatus::Paused);
+    r.svc.start(again("GD5")).await.unwrap();
+    assert_eq!(r.svc.get("GD5b").unwrap().status, RunStatus::Paused);
+    assert_eq!(closed_reason(&r, "GD5b"), None);
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some("superseded by GD5b")
+    );
+}
+
+#[tokio::test]
+async fn a_closed_run_is_not_live_not_active_and_no_longer_blocks_a_start() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+    let annotated = |r: &Rig| {
+        let mut v = serde_json::to_value(&snap).unwrap();
+        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
+        (
+            v["strands"][0]["runs_active"].clone(),
+            v["strands"][0]["runs_needs_you"].clone(),
+        )
+    };
+    assert_eq!(annotated(&r), (json!(1), json!(1)));
+    assert_eq!(r.svc.active_count("Gd"), 1);
+    assert!(r.svc.live_run_of("Gd", "GD5").is_some());
+    assert!(matches!(
+        r.svc.start(item("GD5")).await,
+        Err(Refusal::Live(_))
+    ));
+    let closed = r.svc.close("GD5", None).unwrap();
+    assert_eq!(closed.status, RunStatus::Closed);
+    assert_eq!(closed.closed_reason.as_deref(), Some(CLOSED_BY_JEREMY));
+    assert_eq!(annotated(&r), (json!(0), json!(0)));
+    assert_eq!(r.svc.active_count("Gd"), 0);
+    assert!(r.svc.live_run_of("Gd", "GD5").is_none());
+    let counts = &r.svc.list_json()["counts"];
+    assert_eq!(counts["needs_you"], 0);
+    // A plain start of the item goes ahead.
+    assert_eq!(r.svc.start(item("GD5")).await.unwrap().run_id, "GD5b");
+}
+
+#[tokio::test]
+async fn a_ticked_line_closes_a_waiting_run_and_an_unticked_one_does_not() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.start(item("GD10")).await.unwrap();
+    to_interrupted(&r, "GD10");
+    r.svc.start(item("GD12")).await.unwrap();
+    assert_eq!(r.svc.get("GD12").unwrap().status, RunStatus::Running);
+    let pushes = lock(&r.rec.pushes).len();
+    let turns = lock(&r.rec.turns).len();
+    // Nothing ticked: nothing closes.
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::NeedsYou);
+    // A note that can no longer be found closes nothing.
+    let note = s.notes().join("Strands/Gd.md");
+    std::fs::rename(&note, s.notes().join("Strands/Gd.md.away")).unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    // Nor does a line that is gone from the note.
+    std::fs::write(
+        &note,
+        NOTE.replace(
+            "- [ ] **GD5** Run the thing on the Studio. [[todo-list/Projects/drafts/gd5-prompt]]\n",
+            "",
+        ),
+    )
+    .unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    // GD5 ticked, GD10 moved under ### Done unchecked, GD12 (running) ticked.
+    let ticked = NOTE
+        .replace("- [ ] **GD5**", "- [x] **GD5**")
+        .replace("- [ ] **GD12**", "- [x] **GD12**")
+        .replace(
+            "- [ ] **GD10** No host. [[todo-list/Projects/drafts/gd10-prompt]]\n",
+            "",
+        )
+        + "- [ ] **GD10** No host. [[todo-list/Projects/drafts/gd10-prompt]]\n";
+    std::fs::write(&note, ticked).unwrap();
+    let parsed = parse_strand("Gd", &std::fs::read_to_string(&note).unwrap());
+    let gd10 = parsed.items.iter().find(|i| i.id == "GD10").unwrap();
+    assert_eq!((gd10.section, gd10.checked), (StrandSection::Done, false));
+    r.svc.pass(now_ms()).await;
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some(CLOSED_ITEM_TICKED)
+    );
+    assert_eq!(
+        closed_reason(&r, "GD10").as_deref(),
+        Some(CLOSED_ITEM_TICKED)
+    );
+    // Never a running run.
+    assert_eq!(r.svc.get("GD12").unwrap().status, RunStatus::Running);
+    // Silent.
+    assert_eq!(lock(&r.rec.pushes).len(), pushes);
+    assert_eq!(lock(&r.rec.turns).len(), turns);
+    // Once.
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+}
+
+#[tokio::test]
+async fn an_archived_report_closes_a_needs_you_run_and_a_deleted_one_does_not() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.start(free("other")).await.unwrap();
+    to_needs_you(&r, "s-other").await;
+    let rel = |id: &str| {
+        r.svc
+            .get(id)
+            .unwrap()
+            .round()
+            .unwrap()
+            .report_path
+            .clone()
+            .unwrap()
+    };
+    let (gd5, other) = (rel("GD5"), rel("s-other"));
+    let archive = s.notes().join(INBOX_ARCHIVE_DIR);
+    std::fs::create_dir_all(&archive).unwrap();
+    let name = |p: &str| p.rsplit('/').next().unwrap().to_string();
+    // A copy in the archive while the report is still in the Inbox: not settled.
+    std::fs::copy(s.notes().join(&gd5), archive.join(name(&gd5))).unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    // Moved: settled. Deleted: not.
+    std::fs::remove_file(s.notes().join(&gd5)).unwrap();
+    std::fs::remove_file(s.notes().join(&other)).unwrap();
+    r.svc.pass(now_ms()).await;
+    assert_eq!(
+        closed_reason(&r, "GD5").as_deref(),
+        Some(CLOSED_REPORT_ARCHIVED)
+    );
+    assert_eq!(r.svc.get("s-other").unwrap().status, RunStatus::NeedsYou);
+    // A second round's report counts too: both have to be gone.
+    r.svc.reply_and_pump("s-other", "go on").await.unwrap();
+    to_needs_you(&r, "s-other").await;
+    let rounds: Vec<String> = r
+        .svc
+        .get("s-other")
+        .unwrap()
+        .rounds
+        .iter()
+        .filter_map(|x| x.report_path.clone())
+        .collect();
+    assert_eq!(rounds.len(), 2);
+    // Round 1's is deleted; round 2's still in the Inbox.
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    std::fs::rename(s.notes().join(&rounds[1]), archive.join(name(&rounds[1]))).unwrap();
+    assert_eq!(
+        r.svc.close_settled(now_ms()),
+        vec![("s-other".to_string(), CLOSED_REPORT_ARCHIVED.to_string())]
+    );
+}
+
+#[tokio::test]
+async fn an_archived_report_does_not_close_an_interrupted_or_reported_run() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    r.svc.start(free("done")).await.unwrap();
+    finish_round(&r, "s-done", 0, Some("Merged.\n"), "");
+    r.svc.pass(now_ms()).await;
+    // An interrupted round after a reported one: its only report is round 1's.
+    r.svc.reply_and_pump("s-done", "more").await.unwrap();
+    to_interrupted(&r, "s-done");
+    let rel = r.svc.get("s-done").unwrap().rounds[0]
+        .report_path
+        .clone()
+        .unwrap();
+    let archive = s.notes().join(INBOX_ARCHIVE_DIR);
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::rename(
+        s.notes().join(&rel),
+        archive.join(rel.rsplit('/').next().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(r.svc.close_settled(now_ms()), vec![]);
+    assert_eq!(r.svc.get("s-done").unwrap().status, RunStatus::Interrupted);
+}
+
+#[tokio::test]
+async fn close_accepts_needs_you_interrupted_and_failed_and_refuses_the_rest() {
+    let s = Scratch::new();
+    let st = settings(&s);
+    let r = rig_with(&s, st.clone());
+    for (id, status) in [
+        ("n", RunStatus::NeedsYou),
+        ("i", RunStatus::Interrupted),
+        ("f", RunStatus::Failed),
+        ("q", RunStatus::Queued),
+        ("r", RunStatus::Running),
+        ("p", RunStatus::Paused),
+        ("d", RunStatus::Reported),
+        ("c", RunStatus::Cancelled),
+        ("x", RunStatus::Closed),
+    ] {
+        fake_run(&st, id, status, Some(1_000), 1);
+    }
+    let ok = r.svc.close("n", None).unwrap();
+    assert_eq!(ok.closed_reason.as_deref(), Some("closed by Jeremy"));
+    assert_eq!(
+        r.svc
+            .close("i", Some("  done by hand  "))
+            .unwrap()
+            .closed_reason
+            .as_deref(),
+        Some("done by hand")
+    );
+    assert_eq!(
+        r.svc.close("f", Some("")).unwrap().closed_reason.as_deref(),
+        Some(CLOSED_BY_JEREMY)
+    );
+    for (id, label) in [
+        ("q", "queued"),
+        ("r", "running"),
+        ("p", "paused"),
+        ("d", "reported"),
+        ("c", "cancelled"),
+        ("x", "closed"),
+    ] {
+        let e = r.svc.close(id, None).unwrap_err();
+        assert_eq!(e.status(), StatusCode::CONFLICT, "{id}");
+        assert_eq!(
+            e.message(),
+            format!("{id} is {label}; only a needs_you, interrupted or failed run can be closed")
+        );
+    }
+    // The refused ones are exactly as they were.
+    assert_eq!(r.svc.get("r").unwrap().status, RunStatus::Running);
+    assert_eq!(r.svc.get("q").unwrap().status, RunStatus::Queued);
+    assert_eq!(r.svc.get("p").unwrap().status, RunStatus::Paused);
+    assert_eq!(
+        r.svc.close("nope", None).unwrap_err().status(),
+        StatusCode::NOT_FOUND
+    );
+    let long = "x".repeat(MAX_CLOSE_REASON_BYTES + 1);
+    fake_run(&st, "n2", RunStatus::NeedsYou, Some(1_000), 1);
+    assert_eq!(
+        r.svc.close("n2", Some(&long)).unwrap_err().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        r.svc.close("n2", Some("two\nlines")).unwrap_err().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(r.svc.get("n2").unwrap().status, RunStatus::NeedsYou);
+    // The route's body: empty, or the object with only `reason`.
+    assert_eq!(CloseBody::parse(b"").unwrap().reason, None);
+    assert_eq!(CloseBody::parse(b"  \n").unwrap().reason, None);
+    assert_eq!(CloseBody::parse(b"{}").unwrap().reason, None);
+    assert_eq!(
+        CloseBody::parse(br#"{"reason":"merged"}"#)
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("merged")
+    );
+    assert!(CloseBody::parse(br#"{"why":"x"}"#).is_err());
+    assert!(CloseBody::parse(b"not json").is_err());
+}
+
+#[tokio::test]
+async fn a_reply_to_a_closed_run_is_taken_as_a_reply_to_a_reported_one() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.close("GD5", Some("settled")).unwrap();
+    let rec = r.svc.reply_and_pump("GD5", "one more thing").await.unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(rec.rounds.len(), 2);
+    assert_eq!((rec.closed_reason, rec.closed_at), (None, None));
+}
+
+#[tokio::test]
+async fn the_devjob_close_tool_closes_by_status_and_says_why_it_refuses() {
+    use crate::gateway::InProcessServer;
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let kc = s.base.join("kc.yaml");
+    std::fs::write(
+        &kc,
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\n\
+         contexts:\n- name: x\n  context:\n    cluster: c\n    user: u\ncurrent-context: x\n\
+         users:\n- name: u\n  user:\n    token: not-a-real-token\n",
+    )
+    .unwrap();
+    let dj = devjob::DevJobs::connect(devjob::DevJobSettings::from_toml(
+        Some(devjob::DevJobToml {
+            enabled: true,
+            kubeconfig: Some(kc),
+            ..devjob::DevJobToml::default()
+        }),
+        "/home/u",
+    ))
+    .await
+    .unwrap();
+    // Without the Studio the tool is not there.
+    assert!(dj
+        .call(devjob::TOOL_CLOSE, json!({ "run_id": "GD5" }))
+        .await
+        .is_err());
+    dj.attach_studio(r.svc.clone());
+    let listed = dj.tools();
+    let close = listed
+        .iter()
+        .find(|t| t["name"] == devjob::TOOL_CLOSE)
+        .expect("listed with the Studio");
+    assert_eq!(close["inputSchema"]["required"], json!(["run_id"]));
+    r.svc.start(item("GD5")).await.unwrap();
+    // Running: refused, and the run goes on.
+    let refused = dj
+        .call(devjob::TOOL_CLOSE, json!({ "run_id": "GD5" }))
+        .await
+        .unwrap();
+    assert_eq!(refused["isError"], true);
+    assert_eq!(
+        refused["content"][0]["text"],
+        "GD5 is running; only a needs_you, interrupted or failed run can be closed"
+    );
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Running);
+    to_needs_you(&r, "GD5").await;
+    let closed = dj
+        .call(
+            devjob::TOOL_CLOSE,
+            json!({ "run_id": "GD5", "reason": "merged by hand" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed["isError"], false, "{closed}");
+    let v = tool_text(&closed);
+    assert_eq!(v["status"], "closed");
+    assert_eq!(v["closed_reason"], "merged by hand");
+    // Unknown arguments are refused, as on every devjob tool.
+    let bad = dj
+        .call(devjob::TOOL_CLOSE, json!({ "run_id": "GD5", "why": "x" }))
+        .await
+        .unwrap();
+    assert_eq!(bad["isError"], true);
+    // devjob_list files it among the finished.
+    let list = tool_text(&dj.call(devjob::TOOL_LIST, json!({})).await.unwrap());
+    assert!(list["studio"]["finished"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["run_id"] == "GD5" && x["status"] == "closed"));
+    assert!(list["studio"]["active"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_closed_run_follows_the_terminal_retention() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    r.svc.close("GD5", None).unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    assert!(dir.join("worktree").exists());
+    // Past keep_days (7), well short of the 30 a waiting run keeps: the worktree goes.
+    r.svc.cleanup(now_ms() + 8 * 24 * 3_600_000);
+    assert!(!dir.join("worktree").exists());
+    assert!(!dir.join("target").exists());
+    assert!(dir.join(RUN_JSON).is_file());
+}
+
+#[tokio::test]
+async fn a_report_filed_under_the_inbox_archive_is_served_where_it_now_lives() {
+    // THE DEFECT: the Inbox is processed, a read report moves to `Inbox/archive/`, and the
+    // path `run.json` recorded names a note that is gone; the app's Report link opened
+    // "doesn't exist on the Studio".
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    finish_round(&r, "GD5", 0, Some("Done.\n"), STREAM_TEXT);
+    r.svc.pass(now_ms()).await;
+    let rel = format!("Inbox/{}-run-GD5.md", today());
+    let archived = format!("Inbox/archive/{}-run-GD5.md", today());
+
+    // Before the move, the recorded path.
+    let listed = r.svc.list_json();
+    assert_eq!(listed["runs"][0]["report_paths"], json!([rel.clone()]));
+
+    std::fs::create_dir_all(s.notes().join("Inbox/archive")).unwrap();
+    std::fs::rename(s.notes().join(&rel), s.notes().join(&archived)).unwrap();
+
+    // After it, the list and the run both serve the note's current path; the record keeps
+    // what it recorded.
+    let listed = r.svc.list_json();
+    assert_eq!(listed["runs"][0]["report_paths"], json!([archived.clone()]));
+    let one = run_json_located(&r.svc.get("GD5").unwrap(), r.svc.notes_root());
+    assert_eq!(one["report_paths"], json!([archived.clone()]));
+    assert_eq!(
+        r.svc
+            .get("GD5")
+            .unwrap()
+            .round()
+            .unwrap()
+            .report_path
+            .as_deref(),
+        Some(rel.as_str())
+    );
+
+    // A report gone from both places is served as recorded: nothing better is known.
+    std::fs::remove_file(s.notes().join(&archived)).unwrap();
+    assert_eq!(
+        locate_report(r.svc.notes_root(), &rel),
+        rel,
+        "a missing note keeps its recorded path"
+    );
+}
+
+// ---- LOCAL REPOSITORIES (0.202.0) -----------------------------------------------------
+
+fn free_in(repo: &str, slug: &str) -> StartRequest {
+    StartRequest {
+        kind: StartKind::Free {
+            repo: repo.into(),
+            prompt: "Write a file.".into(),
+            slug: slug.into(),
+            model: None,
+        },
+        origin: "turn".into(),
+        again: false,
+    }
+}
+
+/// What an agent on a local repository does: commit a file on its branch, then fast forward
+/// the repository's `main` to it.
+fn commit_and_merge(wt: &Path, file: &str, text: &str) {
+    std::fs::write(wt.join(file), text).unwrap();
+    sh(wt, &["add", file]);
+    sh(wt, &["commit", "-q", "-m", file]);
+    sh(wt, &["push", "-q", ".", "HEAD:main"]);
+}
+
+fn has_branch(bare: &Path, branch: &str) -> bool {
+    git::local_branch_exists(bare, branch)
+}
+
+#[test]
+fn a_local_repository_is_local_owner_and_a_valid_name() {
+    for ok in ["local/scratch", "local/ho3-smoke", "local/a.b_c"] {
+        assert!(is_local_repo(ok), "{ok}");
+        assert!(valid_repo(ok), "{ok}");
+    }
+    for no in [
+        "local",
+        "local/",
+        "local/..",
+        "local/a/b",
+        "localx/a",
+        "o/local",
+        "Local/a",
+        "",
+    ] {
+        assert!(!is_local_repo(no), "{no}");
+    }
+    assert_eq!(
+        devjob::local_repo("scratch").as_deref(),
+        Some("local/scratch")
+    );
+    assert_eq!(devjob::local_repo("a b"), None);
+    assert_eq!(strand_local_repo("Jesse-App").unwrap(), "local/jesse-app");
+    // Its bare repository lives under <root>/local, never under <root>/repos.
+    let root = Path::new("/r");
+    assert_eq!(
+        git::bare_path(root, "local/x"),
+        PathBuf::from("/r/local/x.git")
+    );
+    assert_eq!(
+        git::bare_path(root, "o/n"),
+        PathBuf::from("/r/repos/o/n.git")
+    );
+}
+
+#[test]
+fn a_local_repository_is_created_with_one_empty_commit_on_main_and_its_worktree_needs_no_network() {
+    let s = Scratch::new();
+    let root = s.root();
+    let wt = s.base.join("wt");
+    // The URL is never used: nothing is cloned or fetched.
+    let made = git::add_worktree(&root, "local/ho3-x", "", &wt, "ho3-x-branch").unwrap();
+    let bare = root.join("local/ho3-x.git");
+    assert!(bare.join("HEAD").is_file());
+    assert_eq!(made.default_branch, "main");
+    assert_eq!(
+        sh(&bare, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/main"
+    );
+    assert_eq!(sh(&bare, &["rev-parse", "main"]).trim(), made.base_sha);
+    assert_eq!(
+        sh(&bare, &["log", "--format=%an|%cn|%s|%P", "main"]).trim(),
+        "Jesse Bridge|Jesse Bridge|init|"
+    );
+    // The empty tree.
+    assert_eq!(sh(&bare, &["ls-tree", "main"]).trim(), "");
+    // No remote at all.
+    assert_eq!(sh(&bare, &["remote"]).trim(), "");
+    assert_eq!(sh(&wt, &["remote"]).trim(), "");
+    assert_eq!(
+        sh(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "ho3-x-branch"
+    );
+    // A second run on it reuses the repository and its main as it is.
+    commit_and_merge(&wt, "a.txt", "a\n");
+    let main = sh(&bare, &["rev-parse", "main"]).trim().to_string();
+    let wt2 = s.base.join("wt2");
+    let again = git::add_worktree(&root, "local/ho3-x", "", &wt2, "ho3-x-two").unwrap();
+    assert_eq!(again.base_sha, main);
+    assert!(wt2.join("a.txt").is_file());
+    assert_eq!(sh(&bare, &["rev-list", "--count", "main"]).trim(), "2");
+}
+
+#[tokio::test]
+async fn with_nothing_named_a_studio_run_falls_back_to_a_local_repository() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let n = s.notes();
+    // A strand item whose strand lists no repos: local/<strand slug, lowercased>.
+    let a = r.svc.start(asked("None", "NO1", None)).await.unwrap();
+    let rec = r.svc.get(&a.run_id).unwrap();
+    assert_eq!(rec.repo, "local/none");
+    assert!(s.root().join("local/none.git/HEAD").is_file());
+    assert!(!s.root().join("repos/local").exists());
+    // The pure check still refuses it for a plain request, as before.
+    assert!(
+        studio_item(&n, "None", "NO1", OptIn::Request { repo: None })
+            .unwrap_err()
+            .contains("lists no repos")
+    );
+    // A strand listing several repositories is still refused.
+    let e = r.svc.start(asked("Many", "MA1", None)).await.unwrap_err();
+    assert!(e.message().contains("o/n, o/m"), "{}", e.message());
+    assert!(
+        studio_item(&n, "Many", "MA1", OptIn::RequestOrLocal { repo: None })
+            .unwrap_err()
+            .contains("several")
+    );
+    // A strand with one repository keeps it.
+    assert_eq!(
+        studio_item(&n, "One", "ON1", OptIn::RequestOrLocal { repo: None })
+            .unwrap()
+            .repo,
+        "o/n"
+    );
+    // A loose draft: local/scratch.
+    assert_eq!(
+        studio_draft_or_local(&n, "Projects/drafts/loose-fix-prompt.md", None)
+            .unwrap()
+            .repo,
+        "local/scratch"
+    );
+    // A draft of a strand that lists no repos: local/<strand slug>; of one that lists some:
+    // still refused, as before.
+    assert_eq!(
+        studio_draft_or_local(&n, "Projects/drafts/no1-prompt.md", None)
+            .unwrap()
+            .repo,
+        "local/none"
+    );
+    assert!(
+        studio_draft_or_local(&n, "Projects/drafts/on1-prompt.md", None)
+            .unwrap_err()
+            .contains("pass repo")
+    );
+    // A caller's repo still wins over the fallback.
+    assert_eq!(
+        studio_draft_or_local(&n, "Projects/drafts/loose-fix-prompt.md", Some("o/n"))
+            .unwrap()
+            .repo,
+        "o/n"
+    );
+    let d = r
+        .svc
+        .start(StartRequest {
+            kind: StartKind::Draft {
+                draft: "Projects/drafts/loose-fix-prompt.md".into(),
+                repo: None,
+            },
+            origin: "turn".into(),
+            again: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.svc.get(&d.run_id).unwrap().repo, "local/scratch");
+    // A free prompt with no repo: local/<branch_slug>.
+    let f = r.svc.start(free_in("", "one-off")).await.unwrap();
+    assert_eq!(f.run_id, "s-one-off");
+    assert_eq!(r.svc.get("s-one-off").unwrap().repo, "local/one-off");
+    // Through the tool's arguments: host studio with no repo plans a free run with none.
+    let plan =
+        |v: Value| devjob::plan_start(serde_json::from_value(v).unwrap(), devjob::Agent::Claude);
+    assert_eq!(
+        plan(json!({ "host": "studio", "prompt": "p", "branch_slug": "x" })).unwrap(),
+        devjob::StartPlan::Studio {
+            kind: StartKind::Free {
+                repo: String::new(),
+                prompt: "p".into(),
+                slug: "x".into(),
+                model: None
+            },
+            again: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_local_repository_is_honoured_as_written() {
+    let s = Scratch::new();
+    bare_fixture(&s);
+    let r = rig(&s);
+    let n = s.notes();
+    // In a strand's repos.
+    std::fs::write(
+        n.join("Strands/Loc.md"),
+        "---\ngroup: tag1\nstate: active\nrepos: [local/kept]\nupdated: 2026-11-09\n---\n# Loc\n\n## Drafts\n\
+         - [ ] **LO1** Local. [[todo-list/Projects/drafts/lo1-prompt]]\n### Done\n",
+    )
+    .unwrap();
+    std::fs::write(
+        n.join("Projects/drafts/lo1-prompt.md"),
+        bare_draft("Loc", "LO1"),
+    )
+    .unwrap();
+    assert_eq!(
+        studio_item(&n, "Loc", "LO1", OptIn::Request { repo: None })
+            .unwrap()
+            .repo,
+        "local/kept"
+    );
+    // As the caller's repo, over a strand that lists one.
+    assert_eq!(
+        studio_item(
+            &n,
+            "One",
+            "ON1",
+            OptIn::RequestOrLocal {
+                repo: Some("local/mine")
+            }
+        )
+        .unwrap()
+        .repo,
+        "local/mine"
+    );
+    // In devjob-repo, from a schedule entry too.
+    std::fs::write(
+        n.join("Projects/drafts/lo1-prompt.md"),
+        draft_in(
+            "Loc",
+            "LO1",
+            "devjob-repo: local/sched\ndevjob-host: studio\n",
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        studio_item(&n, "Loc", "LO1", OptIn::Schedule).unwrap().repo,
+        "local/sched"
+    );
+    let a = r.svc.start(free_in("local/named", "named")).await.unwrap();
+    assert_eq!(r.svc.get(&a.run_id).unwrap().repo, "local/named");
+    assert!(s.root().join("local/named.git/HEAD").is_file());
+}
+
+fn draft_in(strand: &str, id: &str, extra: &str) -> String {
+    format!("---\nstrand: {strand}\nstrand-id: {id}\n{extra}---\n# {id}\n\n## PROMPT\n{SECTION}")
+}
+
+#[test]
+fn the_cluster_refuses_a_local_repository_and_a_start_with_none() {
+    let plan =
+        |v: Value| devjob::plan_start(serde_json::from_value(v).unwrap(), devjob::Agent::Claude);
+    let want = "local repositories run only on the Studio (host: \"studio\")";
+    for v in [
+        json!({ "repo": "local/x", "prompt": "p", "branch_slug": "s" }),
+        json!({ "host": "cluster", "repo": "local/x", "prompt": "p", "branch_slug": "s" }),
+        json!({ "prompt": "p", "branch_slug": "s" }),
+        json!({ "host": "cluster", "prompt": "p", "branch_slug": "s" }),
+    ] {
+        let e = plan(v.clone()).unwrap_err();
+        assert!(e.contains(want), "{v}: {e}");
+    }
+    // The spec check refuses it too, so a cluster schedule entry cannot name one.
+    let e = DevJobSpec::validate(
+        DevJobArgs {
+            repo: Some("local/x".into()),
+            prompt: Some("p".into()),
+            branch_slug: Some("s".into()),
+            ..DevJobArgs::default()
+        },
+        devjob::Agent::Claude,
+    )
+    .unwrap_err();
+    assert_eq!(e, want);
+    // A GitHub repository on the cluster is unchanged.
+    assert!(matches!(
+        plan(json!({ "repo": "a/b", "prompt": "p", "branch_slug": "s" })).unwrap(),
+        devjob::StartPlan::Cluster(_)
+    ));
+}
+
+#[test]
+fn the_generated_section_for_a_local_repository_has_no_push_and_no_pull_request() {
+    let dir = Path::new("/Users/j/jesse-runs/runs/s-x");
+    let place = |repo: &'static str| RunPlace {
+        run_id: "s-x",
+        repo,
+        branch: "s-x",
+        default_branch: "main",
+        run_dir: dir,
+        pr_title_tag: true,
+    };
+    let local = served_prompt("Do it.\n", &place("local/x"));
+    let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
+    assert_eq!(local, expected);
+    assert!(!local.contains("pull request title"));
+    assert!(!local.contains("origin/"));
+    // A GitHub repository's section is the one it always was.
+    let gh = served_prompt("Do it.\n", &place("o/n"));
+    assert!(gh.contains("worktree of o/n on branch s-x, cut from origin/main."));
+    assert!(gh.contains(&generated_paragraph("s-x", true)));
+    assert!(!gh.contains("Studio only"));
+}
+
+#[tokio::test]
+async fn the_watcher_never_asks_the_forge_about_a_local_run_and_no_pull_request_is_no_failure() {
+    let s = Scratch::new();
+    let r = rig(&s);
+    r.svc.start(free_in("", "quiet")).await.unwrap();
+    let dir = r.svc.settings.run_dir("s-quiet");
+    assert_eq!(read_run(&dir).unwrap().repo, "local/quiet");
+    finish_round(&r, "s-quiet", 0, Some("Done, merged into main.\n"), "");
+    r.svc.pass(now_ms()).await;
+    let rec = r.svc.get("s-quiet").unwrap();
+    assert_eq!(rec.status, RunStatus::Reported);
+    assert!(lock(&r.rec.pushes)
+        .iter()
+        .all(|p| !p.0.contains("needs you")));
+    r.svc.cleanup(now_ms());
+    r.svc.cleanup(now_ms() + 8 * DAY_MS);
+    r.svc.pass(now_ms() + 9 * DAY_MS).await;
+    assert!(
+        lock(&r.forge.asked).is_empty(),
+        "{:?}",
+        lock(&r.forge.asked)
+    );
+    // A GitHub run on the same rig still asks.
+    remote_fixture(&s);
+    r.svc.start(free("gh")).await.unwrap();
+    finish_round(&r, "s-gh", 0, Some("ok\n"), "");
+    r.svc.pass(now_ms()).await;
+    r.svc.cleanup(now_ms());
+    assert_eq!(lock(&r.forge.asked).as_slice(), ["o/n".to_string()]);
+}
+
+#[tokio::test]
+async fn cleanup_keeps_an_unmerged_local_branch_and_removes_a_merged_one() {
+    let s = Scratch::new();
+    let mut st = settings(&s);
+    st.max_per_repo = 2;
+    let r = rig_with(&s, st);
+    r.svc
+        .start(free_in("local/keep", "unmerged"))
+        .await
+        .unwrap();
+    r.svc.start(free_in("local/keep", "merged")).await.unwrap();
+    let bare = git::bare_path(&s.root(), "local/keep");
+    let du = r.svc.settings.run_dir("s-unmerged");
+    let dm = r.svc.settings.run_dir("s-merged");
+    let bu = r.svc.get("s-unmerged").unwrap().branch;
+    let bm = r.svc.get("s-merged").unwrap().branch;
+    // One commits and never merges; the other commits and fast forwards main.
+    let wu = du.join(WORKTREE_DIR);
+    std::fs::write(wu.join("draft.txt"), "x\n").unwrap();
+    sh(&wu, &["add", "draft.txt"]);
+    sh(&wu, &["commit", "-q", "-m", "draft"]);
+    commit_and_merge(&dm.join(WORKTREE_DIR), "done.txt", "y\n");
+    finish_round(&r, "s-unmerged", 0, Some("ok\n"), "");
+    finish_round(&r, "s-merged", 0, Some("ok\n"), "");
+    r.svc.pass(now_ms()).await;
+    // At once: the merged one is done with, the unmerged one stays whole.
+    r.svc.cleanup(now_ms());
+    assert!(!dm.join(WORKTREE_DIR).exists());
+    assert!(!has_branch(&bare, &bm), "a merged branch goes");
+    assert!(du.join(WORKTREE_DIR).exists());
+    assert!(has_branch(&bare, &bu));
+    // Past keep_days the unmerged worktree goes, but its branch, the only copy, stays.
+    r.svc.cleanup(now_ms() + 8 * DAY_MS);
+    assert!(!du.join(WORKTREE_DIR).exists());
+    assert!(
+        has_branch(&bare, &bu),
+        "an unmerged local branch is never deleted"
+    );
+    // The local repository itself is never touched, even by the disk cap and reconcile.
+    let mut st = settings(&s);
+    st.max_total_bytes = 0;
+    let r2 = rig_with(&s, st);
+    r2.svc.space_pass(now_ms() + 9 * DAY_MS);
+    r2.svc.reconcile(now_ms() + 9 * DAY_MS);
+    assert!(bare.join("HEAD").is_file());
+    assert!(has_branch(&bare, &bu));
+    // And a reply restores the worktree from the local branch.
+    let rec = r.svc.reply_and_pump("s-unmerged", "go on").await.unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert!(wu.join("draft.txt").is_file());
+}
+
+#[tokio::test]
+async fn a_local_run_end_to_end_creates_merges_and_lands_in_the_readable_checkout() {
+    let s = Scratch::new();
+    let r = rig(&s);
+    // Studio, no repository: local/<branch_slug>.
+    let started = r.svc.start(free_in("", "ho3-smoke")).await.unwrap();
+    let dir = r.svc.settings.run_dir(&started.run_id);
+    let rec = read_run(&dir).unwrap();
+    assert_eq!(rec.repo, "local/ho3-smoke");
+    assert_eq!(rec.default_branch.as_deref(), Some("main"));
+    let bare = s.root().join("local/ho3-smoke.git");
+    assert!(bare.join("HEAD").is_file());
+    let prompt = std::fs::read_to_string(dir.join(PROMPT_MD)).unwrap();
+    assert!(prompt.contains("worktree of local/ho3-smoke (Studio only)"));
+    assert!(prompt.contains(LOCAL_REPO_SENTENCE));
+    // The agent commits on its branch and fast forwards main.
+    let wt = dir.join(WORKTREE_DIR);
+    commit_and_merge(&wt, "result.txt", "first\n");
+    finish_round(&r, &started.run_id, 0, Some("Merged into main.\n"), "");
+    r.svc.pass(now_ms()).await;
+    let main = sh(&bare, &["rev-parse", "main"]).trim().to_string();
+    // The Inbox report names the repository, the branch and main.
+    let rel = format!("Inbox/{}-run-s-ho3-smoke.md", today());
+    let text = std::fs::read_to_string(s.notes().join(&rel)).unwrap();
+    assert!(text.contains("\nrepo: local/ho3-smoke\n"), "{text}");
+    assert!(
+        text.ends_with(&format!(
+            "Merged into main.\n\nRepository: local/ho3-smoke (Studio only)\nBranch: {}\nmain: {main}\n",
+            rec.branch
+        )),
+        "{text}"
+    );
+    // The readable checkout: cloned on first use.
+    let checkout = s.base.join("jesse/Code/local/ho3-smoke");
+    assert_eq!(
+        r.svc.settings.local_checkout("local/ho3-smoke"),
+        Some(checkout.clone())
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("result.txt")).unwrap(),
+        "first\n"
+    );
+    // Merged and clean, the run's worktree and branch are done with at once; main holds the
+    // work, so a reply still continues, cut again from main.
+    assert!(!wt.exists());
+    assert!(!git::local_branch_exists(&bare, &rec.branch));
+    r.svc.reply_and_pump(&started.run_id, "more").await.unwrap();
+    assert!(wt.join("result.txt").is_file());
+    commit_and_merge(&wt, "second.txt", "second\n");
+    finish_round(&r, &started.run_id, 0, Some("Merged again.\n"), "");
+    r.svc.pass(now_ms()).await;
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("second.txt")).unwrap(),
+        "second\n"
+    );
+    assert_eq!(
+        sh(&checkout, &["rev-parse", "HEAD"]).trim(),
+        sh(&bare, &["rev-parse", "main"]).trim()
+    );
+    assert_eq!(
+        r.svc.get(&started.run_id).unwrap().status,
+        RunStatus::Reported
+    );
+}
+
+#[test]
+fn local_checkout_root_defaults_under_home_expands_tilde_and_may_not_overlap_root() {
+    let s = HostRunSettings::from_toml(None, "/Users/j", "claude");
+    assert_eq!(
+        s.local_checkout_root,
+        PathBuf::from("/Users/j/jesse/Code/local")
+    );
+    let t: HostRunToml =
+        toml::from_str("enabled = true\nlocal_checkout_root = \"~/elsewhere\"\n").unwrap();
+    let s = HostRunSettings::from_toml(Some(t), "/Users/j", "claude");
+    assert_eq!(s.local_checkout_root, PathBuf::from("/Users/j/elsewhere"));
+    assert_eq!(s.local_checkout("o/n"), None);
+    assert_eq!(
+        s.local_checkout("local/x"),
+        Some(PathBuf::from("/Users/j/elsewhere/x"))
+    );
+    let sc = Scratch::new();
+    let mut st = settings(&sc);
+    st.local_checkout_root = sc.root().join("checkouts");
+    let p = st.problems();
+    assert!(
+        p.iter()
+            .any(|m| m.contains("local_checkout_root") && m.contains("overlaps")),
+        "{p:?}"
+    );
+    let mut st = settings(&sc);
+    st.local_checkout_root = PathBuf::from("relative/x");
+    let p = st.problems();
+    assert!(
+        p.iter().any(|m| m.contains("not an absolute path")),
+        "{p:?}"
+    );
+}
+
+// ---- THE WORK VIEW (0.203.0) ---------------------------------------------------------------
+
+/// `GET /jesse/runs` serves each run's `title` (its Drafts line's, else its prompt's H1, else its
+/// branch, never its id), `last_line` (the last non blank line of the log the log route reads)
+/// and `report_line` (the first line of its newest report).
+#[tokio::test]
+async fn the_run_list_serves_a_title_a_last_line_and_a_report_line() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    finish_round(
+        &r,
+        "GD5",
+        0,
+        Some("NEEDS YOU: main or release?\nThe branch is pushed.\n"),
+        STREAM_TEXT,
+    );
+    r.svc.pass(now_ms()).await;
+    r.svc.start(free("other")).await.unwrap();
+    let list = r.svc.list_json();
+    let run = |id: &str| {
+        list["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["run_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let gd5 = run("GD5");
+    assert_eq!(gd5["title"], "Run the thing on the Studio");
+    // The log route's own tail: the last readable line is the Edit tool line.
+    let tail = r.svc.log_lines("GD5", LOG_DEFAULT).unwrap();
+    assert_eq!(gd5["last_line"], json!(tail.last().unwrap()));
+    assert_eq!(gd5["last_line"], "Edit: bridge/src/x.rs");
+    assert_eq!(gd5["report_line"], "NEEDS YOU: main or release?");
+    // A free run with no H1 in its prompt is named after its branch, never its id.
+    let free = run("s-other");
+    let branch = free["branch"].as_str().unwrap();
+    assert_eq!(free["title"], json!(work::branch_title(branch)));
+    assert_ne!(free["title"], "s-other");
+    // Nothing logged yet, no report yet: both null, never missing.
+    assert!(free.as_object().unwrap().contains_key("last_line"));
+    assert!(free["last_line"].is_null());
+    assert!(free["report_line"].is_null());
+    // One run's route serves the same fields.
+    let one = r.svc.served_one(&r.svc.get("GD5").unwrap());
+    assert_eq!(one["title"], gd5["title"]);
+    assert_eq!(one["report_line"], gd5["report_line"]);
+}
+
+/// A run whose Drafts line is gone is named by its prompt's H1, its leading id removed.
+#[tokio::test]
+async fn a_run_whose_line_is_gone_is_named_by_its_prompt_heading() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let d = s.notes().join("Projects/drafts/gd5-prompt.md");
+    let src = std::fs::read_to_string(&d).unwrap();
+    std::fs::write(
+        &d,
+        src.replace("# GD5\n", "# GD5 Ship the thing: then tidy up\n"),
+    )
+    .unwrap();
+    r.svc.start(item("GD5")).await.unwrap();
+    let note = s.notes().join("Strands/Gd.md");
+    let text = std::fs::read_to_string(&note).unwrap();
+    std::fs::write(&note, text.replace("**GD5**", "**GD5x**")).unwrap();
+    let v = r.svc.served_one(&r.svc.get("GD5").unwrap());
+    assert_eq!(v["title"], "Ship the thing");
+}
+
+/// The last line is at most 200 characters, and is read again only when the stream grows.
+#[tokio::test]
+async fn the_last_line_is_clipped_and_follows_the_stream() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    let line = |t: &str| {
+        format!(
+            "{}\n",
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":t}]}})
+        )
+    };
+    let append = |t: &str| {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(STREAM))
+            .unwrap();
+        std::io::Write::write_all(&mut f, line(t).as_bytes()).unwrap();
+    };
+    append("First.\n\n   \n");
+    let first = r.svc.served_one(&r.svc.get("GD5").unwrap());
+    assert_eq!(first["last_line"], "First.");
+    append(&"x".repeat(300));
+    let long = r.svc.served_one(&r.svc.get("GD5").unwrap());
+    let got = long["last_line"].as_str().unwrap();
+    assert_eq!(got.chars().count(), work::LAST_LINE_MAX);
+    assert!(got.ends_with('\u{2026}'));
+}
+
+/// `startable` over the real annotate: a runnable line with no live run is startable; the same
+/// line with a live run is not; a line whose draft does not name this machine is not; a line
+/// that is not runnable at all carries the runnable check's own reason.
+#[tokio::test]
+async fn startable_is_runnable_and_studio_and_not_live() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let annotate = || {
+        let snap = crate::strands::snapshot(&s.notes(), "2026-11-09");
+        let mut v = serde_json::to_value(&snap).unwrap();
+        annotate_strands(&mut v, &snap, &s.notes(), Some(&r.svc), "2026-11-09");
+        v["strands"][0]["drafts"].as_array().unwrap().clone()
+    };
+    let draft = |all: &[Value], id: &str| all.iter().find(|d| d["id"] == id).unwrap().clone();
+    let all = annotate();
+    let gd5 = draft(&all, "GD5");
+    assert_eq!(gd5["startable"], true);
+    assert!(gd5["startable_reason"].is_null());
+    assert_eq!(gd5["title"], "Run the thing on the Studio");
+    // GD10 is runnable on request but its draft does not say devjob-host: studio.
+    let gd10 = draft(&all, "GD10");
+    assert_eq!(gd10["studio_runnable"], true);
+    assert_eq!(gd10["startable"], false);
+    assert!(gd10["startable_reason"]
+        .as_str()
+        .unwrap()
+        .contains("devjob-host"));
+    // GD8 is not runnable: its reason is the runnable check's.
+    let gd8 = draft(&all, "GD8");
+    assert_eq!(gd8["startable"], false);
+    assert!(gd8["startable_reason"].as_str().unwrap().contains("PROMPT"));
+    r.svc.start(item("GD5")).await.unwrap();
+    let gd5 = draft(&annotate(), "GD5");
+    // `studio_runnable` is unchanged for compatibility: a live run does not touch it.
+    assert_eq!(gd5["studio_runnable"], true);
+    assert_eq!(gd5["startable"], false);
+    assert_eq!(gd5["startable_reason"], "Already has a live run.");
+}
+
+/// A `needs_you` run asked a question: the empty continue would answer it blind, so the bridge
+/// refuses it with a 409 that says so. An answer goes through; an interrupted run still takes
+/// the continue.
+#[tokio::test]
+async fn a_blind_continue_to_a_question_is_refused() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig_with(&s, no_auto_resume(&s));
+    r.svc.start(item("GD5")).await.unwrap();
+    to_needs_you(&r, "GD5").await;
+    let e = r.svc.reply("GD5", CONTINUE_TEXT).unwrap_err();
+    assert_eq!(e.status(), StatusCode::CONFLICT);
+    assert!(
+        e.message().contains("asked a question and needs an answer"),
+        "{e:?}"
+    );
+    // Surrounding whitespace is still the same blind continue.
+    assert!(r
+        .svc
+        .reply("GD5", "  Continue where you left off.\n")
+        .is_err());
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::NeedsYou);
+    // An interrupted run asked nothing: the continue is what resumes it.
+    r.svc.start(item("GD10")).await.unwrap();
+    to_interrupted(&r, "GD10");
+    assert!(r.svc.reply("GD10", CONTINUE_TEXT).is_ok());
+    // A real answer goes through.
+    assert!(r.svc.reply("GD5", "main").is_ok());
+}
+
+mod archive;
+mod settle_failed;

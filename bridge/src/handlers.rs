@@ -184,6 +184,14 @@ pub struct JesseRequest {
     /// cannot claim to be a schedule or a strand tick.
     #[serde(skip)]
     origin: Option<String>,
+    // The workouts the attached health block describes, as STRUCTURED DATA (the app's
+    // `WorkoutRecord`). DATA, NEVER PROMPT TEXT: it is read by `workoutdetail` alone, which
+    // writes it into `diet-logs/workout-detail.csv` and `workout-splits.csv` before the
+    // model runs, and nothing builds a prompt from it. Kept as a raw `Value` so a malformed
+    // one cannot fail the whole request: it is validated on its own, rejected with a logged
+    // reason, and the turn runs. Absent (every older app build) changes nothing.
+    #[serde(default)]
+    workout_records: Option<Value>,
 }
 
 impl JesseRequest {
@@ -256,6 +264,7 @@ impl JesseRequest {
             request_id: None,
             sent_for: None,
             origin: None,
+            workout_records: None,
         }
     }
 
@@ -372,6 +381,35 @@ fn accepted_running(job_id: &str, conversation_id: &str) -> Response {
 #[derive(Deserialize)]
 pub struct DeviceRequest {
     token: String,
+    /// A stable id for this device: `identifierForVendor` on iOS, a UUID the Mac app keeps.
+    /// Absent from an older app build, whose token is then kept under `legacy`.
+    #[serde(default)]
+    device_id: Option<String>,
+    /// `ios`, `macos`, …
+    #[serde(default)]
+    platform: Option<String>,
+    /// The sending app's bundle id, the `apns-topic` its pushes need.
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+/// Trim an optional registration field to `None` when blank, and refuse one that is too long
+/// or carries anything but letters, digits, `.`, `-` and `_`: these become a map key, a log
+/// word and an HTTP header value.
+fn device_field(name: &str, v: Option<String>, max: usize) -> Result<Option<String>, ApiError> {
+    let Some(v) = v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let ok = v.len() <= max
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !ok {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{name}: at most {max} letters, digits, '.', '-' or '_'"),
+        ));
+    }
+    Ok(Some(v))
 }
 
 /// Body of `POST /jesse/title`: the conversation text to turn into a short title.
@@ -1273,6 +1311,9 @@ pub async fn start_turn(
     // sending one to a second model would spend the most sensitive field on a prompt
     // that cannot use it.
     let health_context = req.health_context.clone();
+    // The structured workout records, validated now (a rejection is logged and the turn
+    // runs without them) and written inside the task before the model starts.
+    let workout_records = turn_workout_records(req.workout_records.as_ref());
     // Push machinery for the completion notification (no-ops when push is off).
     let apns = st.apns.clone();
     let devices = st.devices.clone();
@@ -1423,6 +1464,10 @@ pub async fn start_turn(
         // Read from the model's level, so a read-level turn never touches the broker at all
         // and never pays for a lock it cannot need.
         let write_lock = build_write_lock_child(&cfg, &hook_helper, &active, &jid, &cid);
+        // THE WORKOUT LEDGER, before the model runs: the phone's structured records upserted
+        // into the two sidecar CSVs under this turn's own write locks (per-file, then git,
+        // the order above). Best-effort: a failure is logged and the turn goes on.
+        ingest_turn_workout_records(Path::new(&cfg.vault), &broker, &jid, &workout_records).await;
 
         // Turn wall clock starts here (after the permit — queued time doesn't count).
         let turn_start = Instant::now();
@@ -2437,11 +2482,13 @@ pub async fn jesse_cancel(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /jesse/device` — register/update this phone's APNs device token. Same
-/// bearer auth as `/jesse`. Idempotent upsert: a re-register overwrites the
-/// stored token. Persisted (when a state dir is configured) so it survives a
-/// restart. Works even when push is disabled — the bridge just won't send. Never
-/// logs the token.
+/// `POST /jesse/device` — register/update one device's APNs token. Same bearer auth as
+/// `/jesse`. Idempotent upsert of THIS device's entry, keyed by the optional `device_id`
+/// (with `platform` and `topic` beside it); a body with only `token`, as an older app build
+/// sends, is kept under `legacy`. Every other device's entry is left alone, so the iPhone and
+/// the Mac no longer replace each other. Persisted (when a state dir is configured) so it
+/// survives a restart. Works even when push is disabled — the bridge just won't send. Never
+/// logs the token; logs the platform and the device id's first eight characters.
 pub async fn jesse_device(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -2452,7 +2499,21 @@ pub async fn jesse_device(
     if token.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "missing device token".to_string()));
     }
-    st.devices.set(token);
+    let device_id = device_field("device_id", req.device_id, 128)?;
+    let platform = device_field("platform", req.platform, 32)?.map(|p| p.to_ascii_lowercase());
+    let topic = device_field("topic", req.topic, 200)?;
+    let label = format!(
+        "{} {}",
+        platform.as_deref().unwrap_or("unknown"),
+        short_device_id(device_id.as_deref().unwrap_or(LEGACY_DEVICE_ID))
+    );
+    let n = st.devices.register(DeviceRegistration {
+        token,
+        device_id,
+        platform,
+        topic,
+    });
+    eprintln!("jesse-bridge: device registered: {label} ({n} device(s) stored)");
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2889,6 +2950,11 @@ pub fn app(state: AppState) -> Router {
         // Health measured into `diet-logs/vitals-log.csv`, one row per date, replaced in
         // place on a resend. Never touches the diet CSVs. See `vitals`.
         .route("/jesse/diet/vitals", post(jesse_diet_vitals))
+        // THE WORKOUT DETAIL LEDGER's backfill: pages of at most 50 structured workout
+        // records upserted into `diet-logs/workout-detail.csv` and `workout-splits.csv`
+        // exactly as a turn's `workout_records` are. Starts no model turn. See
+        // `workoutdetail`.
+        .route("/jesse/diet/workouts", post(jesse_diet_workouts))
         // THE HEALTH ARCHIVE's one writer: batches of HealthKit samples upserted into Postgres
         // by UUID in one transaction, `200` only after commit. Reads its own body under its
         // own 16 MiB cap (a route of 100000 points), after auth. `503 not_configured` without
@@ -2935,6 +3001,26 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/jesse/runs/:run_id/cancel",
             post(crate::hostrun::jesse_run_cancel),
+        )
+        .route(
+            "/jesse/runs/:run_id/close",
+            post(crate::hostrun::jesse_run_close),
+        )
+        // A flag on the run, never a move or a delete: the list leaves archived runs out.
+        .route(
+            "/jesse/runs/:run_id/archive",
+            post(crate::hostrun::jesse_run_archive),
+        )
+        .route(
+            "/jesse/runs/:run_id/unarchive",
+            post(crate::hostrun::jesse_run_unarchive),
+        )
+        // The Work view's one shared timestamp: when the board was last looked at, on any
+        // device. Same auth as the run routes; works whether or not runs are enabled.
+        .route(
+            "/jesse/work/last-look",
+            get(crate::hostrun::work::jesse_work_last_look)
+                .post(crate::hostrun::work::jesse_work_last_look_set),
         )
         .route("/jesse/strands", get(crate::strands::jesse_strands))
         .route("/jesse/strands/:slug", get(crate::strands::jesse_strand))
@@ -3043,6 +3129,23 @@ mod tests {
 
     fn wire(json: &str) -> JesseRequest {
         serde_json::from_str(json).expect("a valid request body")
+    }
+
+    /// `workout_records` is optional data: absent on an older build, and a malformed value
+    /// never fails the body (it is validated on its own and the turn runs).
+    #[test]
+    fn workout_records_are_optional_and_never_fail_the_body() {
+        let old = wire(r#"{"mode":"ask","text":"hi"}"#);
+        assert!(old.workout_records.is_none());
+        assert!(turn_workout_records(old.workout_records.as_ref()).is_empty());
+        let bad = wire(r#"{"mode":"ask","text":"hi","workout_records":"nonsense"}"#);
+        assert!(turn_workout_records(bad.workout_records.as_ref()).is_empty());
+        let good = wire(
+            r#"{"mode":"ask","text":"log my run","workout_records":[{"schema_version":1,
+            "workout_uuid":"6F1C2A4E-0000-4000-8000-000000000001",
+            "start":"2026-10-07T07:12:03+02:00","activity":"Run","duration_s":2894}]}"#,
+        );
+        assert_eq!(turn_workout_records(good.workout_records.as_ref()).len(), 1);
     }
 
     fn source_of(req: &JesseRequest) -> String {

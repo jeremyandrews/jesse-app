@@ -818,7 +818,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
             "resources_delete",
         ],
     ),
-    // TIMED REMINDERS (0.199.0): this repository's own `jesse-reminders-mcp`, a BARE NAME on
+    // TIMED REMINDERS (0.207.0): this repository's own `jesse-reminders-mcp`, a BARE NAME on
     // the child's `PATH` like `jesse-places-mcp`, and in `deploy-bins.toml`. It reads and writes
     // one file, `<state_dir>/reminders.json`, and reads `<state_dir>/profile.json` for the zone,
     // so its environment is the state dir alone (`HOME`, in [`BASE_ENV`], is its fallback, as
@@ -839,8 +839,8 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
     // on ([`render_in_process_entry`]), so a gateway-off child never sees it, and only when
     // `[devjob] enabled` registered the server. `devjob_start` creates a Job (or a Studio run)
     // that can push a branch and open a pull request, so it is a write; `devjob_reply` and
-    // `devjob_cancel` steer a Studio run, so they are writes beside it (0.197.0); the other two
-    // only read.
+    // `devjob_cancel` steer a Studio run, so they are writes beside it (0.197.0), and so is
+    // `devjob_close` (0.200.0); the other two only read.
     McpServerRow {
         transport: Transport::InProcess,
         ..writes(
@@ -849,6 +849,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
                 crate::devjob::TOOL_START,
                 crate::devjob::TOOL_REPLY,
                 crate::devjob::TOOL_CANCEL,
+                crate::devjob::TOOL_CLOSE,
             ],
         )
     },

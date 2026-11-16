@@ -2,7 +2,7 @@
 //!
 //! Every [`TICK_SECS`] the ticker loads `reminders.json`, decides what is due
 //! ([`crate::reminders::tick`]), WRITES that decision back, and only then sends each push through
-//! [`ApnsClient::push_payload`]. Recording first is what makes "never twice" hold across a
+//! [`push_to_devices`]. Recording first is what makes "never twice" hold across a
 //! restart: the worst a crash between the write and the send can do is lose one push. Every push
 //! error is logged and swallowed, the way `push_schedule_outcome` does, and none can touch the
 //! store, which was already written.
@@ -25,7 +25,7 @@ pub const REMINDER_CATEGORY: &str = "JESSE_REMINDER";
 
 /// The payload for one reminder: title `Reminder`, the text as the body, a sound, the
 /// time-sensitive interruption level, the actions' category and the reminder's id. The badge is
-/// stamped by [`ApnsClient::push_payload`], as on every push.
+/// stamped by [`push_to_devices`], as on every push.
 pub fn build_reminder_payload(id: &str, body: &str) -> Vec<u8> {
     json!({
         "aps": {
@@ -73,7 +73,7 @@ pub trait ReminderSink: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
 }
 
-/// The real sink: the bridge's APNs client and registered device, badge and all.
+/// The real sink: the bridge's APNs client and every registered device, badge and all.
 pub struct ApnsSink {
     pub st: AppState,
 }
@@ -89,18 +89,22 @@ impl ReminderSink for ApnsSink {
                 .apns
                 .as_deref()
                 .ok_or("push is not configured (JESSE_APNS_*)")?;
-            let token = self.st.devices.get().ok_or("no device registered")?;
             let badge = Some(unread_conversation_count(
                 &self.st.conversations,
                 &self.st.flags,
             ));
-            match apns.push_payload(&token, payload, badge).await {
-                PushOutcome::Sent => Ok(()),
-                PushOutcome::DeadToken => {
-                    self.st.devices.clear();
-                    Err("device token rejected (410 dead) — cleared".into())
-                }
-                PushOutcome::Failed(e) => Err(e),
+            // Every paired device, each as its own topic; a 410 removes that device only.
+            let tally =
+                push_to_devices(apns, &self.st.devices, "reminder", "-", payload, badge).await;
+            match tally {
+                t if t.sent > 0 => Ok(()),
+                t if t.devices() == 0 => Err("no device registered".into()),
+                t => Err(format!(
+                    "sent to none of {} device(s) ({} dead, {} failed)",
+                    t.devices(),
+                    t.dead,
+                    t.failed
+                )),
             }
         })
     }

@@ -1324,7 +1324,7 @@ async fn device_register_round_trip_stores_token() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        st.devices.get().as_deref(),
+        st.devices.token_of(LEGACY_DEVICE_ID).as_deref(),
         Some("deadbeefcafe"),
         "token stored"
     );
@@ -1338,7 +1338,103 @@ async fn device_register_round_trip_stores_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(st.devices.get().as_deref(), Some("newtoken99"));
+    assert_eq!(
+        st.devices.token_of(LEGACY_DEVICE_ID).as_deref(),
+        Some("newtoken99")
+    );
+    assert_eq!(st.devices.len(), 1, "a re-register replaces, never adds");
+}
+#[tokio::test]
+async fn device_register_keeps_one_entry_per_device() {
+    // THE DEFECT: one stored token, so the iPhone and the Mac replaced each other. Now each
+    // registration keeps its own entry, with its platform and topic.
+    let st = test_state();
+    for body in [
+        r#"{"token":"phonetok","device_id":"6F1C-PHONE","platform":"ios","topic":"com.tag1.Jesse"}"#,
+        r#"{"token":"mactok","device_id":"A9E2-MAC","platform":"macos","topic":"com.tag1.JesseMac"}"#,
+    ] {
+        let resp = app(st.clone())
+            .oneshot(device_request(Some("Bearer test-token"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert_eq!(st.devices.len(), 2);
+    assert_eq!(
+        st.devices.token_of("6F1C-PHONE").as_deref(),
+        Some("phonetok")
+    );
+    assert_eq!(st.devices.token_of("A9E2-MAC").as_deref(), Some("mactok"));
+    let mac = st
+        .devices
+        .all()
+        .into_iter()
+        .find(|(id, _)| id == "A9E2-MAC")
+        .unwrap()
+        .1;
+    assert_eq!(mac.platform.as_deref(), Some("macos"));
+    assert_eq!(mac.topic.as_deref(), Some("com.tag1.JesseMac"));
+}
+#[tokio::test]
+async fn a_registration_without_a_device_id_still_gets_pushed() {
+    // An app build from before device ids: only `token`. It is stored under `legacy` and
+    // pushed beside a device that did name itself.
+    let mock = MockApns::default();
+    let mut st = test_state();
+    st.apns = Some(test_apns(Arc::new(mock.clone())));
+    for body in [
+        r#"{"token":"oldbuildtoken"}"#,
+        r#"{"token":"mactok","device_id":"A9E2-MAC","platform":"macos","topic":"com.tag1.JesseMac"}"#,
+    ] {
+        let resp = app(st.clone())
+            .oneshot(device_request(Some("Bearer test-token"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let id = st.jobs.create();
+    st.jobs
+        .complete(&id, Ok(("already done".to_string(), None, None)));
+    let resp = app(st.clone())
+        .oneshot(notify_request(Some("Bearer test-token"), &id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let mut sent: Vec<(String, String)> = mock
+        .calls
+        .lock_ok()
+        .iter()
+        .map(|r| (r.path.clone(), r.topic.clone()))
+        .collect();
+    sent.sort();
+    assert_eq!(
+        sent,
+        vec![
+            (
+                "/3/device/mactok".to_string(),
+                "com.tag1.JesseMac".to_string()
+            ),
+            (
+                "/3/device/oldbuildtoken".to_string(),
+                "com.tag1.Jesse".to_string()
+            ),
+        ]
+    );
+}
+#[tokio::test]
+async fn device_register_refuses_a_malformed_device_id() {
+    let st = test_state();
+    for body in [
+        r#"{"token":"t","device_id":"has space"}"#,
+        r#"{"token":"t","platform":"ios\nX"}"#,
+    ] {
+        let resp = app(st.clone())
+            .oneshot(device_request(Some("Bearer test-token"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    assert!(st.devices.is_empty());
 }
 #[tokio::test]
 async fn device_register_rejects_empty_token() {
@@ -10458,7 +10554,8 @@ async fn strands_list_serves_the_contract_json() {
         .find(|t| t["slug"] == "Clean-Strand")
         .unwrap();
     // `drafts` and `runs_active` are the Studio run fields (bridge 0.196.0), always served;
-    // `runs_needs_you` joined them in 0.198.0.
+    // `runs_needs_you` joined them in 0.198.0; `headline`, `next_title` and `your_action`, the
+    // board row's phrases, in 0.205.0.
     assert_eq!(
         keys(clean),
         vec![
@@ -10466,7 +10563,9 @@ async fn strands_list_serves_the_contract_json() {
             "drafts",
             "findings",
             "group",
+            "headline",
             "next",
+            "next_title",
             "now",
             "parent",
             "repos",
@@ -10477,6 +10576,7 @@ async fn strands_list_serves_the_contract_json() {
             "title",
             "updated",
             "waiting",
+            "your_action",
         ]
     );
     assert_eq!(clean["runs_active"], 0, "[hostrun] is off in the fixture");
@@ -11071,4 +11171,87 @@ async fn diet_snapshot_carries_the_patterns_report_with_every_catalogue_question
     assert!(p["caveat"].as_str().unwrap().contains("not causes"));
     assert!(p["energyAudit"]["withheld"].is_string());
     let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ---- GET/POST /jesse/work/last-look ------------------------------------------------------
+//
+// The Work view's one shared timestamp, in the state directory, behind the run routes' auth.
+
+fn last_look_request(method: &str, auth: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri("/jesse/work/last-look");
+    if let Some(a) = auth {
+        b = b.header("authorization", a);
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn last_look_needs_the_paired_token() {
+    let st = AppState::new(test_config());
+    for method in ["GET", "POST"] {
+        for auth in [None, Some("Bearer wrong")] {
+            let resp = app(st.clone())
+                .oneshot(last_look_request(method, auth))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {auth:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn last_look_is_null_then_now_and_survives_a_restart() {
+    let state_parent = std::env::temp_dir().join(format!("jesse-state-{}", random_hex()));
+    let cfg = || Config {
+        state_dir: Some(state_parent.to_string_lossy().into_owned()),
+        ..test_config()
+    };
+    let st = AppState::new(cfg());
+    let resp = app(st.clone())
+        .oneshot(last_look_request("GET", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(body, serde_json::json!({ "last_look": null }));
+
+    let before = chrono::Utc::now();
+    let resp = app(st.clone())
+        .oneshot(last_look_request("POST", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let posted: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    let at = posted["last_look"].as_str().unwrap().to_string();
+    let parsed = chrono::DateTime::parse_from_rfc3339(&at).unwrap();
+    assert!(parsed.timestamp_millis() >= before.timestamp_millis() - 1);
+    assert!(state_parent.join("work-last-look.json").is_file());
+
+    // A second device, or the same bridge after a restart, reads the same instant.
+    let resp = app(AppState::new(cfg()))
+        .oneshot(last_look_request("GET", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert_eq!(body["last_look"], serde_json::json!(at));
+    let _ = std::fs::remove_dir_all(&state_parent);
+}
+
+#[tokio::test]
+async fn last_look_without_a_state_dir_is_null_and_cannot_be_set() {
+    let st = AppState::new(test_config());
+    let resp = app(st.clone())
+        .oneshot(last_look_request("GET", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_string(resp).await).unwrap();
+    assert!(body["last_look"].is_null());
+    let resp = app(st)
+        .oneshot(last_look_request("POST", Some("Bearer test-token")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

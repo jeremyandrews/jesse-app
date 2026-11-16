@@ -892,8 +892,8 @@ pub fn hours_from_google(periods: &[Value]) -> Result<OpeningHours, String> {
             );
         }
         out.always_open = true;
-        for d in 0..7 {
-            out.days[d] = vec![Interval {
+        for day in out.days.iter_mut() {
+            *day = vec![Interval {
                 start: 0,
                 end: 1440,
             }];
@@ -1467,8 +1467,8 @@ mod tests {
                 end: 17 * 60
             }]
         );
-        for d in 1..7 {
-            assert!(h.days[d].is_empty(), "day {d} should be closed");
+        for (d, day) in h.days.iter().enumerate().skip(1) {
+            assert!(day.is_empty(), "day {d} should be closed");
         }
         assert!(h.open_at(0, 10 * 60));
         assert!(!h.open_at(0, 18 * 60));
@@ -1531,9 +1531,9 @@ mod tests {
     fn a_single_open_with_no_close_is_always_open() {
         let h = hours_from_google(&[json!({"open": {"day": 0, "hour": 0, "minute": 0}})]).unwrap();
         assert!(h.always_open);
-        for d in 0..7 {
+        for day in &h.days {
             assert_eq!(
-                h.days[d],
+                *day,
                 vec![Interval {
                     start: 0,
                     end: 1440

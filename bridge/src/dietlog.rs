@@ -720,6 +720,10 @@ pub fn canonical_header(file_name: &str) -> Option<&'static str> {
         "food-log.csv" => Some(food_log_header()),
         "exercise-log.csv" => Some(EXERCISE_LOG_HEADER),
         "weight-log.csv" => Some(WEIGHT_LOG_HEADER),
+        // The workout detail sidecars (`workoutdetail`): written by the bridge from the
+        // phone's structured records, never by the diet pipeline.
+        WORKOUT_DETAIL_LOG => Some(WORKOUT_DETAIL_HEADER),
+        WORKOUT_SPLITS_LOG => Some(WORKOUT_SPLITS_HEADER),
         _ => None,
     }
 }
@@ -5393,7 +5397,7 @@ Cadence,Calories,Plan_Source,Notes,Start_Time,TZ,"
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let node = bin.join("node");
-        std::fs::write(
+        crate::testutil::write_executable(
             &node,
             "#!/bin/sh\n\
              echo \"$@\" >> \"$JESSE_TEST_ARGV\"\n\
@@ -5407,11 +5411,7 @@ Cadence,Calories,Plan_Source,Notes,Start_Time,TZ,"
              [ \"$day\" = \"$current\" ] || exit 0\n\
              printf 'window.DIET_TODAY = { date: \"%s\", regenerated: true };\\n' \"$day\" \\\n\
              \x20 > vault/diet-today.js\n",
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&node).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&node, perms).unwrap();
+        );
         bin
     }
 

@@ -7,11 +7,19 @@
 //!
 //! A bare clone keeps the remote's branches under `refs/remotes/origin/*` (not the `clone
 //! --bare` mirror refspec), so a fetch never tries to move a branch a worktree has checked out.
+//!
+//! **A LOCAL REPOSITORY** (`local/<name>`, [`crate::devjob::is_local_repo`]) is a bare
+//! repository at `<root>/local/<name>.git` with no remote at all: it is created on first use
+//! with one empty commit on `main`, its worktrees branch from its own `main` with no fetch, and
+//! a run's branch is deleted only once it is merged into that `main`, since nothing else holds
+//! the work. Nothing here ever deletes `<root>/local/`.
 
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::devjob::is_local_repo;
 
 /// An exclusive `flock` on one repository's lock file, released on drop.
 pub struct RepoLock {
@@ -55,10 +63,154 @@ pub fn flock_exclusive(file: &File) -> std::io::Result<()> {
     }
 }
 
-/// `<root>/repos/<owner>/<name>.git`.
+/// `<root>/repos/<owner>/<name>.git`, or `<root>/local/<name>.git` for `local/<name>`.
 pub fn bare_path(root: &Path, repo: &str) -> PathBuf {
     let (owner, name) = repo.split_once('/').unwrap_or((repo, repo));
+    if is_local_repo(repo) {
+        return root.join(LOCAL_DIR).join(format!("{name}.git"));
+    }
     root.join("repos").join(owner).join(format!("{name}.git"))
+}
+
+/// The folder under `root` that holds the local repositories.
+pub const LOCAL_DIR: &str = "local";
+/// The branch a local repository starts with and its runs merge into.
+pub const LOCAL_DEFAULT_BRANCH: &str = "main";
+/// Who makes a local repository's first commit.
+pub const LOCAL_AUTHOR_NAME: &str = "Jesse Bridge";
+pub const LOCAL_AUTHOR_EMAIL: &str = "jesse-bridge@localhost";
+
+/// Run git with `args` in `dir`, stdin empty and the bridge's own identity on any commit.
+fn git_as_bridge(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", LOCAL_AUTHOR_NAME)
+        .env("GIT_AUTHOR_EMAIL", LOCAL_AUTHOR_EMAIL)
+        .env("GIT_COMMITTER_NAME", LOCAL_AUTHOR_NAME)
+        .env("GIT_COMMITTER_EMAIL", LOCAL_AUTHOR_EMAIL)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Create a local repository when it is missing (under the lock the caller holds): a bare
+/// repository whose `HEAD` is `main`, with one empty commit `init` by [`LOCAL_AUTHOR_NAME`].
+/// It has no remote. An existing one is left as it is.
+pub fn ensure_local_bare(bare: &Path) -> Result<(), String> {
+    let main_ref = format!("refs/heads/{LOCAL_DEFAULT_BRANCH}");
+    if bare.join("HEAD").is_file()
+        && git(bare, &["rev-parse", "--verify", "--quiet", &main_ref]).is_ok()
+    {
+        return Ok(());
+    }
+    std::fs::create_dir_all(bare)
+        .map_err(|e| format!("could not create {}: {e}", bare.display()))?;
+    git(bare, &["init", "--bare", "--quiet"])?;
+    git(bare, &["symbolic-ref", "HEAD", &main_ref])?;
+    // The empty tree, written from empty stdin, then a commit of it.
+    let tree = git_as_bridge(bare, &["mktree"])?.trim().to_string();
+    let commit = git_as_bridge(bare, &["commit-tree", &tree, "-m", "init"])?
+        .trim()
+        .to_string();
+    git(bare, &["update-ref", &main_ref, &commit, ""])?;
+    Ok(())
+}
+
+/// Whether a local repository's `branch` is already in its `main` (an ancestor of it, or the
+/// same commit). `None` when either is missing or git could not say.
+pub fn merged_into_local_main(bare: &Path, branch: &str) -> Option<bool> {
+    let b = format!("refs/heads/{branch}");
+    let main = format!("refs/heads/{LOCAL_DEFAULT_BRANCH}");
+    git(bare, &["rev-parse", "--verify", "--quiet", &b]).ok()?;
+    git(bare, &["rev-parse", "--verify", "--quiet", &main]).ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(bare)
+        .args(["merge-base", "--is-ancestor", &b, &main])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether a local repository has `branch` (a local branch, the only kind it has).
+pub fn local_branch_exists(bare: &Path, branch: &str) -> bool {
+    git(
+        bare,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// The commit a local repository's `main` is at.
+pub fn local_main_sha(root: &Path, repo: &str) -> Option<String> {
+    let bare = bare_path(root, repo);
+    git(
+        &bare,
+        &["rev-parse", &format!("refs/heads/{LOCAL_DEFAULT_BRANCH}")],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+/// Whether a worktree has nothing uncommitted (`status --porcelain` is empty). False when git
+/// could not say.
+pub fn worktree_clean(worktree: &Path) -> bool {
+    git(worktree, &["status", "--porcelain"]).is_ok_and(|s| s.trim().is_empty())
+}
+
+/// Bring the plain checkout of a local repository's `main` at `checkout` up to date: clone it
+/// on first use, then `pull --ff-only`. It is a copy to read; nothing is ever written back.
+pub fn update_local_checkout(root: &Path, repo: &str, checkout: &Path) -> Result<(), String> {
+    let bare = bare_path(root, repo);
+    if !bare.join("HEAD").is_file() {
+        return Err(format!("{repo} has no repository at {}", bare.display()));
+    }
+    if checkout.join(".git").exists() {
+        git(checkout, &["pull", "--ff-only", "--quiet"]).map(|_| ())
+    } else {
+        let parent = checkout.parent().unwrap_or(checkout);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        let out = Command::new("git")
+            .args(["clone", "--quiet", "--branch", LOCAL_DEFAULT_BRANCH])
+            .arg(&bare)
+            .arg(checkout)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| format!("could not run git: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "git clone {} failed: {}",
+                bare.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
 }
 
 /// Run git with `args` in `dir`, with a clean, non-interactive environment for its prompts.
@@ -141,7 +293,8 @@ pub struct NewWorktree {
 }
 
 /// Clone if needed, fetch, and add `worktree` on a new `branch` from `origin/<default>`. All
-/// under the repository lock.
+/// under the repository lock. A local repository is created if needed and the branch is cut
+/// from its `main`, with no fetch (`url` is not used).
 pub fn add_worktree(
     root: &Path,
     repo: &str,
@@ -151,9 +304,19 @@ pub fn add_worktree(
 ) -> Result<NewWorktree, String> {
     let bare = bare_path(root, repo);
     let _lock = lock_repo(root, repo)?;
-    ensure_bare(&bare, url)?;
-    let default_branch = fetch_default(&bare)?;
-    let base = format!("origin/{default_branch}");
+    let (default_branch, base) = if is_local_repo(repo) {
+        // No remote and no fetch: the run branches from the repository's own `main`.
+        ensure_local_bare(&bare)?;
+        (
+            LOCAL_DEFAULT_BRANCH.to_string(),
+            format!("refs/heads/{LOCAL_DEFAULT_BRANCH}"),
+        )
+    } else {
+        ensure_bare(&bare, url)?;
+        let default_branch = fetch_default(&bare)?;
+        let base = format!("origin/{default_branch}");
+        (default_branch, base)
+    };
     let base_sha = git(&bare, &["rev-parse", &base])?.trim().to_string();
     let wt = worktree.to_string_lossy().into_owned();
     git(
@@ -167,8 +330,8 @@ pub fn add_worktree(
     })
 }
 
-/// Re-create a removed worktree from the run's pushed branch. `Err` when the branch is not on
-/// the remote.
+/// Re-create a removed worktree from the run's pushed branch (a local repository's: its local
+/// branch, else, once merged and deleted, `main`). `Err` when the branch is not on the remote.
 pub fn restore_worktree(
     root: &Path,
     repo: &str,
@@ -178,6 +341,34 @@ pub fn restore_worktree(
 ) -> Result<(), String> {
     let bare = bare_path(root, repo);
     let _lock = lock_repo(root, repo)?;
+    if is_local_repo(repo) {
+        // The branch never left this machine: it is restored from the local branch itself. A
+        // branch that is gone was deleted only once merged, so `main` holds all of its work and
+        // the branch is cut again from there.
+        let _ = git(&bare, &["worktree", "prune"]);
+        let wt = worktree.to_string_lossy().into_owned();
+        if local_branch_exists(&bare, branch) {
+            git(&bare, &["worktree", "add", "--quiet", &wt, branch])?;
+        } else if local_branch_exists(&bare, LOCAL_DEFAULT_BRANCH) {
+            git(
+                &bare,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    branch,
+                    &wt,
+                    LOCAL_DEFAULT_BRANCH,
+                ],
+            )?;
+        } else {
+            return Err(format!(
+                "its worktree was removed and {repo} has neither the branch {branch} nor main, so there is nothing to continue from"
+            ));
+        }
+        return Ok(());
+    }
     ensure_bare(&bare, url)?;
     fetch_default(&bare)?;
     let remote = format!("refs/remotes/origin/{branch}");
@@ -203,7 +394,8 @@ pub fn restore_worktree(
     Ok(())
 }
 
-/// Remove a run's worktree and its local branch, then prune. Under the repository lock.
+/// Remove a run's worktree and its local branch, then prune. Under the repository lock. A local
+/// repository's branch is kept unless it is already merged into its `main`.
 pub fn remove_worktree(
     root: &Path,
     repo: &str,
@@ -225,17 +417,28 @@ pub fn remove_worktree(
                 .map_err(|e| format!("could not remove {}: {e}", worktree.display()))?;
         }
     }
-    let _ = git(&bare, &["branch", "-D", branch]);
+    // A GitHub branch was pushed, so the local copy may go. A local repository's branch is
+    // the only copy of the work: it goes only once it is merged into its `main`.
+    if !is_local_repo(repo) || merged_into_local_main(&bare, branch) == Some(true) {
+        let _ = git(&bare, &["branch", "-D", branch]);
+    }
     git(&bare, &["worktree", "prune"])?;
     Ok(())
 }
 
 /// Whether `branch` is on the remote right now (`ls-remote`, no lock: it changes nothing).
-/// `None` when the remote could not be asked.
+/// `None` when the remote could not be asked. A local repository has no remote: this is
+/// whether the work can be continued, from the branch or (once merged and deleted) from `main`.
 pub fn branch_on_origin(root: &Path, repo: &str, branch: &str) -> Option<bool> {
     let bare = bare_path(root, repo);
     if !bare.join("HEAD").is_file() {
         return None;
+    }
+    if is_local_repo(repo) {
+        // A local branch is deleted only once it is in `main`, so either holds the work.
+        return Some(
+            local_branch_exists(&bare, branch) || local_branch_exists(&bare, LOCAL_DEFAULT_BRANCH),
+        );
     }
     git(
         &bare,

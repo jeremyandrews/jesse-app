@@ -72,10 +72,9 @@ final class MacTranscriptScreenshotTests: XCTestCase {
                                  key: Bool = false) -> NSHostingView<V> {
         let host = NSHostingView(rootView: view)
         let fitting = height ?? max(host.fittingSize.height, 100)
-        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: Self.width,
-                                                  height: fitting),
-                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: Self.width,
+                                                        height: fitting),
+                                    styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = host
         windows.append(window)
         if key {

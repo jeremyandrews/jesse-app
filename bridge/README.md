@@ -794,6 +794,63 @@ bearer_env = "SLACK_ADAPTER_TOKEN"
 - **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
   turn and per gateway call, kept 90 days.
 
+### The iMCP helper (`[mcp.imcp] command`, 0.206.0)
+
+The `imcp` row starts `/Applications/iMCP.app/Contents/MacOS/imcp-server`, the helper inside
+the installed app. A deployment can run another build of the helper instead:
+
+```toml
+[mcp.imcp]
+command = "/opt/imcp/imcp-server"   # an absolute path; imcp only
+```
+
+The gateway resolves every upstream through `resolve_row`, so the path reaches every place the
+helper is started: a Claude Code, Codex or `direct` turn's `imcp` upstream, the containment
+battery's probe children, and its pre-flight. Like every `[mcp.<name>]` key it is read only while
+the gateway is on. With the gateway off, children start the table's path. `imcp` is the only row
+whose command can be configured (`COMMAND_OVERRIDE_ROWS`), and the path must be absolute: a
+relative path, or a `command` on any other row, stops the bridge at boot. Without the key,
+nothing changes.
+
+**Why a patched helper exists.** The stock helper (iMCP 1.4.1) browses `_mcp._tcp` and then
+connects to the browsed *service* endpoint, so Network.framework resolves the service and
+connects on whichever interface mDNSResponder answers on. On the Studio that answer is an
+OrbStack VM bridge (`bridge104`, ifindex 48, address `192.168.117.0`). The scoped connect
+there fails with `EADDRNOTAVAIL`. The Bonjour resolver then waits for another answer that never
+comes, and the helper, which has no connect deadline, stays in `.preparing` and never answers
+`initialize`. Measured 2026-11-15: stock 0 of 26 starts answered within 5 s; the patched helper
+answered 26 of 26, `tools/list` in 62–128 ms. The patch pins the connection to loopback; the
+app always runs on the same Mac.
+
+**Provenance of the patched helper:**
+
+- Repository: `https://github.com/mattt/iMCP`, tag `1.4.1` (`b84f266`), which matches the
+  installed app's `CFBundleShortVersionString` 1.4.1.
+- Local branch `jesse-local-resolve` (not published upstream), two commits:
+  `919ba3b` "Connect to the iMCP app over loopback, not the resolved Bonjour interface" and
+  `e8c2dc7` "Build with Swift 6.4: capture self weakly in the outer state handlers" (1.4.1 does
+  not compile under Swift 6.4 without it; no behaviour change).
+- Built with Xcode 27.2: `xcodebuild -project iMCP.xcodeproj -target imcp-server -configuration
+  Release CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build`, ad-hoc signed.
+  The 2026-11-15 build's SHA-256 is
+  `ede97943536fe9c8ddbd959d9cac1b674695575234206c291ce4557d63e01ede`.
+- The behavioural change, in `CLI/main.swift`'s `MCPService.run()`:
+
+```diff
++                let connectionParameters = parameters.copy()
++                connectionParameters.requiredInterfaceType = .loopback
++
+                 // Create the proxy
+                 let proxy = StdioProxy(
+                     endpoint: endpoint,
+-                    parameters: parameters,
++                    parameters: connectionParameters,
+```
+
+The app still advertises over Bonjour, and the helper still browses for it and takes the port
+from the service, so an app restart on a new port is still found. Only the interface the
+connection uses is fixed.
+
 ### Coding agents on the cluster (`[devjob]`, 0.186.0)
 
 A main turn can start a coding agent on the k3s cluster with one tool call and get a job name
@@ -880,6 +937,119 @@ JESSE_CONFIG=/path/to/a-copy-with-gateway-and-devjob.toml \
 ```bash
 cargo test --features devjob-live --test devjob_live -- --nocapture
 ```
+
+### Coding agents on the Studio (`[hostrun]`, 0.196.0)
+
+`[hostrun] enabled = true` runs Claude Code on the Mac Studio itself, with no time limit, in its
+own git worktree (`src/hostrun.rs`; the trust model is in SECURITY.md). A run starts from
+`POST /jesse/runs` (`{ strand, item_id, repo?, again? }` or `{ draft, repo?, again? }`), from
+`devjob_start` with `host: "studio"`, or from a strand schedule entry whose draft says
+`devjob-repo` and `devjob-host: studio`.
+
+```toml
+[hostrun]
+enabled = true
+# root = "~/jesse-runs"                  # runs, bare clones, local repositories, locks
+# local_checkout_root = "~/jesse/Code/local"   # readable checkouts of local repositories (0.202.0)
+# max_concurrent = 3
+# max_per_repo = 1
+# stall_minutes = 60
+# permission_mode = "bypassPermissions"
+# keep_days = 7
+# min_free_gb = 100
+# max_total_gb = 300
+# auto_resume_interrupted = true
+# [hostrun.repos."owner/name"]
+# max_concurrent = 2
+# env_file = "~/.config/jesse/owner-name.env"
+# pr_title_tag = true
+```
+
+**Which repository.** The draft's `devjob-repo`, else the caller's `repo`, else the strand's one
+`repos:` entry. A strand listing several repositories needs `repo`.
+
+**Local repositories (0.202.0).** `local/<name>` (the name follows the `owner/name` rules) is a
+repository that exists only on the Studio: a bare repository at `<root>/local/<name>.git` with no
+remote, created on a run's first round with one empty commit `init` on `main` by `Jesse Bridge`.
+Its runs branch from its `main` with no fetch; the agent is told there is no push, no pull request
+and no CI, and to fast forward its branch into `main` once its checks pass. `gh` is never asked
+about it. On the Studio, where nothing names a repository, a run falls back to one instead of
+refusing: a strand item, or a draft of a strand, whose strand lists no repos uses
+`local/<strand slug, lowercased>`; a loose draft with no `devjob-repo` and no `repo` uses
+`local/scratch`; a free prompt (`devjob_start` with `host: "studio"`, `prompt` and `branch_slug`
+and no `repo`) uses `local/<branch_slug>`. `local/<name>` written in `devjob-repo`, `repo` or a
+strand's `repos:` is used as written. The cluster refuses a local repository and a start with no
+repository: `local repositories run only on the Studio (host: "studio")`.
+
+Its Inbox report ends with `Repository: local/<name> (Studio only)`, the branch, and `main` at its
+commit. After each finished round `<local_checkout_root>/<name>` is brought up to date: a plain
+clone of `main` on first use, then `git pull --ff-only` (a failure is logged and the run goes on).
+That is where a bridge session reads the work; it cannot read the run root. A run's branch is
+deleted with its worktree only once it is merged into the repository's `main`, and is restored
+from the local branch for a reply. Cleanup, reconcile and the disk cap never delete
+`<root>/local/`.
+
+**The Work view's fields (0.203.0, `src/hostrun/work.rs`).** All derived on read; nothing is
+written to a note.
+
+- Every run served (`GET /jesse/runs`, `GET /jesse/runs/:id`, a reply's and a cancel's answer)
+  carries `title` (its Drafts line's title, else its prompt's H1 without its leading id, else its
+  branch as words, never its run id), `last_line` (the last non blank line of the readable log,
+  at most 200 characters, or `null`) and `report_line` (the first line of its newest report, or
+  `null`).
+- Every `drafts[]` item of `GET /jesse/strands` carries `title`, `startable` and
+  `startable_reason`. A line's title is its text without the id, any `(waits on: …)` and the
+  wiki links it ends on, Markdown stripped, the words before the first `": "`, cut at 57
+  characters on a word with `…`. `startable` is `studio_runnable` and: not under `### Later`, no
+  `(waits on: …)`, the draft says `devjob-host: studio`, and no live run of the step.
+- `GET /jesse/work/last-look` answers `{ "last_look": "<RFC 3339>" | null }`;
+  `POST /jesse/work/last-look` sets it to now. One value for every device, in
+  `<state_dir>/work-last-look.json`, behind the paired device token.
+- `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
+  refused with 409: the run asked a question, and an empty continue would answer it blind.
+
+**The board row's phrases (0.205.0, `src/hostrun/work/row.rs`).** Three more fields on every
+strand of `GET /jesse/strands`, derived on read from what the note already says, so a Work board
+row can say what a project is about and what is the owner's to do. No model call, nothing written
+back, `null` when the note gives nothing usable. Design and rules: `docs/ho5-work-board-rows.md`.
+
+- `headline`: the lead clause of `**Now:**` in plain words (Markdown, parentheticals and PR
+  numbers gone; a bare build number such as `(213)` kept). The sentence naming today's date wins
+  (its weekday and date dropped, its time kept), else the first of more than one word that is not
+  a `No …` remark or a lone verb. A clause opening on step ids is reworded around the step's title
+  (`GO123 merged` → `Merged: arm64 Chromium fallback chain`), or the quoted name after its colon.
+  Branch names, machine short names (`ks1`), paths, commit hashes and other ids are dropped; a run
+  of ids reads `N drafts`; `Jeremy` reads `you`.
+- `your_action`: the first action of a `you:` `**Waiting on:**`: the first gate (cut at `; `), its
+  first sentence, a lead in (`for S23, Part 0:`) and a tail (`, which …`, `, and …`, `, then …`,
+  `boarded …`) dropped. A gate opening on a step's possessive id is that step, from its whole text;
+  leading `-ing` verbs read as instructions; `whether …` reads `decide whether …`; a branch reads as
+  its kind (`on the release branch`). A gate that is a remark about the note (`… of yours`, `… only
+  you can have`, `… is yours to run`) gives way to the first queued line (with the remark's verb).
+  The case is kept as written. `null` for any gate that is not `you:`.
+- `next_title`: the first queued Drafts line, named from its whole text (its first clause; a one
+  or two word label keeps the first clause of its tail), scrubbed as above.
+
+**Archiving (0.204.0).** A flag on `run.json`, never a move or a delete: the run's directory, log
+and reports stay where they are.
+
+- `archived_at` (RFC 3339) and `archived_reason` on the record, absent until a run is archived and
+  after an unarchive; older records read unchanged.
+- `POST /jesse/runs/:id/archive` (paired device token) refuses a `queued`, `running` or `paused`
+  run with 409 naming its status; a `needs_you` or `interrupted` run is closed first (`closed_reason`
+  `archived by Jeremy`). `POST /jesse/runs/:id/unarchive` clears both fields and nothing else. Both
+  are idempotent and silent (no push, no turn), and answer the run as `GET /jesse/runs/:id` does.
+- `GET /jesse/runs` leaves archived runs out; `?archived=only` serves only them, newest archived
+  first; `?archived=all` serves both. `counts` gains `needs_me` (`needs_you`, `interrupted`,
+  `failed`), `moving` (`queued`, `running`, `paused`), `finished` (everything else not archived)
+  and `archived`, over the whole store in the same scan. A run a reply puts back to work shows in
+  the list again while it is moving or waiting, even with `archived_at` still set.
+- The watcher pass, after closing settled runs, archives every `reported`, `cancelled` or `closed`
+  run not already archived when its Drafts line is ticked (`item ticked`), every report has moved
+  to `Inbox/archive/` (`report archived`), or its last status change is more than
+  `AUTO_ARCHIVE_AFTER_DAYS` (14) days old (`finished over 14 days ago`). Never a `needs_you`,
+  `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts,
+  so an Undo is not taken back by the next pass.
 
 ### How `claude` is run
 
@@ -1355,6 +1525,32 @@ same date twice, more than 400 days, or a day with no metric at all (the usual s
 one is a failed HealthKit read, and writing it would blank a measured night). A file whose
 header is not the ledger's is never rewritten (`500`). Writes are atomic and serialized
 in-process. The diet CSVs are never touched.
+
+### Workout detail ledger (`workout_records` on `POST /jesse`, and `POST /jesse/diet/workouts`)
+
+The phone sends each workout its health block describes as a structured record
+(`workout_records`, a JSON array beside `health_context`; data, never prompt text). Before
+the model runs, the bridge upserts them into `$JESSE_VAULT/diet-logs/workout-detail.csv`
+(one row per workout, keyed by `Workout_UUID`, one column per figure; header
+`WORKOUT_DETAIL_HEADER` in `src/workoutdetail.rs`) and `workout-splits.csv`
+(`Workout_UUID,Kind,Index,Distance_m,Duration_s`). `Date` is the diet day (the start in
+the record's zone minus four hours) and joins to `exercise-log.csv` with `Start_Time`. A
+known workout's row is rewritten only when a figure changed, and a blank never erases a
+value; a request that changes nothing leaves both files byte-identical. A malformed or
+oversized `workout_records` is logged and ignored; the turn runs.
+
+The backfill posts the same records in pages of at most 50, starting no model turn:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/jesse/diet/workouts \
+  -H "Authorization: Bearer $JESSE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"records":[{"schema_version":1,"workout_uuid":"6F1C2A4E-0000-4000-8000-000000000001",
+       "start":"2026-10-07T07:12:03+02:00","time_zone":"Europe/Rome","activity":"Run",
+       "duration_s":2894,"distance_m":7500,"avg_hr_bpm":150}]}'
+# {"status":"ok","written":1,"unchanged":0,"added":1,"replaced":0,"splits_written":0}
+```
+
+`400` and nothing written for a page that does not validate. The diet CSVs are never touched.
 
 ### Patterns (`patterns` on the live snapshot)
 
@@ -3951,6 +4147,29 @@ cargo test $F --test containment                        # the always-on consiste
 cargo test $F --test containment -- --ignored --nocapture   # the live gate
 cargo build --release                                   # the serving binary, with none of it
 ```
+
+**It runs in the bridge's own environment, with nothing sourced first (0.200.1).** Every run
+but `--show` reads the live bridge's LaunchAgent plist's `EnvironmentVariables`
+(`~/Library/LaunchAgents/<bridge label>.plist`, the label found as the battery's signing finds
+it, else the one `*.jesse-bridge.plist` there) before any harness or server starts, so a full
+battery from a plain shell, in `bridge/`, is one command:
+
+```bash
+cargo run --features containment-probe --bin containment-probe -- --write
+```
+
+The plist wins for every variable. PATH is the plist's PATH (the nvm node bin and
+`~/.local/bin`, where `qmd`, `node`, `npx` and `uvx` live) followed by any shell entries it
+lacks, so `~/.cargo/bin` still resolves. `--env-plist <path>` reads another plist;
+`--no-env-plist` keeps the shell's environment as is (CI and tests). If the plist is missing or
+unreadable, `--write` refuses to start and a run without it warns and goes on. One line names
+the plist, how many variables it took and PATH's first three entries; no other value is
+printed. Then a **pre-flight** starts every MCP server the chosen rows load, the way the gateway
+starts it, and stops the run before any model turn, naming them, if any registers zero tools.
+Before this, the battery used whatever environment its shell had: without the plist's PATH,
+qmd, github, google, google-perseido, imcp, proxmox, routeros, unifi and whatsapp started with
+zero tools, the run still finished, and `--write` recorded a posture the bridge never runs.
+No hand step exporting the plist's variables is needed, or wanted.
 
 **The battery signs itself (0.196.2).** macOS keys Local Network grants to a binary's code
 identity, and the linker gives every build a fresh ad hoc one, so each rebuild of

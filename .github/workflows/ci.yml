@@ -73,6 +73,22 @@ jobs:
       - name: Format check
         run: cargo fmt -p jesse-agent --check
 
+      # THE ROOT LOCKFILE'S CVE GATE. `Cargo.lock` at the repository root covers both
+      # `agent/` and `eval/`, and until this step nothing audited it: the bridge job audits
+      # `bridge/Cargo.lock` only, and audit.yml runs that same bridge audit weekly. It lives
+      # in this job because the agent is where reqwest/rustls enter the root graph. Same
+      # prebuilt binary and the same bare `cargo audit` as the bridge job: a vulnerability
+      # fails the step, an informational warning (unsound, unmaintained) is reported and
+      # does not. There is no root ignore list; see `bridge/.cargo/audit.toml` for what an
+      # audited exception has to say before one is added.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Dependency CVE audit (root lockfile)
+        run: cargo audit
+
   # THE EVAL HARNESS. New in D7, and it joins CI at the same time as the `product-v1`
   # suite it validates: the teeth check (good mock scores every task, known-bad mock scores
   # none, on BOTH drivers) lives in `eval/tests/integration.rs` and is worth nothing unless
@@ -149,8 +165,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      # PINNED, not the runner image's stable. The clippy that gates a merge used to be
+      # whatever stable `ubuntu-latest` happened to carry, so the gate changed under the
+      # repository without a commit: Clippy 1.100 reported `needless_range_loop` on loops
+      # nobody had touched, and `main` would have gone red the day the image moved. The
+      # gate must not change without a commit. Moving to a newer Rust is a deliberate pull
+      # request that bumps this version AND fixes the new lints in the same change. The
+      # version is printed so every run's log names the toolchain it was judged by.
+      # SCOPE: this job only; `agent` and `eval` still use the image's stable.
       - name: Install Rust toolchain
-        run: rustup component add clippy rustfmt llvm-tools-preview
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default 1.100.0
+          rustc --version
+          cargo clippy --version
 
       - name: Cache cargo
         uses: actions/cache@v6
@@ -195,6 +223,14 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --features containment-probe -- -D warnings
+
+      # Clippy AGAIN, on the default feature set, for the same reason as the default
+      # features test above. A lint that exists only without the feature is invisible to
+      # the feature build: `row()` in mcpservers.rs once had an `or_else` closure that
+      # compiled to `|| None` without `containment-probe`, and nothing here reported it.
+      # This is the build a developer gets from a bare `cargo clippy`, which they run first.
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
 
       # Formatting is enforced, not merely conventional. It sits AFTER build/test/clippy
       # for the same reason clippy sits after test: steps stop at the first failure, and a
@@ -271,3 +307,21 @@ jobs:
 
       - name: Helper unit tests
         run: bash scripts/test-ios-deployment-target.sh
+
+      # The simulator rule both Mac gates share (scripts/simulator-pick.jq): which
+      # runtime and iPhone they test on. A wrong pick still builds and runs, on a
+      # model nobody chose; an iPhone Duo listed last turned 38 UI tests red.
+      - name: Simulator pick rule
+        run: bash scripts/test-simulator-pick.sh
+
+      # The local gate's step plumbing (scripts/lib/ci-runner.sh): every step runs,
+      # a step runs only when the steps it needs passed, and the final line names
+      # every failure. Stub steps, no Xcode, so it is checked here on every push.
+      - name: Local gate runner
+        run: bash scripts/test-ci-runner.sh
+
+      # The window trap: a test builds an AppKit window only through makeTestWindow,
+      # which sets isReleasedWhenClosed = false. Source text only, so Linux can check
+      # it on every push; the local gate runs it too.
+      - name: Swift test guards
+        run: bash scripts/swift-test-guards.sh

@@ -64,8 +64,17 @@ pub const DEVJOB_TOOLS: [&str; 3] = [TOOL_START, TOOL_STATUS, TOOL_LIST];
 pub const TOOL_REPLY: &str = "devjob_reply";
 /// Cancel a queued or running Studio run. Classed `write`.
 pub const TOOL_CANCEL: &str = "devjob_cancel";
-/// The five tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
-pub const STUDIO_TOOLS: [&str; 5] = [TOOL_START, TOOL_STATUS, TOOL_LIST, TOOL_REPLY, TOOL_CANCEL];
+/// Close a Studio run that needs you, was interrupted or failed. Classed `write`.
+pub const TOOL_CLOSE: &str = "devjob_close";
+/// The six tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
+pub const STUDIO_TOOLS: [&str; 6] = [
+    TOOL_START,
+    TOOL_STATUS,
+    TOOL_LIST,
+    TOOL_REPLY,
+    TOOL_CANCEL,
+    TOOL_CLOSE,
+];
 
 /// On every object a run creates: the selector the watcher lists by.
 pub const LABEL_DEVJOB: &str = "jesse.dev/devjob";
@@ -217,8 +226,10 @@ pub enum StartPlan {
 /// nothing else, so the cluster path is unchanged; `strand`, `item_id` and `again` are refused
 /// there. With `studio`, a strand item (`strand` and `item_id`, optional `repo`; its prompt and
 /// model come from its draft, its repository from the draft, else `repo`, else the strand's one
-/// `repos:` entry), a draft by its path (`draft`, optional `repo`), or a free prompt (`repo`,
-/// `prompt`, `branch_slug`, optional `model`). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
+/// `repos:` entry), a draft by its path (`draft`, optional `repo`), or a free prompt (`prompt`,
+/// `branch_slug`, optional `repo` and `model`). Where nothing names a repository, a Studio run
+/// goes to a Studio only `local/<name>` one ([`crate::hostrun`]); the cluster refuses
+/// `local/<name>` and a start with no repository ([`LOCAL_ONLY_STUDIO`]). A Studio run has no clock, so `timeout_minutes` is refused, and it runs Claude Code,
 /// so `agent` may only be `claude`.
 pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, String> {
     match args.host.as_deref().map(str::trim) {
@@ -231,6 +242,11 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 return Err(
                     "strand, item_id, draft and again apply only with host \"studio\"".into(),
                 );
+            }
+            match args.repo.as_deref().map(str::trim) {
+                None | Some("") => return Err(format!("repo is missing: {LOCAL_ONLY_STUDIO}")),
+                Some(r) if is_local_repo(r) => return Err(LOCAL_ONLY_STUDIO.into()),
+                Some(_) => {}
             }
             DevJobSpec::validate(args, default_agent).map(StartPlan::Cluster)
         }
@@ -339,6 +355,29 @@ pub fn valid_repo(repo: &str) -> bool {
     owner_ok && name_ok
 }
 
+/// The reserved owner of a Studio only repository: `local/<name>` lives at
+/// `<[hostrun] root>/local/<name>.git` and has no remote ([`is_local_repo`]).
+pub const LOCAL_OWNER: &str = "local";
+
+/// Why a cluster start of a local repository (or of no repository) is refused.
+pub const LOCAL_ONLY_STUDIO: &str = "local repositories run only on the Studio (host: \"studio\")";
+
+/// Whether `repo` is `local/<name>`, a repository that exists only on the Studio, `<name>`
+/// following [`valid_repo`]'s name rules. Such a repository is never a GitHub one: no `gh`, no
+/// `git push`, no clone URL.
+pub fn is_local_repo(repo: &str) -> bool {
+    valid_repo(repo)
+        && repo
+            .split_once('/')
+            .is_some_and(|(owner, _)| owner == LOCAL_OWNER)
+}
+
+/// `local/<name>` for a name, when the name follows [`valid_repo`]'s rules.
+pub fn local_repo(name: &str) -> Option<String> {
+    let repo = format!("{LOCAL_OWNER}/{name}");
+    is_local_repo(&repo).then_some(repo)
+}
+
 /// Whether `slug` is lowercase letters, digits and hyphens, at most [`MAX_SLUG_CHARS`], starting
 /// and ending with a letter or digit (it becomes part of a Kubernetes name and a label value).
 pub fn valid_slug(slug: &str) -> bool {
@@ -412,9 +451,22 @@ fn valid_model(model: &str) -> bool {
 impl DevJobSpec {
     /// Check every field. `default_agent` applies when `agent` is absent.
     pub fn validate(args: DevJobArgs, default_agent: Agent) -> Result<DevJobSpec, String> {
+        DevJobSpec::validate_on(args, default_agent, false)
+    }
+
+    /// [`DevJobSpec::validate`], with `studio` saying the run goes to the Studio, where a
+    /// `local/<name>` repository is allowed; the cluster refuses one ([`LOCAL_ONLY_STUDIO`]).
+    pub fn validate_on(
+        args: DevJobArgs,
+        default_agent: Agent,
+        studio: bool,
+    ) -> Result<DevJobSpec, String> {
         let repo = args.repo.unwrap_or_default().trim().to_string();
         if !valid_repo(&repo) {
             return Err(format!("repo {repo:?} is not owner/name"));
+        }
+        if !studio && is_local_repo(&repo) {
+            return Err(LOCAL_ONLY_STUDIO.into());
         }
         let prompt = args.prompt.unwrap_or_default();
         if prompt.trim().is_empty() {
@@ -1406,27 +1458,21 @@ impl Notifier for AppNotifier {
                 eprintln!("jesse-bridge: devjob PUSH {job} — push is not configured, nothing sent");
                 return;
             };
-            let Some(token) = devices.get() else {
-                eprintln!("jesse-bridge: devjob PUSH {job} — no device registered, nothing sent");
-                return;
-            };
-            match apns
-                .push_payload(
-                    &token,
-                    build_devjob_payload(&title, &body, &job),
-                    Some(badge),
-                )
-                .await
-            {
-                PushOutcome::Sent => eprintln!("jesse-bridge: devjob PUSH {job} sent"),
-                PushOutcome::DeadToken => {
-                    devices.clear();
-                    eprintln!("jesse-bridge: devjob PUSH {job} — device token rejected, cleared");
-                }
-                PushOutcome::Failed(e) => {
-                    eprintln!("jesse-bridge: devjob PUSH {job} failed: {e} — swallowed")
-                }
-            }
+            // Every paired device, each as its own topic: one line per device, then the sum.
+            let tally = push_to_devices(
+                &apns,
+                &devices,
+                "devjob",
+                &job,
+                build_devjob_payload(&title, &body, &job),
+                Some(badge),
+            )
+            .await;
+            eprintln!(
+                "jesse-bridge: devjob PUSH {job} sent to {} of {} device(s)",
+                tally.sent,
+                tally.devices()
+            );
         })
     }
 }
@@ -1526,7 +1572,8 @@ impl DevJobs {
     }
 
     /// Serve Studio runs too: `host: "studio"` on `devjob_start`, Studio runs in
-    /// `devjob_status` and `devjob_list`, and `devjob_reply` and `devjob_cancel`.
+    /// `devjob_status` and `devjob_list`, and `devjob_reply`, `devjob_cancel` and
+    /// `devjob_close`.
     pub fn attach_studio(&self, studio: Arc<crate::hostrun::HostRuns>) {
         let _ = self.studio.set(studio);
     }
@@ -2193,7 +2240,8 @@ pub fn tool_descriptors() -> Vec<Value> {
 }
 
 /// The tools once `[hostrun]` is attached: `devjob_start` gains `host`, `strand`, `item_id` and
-/// `again`, and `devjob_reply` and `devjob_cancel` join. [`tool_descriptors`] is unchanged.
+/// `again`, and `devjob_reply`, `devjob_cancel` and `devjob_close` join. [`tool_descriptors`] is
+/// unchanged.
 pub fn tool_descriptors_with_studio() -> Vec<Value> {
     let mut tools = tool_descriptors();
     if let Some(start) = tools.first_mut() {
@@ -2208,13 +2256,26 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              with no time limit, in its own worktree: pass strand and item_id to run any \
              unchecked Drafts item of a strand (\"run GD5 on the Studio\"); its repository is \
              the draft's devjob-repo, else repo, else the strand's one repos entry (a strand with \
-             several needs repo). Or pass draft (a path under Projects/drafts/) and repo to run \
-             a draft outside any strand line, or repo, prompt and branch_slug for a free prompt. \
-             It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A second \
-             start of an item that is still queued, running, paused or needs Jeremy is refused \
-             unless again is true."
+             several needs repo). Or pass draft (a path under Projects/drafts/), and repo if it \
+             names none, to run a draft outside any strand line, or prompt and branch_slug (and \
+             repo) for a free prompt. On the Studio repo is optional: local/<name> names a \
+             repository that exists only on the Studio, with no GitHub remote, no push, no pull \
+             request and no CI (the agent merges into its main), created on first use. When \
+             nothing names a repository, a strand with no repos uses local/<strand slug>, a \
+             loose draft local/scratch, and a free prompt local/<branch_slug>. The cluster \
+             refuses local/<name>. It returns a run_id; the report lands in \
+             Inbox/<date>-run-<run_id>.md. A second start of an item that is still queued, \
+             running, paused or needs Jeremy is refused unless again is true."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
+            props.insert(
+                "repo".into(),
+                json!({ "type": "string",
+                        "description": "owner/name on GitHub; required on the cluster. Host \
+                            studio: optional, and local/<name> names a Studio only repository \
+                            with no remote; with none named it falls back to local/<strand slug>, \
+                            local/scratch or local/<branch_slug>" }),
+            );
             props.insert(
                 "host".into(),
                 json!({ "type": "string", "enum": ["cluster", "studio"],
@@ -2268,6 +2329,22 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             "properties": { "run_id": { "type": "string" } },
         },
     }));
+    tools.push(json!({
+        "name": TOOL_CLOSE,
+        "description": "Close a Studio run whose question is settled, so it no longer counts as \
+            needing Jeremy: a run that needs you, was interrupted or failed. Nothing is stopped and \
+            nothing is deleted; a reply still continues it. Queued, running and paused runs are \
+            refused (cancel those).",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id"],
+            "properties": {
+                "run_id": { "type": "string" },
+                "reason": { "type": "string", "description": "why; default \"closed by Jeremy\"" },
+            },
+        },
+    }));
     tools
 }
 
@@ -2305,9 +2382,16 @@ struct CancelArgs {
     run_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseArgs {
+    run_id: String,
+    reason: Option<String>,
+}
+
 /// One Studio run, as `devjob_status` reports it: the record, `host`, and the readable log tail.
 fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) -> Value {
-    let mut v = crate::hostrun::run_json(r);
+    let mut v = crate::hostrun::run_json_located(r, svc.notes_root());
     v["log_tail"] = json!(svc
         .log_lines(&r.run_id, STATUS_LOG_LINES)
         .unwrap_or_default());
@@ -2329,6 +2413,7 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "finished_at": r.finished_at,
         "stalled_since": r.stalled_since,
         "resume_at": r.resume_at,
+        "closed_reason": r.closed_reason,
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
     })
@@ -2477,13 +2562,26 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Err(e) => Ok(error_result(e.message())),
                     }
                 }
+                TOOL_CLOSE => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: CloseArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    match svc.close_blocking(args.run_id.trim(), args.reason).await {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
                 other => Err(format!("devjob has no tool {other:?}")),
             }
         })
     }
 }
 
-/// The containment battery's `devjob`: the five tools, listed exactly as the real server lists
+/// The containment battery's `devjob`: the six tools, listed exactly as the real server lists
 /// them on the Studio (with `[hostrun]` attached), and every call refused. Only in a
 /// `containment-probe` build.
 #[cfg(feature = "containment-probe")]

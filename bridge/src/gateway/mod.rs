@@ -138,7 +138,18 @@ pub struct McpOverrideToml {
     pub header_env: BTreeMap<String, String>,
     /// The name of a `[gateway.client_certs]` entry.
     pub client_cert: Option<String>,
+    /// An absolute path that replaces the row's command. Only `imcp` takes one
+    /// ([`COMMAND_OVERRIDE_ROWS`]): its helper is a binary inside a GUI app's bundle, and a
+    /// deployment may run a patched build of it from elsewhere (see the bridge README, "The
+    /// iMCP helper").
+    pub command: Option<String>,
 }
+
+/// The rows whose command `[mcp.<name>] command` may replace. ONE, deliberately: every other
+/// row's command is a bare name resolved off the forwarded `PATH`, and pointing a credentialed
+/// server at an arbitrary binary from a config file is the edit this table exists to prevent.
+/// `imcp` holds no credential and reads nothing itself; it only proxies to the iMCP app.
+pub const COMMAND_OVERRIDE_ROWS: &[&str] = &["imcp"];
 
 /// Everything the gateway reads from the deployment, resolved.
 #[derive(Debug, Clone, Default)]
@@ -303,6 +314,20 @@ pub fn resolve_row(name: &str, settings: &GatewaySettings) -> Result<ResolvedSer
     }
     if let Some(u) = &o.url {
         r.url = u.clone();
+    }
+    if let Some(c) = &o.command {
+        if !COMMAND_OVERRIDE_ROWS.contains(&name) {
+            return Err(format!(
+                "[mcp.{name}] command: only {} may name its own command",
+                COMMAND_OVERRIDE_ROWS.join(", ")
+            ));
+        }
+        if !Path::new(c).is_absolute() {
+            return Err(format!(
+                "[mcp.{name}] command = \"{c}\": must be an absolute path"
+            ));
+        }
+        r.command = c.clone();
     }
     let named_auth = [
         o.bearer_env.is_some(),
@@ -529,6 +554,22 @@ impl Gateway {
     /// The deployment's gateway: its settings, its ledger, and the values its own config
     /// supplies for the `house` and `healthdb` rows.
     pub fn from_config(cfg: &crate::Config, state_dir: &Path) -> Gateway {
+        Gateway::from_config_with_ledger(cfg, state_dir, crate::activity::global(cfg))
+    }
+
+    /// [`Gateway::from_config`] with NO activity ledger: the containment battery's pre-flight
+    /// starts every upstream once to count its tools, and that is neither a turn nor anything
+    /// the deployment's ledger (or its process-wide slot) should learn about.
+    #[cfg(feature = "containment-probe")]
+    pub fn from_config_without_ledger(cfg: &crate::Config, state_dir: &Path) -> Gateway {
+        Gateway::from_config_with_ledger(cfg, state_dir, None)
+    }
+
+    fn from_config_with_ledger(
+        cfg: &crate::Config,
+        state_dir: &Path,
+        ledger: Option<Arc<ActivityLedger>>,
+    ) -> Gateway {
         let mut g = Gateway::new(
             state_dir,
             cfg.gateway.clone(),
@@ -538,7 +579,7 @@ impl Gateway {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            crate::activity::global(cfg),
+            ledger,
         );
         if let Some(h) = cfg.house.ready() {
             g.deployment_env.insert(

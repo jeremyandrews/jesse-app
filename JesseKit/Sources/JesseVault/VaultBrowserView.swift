@@ -25,6 +25,10 @@ public final class VaultBrowserModel {
     /// The live query. Bound straight to `.searchable`.
     public var query: String = ""
 
+    /// Set to put the caret in the search field (the Mac's Command F). The screen clears it
+    /// once the field has it. Nothing sets it on the iPhone.
+    public var searchFocusRequested = false
+
     /// **What the tab is looking at.** `.all` is the default and always will be: the
     /// Vault tab's promise is every note on the device, and a scope remembered across
     /// launches would be a search that silently answered a narrower question than the
@@ -558,6 +562,8 @@ public struct VaultBrowserView: View {
     @State private var path: [VaultNoteRoute] = []
     @State private var isPickingFolder = false
     @State private var isPickingStrand = false
+    /// The search field's focus, set when `model.searchFocusRequested` asks for it.
+    @FocusState private var searchFocused: Bool
     /// The strand picker's own filter, reset on every open so that a sheet never opens
     /// already hiding most of what it is there to show.
     @State private var strandFilter = ""
@@ -588,6 +594,7 @@ public struct VaultBrowserView: View {
                 // `NavigationStack` itself is a field whose placement depends on what is
                 // pushed, which is not what a search field should do.
                 .searchable(text: $model.query, prompt: "Search every note")
+                .searchFocused($searchFocused)
                 .navigationDestination(for: VaultNoteRoute.self) { route in
                     VaultNoteReaderView(route: route) { next in
                         path.append(next)
@@ -609,6 +616,12 @@ public struct VaultBrowserView: View {
                 }
         }
         .onChange(of: model.query) { _, _ in model.search() }
+        .onChange(of: model.searchFocusRequested, initial: true) { _, requested in
+            guard requested else { return }
+            model.searchFocusRequested = false
+            path.removeAll()
+            searchFocused = true
+        }
         .task {
             // No refresh here: `onAppear` below already starts one on every appearance,
             // and a `.task` in a tab bar restarts on every appearance too, so a refresh

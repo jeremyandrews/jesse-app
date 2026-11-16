@@ -477,11 +477,13 @@ fn an_in_process_row_in_a_set_reaches_a_spawned_child_through_the_stub_with_the_
     );
     let mut tools = devjob.tools.clone();
     tools.sort();
-    // `devjob_reply` and `devjob_cancel` (0.197.0) reach exactly the turns `devjob_start` does.
+    // `devjob_reply` and `devjob_cancel` (0.197.0) and `devjob_close` (0.200.0) reach exactly the
+    // turns `devjob_start` does.
     assert_eq!(
         tools,
         [
             "devjob_cancel",
+            "devjob_close",
             "devjob_list",
             "devjob_reply",
             "devjob_start",
@@ -519,13 +521,13 @@ fn an_in_process_row_in_a_set_reaches_a_spawned_child_through_the_stub_with_the_
             "args": ["--upstream", "devjob", "--socket", "/tmp/jesse-gw-unit/gw/job-1/devjob.sock"],
         })
     );
-    // Codex takes the stub too, with no environment and exactly the five grants.
+    // Codex takes the stub too, with no environment and exactly the six grants.
     let codex = codex_mcp_args(CODEX_ID, &child, DEFAULT_ALLOWED_TOOLS).unwrap();
     assert!(codex
         .iter()
         .any(|a| a == r#"mcp_servers.devjob.command="/opt/bin/jesse-gateway-mcp""#));
     assert!(codex.iter().any(|a| a
-        == r#"mcp_servers.devjob.enabled_tools=["devjob_start", "devjob_status", "devjob_list", "devjob_reply", "devjob_cancel"]"#));
+        == r#"mcp_servers.devjob.enabled_tools=["devjob_start", "devjob_status", "devjob_list", "devjob_reply", "devjob_cancel", "devjob_close"]"#));
     assert!(!codex
         .iter()
         .any(|a| a.starts_with("mcp_servers.devjob.env")));
@@ -619,4 +621,151 @@ fn a_bind_out_of_open_files_names_the_limit_and_the_open_turns() {
             && !m.contains("open files"),
         "{m}"
     );
+}
+
+// ---- `[mcp.imcp] command`: the iMCP helper's path --------------------------------------
+
+/// The installed app's helper: the table row's command, which every record names and which
+/// `mcpservers`' golden config test pins byte for byte.
+fn stock_imcp() -> &'static str {
+    crate::mcpservers::row("imcp").unwrap().command
+}
+
+fn imcp_command_on(path: &str) -> crate::Config {
+    let mut cfg = gateway_on();
+    cfg.gateway.overrides.insert(
+        "imcp".into(),
+        McpOverrideToml {
+            command: Some(path.into()),
+            ..McpOverrideToml::default()
+        },
+    );
+    cfg
+}
+
+/// The `imcp` upstream a turn on each harness is admitted to: Claude Code and Codex from their
+/// own main sets, `direct` from the shipped main set exactly as [`super::direct`] reads it, and
+/// in a `containment-probe` build the battery's pre-flight through `preflight_admitted`.
+fn imcp_commands(cfg: &crate::Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let spawned: [(&str, &dyn crate::SpawnedHarness); 2] =
+        [("claude-code", &ClaudeCode), (CODEX_ID, &Codex)];
+    let mut configs: Vec<(String, String)> = spawned
+        .iter()
+        .map(|(id, h)| (id.to_string(), crate::main_mcp_config(cfg, *h).to_string()))
+        .collect();
+    configs.push(("direct".into(), MAIN_CHILD_MCP_CONFIG.as_str().to_string()));
+    for (id, config) in configs {
+        let rendered = render_child_mcp(cfg, &config);
+        let set = McpSet::from_config(&config).unwrap_or(McpSet::None);
+        let allowed = crate::row_allowed_tools(cfg, Capability::Write, set);
+        let admitted = admitted_servers(&cfg.gateway, &rendered, Capability::Write, allowed)
+            .unwrap_or_else(|e| panic!("{id}: {e}"));
+        let imcp = admitted
+            .iter()
+            .find(|a| a.server.name == "imcp")
+            .unwrap_or_else(|| panic!("{id}: the main set loads imcp"));
+        assert!(!imcp.tools.is_empty(), "{id}: imcp is granted tools");
+        out.push((id, imcp.server.command.clone()));
+    }
+    #[cfg(feature = "containment-probe")]
+    {
+        let (pre, failed) = crate::preflight_admitted(&cfg.gateway, &["imcp".to_string()]);
+        assert!(failed.is_empty(), "{failed:?}");
+        out.push((
+            "containment pre-flight".into(),
+            pre[0].server.command.clone(),
+        ));
+    }
+    out
+}
+
+#[test]
+fn the_imcp_helper_defaults_to_the_installed_app() {
+    for (site, command) in imcp_commands(&gateway_on()) {
+        assert_eq!(command, stock_imcp(), "{site}");
+    }
+    // With the gateway off nothing is read from [mcp.*]: the child starts the table's helper.
+    let off = test_config();
+    let rendered = render_child_mcp(&off, MAIN_CHILD_MCP_CONFIG.as_str());
+    assert_eq!(servers(&rendered)["imcp"]["command"], stock_imcp());
+}
+
+#[test]
+fn a_configured_imcp_helper_reaches_every_harness_and_the_containment_preflight() {
+    let patched = "/opt/imcp-patched/imcp-server";
+    let cfg = imcp_command_on(patched);
+    assert!(
+        cfg.gateway.problems().is_empty(),
+        "{:?}",
+        cfg.gateway.problems()
+    );
+    let sites = imcp_commands(&cfg);
+    let expected = if cfg!(feature = "containment-probe") {
+        4
+    } else {
+        3
+    };
+    assert_eq!(sites.len(), expected, "{sites:?}");
+    for (site, command) in sites {
+        assert_eq!(command, patched, "{site}");
+    }
+    // The child's own config still names the stub, never the helper: the gateway starts it.
+    let rendered = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str());
+    let child = child_mcp_config(
+        &cfg.gateway,
+        &rendered,
+        Path::new("/tmp/jesse-gw-unit"),
+        "job-1",
+        Path::new("/opt/bin/jesse-gateway-mcp"),
+    )
+    .unwrap();
+    assert!(!child.contains(patched), "{child}");
+    // No other row moves.
+    let s = &cfg.gateway;
+    for r in crate::mcpservers::MCP_SERVERS
+        .iter()
+        .filter(|r| r.name != "imcp")
+    {
+        assert_eq!(
+            resolve_row(r.name, s).unwrap().command,
+            r.command,
+            "{}",
+            r.name
+        );
+    }
+}
+
+#[test]
+fn only_imcp_takes_a_command_and_only_an_absolute_one() {
+    let with = |name: &str, command: &str| {
+        let mut s = GatewaySettings {
+            enabled: true,
+            ..GatewaySettings::default()
+        };
+        s.overrides.insert(
+            name.into(),
+            McpOverrideToml {
+                command: Some(command.into()),
+                ..McpOverrideToml::default()
+            },
+        );
+        s.problems()
+    };
+    assert!(with("imcp", "/opt/imcp/imcp-server").is_empty());
+    assert!(
+        !with("slack", "/opt/evil/slack-mcp").is_empty(),
+        "a credentialed row's command is not configurable"
+    );
+    assert!(
+        !with("imcp", "imcp-server").is_empty(),
+        "a bare name would be resolved off PATH"
+    );
+}
+
+#[test]
+fn the_command_key_parses_from_the_bridge_toml() {
+    let o: McpOverrideToml =
+        toml::from_str(r#"command = "/opt/imcp-patched/imcp-server""#).unwrap();
+    assert_eq!(o.command.as_deref(), Some("/opt/imcp-patched/imcp-server"));
 }

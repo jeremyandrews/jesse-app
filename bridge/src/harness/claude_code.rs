@@ -1553,16 +1553,16 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
 /// when `[healthdb]` has an `ro_url_file`. `clockify-rs`, `runn-rs`, `google-sheets` and
 /// `kubernetes-cloud` are unconditional.
 ///
-/// **RETIRED AS THE MAIN SET IN 0.199.0**, split out rather than grown in place for the reason
+/// **RETIRED AS THE MAIN SET IN 0.207.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud`]
-/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.188.0 until 0.199.0. The
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.188.0 until 0.207.0. The
 /// in-process `devjob` row is not named: it renders nothing with the gateway off, so this is the
 /// string that set was spawned with, and only the live main set is re-rendered with it on.
 pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG: LazyLock<String> =
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets", "kubernetes-cloud"])));
 
 /// The twenty-seven-server set PLUS **`reminders`**: every main turn on BOTH harnesses from
-/// bridge 0.199.0. Twenty-eight servers.
+/// bridge 0.207.0. Twenty-eight servers.
 ///
 /// What it adds is this repository's own `jesse-reminders-mcp`: four tools that create, list,
 /// cancel and snooze timed reminders in `<state_dir>/reminders.json`, which the bridge's reminder

@@ -184,9 +184,16 @@ public struct OutgoingDeviceContext: Sendable, Equatable {
                               unavailableReason: reason)
     }
 
+    /// The workouts a fulfilled health block describes, as structured records (sent as
+    /// `workout_records`). Empty on every other channel and outcome.
+    public var workoutRecords: [WorkoutRecord] = []
+
     /// A fulfilled channel carrying `block`.
-    public static func fulfilled(_ block: String) -> OutgoingDeviceContext {
-        OutgoingDeviceContext(block: block, requested: true, unavailable: false)
+    public static func fulfilled(_ block: String,
+                                 workoutRecords: [WorkoutRecord] = []) -> OutgoingDeviceContext {
+        var c = OutgoingDeviceContext(block: block, requested: true, unavailable: false)
+        c.workoutRecords = workoutRecords
+        return c
     }
 }
 
@@ -725,6 +732,11 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
     // the body then. The bridge records it on the conversation this turn opens, so every
     // device folds that opening turn away; a later turn's value is ignored.
     public var sentFor: String?
+    // The workouts the attached health block describes, as STRUCTURED DATA (`WorkoutRecord`),
+    // so the bridge can write each figure into its own column of
+    // `diet-logs/workout-detail.csv` before the model runs. Data only: the bridge never puts
+    // it in a prompt. Nil omits the key, which is what every older build sends.
+    public var workoutRecords: [WorkoutRecord]?
 
     public init(mode: String, text: String, sessionId: String?, conversationId: String? = nil,
                 voice: Bool?,
@@ -760,6 +772,7 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
         self.clientKind = nil
         self.clientDevice = nil
         self.sentFor = nil
+        self.workoutRecords = nil
     }
 
     /// The same request, carrying the facts only the DEVICE knows: the zone it is standing
@@ -818,6 +831,7 @@ public struct JesseRequest: Encodable, Equatable, Sendable {
         case clientKind = "client_kind"
         case clientDevice = "client_device"
         case sentFor = "sent_for"
+        case workoutRecords = "workout_records"
     }
 }
 
@@ -1078,10 +1092,41 @@ public struct JesseStreamFrameData: Decodable {
     }
 }
 
-/// The `POST /jesse/device` body — register this phone's APNs token.
-public struct JesseDeviceRegistration: Encodable {
+/// The `POST /jesse/device` body — register this device's APNs token.
+///
+/// `deviceID`, `platform` and `topic` are what let the bridge keep ONE ENTRY PER DEVICE and push
+/// every one of them: before, it kept a single token and each registration replaced it, so the
+/// iPhone and the Mac took turns receiving every push. All three are optional on the wire and
+/// left out when nil, so the body of a bare token is the one older bridges were always sent.
+public struct JesseDeviceRegistration: Encodable, Equatable, Sendable {
     public let token: String
-    public init(token: String) { self.token = token }
+    /// Stable per install: `identifierForVendor` on iOS, a UUID the Mac app keeps.
+    public let deviceID: String?
+    /// `ios` or `macos`.
+    public let platform: String?
+    /// The app's bundle id, which APNs needs as the `apns-topic` of this token's pushes.
+    public let topic: String?
+
+    public init(token: String, deviceID: String? = nil, platform: String? = nil,
+                topic: String? = nil) {
+        self.token = token
+        self.deviceID = deviceID
+        self.platform = platform
+        self.topic = topic
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case token, platform, topic
+        case deviceID = "device_id"
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(token, forKey: .token)
+        try c.encodeIfPresent(deviceID, forKey: .deviceID)
+        try c.encodeIfPresent(platform, forKey: .platform)
+        try c.encodeIfPresent(topic, forKey: .topic)
+    }
 }
 
 // MARK: - Global model switch (GET /jesse/models, POST /jesse/model)

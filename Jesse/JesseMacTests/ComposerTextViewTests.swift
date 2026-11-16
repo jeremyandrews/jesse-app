@@ -30,12 +30,8 @@ final class ComposerTextViewTests: XCTestCase {
         view.isRichText = false
         view.allowsUndo = true
 
-        let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered,
-                              defer: false)
-        // A programmatically created window releases itself on close, which under ARC is an
-        // over-release (the test still holds it) and segfaults the whole suite in the autorelease
-        // pool pop. Own it here instead.
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: frame, styleMask: [.titled], backing: .buffered,
+                                    defer: false)
         window.contentView?.addSubview(view)
         window.makeFirstResponder(view)
         windows.append(window)
@@ -343,9 +339,8 @@ final class ComposerTextViewTests: XCTestCase {
         view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                               height: CGFloat.greatestFiniteMagnitude)
         scroll.documentView = view
-        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered,
-                              defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered,
+                                    defer: false)
         window.contentView = scroll
         windows.append(window)
 

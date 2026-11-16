@@ -425,10 +425,10 @@ pub enum McpSet {
     /// (kc1's MagicDNS name, port 6443, tailnet only). A distinct row for the standing reason:
     /// the record must be able to say which rows held which server.
     ///
-    /// Retired as the main set in 0.199.0; its config is now [`MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG`].
+    /// Retired as the main set in 0.207.0; its config is now [`MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG`].
     MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud,
     /// The twenty-seven-server set PLUS **`reminders`** ([`MAIN_CHILD_MCP_CONFIG`]): every main
-    /// turn on BOTH harnesses from bridge 0.199.0. Twenty-eight servers.
+    /// turn on BOTH harnesses from bridge 0.207.0. Twenty-eight servers.
     ///
     /// **WHAT IS NEW IS THIS REPOSITORY'S OWN `jesse-reminders-mcp`, AND IT REACHES NOTHING
     /// OFF THE HOST**: four tools (`create_reminder`, `list_reminders`, `cancel_reminder`,
@@ -2736,7 +2736,7 @@ mod tests {
         // The corrected row key: `Read` names TWO containments (the main read-only turn with
         // qmd, the vault-QA child with no servers), so one `Read` row would describe a
         // posture that was never probed.
-        // Claude Code's main rows carry the TWENTY-EIGHT-server set (from 0.199.0), and so do Codex's from
+        // Claude Code's main rows carry the TWENTY-EIGHT-server set (from 0.207.0), and so do Codex's from
         // 0.165.0 on. The old asymmetry is still why this asserts each harness: one harness
         // gaining a server — a code-execution one in 0.86.0, a network one in 0.100.0, a
         // document-fetching one in 0.115.0 — must not silently re-key the other harness's

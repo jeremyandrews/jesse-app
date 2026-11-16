@@ -23,6 +23,7 @@
 //!
 //! Exit status: 0 with a transcript, 1 when the run failed, 2 on bad usage, 130 on Ctrl-C.
 
+use jesse_bridge::plistenv::load_plist_env;
 use jesse_bridge::speech::http::{engine_rows, resolve_plan};
 use jesse_bridge::speech::intake::{sniff_audio, AudioCustody, UploadGate, SNIFF_BYTES};
 use jesse_bridge::speech::service::JobOptions;
@@ -72,32 +73,6 @@ fn parse_args() -> Result<Args, String> {
         return Err("name the recording to transcribe".to_string());
     }
     Ok(a)
-}
-
-/// Fill every variable the shell has not set from a launchd plist's `EnvironmentVariables`.
-fn load_plist_env(path: &str) -> Result<usize, String> {
-    let out = std::process::Command::new("/usr/bin/plutil")
-        .args(["-extract", "EnvironmentVariables", "json", "-o", "-", path])
-        .output()
-        .map_err(|e| format!("could not run plutil: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{path} has no readable EnvironmentVariables: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let map: serde_json::Map<String, Value> = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("{path}: EnvironmentVariables is not a dictionary ({e})"))?;
-    let mut filled = 0;
-    for (k, v) in map {
-        if std::env::var_os(&k).is_none() {
-            if let Some(s) = v.as_str() {
-                std::env::set_var(&k, s);
-                filled += 1;
-            }
-        }
-    }
-    Ok(filled)
 }
 
 fn main() {

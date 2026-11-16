@@ -69,7 +69,8 @@ final class DailyVitalsTests: XCTestCase {
 
     func testUnknownStaysNilAndAnEmptyDayIsNoRow() {
         let nights = ["2026-09-27": SleepSummary(totalMinutes: 431, deepMinutes: 64, remMinutes: nil,
-                                                 coreMinutes: 260, awakeMinutes: nil, isNap: false)]
+                                                 coreMinutes: 260, awakeMinutes: nil, isNap: false,
+                                                 start: at(26, 23, 30), end: at(27, 7, 0))]
         var q = DailyVitals.Quantities()
         q.restingHr = ["2026-09-26": 51, "2026-09-27": 55]
         let rows = DailyVitals.assemble(dates: ["2026-09-25", "2026-09-26", "2026-09-27"],

@@ -295,9 +295,10 @@ nonisolated struct HealthArchiveHealthKitSource: HealthArchiveSource {
 /// engine (joining a run already in flight) and only then calls HealthKit's completion, which
 /// must be called on every path.
 ///
-/// Frequency: hourly, except body mass and workouts, which the weigh-in and workout chat
-/// triggers (`HealthDataObserver`) already ask to be delivered immediately. Background
-/// delivery is one setting per type per app, so asking hourly here would slow those triggers.
+/// Frequency: hourly, except body mass, workouts and sleep, which the weigh-in, workout and
+/// late sleep chat triggers (`HealthDataObserver`) already ask to be delivered immediately.
+/// Background delivery is one setting per type per app, so asking hourly here would slow
+/// those triggers.
 @MainActor
 final class HealthArchiveObserver {
     nonisolated deinit {}
@@ -319,7 +320,8 @@ final class HealthArchiveObserver {
     }
 
     nonisolated static func frequency(for type: HKSampleType) -> HKUpdateFrequency {
-        type == HKQuantityType(.bodyMass) || type == HKObjectType.workoutType() ? .immediate : .hourly
+        type == HKQuantityType(.bodyMass) || type == HKObjectType.workoutType()
+            || type == HKCategoryType(.sleepAnalysis) ? .immediate : .hourly
     }
 
     /// Register once, if Apple Health is connected. Called from launch (so the observers

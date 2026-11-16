@@ -38,6 +38,30 @@ import Foundation
 // QUESTION now — a question mark, or an interrogative first word — and everything else is
 // refused and queued for the bridge, which can actually perform it.
 //
+// WHY "CAN YOU MAKE" IS REFUSED BUT "MAKE" IS NOT A REQUEST VERB. On 2026-10-17, with the
+// bridge unreachable, "That beautiful. But can you make a photo realistic version?" (a
+// follow-up to an image the bridge had just made) ended with a question mark, opened its
+// second sentence with "can", and named no listed verb, so it passed and was answered with
+// passport-photo advice out of three unrelated notes. The request was for WORK, and only the
+// bridge can attempt it. Adding `make` to `requestVerbs` would be the wrong fix: "how do I
+// make pizza dough?" is a cookbook lookup and must still pass. What marks the request is its
+// ADDRESS: a modal followed by "you" asks the assistant to act, so the word after "can you"
+// must be one of a short list of lookup verbs ("can you tell me", "could you find"), and any
+// other word refuses. The rule looks anywhere in the text, not only at its start, because the
+// incident opens with a separate sentence.
+//
+// WHY A QUESTION ABOUT "NOW" IS REFUSED. On 2026-11-10, at about 14:56 CET on the Mac, the
+// bridge was restarting for a deploy and "It's deployed: are things still working? And, what
+// have we unblocked?" passed: it ends with a question mark and opens a clause with "are".
+// It was answered with two changelog paragraphs about bridge releases months old, which
+// shared the words "deployed" and "working" and answered a different question. Whether
+// things work minutes after a deploy is the state of the world at this moment, and no copy
+// of the notes can know it. A question that pins itself to now ("still", "right now",
+// "yet") or asks the running state of something ("up", "running", "green"), in the present,
+// or asks whether something just done worked ("did the deploy work"), is refused. "When was
+// it deployed" and "how do I check if it is running" are about the past and about a method,
+// and stay lookups.
+//
 // This file imports no model framework and has no dependency surface at all. Every rule
 // below is a pure function over a string.
 
@@ -131,6 +155,106 @@ public enum LookupGate {
         "can", "could", "will", "would", "should", "has", "have", "had",
     ]
 
+    /// The modals that, followed by "you", address a request to the assistant.
+    static let addressingModals: Set<String> = ["can", "could", "would", "will"]
+
+    /// "you", as it is typed: in full, and as the one-letter shorthand "u".
+    static let addressee: Set<String> = ["you", "u"]
+
+    /// The verbs that may follow "can you" and still make a LOOKUP.
+    ///
+    /// Every other word after a modal plus "you" asks the assistant to do something, and
+    /// that is the bridge's work. Each entry is here because its object is something
+    /// already in the notes:
+    ///
+    /// - `tell`: "can you tell me when the concert is" asks for a fact to be repeated.
+    /// - `find`: "could you find Aurora's birthday" asks for a fact to be located.
+    /// - `check`: "can you check what time the flight is" asks for a fact to be read.
+    /// - `look`: "can you look up the router address" is `find` as a phrasal verb.
+    /// - `show`: "can you show me the packing list" asks for a note to be displayed.
+    /// - `say`: "could you say when the bins go out" is `tell` without the "me".
+    ///
+    /// `remember` is NOT here: it is already a request verb, because "can you remember
+    /// that the plumber comes Tuesday" asks for a write.
+    public static let lookupVerbs: Set<String> = [
+        "tell", "find", "check", "look", "show", "say",
+    ]
+
+    // ── LIVE STATE. On 2026-11-10 "It's deployed: are things still working? And, what
+    //    have we unblocked?" was answered from changelog notes months old while the bridge
+    //    restarted for a deploy. A question about how things are RIGHT NOW is not in any
+    //    note: its answer is the world at this moment. These lists find that shape.
+
+    /// The words that pin a question to this moment.
+    ///
+    /// - `still`: "is the bridge still up" asks whether a state has lasted until now.
+    /// - `now`: "is it working now", and "right now", which this word already covers.
+    /// - `currently`: "what is currently running" is `now` as an adverb.
+    /// - `yet`: "is CI green yet" asks whether a change has happened by now.
+    /// - `anymore`: "is Plex down anymore" is `still`, negated.
+    ///
+    /// "at the moment" is a phrase, so it is in `nowPhrases`.
+    public static let nowMarkers: Set<String> = [
+        "still", "now", "currently", "yet", "anymore",
+    ]
+
+    /// The multi-word now markers, each as its words in order.
+    ///
+    /// - "at the moment": "what is the run doing at the moment" — no single word in it
+    ///   marks the present, and `moment` alone is too common to list.
+    public static let nowPhrases: [[String]] = [
+        ["at", "the", "moment"],
+    ]
+
+    /// The words that name the running state of a system, which only the system knows.
+    ///
+    /// - `working`, `broken`: whether something functions.
+    /// - `down`: whether a service is unreachable.
+    /// - `running`: whether a process or job is going ("what's running on the Studio").
+    /// - `green`, `red`: a build or check's status ("is CI green").
+    /// - `unblocked`: what a change has freed up, which is known only after it lands.
+    /// - `deployed`: whether a change is live.
+    ///
+    /// `up` is NOT here, though it is `down`'s opposite: it is the particle in "can you
+    /// look up the router address", a lookup. "is the bridge still up" is refused by
+    /// `still`.
+    ///
+    /// Each counts only in a present or present perfect question: "when was bridge 0.150
+    /// deployed" is about the past, and a note can answer it.
+    public static let stateWords: Set<String> = [
+        "working", "broken", "down", "running",
+        "green", "red", "unblocked", "deployed",
+    ]
+
+    /// The auxiliaries that put a question in the present or the present perfect.
+    ///
+    /// A clause holding one of these is about now even if it also holds a past one:
+    /// "when was it deployed and is it still up" asks the second thing.
+    static let presentAuxiliaries: Set<String> = [
+        "is", "are", "am", "do", "does", "has", "have",
+    ]
+
+    /// The contracted forms of those auxiliaries, as the letters after the apostrophe:
+    /// "what's", "they're", "we've", "I'm".
+    static let presentContractions: Set<String> = ["s", "re", "ve", "m"]
+
+    /// The auxiliaries that put a question in the past, where a note can hold the answer.
+    static let pastAuxiliaries: Set<String> = ["was", "were", "did", "had"]
+
+    /// The verbs that, after "did", ask whether something just done came off.
+    ///
+    /// - `work`: "did the deploy work" — the outcome is in the world, not in a note.
+    /// - `succeed`, `fail`: the same question, from either side.
+    public static let outcomeVerbs: Set<String> = ["work", "succeed", "fail"]
+
+    /// The auxiliaries that open a how-to question after "how": "how do I", "how can we".
+    static let instructionAuxiliaries: Set<String> = ["do", "does", "can", "could", "should"]
+
+    /// The generic subjects of a how-to question. "how do I check if the bridge is
+    /// running" asks for a method, which a runbook note holds; "how do things look now"
+    /// does not have one of these, and asks for the state.
+    static let instructionSubjects: Set<String> = ["i", "we", "you", "one"]
+
     /// A refusal, in the two registers the two readers need.
     ///
     /// `rule` is for the diagnostics list, where the question is "which rule fired";
@@ -156,6 +280,14 @@ public enum LookupGate {
 
         static let notAQuestion = Refusal(rule: "not a question",
                                           because: "it is not a question")
+
+        /// "can you make …": a modal plus "you" followed by anything but a lookup verb.
+        static let addressedRequest = Refusal(rule: "addressed request",
+                                              because: "it asks the assistant to do something")
+
+        /// "are things still working?": a question whose answer is the world right now.
+        static let liveState = Refusal(rule: "live state",
+                                       because: "it asks how things are right now, which notes cannot know")
 
         static func request(_ verb: RequestVerb) -> Refusal {
             Refusal(rule: "request verb: \(verb.verb)", because: verb.because)
@@ -195,10 +327,106 @@ public enum LookupGate {
                 return .refused(.request(verb))
             }
         }
+        // An ADDRESSED REQUEST is checked before the question shape, because it is a
+        // question in shape: "can you make a poster?" ends with a mark and opens with an
+        // interrogative, and is still a request for work.
+        if isAddressedRequest(words) {
+            return .refused(.addressedRequest)
+        }
+        // LIVE STATE is also a question in shape — "is the bridge still up?" — and its
+        // answer is not in any note, however many words the notes share with it.
+        if asksAboutLiveState(words) {
+            return .refused(.liveState)
+        }
         guard readsAsAQuestion(trimmed, words: words) else {
             return .refused(.notAQuestion)
         }
         return .passed
+    }
+
+    /// Whether the text asks the assistant to DO something: anywhere in it, a modal, then
+    /// "you", then a word that is not a lookup verb.
+    ///
+    /// Anywhere and not only first, because "That beautiful. But can you make …" opens
+    /// with a separate sentence. A modal with any other subject ("Can I park at the
+    /// station?", "Can the kids swim?") is an ordinary yes/no question and is not matched,
+    /// and neither is "can you" with nothing after it.
+    static func isAddressedRequest(_ words: [some StringProtocol]) -> Bool {
+        let stems = words.map { firstWordStem($0) }
+        guard stems.count >= 3 else { return false }
+        for index in 0..<(stems.count - 2)
+        where addressingModals.contains(stems[index]) && addressee.contains(stems[index + 1]) {
+            if !lookupVerbs.contains(stems[index + 2]) { return true }
+        }
+        return false
+    }
+
+    /// Whether any question in the text asks how things are right now.
+    ///
+    /// The text is cut into clauses at a word ending in `?`, `.`, `!`, `:` or `;`, and a
+    /// clause counts only if it is itself a question (it ends with `?` or opens with an
+    /// interrogative): "It's deployed:" states the state, "are things still working?"
+    /// asks it. A question clause is live state when it is not a how-to ("how do I …"),
+    /// and either it is not in the past and names a now marker or a state word, or it
+    /// asks "did …" with an outcome verb.
+    static func asksAboutLiveState(_ words: [some StringProtocol]) -> Bool {
+        var clause: [String] = []
+        var endsWithMark = false
+        func clauseIsLive() -> Bool {
+            guard !clause.isEmpty else { return false }
+            let stems = clause.map { firstWordStem($0) }
+            let isQuestion = endsWithMark || interrogatives.contains(stems[0])
+            guard isQuestion, !isInstruction(stems) else { return false }
+            let lowered = clause.map {
+                $0.lowercased().trimmingCharacters(in: CharacterSet.letters.inverted)
+            }
+            let present = zip(stems, lowered).contains { stem, word in
+                presentAuxiliaries.contains(stem)
+                    || presentContractions.contains(contraction(of: word))
+            }
+            let past = stems.contains(where: pastAuxiliaries.contains)
+            if stems.contains("did"), stems.contains(where: outcomeVerbs.contains) {
+                return true
+            }
+            if past && !present { return false }
+            if stems.contains(where: { nowMarkers.contains($0) || stateWords.contains($0) }) {
+                return true
+            }
+            return nowPhrases.contains { phrase in
+                stems.count >= phrase.count
+                    && (0...(stems.count - phrase.count)).contains {
+                        Array(stems[$0..<($0 + phrase.count)]) == phrase
+                    }
+            }
+        }
+        for word in words {
+            clause.append(String(word))
+            let tail = word.trimmingCharacters(in: CharacterSet(charactersIn: "\"')]\u{201D}\u{2019}"))
+            if let last = tail.last, "?.!:;".contains(last) {
+                endsWithMark = last == "?"
+                if clauseIsLive() { return true }
+                clause = []
+            }
+        }
+        endsWithMark = false
+        return clauseIsLive()
+    }
+
+    /// Whether a clause asks HOW to do something: "how to …", or "how" then an
+    /// instruction auxiliary then a generic subject ("how do I", "how can we").
+    static func isInstruction(_ stems: [String]) -> Bool {
+        guard stems.count >= 2, stems[0] == "how" else { return false }
+        if stems[1] == "to" { return true }
+        return stems.count >= 3 && instructionAuxiliaries.contains(stems[1])
+            && instructionSubjects.contains(stems[2])
+    }
+
+    /// The letters after the apostrophe in a contraction ("what's" is "s"), or "".
+    static func contraction(of word: String) -> String {
+        guard let cut = word.firstIndex(where: { $0 == "'" || $0 == "\u{2019}" }) else {
+            return ""
+        }
+        return String(word[word.index(after: cut)...])
     }
 
     /// Whether this text asks something.

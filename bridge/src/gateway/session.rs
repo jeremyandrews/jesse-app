@@ -294,7 +294,23 @@ impl TurnSession {
         if granted.is_empty() {
             return Ok(Vec::new());
         }
-        let advertised: Vec<Value> = match self.upstream(server).await {
+        let advertised = self.advertised(server).await?;
+        Ok(advertised
+            .into_iter()
+            .filter(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| granted.iter().any(|g| g == n))
+            })
+            .collect())
+    }
+
+    /// EVERY tool the upstream advertises, before the grant is applied, starting it if this
+    /// turn has not yet. What a child is offered is [`TurnSession::list`]; this is what the
+    /// containment battery's pre-flight counts, to tell a server that started with no tools
+    /// (no PATH, no credential) from one whose tools a grant merely narrowed.
+    pub async fn advertised(&self, server: &str) -> Result<Vec<Value>, String> {
+        Ok(match self.upstream(server).await {
             Upstream::Client(c) => c
                 .list_tools()
                 .await
@@ -304,15 +320,7 @@ impl TurnSession {
                 .collect(),
             Upstream::InProcess(s) => s.tools(),
             Upstream::Failed => return Err(format!("upstream '{server}' did not start")),
-        };
-        Ok(advertised
-            .into_iter()
-            .filter(|t| {
-                t.get("name")
-                    .and_then(|n| n.as_str())
-                    .is_some_and(|n| granted.iter().any(|g| g == n))
-            })
-            .collect())
+        })
     }
 
     /// One call, checked against the grant by exact name before anything goes upstream.

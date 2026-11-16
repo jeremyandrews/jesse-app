@@ -271,9 +271,11 @@ struct MacThreadDetailView: View {
                 .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .onChange(of: thread.orderedTurns.count) { scrollToBottom(proxy) }
-            .onChange(of: coordinator.streamingText(for: thread.id)) { scrollToBottom(proxy) }
-            .onAppear { scrollToBottom(proxy) }
+            .onChange(of: thread.orderedTurns.count) { scrollToBottom(proxy, animated: true) }
+            .onChange(of: coordinator.streamingText(for: thread.id)) {
+                scrollToBottom(proxy, animated: false)
+            }
+            .onAppear { scrollToBottom(proxy, animated: false) }
         }
     }
 
@@ -310,7 +312,24 @@ struct MacThreadDetailView: View {
     private static let bottomAnchor = "bottom"
     private static let streamAnchor = "stream"
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+    /// To the bottom of the transcript. The phone's rule (`ThreadDetailView.autoScroll`): the
+    /// conversation opening and stream deltas land WITHOUT animation, and only a settled turn
+    /// arriving gets the short ease.
+    ///
+    /// An animated `scrollTo` into a `LazyVStack` aims at an ESTIMATED offset, because rows below
+    /// the viewport have not been measured. SwiftUI then keeps chasing the anchor as rows are
+    /// measured and the estimate moves, and it keeps that target after the motion stops: the
+    /// next change to the transcript's frame starts the chase again. The composer growing on a
+    /// paste is such a change. The transcript pinned its bottom, flipped its height estimate
+    /// and eased back for a few frames, and each frame laid out the whole detail view again,
+    /// asking the composer for its size, and sometimes building a transcript row and its reply
+    /// document again. Without the animation, the target resolves in one layout and nothing
+    /// stays behind for a later resize to restart.
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard animated else {
+            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+            return
+        }
         withAnimation(.easeOut(duration: 0.15)) {
             proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
         }

@@ -390,11 +390,8 @@ mod tests {
     }
     /// A tiny executable file at `dir/name`.
     fn install(dir: &Path, name: &str) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
-        let p = dir.join(name);
-        std::fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::write_executable(&dir.join(name), b"#!/bin/sh\nexit 0\n");
     }
 
     /// THE `PATH` UNDER TEST IS THE CHILD'S, not this process's.
@@ -488,7 +485,7 @@ mod tests {
             .expect("the shipped set names a `places` server");
         assert_eq!(places.command, "jesse-places-mcp");
         assert!(missing.iter().any(|m| m.command == "jesse-build-mcp"));
-        // The reminders server (0.199.0) is checked the same way: a missing
+        // The reminders server (0.207.0) is checked the same way: a missing
         // `jesse-reminders-mcp` would leave every main turn unable to set a reminder.
         let reminders = missing
             .iter()

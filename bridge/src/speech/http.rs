@@ -288,7 +288,7 @@ fn completion_hook(st: &AppState, q: &TranscribeQuery) -> Option<FinishHook> {
             .as_deref(),
         Some("1") | Some("true") | Some("on")
     );
-    if !asked || st.apns.is_none() || st.devices.get().is_none() {
+    if !asked || st.apns.is_none() || st.devices.is_empty() {
         return None;
     }
     let st = st.clone();
@@ -317,22 +317,14 @@ async fn push_transcription_outcome(
     let Some(apns) = st.apns.as_deref() else {
         return;
     };
-    let Some(token) = st.devices.get() else {
-        eprintln!("jesse-bridge: speech PUSH id={id} — no device registered, nothing sent");
-        return;
-    };
     let payload = build_transcription_payload(id, conversation_id, state);
     let badge = Some(unread_conversation_count(&st.conversations, &st.flags));
-    match apns.push_payload(&token, payload, badge).await {
-        PushOutcome::Sent => eprintln!("jesse-bridge: speech PUSH id={id} state={state} sent"),
-        PushOutcome::DeadToken => {
-            st.devices.clear();
-            eprintln!("jesse-bridge: speech PUSH id={id} — device token rejected (410) — cleared");
-        }
-        PushOutcome::Failed(e) => {
-            eprintln!("jesse-bridge: speech PUSH id={id} failed: {e} — swallowed")
-        }
-    }
+    let tally = push_to_devices(apns, &st.devices, "speech", id, payload, badge).await;
+    eprintln!(
+        "jesse-bridge: speech PUSH id={id} state={state} sent to {} of {} device(s)",
+        tally.sent,
+        tally.devices()
+    );
 }
 
 fn not_found() -> ApiError {

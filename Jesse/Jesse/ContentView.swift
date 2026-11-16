@@ -624,6 +624,10 @@ struct SettingsView: View {
                     Text(offlineLookupSettings.description)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    // Settings › Vault folder › Owner name: the field and its caption, shared
+                    // with the Mac. It writes the key itself when editing ends, as the toggle
+                    // above does, not through Save.
+                    OwnerNameSettingsRows(settings: offlineLookupSettings)
                     NavigationLink {
                         VaultDiagnosticsView()
                     } label: {
@@ -760,6 +764,8 @@ struct SettingsView: View {
                 }
 
                 HealthArchiveSettingsSection()
+
+                WorkoutDetailBackfillSection()
 
                 Section {
                     Toggle("Attach location context", isOn: $attachLocationContext)

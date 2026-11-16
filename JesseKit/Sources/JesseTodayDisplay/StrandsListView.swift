@@ -30,7 +30,15 @@ import JesseVault
 // stamp to guard a write with, and a second write path to the same lines is how two
 // spellings of "tick a box" end up disagreeing.
 
-/// The Strands segment.
+// ## Work (bridge 0.203.0; the two line row, 0.205.0)
+//
+// The segment reads **Work**. A row is two lines (HO5, `WorkSemantics.rowText`): the project's
+// title with what it is about right now beside it, then what is his to do, else Next. A tap pushes the
+// project's short view (`WorkProjectView`); the full note, with its Drafts block and Run on
+// Studio, is one tap further, behind Full note. A board with no runs model (a preview, a
+// shell without runs) still opens the note directly, as before.
+
+/// The Work segment (internally still the strand board).
 public struct StrandsListView: View {
     @Bindable private var model: StrandsModel
 
@@ -41,6 +49,13 @@ public struct StrandsListView: View {
     /// How many open Today items name a strand, by slug. The count behind a row's
     /// `N on Today` caption, filtered from the day the app already holds.
     private let onTodayCount: (String) -> Int
+
+    /// The runs, for each row's status line, the `Since your last look` line and the project
+    /// view. Nil in a shell or preview without them: rows then open the note, as before.
+    private let runs: StudioRunsModel?
+
+    /// The project pushed from a row.
+    @State private var openedProject: WorkProjectRoute?
 
     /// The strand whose findings sheet is up.
     @State private var findingsFor: Strand?
@@ -63,10 +78,15 @@ public struct StrandsListView: View {
 
     public init(model: StrandsModel,
                 opener: StrandOpener,
-                onTodayCount: @escaping (String) -> Int = { _ in 0 }) {
+                onTodayCount: @escaping (String) -> Int = { _ in 0 },
+                runs: StudioRunsModel? = nil,
+                // For a render of the whole board (the Mac screenshot test): Dormant open.
+                dormantStartsOpen: Bool = false) {
         self.model = model
         self.opener = opener
         self.onTodayCount = onTodayCount
+        self.runs = runs
+        self._collapsed = State(initialValue: dormantStartsOpen ? [] : ["dormant"])
     }
 
     public var body: some View {
@@ -97,11 +117,37 @@ public struct StrandsListView: View {
             // `304` and nothing redraws; on an unreachable one it is the whole feature.
             model.primeFromCache()
             await model.load()
+            if let runs {
+                await runs.loadLastLook()
+                await runs.load()
+            }
         }
-        .refreshable { await model.refresh() }
+        // Opening Work posts the last look, but only once this visit's rows are on screen,
+        // so the visit itself still shows what was new.
+        .task(id: isReadyToMarkLastLook) {
+            guard isReadyToMarkLastLook, let runs else { return }
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await runs.markLastLook()
+        }
+        .refreshable {
+            await model.refresh()
+            await runs?.load()
+        }
         .sheet(item: $findingsFor) { strand in
             StrandFindingsSheet(strand: strand) { findingsFor = nil }
         }
+        .navigationDestination(item: $openedProject) { route in
+            if let runs {
+                WorkProjectView(slug: route.slug, strands: model, runs: runs, opener: opener)
+            }
+        }
+    }
+
+    /// The board has drawn its rows and the runs and last look they compare against.
+    private var isReadyToMarkLastLook: Bool {
+        guard let runs, case .content = model.displayState else { return false }
+        return runs.hasLoaded && runs.lastLookLoaded
     }
 
     /// The empty board, in two sentences that say it is a real answer rather than a
@@ -128,6 +174,14 @@ public struct StrandsListView: View {
                                   message: model.lastErrorMessage,
                                   staleness: model.stalenessLine)
                     .listRowSeparator(.hidden)
+            }
+            if let runs {
+                let since = runs.finishedSinceLastLook()
+                if !since.isEmpty {
+                    Section {
+                        WorkSinceBlock(runs: since)
+                    }
+                }
             }
             ForEach(groups) { group in
                 section(group, family: family)
@@ -233,6 +287,10 @@ public struct StrandsListView: View {
     private func row(_ strand: Strand, family: StrandFamily, showsParent: Bool,
                      insideCaption: String? = nil) -> some View {
         let parent = family.parent(of: strand)
+        let all = runs?.runs ?? []
+        let loaded = runs?.hasLoaded ?? false
+        let text = WorkSemantics.rowText(strand, runs: all, runsLoaded: loaded)
+        let status = WorkSemantics.rowStatus(strand, runs: all, runsLoaded: loaded)
         return StrandRow(strand: strand,
                   tone: family.tone(strand.slug),
                   parentTitle: parent?.title,
@@ -241,9 +299,16 @@ public struct StrandsListView: View {
                   referenceDay: model.referenceDay,
                   onTodayCaption: StrandOnToday.caption(count: onTodayCount(strand.slug)),
                   insideCaption: insideCaption,
-                  runBadge: StudioRunSemantics.badge(for: strand),
+                  text: text,
+                  spokenStatus: status,
                   isOpening: opener.opening == strand.slug,
-                  onOpen: { opener.open(slug: strand.slug, title: strand.title) },
+                  onOpen: {
+                      if runs != nil {
+                          openedProject = WorkProjectRoute(slug: strand.slug)
+                      } else {
+                          opener.open(slug: strand.slug, title: strand.title)
+                      }
+                  },
                   onShowFindings: { findingsFor = strand })
             // A long press (a secondary click on the Mac) on ANY board row — live, dormant
             // or nested — offers the same five things the Vault tab's Strands rows offer.
@@ -302,27 +367,31 @@ public enum StrandNoteSource: Equatable, Identifiable, Sendable {
 
 // MARK: - The row
 
-/// One strand: its group, its title, where it stands, and what runs next.
+/// One project on the Work board: its group's colour bar and at most two lines
+/// (`WorkSemantics.rowText`, docs/ho5-work-board-rows.md). Line 1 is the title in bold with what
+/// the project is about right now beside it in grey; line 2 is what is his to do in orange, else
+/// Next. No audit triangle and no age: the findings are in the full note's sheet.
 struct StrandRow: View {
     let strand: Strand
     /// The strand's family tone, resolved for the current appearance by `StrandTone`:
     /// the one function every surface that draws a strand goes through.
     let tone: TodayProjectColor
-    /// The title of the strand this one sits under, or nil for a top level strand.
+    /// The title of the strand this one sits under, or nil for a top level strand. Read
+    /// aloud, not drawn: the row has one status line and nothing else.
     var parentTitle: String? = nil
-    /// Whether the row says `in <parent>` under its title: the flat lenses do, the
-    /// `Tree` lens draws the relation as indentation instead.
     var showsParentCaption = false
-    /// The parent's tone, for the caption's mark.
     var parentTone: TodayProjectColor? = nil
     /// The day every `updated` stamp is measured against.
     let referenceDay: String
-    /// `N on Today`, or nil when no open Today item names this strand.
     var onTodayCaption: String? = nil
-    /// `N inside`, on a collapsed `Tree` parent only.
+    /// `N inside`, on a collapsed `Tree` parent only: read aloud.
     var insideCaption: String? = nil
-    /// The strand's active Studio runs, or nil with none (or from a bridge that predates them).
     var runBadge: StudioRunBadge? = nil
+    /// The words beside the title and under it, or nil for nothing to say.
+    var text: WorkRowText? = nil
+    /// `Your turn` or `2 moving` (`WorkSemantics.rowStatus`; its `Next: …` is not said, line 2
+    /// says it): said first to a screen reader, so a row's state is heard before its words.
+    var spokenStatus: WorkRowStatus? = nil
     let isOpening: Bool
     let onOpen: () -> Void
     let onShowFindings: () -> Void
@@ -335,57 +404,23 @@ struct StrandRow: View {
             // it is the only vertical mark on the row.
             TodayProjectAccentBar(strandTone: tone)
             Button(action: onOpen) {
-                VStack(alignment: .leading, spacing: 3) {
-                    header
-                    if showsParentCaption, let parentTitle {
-                        // Relatedness never rests on colour alone: the name says it, and
-                        // the mark in the parent's tone ties it to the parent's bar.
-                        HStack(spacing: 5) {
-                            if let parentTone {
-                                Circle()
-                                    .fill(parentTone.color)
-                                    .frame(width: 6, height: 6)
-                            }
-                            Text(StrandsSemantics.parentCaption(parentTitle))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                // The widest arrangement that fits on one line beside the title: the grey text
+                // cut on a word (never under four), else just the word for what is moving, else
+                // the title alone. In the last two, line 2 is `WorkRowText.fallbackLine`: his
+                // action, else what is moving, else Next, else the headline.
+                ViewThatFits(in: .horizontal) {
+                    ForEach(Array(detailVariants.enumerated()), id: \.offset) { _, variant in
+                        rowBody(detail: variant, line: text?.line, tone: text?.tone ?? .plain)
                     }
-                    if let now = strand.now, !now.isEmpty {
-                        Text(now)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
+                    if let marker = text?.marker {
+                        // Only the word fits: when nothing is his, line 2 says what is moving.
+                        rowBody(detail: marker, line: fallbackLine, tone: text?.tone ?? .plain)
                     }
-                    if let next = StrandsSemantics.nextLine(strand) {
-                        Label(next, systemImage: "arrow.turn.down.right")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if let onTodayCaption {
-                        Label(onTodayCaption, systemImage: "checklist")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let insideCaption {
-                        Label(insideCaption, systemImage: "list.bullet.indent")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if strand.isWaitingOnYou {
-                        // The one gate the reader can clear personally, said out loud.
-                        Label(StrandsWording.waitingOnYou,
-                              systemImage: "person.crop.circle.badge.exclamationmark")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
+                    rowBody(detail: nil, line: fallbackLine, tone: text?.tone ?? .plain,
+                            fitsTitle: true)
                 }
+                // A wide Mac window does not stretch a line past what reads at a glance.
+                .frame(maxWidth: Self.textMaxWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(.rect)
             }
@@ -394,58 +429,141 @@ struct StrandRow: View {
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint("Opens the strand's note")
+        .accessibilityHint("Opens the project")
     }
 
-    private var header: some View {
-        HStack(spacing: 6) {
-            Text(strand.title)
-                .font(.body)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            if isOpening {
-                ProgressView()
-                    .controlSize(.mini)
-            }
-            Spacer(minLength: 4)
-            if let runBadge {
-                StudioRunBadgeView(badge: runBadge)
-            }
-            if !strand.findings.isEmpty {
-                // A BUTTON of its own, not part of the row's tap: the findings are about
-                // the note's bookkeeping and the row's tap is about the work, and one
-                // gesture that did both would open whichever the user did not mean.
-                Button(action: onShowFindings) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .frame(width: 24, height: 24)
-                        .contentShape(.rect)
+    /// The grey text beside the title, whole and then cut shorter on a word, never under four.
+    private var detailVariants: [String] {
+        guard let detail = text?.detail else { return [] }
+        return WordFitLine.variants(detail, minWords: 4)
+    }
+
+    /// Line 2 when the grey text does not fit beside the title (`WorkRowText.fallbackLine`).
+    private var fallbackLine: String? { text?.fallbackLine }
+
+    private func rowBody(detail: String?, line: String?, tone: WorkRowText.Tone,
+                         fitsTitle: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(strand.title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: !fitsTitle, vertical: false)
+                if let detail {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(strand.findings.count == 1
-                                    ? "1 audit finding"
-                                    : "\(strand.findings.count) audit findings")
+                if isOpening {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
             }
-            if let age = StrandsSemantics.relativeUpdated(strand.updated,
-                                                          today: referenceDay) {
-                Text(age)
-                    .font(.caption2)
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
+            if let line {
+                WordFitLine(text: line)
+                    .font(.subheadline)
+                    .foregroundStyle(tone == .you ? AnyShapeStyle(.orange)
+                                                  : AnyShapeStyle(.secondary))
+                    // Line 2 takes whatever width there is; only line 1 decides the fit.
+                    .frame(minWidth: 0, idealWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    /// One sentence for a screen reader — the row's content, computed where a test can
-    /// reach it.
-    private var accessibilityLabel: String {
-        var sentence = StrandsSemantics.rowAccessibilityLabel(strand, today: referenceDay,
-                                                              parentTitle: parentTitle)
-        if let runBadge { sentence += ", \(runBadge.accessibilityLabel)" }
-        guard let insideCaption else { return sentence }
-        return "\(sentence), \(insideCaption)"
+    /// The widest a row's words run, in points: wider than any phone, narrower than a Mac window.
+    static let textMaxWidth: CGFloat = 560
+
+    /// One sentence for a screen reader: the title, its state, the grey text and line 2 whole
+    /// (never cut), and where it sits.
+    var accessibilityLabel: String {
+        var parts = [strand.title]
+        switch spokenStatus {
+        case .yourTurn, .moving: parts.append(spokenStatus?.text ?? "")
+        case .next, nil: break
+        }
+        if let detail = text?.detail { parts.append(detail) }
+        if let line = text?.line { parts.append(line) }
+        if let parentTitle { parts.append(StrandsSemantics.parentCaption(parentTitle)) }
+        if let insideCaption { parts.append(insideCaption) }
+        return parts.joined(separator: ", ")
     }
+}
+
+// MARK: - One line, cut on a word
+
+/// One line of text that never ends mid word: the whole text when it fits, else the longest
+/// run of its first words that fits, with `…`. The last resort (one word that does not fit)
+/// truncates as any line does.
+///
+/// The `View` conformance makes the type MainActor, and with it every static member that is
+/// not marked otherwise. The four string helpers below are pure and `WorkSemantics.rowTitle`
+/// (nonisolated) calls two of them, so they are `nonisolated`: a newer Swift only warns about
+/// the call from a nonisolated context, Xcode 26.6 rejects it, and PR 333 shipped a red
+/// nightly through that difference.
+struct WordFitLine: View {
+    let text: String
+
+    var body: some View {
+        let variants = Self.variants(text)
+        ViewThatFits(in: .horizontal) {
+            ForEach(Array(variants.enumerated()), id: \.offset) { _, v in
+                Text(v).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+            }
+            Text(variants.last ?? text).lineLimit(1)
+        }
+        .accessibilityLabel(text)
+    }
+
+    /// The text, then each shorter run of its first words with `…`, longest first, none under
+    /// `minWords` words (the grey text beside a title asks for four: fewer is a stub). Trailing
+    /// punctuation and a dangling small word are dropped before the `…`.
+    nonisolated static func variants(_ text: String, minWords: Int = 1) -> [String] {
+        let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard words.count > 1 else { return [text] }
+        var out = [text]
+        var k = words.count - 1
+        while k >= max(1, minWords) {
+            let joined = trimTail(dropDangling(Array(words.prefix(k))).joined(separator: " "))
+            if joined.split(separator: " ").count < minWords { break }
+            var candidate = joined + "\u{2026}"
+            // A quotation cut short still closes.
+            if candidate.contains("\u{201C}") && !candidate.contains("\u{201D}") {
+                candidate += "\u{201D}"
+            }
+            if out.last != candidate { out.append(candidate) }
+            k -= 1
+        }
+        return out
+    }
+
+    /// `words` without the small words it ends on (one word always stays).
+    nonisolated static func dropDangling(_ words: [String]) -> [String] {
+        var out = words
+        while out.count > 1, let last = out.last,
+              dangling.contains(last.lowercased().trimmingCharacters(in: .punctuationCharacters)) {
+            out.removeLast()
+        }
+        return out
+    }
+
+    /// `text` without the punctuation and opening marks a cut can leave at its end.
+    nonisolated static func trimTail(_ text: String) -> String {
+        var out = text
+        while let last = out.last, ",;:.-\u{2013}\u{2014}\u{201C}( ".contains(last) {
+            out.removeLast()
+        }
+        return out
+    }
+
+    /// Small words a cut line should not end on. The bridge's `is_filler`
+    /// (`bridge/src/hostrun/work/row.rs`) holds the same list; keep the two together.
+    nonisolated static let dangling: Set<String> = [
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "its", "of", "on", "or",
+        "per", "the", "their", "to", "with",
+    ]
 }
 
 // MARK: - A group heading

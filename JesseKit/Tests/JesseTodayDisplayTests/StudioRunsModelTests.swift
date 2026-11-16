@@ -28,9 +28,12 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertEqual(enabled, [.needsYou, .reported, .interrupted])
     }
 
-    func testResumeIsOfferedOnInterruptedAndNeedsYouWithAnEmptyComposerOnly() {
+    /// Resume is the empty continue: a `needs_you` run asked a question, which a blind continue
+    /// would answer (the bridge refuses it with a 409), so only an interrupted run offers it.
+    func testResumeIsOfferedOnInterruptedOnlyWithAnEmptyComposerOnly() {
         let offered = Self.all.filter { StudioRunSemantics.offersResume($0, composer: "") }
-        XCTAssertEqual(offered, [.needsYou, .interrupted])
+        XCTAssertEqual(offered, [.interrupted])
+        XCTAssertFalse(StudioRunSemantics.offersResume(.needsYou, composer: ""))
         XCTAssertTrue(StudioRunSemantics.offersResume(.interrupted, composer: "  \n "))
         XCTAssertFalse(StudioRunSemantics.offersResume(.interrupted, composer: "use main"))
         XCTAssertFalse(StudioRunSemantics.offersResume(.reported, composer: ""))
@@ -70,7 +73,7 @@ final class StudioRunsModelTests: XCTestCase {
         let model = StudioRunDetailModel(runID: "GD5", run: run("GD5", .needsYou),
                                          makeClient: { FakeRuns() })
         XCTAssertTrue(model.isComposerEnabled)
-        XCTAssertTrue(model.showsResume)
+        XCTAssertFalse(model.showsResume, "a question is answered, never continued blind")
         XCTAssertFalse(model.canSend, "nothing typed")
         XCTAssertFalse(model.canCancel)
         model.composer = "main"
@@ -206,10 +209,31 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertEqual(model.runs(strand: "Gd").count, 2)
         XCTAssertEqual(model.runs(strand: "Other").count, 0)
     }
+
+    func testTheListShowsEveryRunInEveryStatusAndEachOpensWithItsReport() async throws {
+        let fake = FakeRuns()
+        let statuses = Self.all
+        fake.list = StudioRunList(runs: statuses.enumerated().map { i, status in
+            StudioRun(runID: "R\(i)", strand: i % 2 == 0 ? "Gd" : nil, status: status,
+                      createdAt: "2026-11-09T1\(i):00:00.000Z",
+                      reportPaths: ["Inbox/2026-11-09-run-R\(i).md"])
+        })
+        let model = StudioRunsModel(makeClient: { fake })
+        await model.load()
+        XCTAssertEqual(model.runs(strand: nil).count, statuses.count, "no run is dropped")
+        XCTAssertEqual(Set(model.runs(strand: nil).map(\.status)), Set(statuses))
+        for i in statuses.indices {
+            let detail = model.detailModel(for: "R\(i)")
+            XCTAssertEqual(detail.run?.latestReportPath, "Inbox/2026-11-09-run-R\(i).md")
+            await detail.refresh()
+            XCTAssertNil(detail.loadError)
+            XCTAssertEqual(detail.run?.latestReportPath, "Inbox/2026-11-09-run-R\(i).md")
+        }
+    }
 }
 
-/// The six calls, faked.
-private final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
+/// The run calls and the two last look calls, faked. Shared with `WorkSemanticsTests`.
+final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     var list = StudioRunList()
     var listError: (any Error)?
     var startResult: Result<StudioRunStarted, any Error> = .failure(StudioRunError.other("unset"))
@@ -218,9 +242,45 @@ private final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     var started: [(String, String)] = []
     var replies: [(String, String)] = []
 
-    func listRuns() async throws -> StudioRunList {
+    /// What `?archived=only` answers; `list` is what the default answers.
+    var archivedList = StudioRunList()
+    var modes: [StudioRunArchivedMode] = []
+    var archived: [String] = []
+    var unarchived: [String] = []
+    /// A refusal for an archive of these runs, in the bridge's words.
+    var archiveRefusals: [String: String] = [:]
+
+    func listRuns(archived mode: StudioRunArchivedMode) async throws -> StudioRunList {
+        modes.append(mode)
         if let listError { throw listError }
-        return list
+        return mode == .only ? archivedList : list
+    }
+    func archive(id: String) async throws -> StudioRun {
+        if let message = archiveRefusals[id] {
+            throw StudioRunError.refused(status: 409, message: message)
+        }
+        archived.append(id)
+        guard var r = list.runs.first(where: { $0.runID == id }) else {
+            throw StudioRunError.refused(status: 404, message: "no run \"\(id)\"")
+        }
+        if r.status == .needsYou || r.status == .interrupted { r.status = .closed }
+        r.archivedAt = "2026-11-09T17:00:00.000Z"
+        r.archivedReason = "archived by Jeremy"
+        list.runs.removeAll { $0.runID == id }
+        archivedList.runs.insert(r, at: 0)
+        return r
+    }
+    func unarchive(id: String) async throws -> StudioRun {
+        unarchived.append(id)
+        guard var r = archivedList.runs.first(where: { $0.runID == id })
+                ?? list.runs.first(where: { $0.runID == id }) else {
+            throw StudioRunError.refused(status: 404, message: "no run \"\(id)\"")
+        }
+        r.archivedAt = nil
+        r.archivedReason = nil
+        archivedList.runs.removeAll { $0.runID == id }
+        if !list.runs.contains(where: { $0.runID == id }) { list.runs.append(r) }
+        return r
     }
     func startRun(strand: String, itemID: String) async throws -> StudioRunStarted {
         started.append((strand, itemID))
@@ -241,5 +301,17 @@ private final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
     }
     func cancelRun(id: String) async throws -> StudioRun {
         try cancelResult.get()
+    }
+    var lastLookValue: String?
+    var lastLookError: (any Error)?
+    var marks = 0
+    func lastLook() async throws -> WorkLastLook {
+        if let lastLookError { throw lastLookError }
+        return WorkLastLook(lastLook: lastLookValue)
+    }
+    func markLastLook() async throws -> WorkLastLook {
+        marks += 1
+        lastLookValue = "2026-11-09T17:00:00.000Z"
+        return WorkLastLook(lastLook: lastLookValue)
     }
 }

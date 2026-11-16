@@ -1,7 +1,7 @@
 import Foundation
 
 // The Studio run routes (`bridge/src/hostrun.rs`), decoded exactly as the bridge serializes
-// them, and the six calls that reach them.
+// them, and the calls that reach them.
 //
 // ## The wire
 //
@@ -33,6 +33,9 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
     case interrupted
     /// The plan's usage limit ended the round; the run continues by itself at `resume_at`.
     case paused
+    /// Settled without a reply: superseded, its line ticked, its report archived, or closed
+    /// (or archived) by its owner. A reply still continues it, as it does a reported run.
+    case closed
     /// A status a newer bridge serves. Carries the word so the screen can still show it.
     case unknown(String)
 
@@ -46,6 +49,7 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
         case "cancelled": self = .cancelled
         case "interrupted": self = .interrupted
         case "paused": self = .paused
+        case "closed": self = .closed
         default: self = .unknown(wire)
         }
     }
@@ -66,6 +70,7 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
         case .cancelled: return "cancelled"
         case .interrupted: return "interrupted"
         case .paused: return "paused"
+        case .closed: return "closed"
         case .unknown(let w): return w
         }
     }
@@ -80,13 +85,25 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
     }
 
     /// Something is still happening without anyone's help: queued, running or paused. What
-    /// keeps a detail screen polling.
+    /// keeps a detail screen polling, and what the bridge refuses to archive.
     public var isMoving: Bool {
         switch self {
         case .queued, .running, .paused: return true
         default: return false
         }
     }
+
+    /// Waits on its owner: a question, a cut off round, or a failure. The `Needs me` filter,
+    /// the bridge's `needs_me` count.
+    public var needsMe: Bool {
+        switch self {
+        case .needsYou, .interrupted, .failed: return true
+        default: return false
+        }
+    }
+
+    /// Done with: neither moving nor waiting on its owner. The `Finished` filter.
+    public var isFinished: Bool { !isMoving && !needsMe }
 }
 
 /// One round of a run: the first run of the prompt, or one reply.
@@ -169,6 +186,19 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
     public var host: String?
     /// Every round's Inbox report, vault relative, oldest first.
     public var reportPaths: [String]
+    /// What the run is called (`work::run_title`): its Drafts line's title, its prompt's
+    /// heading, or its branch, never its id. Nil from a bridge that predates the Work view.
+    public var title: String?
+    /// The last non blank line of its readable log, at most 200 characters. Nil before
+    /// anything is logged, and from an older bridge.
+    public var lastLine: String?
+    /// The first line of its newest report. Nil before a report, and from an older bridge.
+    public var reportLine: String?
+    /// When it left the runs list (RFC 3339). Nil while it is in the list, and from a bridge
+    /// that predates archiving.
+    public var archivedAt: String?
+    /// Why: `archived by Jeremy`, `item ticked`, `report archived`, `finished over 14 days ago`.
+    public var archivedReason: String?
 
     public var id: String { runID }
 
@@ -179,7 +209,9 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
                 startedAt: String? = nil, finishedAt: String? = nil,
                 lastEventAt: String? = nil, stalledSince: String? = nil,
                 rounds: [StudioRunRound] = [], model: String? = nil, error: String? = nil,
-                resumeAt: String? = nil, host: String? = nil, reportPaths: [String] = []) {
+                resumeAt: String? = nil, host: String? = nil, reportPaths: [String] = [],
+                title: String? = nil, lastLine: String? = nil, reportLine: String? = nil,
+                archivedAt: String? = nil, archivedReason: String? = nil) {
         self.runID = runID
         self.strand = strand
         self.itemID = itemID
@@ -202,10 +234,15 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         self.resumeAt = resumeAt
         self.host = host
         self.reportPaths = reportPaths
+        self.title = title
+        self.lastLine = lastLine
+        self.reportLine = reportLine
+        self.archivedAt = archivedAt
+        self.archivedReason = archivedReason
     }
 
     private enum CodingKeys: String, CodingKey {
-        case strand, repo, branch, origin, status, rounds, model, error, host
+        case strand, repo, branch, origin, status, rounds, model, error, host, title
         case runID = "run_id"
         case itemID = "item_id"
         case promptPath = "prompt_path"
@@ -219,6 +256,10 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         case stalledSince = "stalled_since"
         case resumeAt = "resume_at"
         case reportPaths = "report_paths"
+        case lastLine = "last_line"
+        case reportLine = "report_line"
+        case archivedAt = "archived_at"
+        case archivedReason = "archived_reason"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -245,6 +286,11 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         resumeAt = try c.decodeIfPresent(String.self, forKey: .resumeAt)
         host = try c.decodeIfPresent(String.self, forKey: .host)
         reportPaths = try c.decodeIfPresent([String].self, forKey: .reportPaths) ?? []
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        lastLine = try c.decodeIfPresent(String.self, forKey: .lastLine)
+        reportLine = try c.decodeIfPresent(String.self, forKey: .reportLine)
+        archivedAt = try c.decodeIfPresent(String.self, forKey: .archivedAt)
+        archivedReason = try c.decodeIfPresent(String.self, forKey: .archivedReason)
     }
 
     public static func decode(from data: Data) throws -> StudioRun {
@@ -256,6 +302,13 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
 
     /// The newest report, the one the detail screen links.
     public var latestReportPath: String? { reportPaths.last }
+
+    /// Out of the runs list: archived, and not since put back to work. The bridge's
+    /// `is_archived`: a run a reply has queued again (or that is waiting on its owner) shows
+    /// in the list even with `archived_at` still set.
+    public var isArchived: Bool {
+        archivedAt != nil && !status.isMoving && status != .needsYou && status != .interrupted
+    }
 
     /// When anything last happened to the run: its last agent event, else the last of its
     /// own stamps.
@@ -270,17 +323,30 @@ public struct StudioRunCounts: Decodable, Equatable, Sendable {
     public var queued: Int
     public var needsYou: Int
     public var paused: Int
+    /// The four filters' tallies over the whole store, whatever the list's mode. Nil from a
+    /// bridge that predates archiving; the app then counts what it holds.
+    public var needsMe: Int?
+    public var moving: Int?
+    public var finished: Int?
+    public var archived: Int?
 
-    public init(running: Int = 0, queued: Int = 0, needsYou: Int = 0, paused: Int = 0) {
+    public init(running: Int = 0, queued: Int = 0, needsYou: Int = 0, paused: Int = 0,
+                needsMe: Int? = nil, moving: Int? = nil, finished: Int? = nil,
+                archived: Int? = nil) {
         self.running = running
         self.queued = queued
         self.needsYou = needsYou
         self.paused = paused
+        self.needsMe = needsMe
+        self.moving = moving
+        self.finished = finished
+        self.archived = archived
     }
 
     private enum CodingKeys: String, CodingKey {
-        case running, queued, paused
+        case running, queued, paused, moving, finished, archived
         case needsYou = "needs_you"
+        case needsMe = "needs_me"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -289,6 +355,22 @@ public struct StudioRunCounts: Decodable, Equatable, Sendable {
         queued = try c.decodeIfPresent(Int.self, forKey: .queued) ?? 0
         needsYou = try c.decodeIfPresent(Int.self, forKey: .needsYou) ?? 0
         paused = try c.decodeIfPresent(Int.self, forKey: .paused) ?? 0
+        needsMe = try c.decodeIfPresent(Int.self, forKey: .needsMe)
+        moving = try c.decodeIfPresent(Int.self, forKey: .moving)
+        finished = try c.decodeIfPresent(Int.self, forKey: .finished)
+        archived = try c.decodeIfPresent(Int.self, forKey: .archived)
+    }
+}
+
+/// Which runs `GET /jesse/runs` serves: the list without archived runs, only the archived
+/// ones (newest archived first), or all of them. An older bridge ignores the query and serves
+/// every run, none of them archived.
+public enum StudioRunArchivedMode: String, Equatable, Sendable {
+    case hide, only, all
+
+    /// The query item, none for the default.
+    var queryItems: [URLQueryItem] {
+        self == .hide ? [] : [URLQueryItem(name: "archived", value: rawValue)]
     }
 }
 
@@ -372,6 +454,29 @@ public struct StudioRunLog: Decodable, Equatable, Sendable {
     }
 }
 
+/// `GET`/`POST /jesse/work/last-look`: when the Work board was last looked at, on any device.
+public struct WorkLastLook: Decodable, Equatable, Sendable {
+    /// RFC 3339, or nil before the first look (and from a bridge with no state directory).
+    public var lastLook: String?
+
+    public init(lastLook: String? = nil) {
+        self.lastLook = lastLook
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastLook = "last_look"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lastLook = try c.decodeIfPresent(String.self, forKey: .lastLook)
+    }
+
+    public static func decode(from data: Data) throws -> WorkLastLook {
+        try JSONDecoder().decode(WorkLastLook.self, from: data)
+    }
+}
+
 /// A run route failed.
 public enum StudioRunError: LocalizedError, Equatable, Sendable {
     /// The bridge answered with a refusal; `message` is its own sentence, shown verbatim.
@@ -390,21 +495,51 @@ public enum StudioRunError: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// The six calls. A seam so the screens' models can be driven by a fake in a test.
+/// The run calls and the two last look calls. A seam so the screens' models can be driven by a
+/// fake in a test.
 public protocol StudioRunsProviding: Sendable {
-    func listRuns() async throws -> StudioRunList
+    /// `GET /jesse/runs`, `?archived=only|all` for the other modes.
+    func listRuns(archived: StudioRunArchivedMode) async throws -> StudioRunList
     func startRun(strand: String, itemID: String) async throws -> StudioRunStarted
     func getRun(id: String) async throws -> StudioRun
     func runLog(id: String, tail: Int?) async throws -> StudioRunLog
     func replyToRun(id: String, text: String) async throws -> StudioRun
     func cancelRun(id: String) async throws -> StudioRun
+    /// `POST /jesse/runs/:id/archive`: out of the list. Refused (409) for a queued, running or
+    /// paused run; a `needs_you` or `interrupted` run is closed first.
+    func archive(id: String) async throws -> StudioRun
+    /// `POST /jesse/runs/:id/unarchive`: back in the list.
+    func unarchive(id: String) async throws -> StudioRun
+    /// `GET /jesse/work/last-look`.
+    func lastLook() async throws -> WorkLastLook
+    /// `POST /jesse/work/last-look`: the last look becomes now.
+    func markLastLook() async throws -> WorkLastLook
+}
+
+extension StudioRunsProviding {
+    /// The list as the app shows it: every run not archived.
+    public func listRuns() async throws -> StudioRunList {
+        try await listRuns(archived: .hide)
+    }
 }
 
 extension JesseBridgeClient: StudioRunsProviding {
 
-    public func listRuns() async throws -> StudioRunList {
-        let data = try await runCall("/jesse/runs", method: "GET")
+    public func listRuns(archived: StudioRunArchivedMode) async throws -> StudioRunList {
+        let data = try await runCall("/jesse/runs", method: "GET", query: archived.queryItems)
         return try runDecode { try StudioRunList.decode(from: data) }
+    }
+
+    public func archive(id: String) async throws -> StudioRun {
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/archive",
+                                     method: "POST", body: [String: String]())
+        return try runDecode { try StudioRun.decode(from: data) }
+    }
+
+    public func unarchive(id: String) async throws -> StudioRun {
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/unarchive",
+                                     method: "POST", body: [String: String]())
+        return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func startRun(strand: String, itemID: String) async throws -> StudioRunStarted {
@@ -414,27 +549,38 @@ extension JesseBridgeClient: StudioRunsProviding {
     }
 
     public func getRun(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))", method: "GET")
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))", method: "GET")
         return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func runLog(id: String, tail: Int? = nil) async throws -> StudioRunLog {
         let query = tail.map { [URLQueryItem(name: "tail", value: String($0))] } ?? []
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/log", method: "GET",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/log", method: "GET",
                                      query: query)
         return try runDecode { try StudioRunLog.decode(from: data) }
     }
 
     public func replyToRun(id: String, text: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/reply",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/reply",
                                      method: "POST", body: ["text": text])
         return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func cancelRun(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.pathEscaped(id))/cancel",
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/cancel",
                                      method: "POST", body: [String: String]())
         return try runDecode { try StudioRun.decode(from: data) }
+    }
+
+    public func lastLook() async throws -> WorkLastLook {
+        let data = try await runCall("/jesse/work/last-look", method: "GET")
+        return try runDecode { try WorkLastLook.decode(from: data) }
+    }
+
+    public func markLastLook() async throws -> WorkLastLook {
+        let data = try await runCall("/jesse/work/last-look", method: "POST",
+                                     body: [String: String]())
+        return try runDecode { try WorkLastLook.decode(from: data) }
     }
 
     /// One call: the paired request, the bridge's own words for any refusal.
@@ -453,6 +599,16 @@ extension JesseBridgeClient: StudioRunsProviding {
             throw StudioRunError.refused(status: http.statusCode, message: Self.bodyText(data))
         }
         return data
+    }
+
+    /// A run id as one path segment. Only what is not an RFC 3986 unreserved character is
+    /// escaped: the shared `pathEscaped` turns `-` into `%2D`, which the bridge's router does not
+    /// decode, so every free run (`s-…`) answered "no run" to its detail, log, reply, cancel and
+    /// archive.
+    static func runPathEscaped(_ id: String) -> String {
+        var unreserved = CharacterSet.alphanumerics
+        unreserved.insert(charactersIn: "-._~")
+        return id.addingPercentEncoding(withAllowedCharacters: unreserved) ?? id
     }
 
     private func runDecode<T>(_ decode: () throws -> T) throws -> T {

@@ -353,12 +353,22 @@ pub trait Forge: Send + Sync {
     /// The newest pull request whose head is `branch`, or `None` when there is none or the
     /// question could not be answered.
     fn pr_state(&self, repo: &str, branch: &str) -> Option<PrState>;
+
+    /// What the post-run attribution check reads from GitHub; `None` for a forge that cannot
+    /// ask, which makes the check find nothing.
+    fn github(&self) -> Option<&dyn crate::attribution::GitHubView> {
+        None
+    }
 }
 
 /// `gh pr list`, as the bridge user (its own `gh` login).
 pub struct GhForge;
 
 impl Forge for GhForge {
+    fn github(&self) -> Option<&dyn crate::attribution::GitHubView> {
+        Some(self)
+    }
+
     fn pr_state(&self, repo: &str, branch: &str) -> Option<PrState> {
         let out = Command::new("gh")
             .args([
@@ -420,4 +430,112 @@ pub fn resolve_program(name: &str, path_var: Option<&str>) -> Option<PathBuf> {
 pub fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+// ---- THE ATTRIBUTION CHECK'S VIEW OF GITHUB ------------------------------------------
+
+/// `gh` with `args`, as the bridge user, parsed as JSON; `None` on any failure.
+fn gh_json(args: &[&str]) -> Option<serde_json::Value> {
+    let out = Command::new("gh")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// `owner/name` out of `https://github.com/<owner>/<name>/pull/<n>`.
+fn repo_of_pull_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let mut parts = rest.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    (!owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
+const PULL_FIELDS: &str = "url,title,body,baseRefName,headRefName";
+
+fn pull_of(v: &serde_json::Value, repo: &str) -> Option<crate::attribution::PullText> {
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let url = s("url");
+    if url.is_empty() {
+        return None;
+    }
+    Some(crate::attribution::PullText {
+        repo: repo_of_pull_url(&url).unwrap_or_else(|| repo.to_string()),
+        title: s("title"),
+        body: s("body"),
+        base: s("baseRefName"),
+        head: s("headRefName"),
+        url,
+    })
+}
+
+impl crate::attribution::GitHubView for GhForge {
+    fn pulls_for_branch(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Option<Vec<crate::attribution::PullText>> {
+        let v = gh_json(&[
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            PULL_FIELDS,
+            "--limit",
+            "20",
+        ])?;
+        Some(
+            v.as_array()?
+                .iter()
+                .filter_map(|p| pull_of(p, repo))
+                .collect(),
+        )
+    }
+
+    fn pull(&self, url: &str) -> Option<crate::attribution::PullText> {
+        let repo = repo_of_pull_url(url)?;
+        pull_of(
+            &gh_json(&["pr", "view", url, "--json", PULL_FIELDS])?,
+            &repo,
+        )
+    }
+
+    fn commits(
+        &self,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Option<Vec<crate::attribution::CommitInfo>> {
+        let v = gh_json(&["api", &format!("repos/{repo}/compare/{base}...{head}")])?;
+        let s = |c: &serde_json::Value, path: &[&str]| {
+            let mut x = c;
+            for p in path {
+                x = x.get(*p).unwrap_or(&serde_json::Value::Null);
+            }
+            x.as_str().unwrap_or("").to_string()
+        };
+        Some(
+            v.get("commits")?
+                .as_array()?
+                .iter()
+                .map(|c| crate::attribution::CommitInfo {
+                    sha: s(c, &["sha"]),
+                    message: s(c, &["commit", "message"]),
+                    author_name: s(c, &["commit", "author", "name"]),
+                    author_email: s(c, &["commit", "author", "email"]),
+                    committer_name: s(c, &["commit", "committer", "name"]),
+                    committer_email: s(c, &["commit", "committer", "email"]),
+                })
+                .collect(),
+        )
+    }
 }

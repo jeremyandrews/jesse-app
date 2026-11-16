@@ -425,8 +425,12 @@ final class MacSearchVisibilityTests: XCTestCase {
         let shell = try await hostShell(windowWidth: 1_000)
         await setSidebarWidth(240, in: shell.window)
         let narrowest = Self.sidebarWidth(in: shell.window)
-        await setSidebarWidth(250, in: shell.window)
-        print("MS1-PROBE a 240 request lands at \(narrowest); a 250 request at \(Self.sidebarWidth(in: shell.window))")
+        // The second request is measured against the first, not fixed: a 250 request used to
+        // stand for "narrower than the minimum", which held on macOS 27 (240 lands at 257) and
+        // not on macOS 26 (240 lands at 248, so 250 is a width it can take).
+        let narrower = narrowest - 1
+        await setSidebarWidth(narrower, in: shell.window)
+        print("MS1-PROBE a 240 request lands at \(narrowest); a \(narrower) request at \(Self.sidebarWidth(in: shell.window))")
         XCTAssertGreaterThanOrEqual(narrowest, 240)
         XCTAssertLessThan(narrowest, 270)
         XCTAssertEqual(Self.sidebarWidth(in: shell.window), narrowest,

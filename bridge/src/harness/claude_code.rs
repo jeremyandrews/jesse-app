@@ -30,7 +30,9 @@ impl ClaudeCode {
     /// expresses every request shape the bridge makes, which is why nothing on this path
     /// constructs a [`HarnessError`]; [`Harness::build_turn`] just wraps this in `Ok`.
     ///
-    /// It sets no other environment: the child inherits the bridge's process env unchanged.
+    /// Beyond those it sets only the `GIT_CONFIG_*` entries that point the child's git at the
+    /// bridge's attribution hooks ([`crate::attribution`]); otherwise the child inherits the
+    /// bridge's process env unchanged.
     /// A per-ROLE override (title / diet / vault-QA / shadow) is layered by the caller on
     /// top, and a main turn never layers one — that is the isolation guarantee, proven by
     /// dedicated tests.
@@ -53,9 +55,12 @@ impl ClaudeCode {
         // WRITE the settings file leaves `None`, and the caller's own gate (a turn is only
         // given `write_lock` when the broker is armed) means the turn then runs at one slot
         // rather than unlocked — see `install_write_lock_settings`.
+        // Every other turn gets the bridge-owned attribution settings (Claude Code's attribution
+        // off, the hook-skipping git spellings denied); the write lock's file carries them too.
         let settings = req
             .write_lock
-            .and_then(|wl| install_write_lock_settings(cfg, wl));
+            .and_then(|wl| install_write_lock_settings(cfg, wl))
+            .or_else(|| crate::attribution::settings_path_of(cfg).filter(|p| p.is_file()));
         let mut args = build_claude_args(
             cfg,
             req.prompt,
@@ -87,6 +92,11 @@ impl ClaudeCode {
         // the child is given neither.
         if !cfg.gateway.enabled {
             apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
+        }
+        // NO AI ATTRIBUTION: every git the child runs uses the bridge's hooks, which refuse an
+        // attributed commit or push and then run the repository's own.
+        if let Some(hooks) = crate::attribution::hooks_dir_of(cfg) {
+            crate::attribution::apply_git_env(&mut cmd, &hooks, !cfg.gateway.enabled);
         }
         // THE TURN'S EFFORT, when it asked for one. Appended AFTER the containment argv and
         // never part of `capability_args`, so it moves no recorded posture, and absent on a
@@ -1553,16 +1563,16 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
 /// when `[healthdb]` has an `ro_url_file`. `clockify-rs`, `runn-rs`, `google-sheets` and
 /// `kubernetes-cloud` are unconditional.
 ///
-/// **RETIRED AS THE MAIN SET IN 0.207.0**, split out rather than grown in place for the reason
+/// **RETIRED AS THE MAIN SET IN 0.208.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud`]
-/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.188.0 until 0.207.0. The
+/// still names it. It was **BOTH HARNESSES' MAIN SET** from bridge 0.188.0 until 0.208.0. The
 /// in-process `devjob` row is not named: it renders nothing with the gateway off, so this is the
 /// string that set was spawned with, and only the live main set is re-rendered with it on.
 pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG: LazyLock<String> =
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets", "kubernetes-cloud"])));
 
 /// The twenty-seven-server set PLUS **`reminders`**: every main turn on BOTH harnesses from
-/// bridge 0.207.0. Twenty-eight servers.
+/// bridge 0.208.0. Twenty-eight servers.
 ///
 /// What it adds is this repository's own `jesse-reminders-mcp`: four tools that create, list,
 /// cancel and snooze timed reminders in `<state_dir>/reminders.json`, which the bridge's reminder
@@ -2215,7 +2225,9 @@ pub fn build_claude_args(
             }
         }
     }
-    // THE VAULT WRITE LOCK'S HOOKS, on a write-capable turn only.
+    // THE BRIDGE-OWNED SETTINGS FILE: the vault write lock's hooks on a write-capable turn,
+    // and on every turn Claude Code's attribution off and the hook-skipping git spellings
+    // denied ([`crate::attribution`]).
     //
     // A bridge-OWNED settings file, outside the vault, rather than hooks added to the vault's
     // own `.claude/settings.json`. The deciding argument is self-disarming: the vault's
@@ -2307,7 +2319,7 @@ pub fn install_write_lock_settings(cfg: &Config, wl: &WriteLockChild) -> Option<
         .join("claude-settings");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{}.json", wl.turn));
-    let doc = json!({
+    let mut doc = json!({
         "hooks": {
             "PreToolUse": [{
                 "matcher": "Write|Edit|NotebookEdit|Bash",
@@ -2319,6 +2331,9 @@ pub fn install_write_lock_settings(cfg: &Config, wl: &WriteLockChild) -> Option<
             }],
         }
     });
+    // Claude Code's attribution off and the hook-skipping git spellings denied, as on every
+    // other turn: this file replaces the shared one for a write-capable turn.
+    crate::attribution::merge_into(&mut doc);
     std::fs::write(&path, serde_json::to_vec_pretty(&doc).ok()?).ok()?;
     Some(path)
 }

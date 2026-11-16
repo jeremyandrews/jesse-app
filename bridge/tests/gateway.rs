@@ -832,6 +832,11 @@ async fn a_scratch_bridge_turn_drives_three_upstreams_through_the_gateway() {
     );
     for name in r["env"].as_array().unwrap() {
         let name = name.as_str().unwrap();
+        // `GIT_CONFIG_KEY_<n>` names a git setting (the attribution hooks' `core.hooksPath`),
+        // not a credential.
+        if name.starts_with("GIT_CONFIG_KEY_") {
+            continue;
+        }
         assert!(
             !name.starts_with("JESSE_GWPROBE") && !name.contains("TOKEN") && !name.contains("KEY"),
             "the child inherited {name}"

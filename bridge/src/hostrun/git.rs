@@ -82,7 +82,7 @@ pub const LOCAL_AUTHOR_EMAIL: &str = "jesse-bridge@localhost";
 
 /// Run git with `args` in `dir`, stdin empty and the bridge's own identity on any commit.
 fn git_as_bridge(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -135,7 +135,7 @@ pub fn merged_into_local_main(bare: &Path, branch: &str) -> Option<bool> {
     let main = format!("refs/heads/{LOCAL_DEFAULT_BRANCH}");
     git(bare, &["rev-parse", "--verify", "--quiet", &b]).ok()?;
     git(bare, &["rev-parse", "--verify", "--quiet", &main]).ok()?;
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(bare)
         .args(["merge-base", "--is-ancestor", &b, &main])
@@ -194,7 +194,7 @@ pub fn update_local_checkout(root: &Path, repo: &str, checkout: &Path) -> Result
         let parent = checkout.parent().unwrap_or(checkout);
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-        let out = Command::new("git")
+        let out = git_command()
             .args(["clone", "--quiet", "--branch", LOCAL_DEFAULT_BRANCH])
             .arg(&bare)
             .arg(checkout)
@@ -215,7 +215,7 @@ pub fn update_local_checkout(root: &Path, repo: &str, checkout: &Path) -> Result
 
 /// Run git with `args` in `dir`, with a clean, non-interactive environment for its prompts.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -497,4 +497,13 @@ pub fn cloned_repos(root: &Path) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// A `git` command for the bridge's own work on a run (clones, worktrees, fetches, the local
+/// checkout), pointed at the bridge's attribution hooks once they are installed, so the
+/// repository's own hooks run through them exactly as they do for the agent.
+fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    crate::attribution::apply_global_std(&mut cmd);
+    cmd
 }

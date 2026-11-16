@@ -20,8 +20,23 @@ use super::{
 /// `last_event_at` is written at most this often.
 const EVENT_WRITE_MS: u64 = 1000;
 
+/// The runner's own variable (never the agent's) naming `<state_dir>/attribution`, set by the
+/// bridge in the run's launchd job.
+pub const ATTRIBUTION_ENV: &str = "JESSE_ATTRIBUTION_DIR";
+
 /// The argv the agent runs with, after the program.
 pub fn claude_args(rec: &RunRecord, first_round: bool, session: &str) -> Vec<String> {
+    claude_args_with(rec, first_round, session, None)
+}
+
+/// [`claude_args`], with the bridge's attribution settings file (`--settings`) when there is
+/// one: Claude Code's own attribution off and the hook-skipping git spellings denied.
+pub fn claude_args_with(
+    rec: &RunRecord,
+    first_round: bool,
+    session: &str,
+    settings: Option<&Path>,
+) -> Vec<String> {
     let mut a = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -40,7 +55,33 @@ pub fn claude_args(rec: &RunRecord, first_round: bool, session: &str) -> Vec<Str
         a.push("--model".into());
         a.push(m.clone());
     }
+    if let Some(s) = settings {
+        a.push("--settings".into());
+        a.push(s.to_string_lossy().into_owned());
+    }
     a
+}
+
+/// `env` with the variables that point its `git` at the bridge's hooks appended, after any
+/// `GIT_CONFIG_*` it already carries (from the repository's env file, say). Unchanged without
+/// a hooks directory.
+pub fn with_attribution(
+    mut env: Vec<(String, String)>,
+    hooks: Option<&Path>,
+) -> Vec<(String, String)> {
+    if let Some(h) = hooks {
+        let add = crate::attribution::git_env(
+            |k| {
+                env.iter()
+                    .rev()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| v.clone())
+            },
+            h,
+        );
+        env.extend(add);
+    }
+    env
 }
 
 /// The environment the agent gets: the allowlist from the runner's own environment, plus the
@@ -193,7 +234,28 @@ fn run_round(dir: &Path) -> Result<ExitInfo, String> {
         Some(p) => read_env_file(Path::new(p))?,
         None => Vec::new(),
     };
-    let args = claude_args(&rec, first, &session);
+    // NO AI ATTRIBUTION: the hooks and settings, rewritten from this binary before the round,
+    // so a run never meets a copy someone edited. A runner that cannot write them does not
+    // run the agent: pointed at a missing hooks directory, git would run no hook at all.
+    let attribution = std::env::var(ATTRIBUTION_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    if let Some(a) = &attribution {
+        crate::attribution::install_root(a).map_err(|e| {
+            format!(
+                "could not write the attribution hooks under {}: {e}",
+                a.display()
+            )
+        })?;
+    }
+    let settings = attribution
+        .as_ref()
+        .map(|a| a.join(crate::attribution::SETTINGS_FILE));
+    let hooks = attribution
+        .as_ref()
+        .map(|a| a.join(crate::attribution::HOOKS_DIR));
+    let args = claude_args_with(&rec, first, &session, settings.as_deref());
     eprintln!(
         "jesse-runner: {} round {}: {} {}",
         rec.run_id,
@@ -205,11 +267,9 @@ fn run_round(dir: &Path) -> Result<ExitInfo, String> {
     cmd.args(&args)
         .current_dir(&worktree)
         .env_clear()
-        .envs(agent_env_with(
-            dir,
-            &rec.run_id,
-            |k| std::env::var(k).ok(),
-            file_env,
+        .envs(with_attribution(
+            agent_env_with(dir, &rec.run_id, |k| std::env::var(k).ok(), file_env),
+            hooks.as_deref(),
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

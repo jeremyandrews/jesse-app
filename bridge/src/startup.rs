@@ -485,7 +485,7 @@ mod tests {
             .expect("the shipped set names a `places` server");
         assert_eq!(places.command, "jesse-places-mcp");
         assert!(missing.iter().any(|m| m.command == "jesse-build-mcp"));
-        // The reminders server (0.207.0) is checked the same way: a missing
+        // The reminders server (0.208.0) is checked the same way: a missing
         // `jesse-reminders-mcp` would leave every main turn unable to set a reminder.
         let reminders = missing
             .iter()

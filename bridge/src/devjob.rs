@@ -1269,6 +1269,39 @@ pub fn render_report(r: &ReportInput) -> String {
 /// [`render_report`], for a run a strand entry started: the front matter adds `strand`,
 /// `strand-id` and `prompt` after the existing keys, and the Spec table adds a Strand row.
 /// With `None` it is byte for byte the report of a run the tool or a fixed entry started.
+/// Set to `"found"` on a Job whose pull request or commits carried AI attribution.
+pub const ANN_ATTRIBUTION: &str = "jesse.dev/attribution";
+
+/// The post-run attribution check of a cluster run that pushed: the pull request the report
+/// names and every pull request on `jesse/<slug>` (title and body), and the commits of each and
+/// of the branch. The `ATTRIBUTION:` line, or `None` when nothing was pushed or nothing was
+/// found.
+pub fn cluster_attribution(
+    gh: &dyn crate::attribution::GitHubView,
+    spec: &SpecAnnotation,
+    report: &DevJobReport,
+) -> Option<String> {
+    let branch = report
+        .branch
+        .clone()
+        .unwrap_or_else(|| format!("jesse/{}", spec.branch_slug));
+    let repo = report.repo.as_deref().unwrap_or(&spec.repo);
+    let hits =
+        crate::attribution::scan_github(gh, repo, &branch, "main", report.pull_request_url());
+    crate::attribution::report_line(&hits)
+}
+
+/// `text` (a report with front matter) with `line` as the first line of its body.
+pub fn lead_with(text: &str, line: &str) -> String {
+    if let Some(rest) = text.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---\n") {
+            let cut = 4 + end + 5;
+            return format!("{}\n{line}\n{}", &text[..cut], &text[cut..]);
+        }
+    }
+    format!("{line}\n\n{text}")
+}
+
 pub fn render_report_for(r: &ReportInput, strand: Option<&StrandRef>) -> String {
     let outcome = RunOutcome::of(r.report);
     let mut s = String::new();
@@ -2020,7 +2053,7 @@ impl DevJobs {
         let rel = match find_existing_report(&sink.notes_root, &v.slug, &v.name) {
             Some(rel) => {
                 eprintln!("jesse-bridge: devjob {}: already reported at {rel}", v.name);
-                (rel, None)
+                (rel, None, None)
             }
             None => {
                 let pod = self.pod_of(&v.name).await;
@@ -2067,6 +2100,17 @@ impl DevJobs {
                         .and_then(|d| d.get("prompt.md").cloned()),
                     None => None,
                 };
+                // NO AI ATTRIBUTION, the backstop: the pull request and commits the run pushed,
+                // read back from GitHub before the run is reported.
+                let attribution = {
+                    let (spec, rep) = (v.spec.clone(), report.clone());
+                    tokio::task::spawn_blocking(move || {
+                        cluster_attribution(&crate::hostrun::sys::GhForge, &spec, &rep)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                };
                 let text = render_report_for(
                     &ReportInput {
                         job_name: &v.name,
@@ -2081,6 +2125,13 @@ impl DevJobs {
                     },
                     strand,
                 );
+                let text = match &attribution {
+                    Some(line) => {
+                        eprintln!("jesse-bridge: devjob {}: {line}", v.name);
+                        lead_with(&text, line)
+                    }
+                    None => text,
+                };
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
                 let rel = write_report(sink, &v.name, &date, &v.slug, &text).await?;
                 eprintln!(
@@ -2088,15 +2139,15 @@ impl DevJobs {
                     v.name,
                     RunOutcome::of(&report).label()
                 );
-                (rel, Some(report))
+                (rel, Some(report), attribution)
             }
         };
-        let (rel, report) = rel;
+        let (rel, report, attribution) = rel;
         let outcome = report.as_ref().map(RunOutcome::of);
         // A scheduled run is pushed by the scheduler, under its `notify`; only a turn's run pushes
         // here, so a scheduled run never pushes twice.
         if let (Some(report), Some(outcome), Some(n)) = (&report, outcome, &sink.notifier) {
-            if !v.origin.starts_with("schedule:") {
+            if !v.origin.starts_with("schedule:") && attribution.is_none() {
                 let wall = wall_secs(report, v.started_ms, v.finished_ms)
                     .map(human_secs)
                     .unwrap_or_else(|| "unknown time".into());
@@ -2108,7 +2159,23 @@ impl DevJobs {
                 .await;
             }
         }
+        // A hit is pushed whoever started the run, and says what it found.
+        if let (Some(line), Some(n)) = (&attribution, &sink.notifier) {
+            n.notify(
+                "Dev job needs you".to_string(),
+                format!(
+                    "{} · {}",
+                    v.slug,
+                    line.chars().take(160).collect::<String>()
+                ),
+                v.name.clone(),
+            )
+            .await;
+        }
         let mut ann = json!({ ANN_REPORTED: "true", ANN_REPORT_PATH: rel });
+        if attribution.is_some() {
+            ann[ANN_ATTRIBUTION] = json!("found");
+        }
         if let Some(o) = outcome {
             ann[ANN_OUTCOME] = json!(o.label());
         }

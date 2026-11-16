@@ -81,6 +81,7 @@ mod apns;
 mod artifacts;
 mod atomicfile;
 mod attachments;
+pub mod attribution;
 mod audit;
 mod auth;
 mod backend_call;

@@ -566,15 +566,35 @@ public struct StudioFirstTranscriber: AudioFileTranscribing {
                 onDevice: any AudioFileTranscribing = SpeechAnalyzerFileTranscriber(),
                 pollInterval: Duration = .seconds(1),
                 contactTolerance: TimeInterval = 90,
-                sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+                // Nil, not the closure, as the default: see `taskSleep` for why the default must
+                // not be an async closure.
+                sleep: (@Sendable (Duration) async throws -> Void)? = nil,
                 now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
                 foreground: (any ForegroundGating)? = nil) {
         self.studio = studio
         self.onDevice = onDevice
         self.pollInterval = pollInterval
         self.contactTolerance = contactTolerance
-        self.sleep = sleep
+        self.sleep = sleep ?? Self.taskSleep
         self.foreground = foreground ?? AlwaysForeground(now: now)
+    }
+
+    /// The real wait between polls, and the only one outside a test.
+    ///
+    /// It is a function here, and the initializer's default is `nil`, because the default
+    /// used to be the closure `{ try await Task.sleep(for: $0) }` itself. A default argument
+    /// of a public initializer is compiled into EVERY module that calls it without the
+    /// argument, and an async closure there is emitted under one weak symbol in each of
+    /// them. Swift 6.3.3 (Xcode 26.6) lowers that closure with a different async context
+    /// size in JesseSpeech than in a client module (0x90 against 0x80), and the linker keeps
+    /// one copy's size record with another copy's body: the frame is 16 bytes short, the
+    /// first poll writes past it, and the process aborts with "freed pointer was not the
+    /// last allocation" (swiftlang/swift#86204, https://github.com/swiftlang/swift/issues/86204).
+    /// Every RecordingRunsTests test aborted on the nightly that way, and both apps call
+    /// this initializer without `sleep:`. A plain function in this module has one symbol
+    /// and one frame size. Do not turn it back into a default closure.
+    static func taskSleep(_ duration: Duration) async throws {
+        try await Task.sleep(for: duration)
     }
 
     /// What the progress row and the header call the Studio.

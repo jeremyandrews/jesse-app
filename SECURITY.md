@@ -1012,7 +1012,7 @@ and read-only). Only the servers named in that config load:
 | `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
 | `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
 | `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
-| `reminders` | Timed reminders, added 2026-11-10 (bridge 0.207.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0207)
+| `reminders` | Timed reminders, added 2026-11-10 (bridge 0.208.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0208)
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -2848,7 +2848,7 @@ bridge plist with `plutil -extract` instead. Rotate the token before it expires 
 one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
 --duration=2160h`) and replacing the file; see the k3s README, "Jesse's access to kc1".
 
-## Timed reminders (`reminders`, 0.207.0)
+## Timed reminders (`reminders`, 0.208.0)
 
 "Remind me at 6:45 to start the pancakes" and "every weekday at 7:30 remind me to take the bins
 out" are set from any turn through `reminders`, this repository's own `jesse-reminders-mcp`, the

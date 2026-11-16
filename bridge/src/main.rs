@@ -397,6 +397,26 @@ async fn main() {
     // and registered as the gateway's `devjob` in-process server BEFORE the gateway is first built
     // (it copies the registry then). Building the client connects to nothing, so a cluster that is
     // down costs the runs, never the boot; a kubeconfig that configures no client refuses it.
+    // NO AI ATTRIBUTION: the git hooks and the Claude Code settings every child is pointed at,
+    // rewritten from this binary at every start, before anything can spawn. A bridge that
+    // cannot write them does not start: a child pointed at a missing hooks directory would run
+    // no hook at all, its repository's own included.
+    if let Some(dir) = cfg.state_dir.as_deref() {
+        match jesse_bridge::attribution::install(Path::new(dir)) {
+            Ok(hooks) => {
+                eprintln!("jesse-bridge: attribution hooks at {}", hooks.display());
+                jesse_bridge::attribution::set_global(hooks);
+            }
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: refusing to start — could not write the attribution hooks \
+                     under {dir}: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let devjobs = if cfg.devjob.enabled {
         match jesse_bridge::devjob::DevJobs::connect(cfg.devjob.clone()).await {
             Ok(d) => {

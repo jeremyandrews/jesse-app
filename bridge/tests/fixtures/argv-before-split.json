@@ -23,7 +23,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read,ToolSearch,Workflow,Agent,TodoWrite,Skill"
       ],
       "cwd": "/scratch",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "main-read": {
       "argv": [
@@ -41,7 +45,7 @@
         "/vault/.jesse-inbound",
         "--strict-mcp-config",
         "--mcp-config",
-        "sha256:521cc69d83c54f42a9563669954a0e6e8900d625cef8dbdd44efff47b9bcd24d",
+        "sha256:d0e10c05870b7f925ff02a0e49d34cf2eef94ce926fdb676dcbd42120aa7c1d9",
         "--tools",
         "Read,Grep,Glob",
         "--allowedTools",
@@ -50,7 +54,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent,ToolSearch,Workflow,TodoWrite,Skill"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "main-write": {
       "argv": [
@@ -68,14 +76,18 @@
         "/vault/.jesse-inbound",
         "--strict-mcp-config",
         "--mcp-config",
-        "sha256:521cc69d83c54f42a9563669954a0e6e8900d625cef8dbdd44efff47b9bcd24d",
+        "sha256:d0e10c05870b7f925ff02a0e49d34cf2eef94ce926fdb676dcbd42120aa7c1d9",
         "--allowedTools",
-        "sha256:c2fecface041ce9d3d957766e4adcc52f364418fe5b103f5c8f63d5f2fbf9742",
+        "sha256:40aef20409b089e08971ec7ff8dd620b45fd3b79adee22a3b3260608c129c9b7",
         "--disallowedTools",
         "NotebookEdit"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "main-write-resume": {
       "argv": [
@@ -93,16 +105,20 @@
         "/vault/.jesse-inbound",
         "--strict-mcp-config",
         "--mcp-config",
-        "sha256:521cc69d83c54f42a9563669954a0e6e8900d625cef8dbdd44efff47b9bcd24d",
+        "sha256:d0e10c05870b7f925ff02a0e49d34cf2eef94ce926fdb676dcbd42120aa7c1d9",
         "--allowedTools",
-        "sha256:c2fecface041ce9d3d957766e4adcc52f364418fe5b103f5c8f63d5f2fbf9742",
+        "sha256:40aef20409b089e08971ec7ff8dd620b45fd3b79adee22a3b3260608c129c9b7",
         "--disallowedTools",
         "NotebookEdit",
         "--resume",
         "sess-1"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "title": {
       "argv": [
@@ -127,7 +143,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read,ToolSearch,Workflow,Agent,TodoWrite,Skill"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "vaultqa": {
       "argv": [
@@ -152,7 +172,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent,ToolSearch,Workflow,TodoWrite,Skill"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     }
   },
   "codex": {
@@ -174,7 +198,10 @@
       ],
       "cwd": "/scratch",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "main-read": {
@@ -344,6 +371,16 @@
         "-c",
         "mcp_servers.qmd.default_tools_approval_mode=\"approve\"",
         "-c",
+        "mcp_servers.reminders.command=\"jesse-reminders-mcp\"",
+        "-c",
+        "mcp_servers.reminders.args=[]",
+        "-c",
+        "mcp_servers.reminders.env_vars=[\"JESSE_STATE_DIR\"]",
+        "-c",
+        "mcp_servers.reminders.enabled_tools=[]",
+        "-c",
+        "mcp_servers.reminders.default_tools_approval_mode=\"approve\"",
+        "-c",
         "sha256:b81b9ece675471cc6b4d14a199947f3828321bcc83c06d5c5ef3093b253e0ca5",
         "-c",
         "mcp_servers.roon.enabled_tools=[]",
@@ -417,7 +454,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "main-write": {
@@ -595,6 +635,16 @@
         "-c",
         "mcp_servers.qmd.default_tools_approval_mode=\"approve\"",
         "-c",
+        "mcp_servers.reminders.command=\"jesse-reminders-mcp\"",
+        "-c",
+        "mcp_servers.reminders.args=[]",
+        "-c",
+        "mcp_servers.reminders.env_vars=[\"JESSE_STATE_DIR\"]",
+        "-c",
+        "mcp_servers.reminders.enabled_tools=[\"create_reminder\", \"list_reminders\", \"cancel_reminder\", \"snooze_reminder\"]",
+        "-c",
+        "mcp_servers.reminders.default_tools_approval_mode=\"approve\"",
+        "-c",
         "sha256:b81b9ece675471cc6b4d14a199947f3828321bcc83c06d5c5ef3093b253e0ca5",
         "-c",
         "sha256:1789dc798f8f46d455472c849e54a1fe707805249f40e76e746262c0f06c6d99",
@@ -668,7 +718,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "main-write-resume": {
@@ -846,6 +899,16 @@
         "-c",
         "mcp_servers.qmd.default_tools_approval_mode=\"approve\"",
         "-c",
+        "mcp_servers.reminders.command=\"jesse-reminders-mcp\"",
+        "-c",
+        "mcp_servers.reminders.args=[]",
+        "-c",
+        "mcp_servers.reminders.env_vars=[\"JESSE_STATE_DIR\"]",
+        "-c",
+        "mcp_servers.reminders.enabled_tools=[\"create_reminder\", \"list_reminders\", \"cancel_reminder\", \"snooze_reminder\"]",
+        "-c",
+        "mcp_servers.reminders.default_tools_approval_mode=\"approve\"",
+        "-c",
         "sha256:b81b9ece675471cc6b4d14a199947f3828321bcc83c06d5c5ef3093b253e0ca5",
         "-c",
         "sha256:1789dc798f8f46d455472c849e54a1fe707805249f40e76e746262c0f06c6d99",
@@ -919,7 +982,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "title": {
@@ -940,7 +1006,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "vaultqa": {
@@ -961,7 +1030,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     }
   }

@@ -818,7 +818,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
             "resources_delete",
         ],
     ),
-    // TIMED REMINDERS (0.207.0): this repository's own `jesse-reminders-mcp`, a BARE NAME on
+    // TIMED REMINDERS (0.208.0): this repository's own `jesse-reminders-mcp`, a BARE NAME on
     // the child's `PATH` like `jesse-places-mcp`, and in `deploy-bins.toml`. It reads and writes
     // one file, `<state_dir>/reminders.json`, and reads `<state_dir>/profile.json` for the zone,
     // so its environment is the state dir alone (`HOME`, in [`BASE_ENV`], is its fallback, as

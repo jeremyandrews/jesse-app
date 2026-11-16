@@ -46,6 +46,23 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         try await super.tearDown()
     }
 
+    // DIAGNOSTIC (temporary): how a sheet with a min and ideal frame is sized on this OS.
+    func testDIAGSheetSizingVariants() async throws {
+        func probe<V: View>(_ name: String, _ v: V) async throws {
+            let w = host(Text("x").sheet(isPresented: .constant(true)) { v })
+            let s = try await sheet(of: w)
+            print("JS1-DIAG variant \(name) sheet \(s.frame)")
+            w.endSheet(s); w.contentView = nil; w.close(); window = nil
+        }
+        func list() -> some View {
+            NavigationStack { List { ForEach(0..<14, id: \.self) { Text("Row \($0)") } }.navigationTitle("Run") }
+        }
+        try await probe("plain", list().frame(minWidth: 560, idealWidth: 720, minHeight: 520, idealHeight: 780))
+        try await probe("fitted", list().frame(minWidth: 560, idealWidth: 720, minHeight: 520, idealHeight: 780).presentationSizing(.fitted))
+        try await probe("form", list().frame(minWidth: 560, idealWidth: 720, minHeight: 520, idealHeight: 780).presentationSizing(.form))
+        try await probe("fixed", list().frame(width: 720, height: 780))
+    }
+
     // DIAGNOSTIC (temporary): where "Cancel run" is in the run sheet on this OS.
     func testDIAGRunSheetLayout() async throws {
         let out = URL(fileURLWithPath: "/tmp/js1-diag", isDirectory: true)
@@ -129,8 +146,20 @@ final class MacStudioRunsPresentationTests: XCTestCase {
         try await waitUntil("the run's sheet closed") { note.attachedSheet == nil }
 
         // The block's own Runs button.
-        click(note, at: try await waitForText(["Runs"], in: note, exact: true)[0])
-        let list = try await sheet(of: note)
+        // DIAGNOSTIC (temporary)
+        let runsBox = try await waitForText(["Runs"], in: note, exact: true)[0]
+        print("JS1-DIAG drafts click at \(runsBox.rect) note \(note.frame) key \(note.isKeyWindow) sheet \(String(describing: note.attachedSheet))")
+        for b in try text(in: note) { print("JS1-DIAG drafts ocr \(b.rect) \(b.string)") }
+        click(note, at: runsBox)
+        let list: NSWindow
+        do { list = try await sheet(of: note) } catch {
+            let out = URL(fileURLWithPath: "/tmp/js1-diag", isDirectory: true)
+            try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+            try? shoot(note, out, "drafts-note-\(Int(Date().timeIntervalSince1970)).png")
+            print("JS1-DIAG drafts no sheet; note sheet \(String(describing: note.attachedSheet)) windows \(NSApp.windows.map { "\($0.title)|\($0.frame)|\($0.isVisible)" })")
+            for b in try text(in: note) { print("JS1-DIAG drafts after ocr \(b.rect) \(b.string)") }
+            throw error
+        }
         assertSheetIsUsable(list)
         let table = try await table(in: list, rows: 3)
         assertRowIsHittable(table, row: 0, in: list)

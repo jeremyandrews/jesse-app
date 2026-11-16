@@ -435,6 +435,15 @@ jobs:
             exit 1
           fi
 
+      - name: DIAGNOSTIC (temporary) upload the full-run Mac diagnostic images
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: js1-diag-full
+          path: /tmp/js1-diag
+          if-no-files-found: warn
+          retention-days: 3
+
       # A failed run otherwise leaves only log text. The result bundles make
       # test failures and simulator flakes diagnosable in Xcode without
       # re-running the job. `if-no-files-found: ignore` because a failure

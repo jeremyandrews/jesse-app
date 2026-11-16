@@ -60,11 +60,13 @@ final class HealthArchiveCatalogueTests: XCTestCase {
         XCTAssertEqual(HealthArchiveHealthKitSource.eventKind(.pauseOrResumeRequest), .other)
     }
 
-    /// Body mass and workouts keep the immediate delivery the chat triggers ask for; the
-    /// archive must not slow them to hourly.
+    /// Body mass, workouts and sleep keep the immediate delivery the chat triggers ask for;
+    /// the archive must not slow them to hourly.
     func testTheChatTriggerTypesKeepImmediateDelivery() {
         XCTAssertEqual(HealthArchiveObserver.frequency(for: HKQuantityType(.bodyMass)), .immediate)
         XCTAssertEqual(HealthArchiveObserver.frequency(for: HKObjectType.workoutType()), .immediate)
+        XCTAssertEqual(HealthArchiveObserver.frequency(for: HKCategoryType(.sleepAnalysis)),
+                       .immediate)
         XCTAssertEqual(HealthArchiveObserver.frequency(for: HKQuantityType(.heartRate)), .hourly)
         XCTAssertEqual(HealthArchiveObserver.frequency(for: HKSeriesType.workoutRoute()), .hourly)
     }

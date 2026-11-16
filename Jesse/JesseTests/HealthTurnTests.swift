@@ -129,13 +129,18 @@ final class HealthTurnTests: XCTestCase {
     /// holds its coordinator weakly, as the app's does, so the test keeps it alive.
     private func trigger(defaults: UserDefaults, context: ModelContext, now: Date,
                          locked: @escaping @MainActor () -> Bool,
-                         client: PromptCountingClient)
+                         client: PromptCountingClient,
+                         sleep: SleepSummary? = nil,
+                         model: HealthDashboardModel? = nil)
         async -> (HealthAutoTrigger, RunCoordinator) {
         let trigger = HealthAutoTrigger(defaults: defaults, now: { now },
                                         protectedDataAvailable: { !locked() },
-                                        isPaired: { true }, context: { context })
+                                        isPaired: { true }, context: { context },
+                                        lastSleep: { sleep })
         let coordinator = Self.coordinator(client)
-        trigger.attach(coordinator: coordinator, model: await Self.model(offline: false))
+        let attached: HealthDashboardModel
+        if let model { attached = model } else { attached = await Self.model(offline: false) }
+        trigger.attach(coordinator: coordinator, model: attached)
         return (trigger, coordinator)
     }
 
@@ -272,6 +277,140 @@ final class HealthTurnTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
+    // MARK: - The late sleep turn
+
+    /// 10:16 on 2026-11-08 in this host's zone: the real night has just reached the phone.
+    private static var lateMorning: Date {
+        Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 8,
+                                                   hour: 10, minute: 16))!
+    }
+
+    /// Last night, ended 08:36 this morning.
+    private static var lastNight: SleepSummary {
+        let end = Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 8,
+                                                             hour: 8, minute: 36))!
+        return SleepSummary(totalMinutes: 444, deepMinutes: 61, remMinutes: 102,
+                            coreMinutes: 268, awakeMinutes: 14, isNap: false,
+                            start: end.addingTimeInterval(-8 * 3600), end: end)
+    }
+
+    private static func sleepArrival() -> HealthArrivals<Date> {
+        HealthArrivals(items: [lastNight.end], isBaseline: false, anchor: nil, deletedCount: 0)
+    }
+
+    /// The 08:51 turn went out with the not synced line.
+    private static func seedNotSynced(_ defaults: UserDefaults, now: Date) {
+        defaults.set(DietDay.stamp(for: now), forKey: HealthAutoTrigger.sleepNotSyncedDayKey)
+    }
+
+    /// Last night lands on a locked phone: held, nothing staged. Unlocked, the unlock
+    /// settle, a second sleep arrival and a foreground settle all run, and exactly one late
+    /// turn is staged.
+    func testALateNightLandingLockedIsHeldThenSentExactlyOnceAfterUnlock() async throws {
+        let defaults = freshDefaults()
+        let now = Self.lateMorning
+        let today = DietDay.stamp(for: now)
+        Self.seedNotSynced(defaults, now: now)
+        let context = try Self.makeContext()
+        let client = PromptCountingClient()
+        var locked = true
+        let (trigger, coordinator) = await trigger(defaults: defaults, context: context,
+                                                   now: now, locked: { locked }, client: client,
+                                                   sleep: Self.lastNight)
+
+        trigger.receiveSleep(Self.sleepArrival())
+        await Self.settle()
+        XCTAssertEqual(client.count(of: HealthLateSleep.prompt), 0, "nothing while locked")
+        XCTAssertEqual(defaults.string(forKey: HealthAutoTrigger.heldLateSleepKey), today)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<JesseThread>()).isEmpty, "nothing staged")
+
+        locked = false
+        await trigger.settle()                       // the unlock notification
+        trigger.receiveSleep(Self.sleepArrival())    // another sample of the same night
+        await trigger.settle()                       // the foreground
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthLateSleep.prompt), 1, "exactly one late turn")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<JesseThread>()).count, 1)
+        XCTAssertEqual(defaults.string(forKey: HealthAutoTrigger.sleepLastNightSentDayKey), today)
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.heldLateSleepKey))
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// A turn today already carried last night: the arrival stages nothing.
+    func testNoLateTurnWhenLastNightWasAlreadySentToday() async throws {
+        let defaults = freshDefaults()
+        let now = Self.lateMorning
+        Self.seedNotSynced(defaults, now: now)
+        defaults.set(DietDay.stamp(for: now), forKey: HealthAutoTrigger.sleepLastNightSentDayKey)
+        let context = try Self.makeContext()
+        let client = PromptCountingClient()
+        let (trigger, coordinator) = await trigger(defaults: defaults, context: context,
+                                                   now: now, locked: { false }, client: client,
+                                                   sleep: Self.lastNight)
+
+        trigger.receiveSleep(Self.sleepArrival())
+        await Self.settle()
+        await trigger.settle()
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthLateSleep.prompt), 0)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<JesseThread>()).isEmpty)
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.heldLateSleepKey))
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// A hold from a diet day that has rolled is dropped unsent.
+    func testALateSleepHoldFromYesterdayIsDroppedWithoutSending() async throws {
+        let defaults = freshDefaults()
+        let now = Self.lateMorning
+        Self.seedNotSynced(defaults, now: now)
+        defaults.set(DietDay.stamp(for: now.addingTimeInterval(-24 * 3600)),
+                     forKey: HealthAutoTrigger.heldLateSleepKey)
+        let context = try Self.makeContext()
+        let client = PromptCountingClient()
+        let (trigger, coordinator) = await trigger(defaults: defaults, context: context,
+                                                   now: now, locked: { false }, client: client,
+                                                   sleep: Self.lastNight)
+
+        await trigger.settle()
+        await Self.settle()
+
+        XCTAssertEqual(client.count(of: HealthLateSleep.prompt), 0)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<JesseThread>()).isEmpty)
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.heldLateSleepKey))
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.sleepLastNightSentDayKey))
+        withExtendedLifetime(coordinator) {}
+    }
+
+    /// The bridge cannot be reached: nothing staged, nothing captured, and the hold stays for
+    /// the next settle.
+    func testAReadOnlyModelLeavesTheLateSleepHoldAndStagesNothing() async throws {
+        let defaults = freshDefaults()
+        let now = Self.lateMorning
+        let today = DietDay.stamp(for: now)
+        Self.seedNotSynced(defaults, now: now)
+        defaults.set(today, forKey: HealthAutoTrigger.heldLateSleepKey)
+        let context = try Self.makeContext()
+        let client = PromptCountingClient()
+        let store = HeldRuns()
+        let offline = HealthDashboardModel(makeClient: { NoBridge() }, pending: store)
+        let (trigger, coordinator) = await trigger(defaults: defaults, context: context,
+                                                   now: now, locked: { false }, client: client,
+                                                   sleep: Self.lastNight, model: offline)
+
+        await trigger.settle()
+        await Self.settle()
+
+        XCTAssertTrue(offline.isReadOnly)
+        XCTAssertEqual(client.count(of: HealthLateSleep.prompt), 0)
+        XCTAssertTrue(try context.fetch(FetchDescriptor<JesseThread>()).isEmpty)
+        XCTAssertTrue(store.all().isEmpty, "never handed to the capture queue")
+        XCTAssertEqual(defaults.string(forKey: HealthAutoTrigger.heldLateSleepKey), today)
+        XCTAssertNil(defaults.string(forKey: HealthAutoTrigger.sleepLastNightSentDayKey))
+        withExtendedLifetime(coordinator) {}
+    }
+
     /// A morning refresh held in the capture queue and replayed while the phone is locked
     /// goes through the real client, which refuses it before it leaves: the replay defers
     /// rather than refusing, and the outbox row says why. A later replay after the day rolled
@@ -353,6 +492,13 @@ private struct OneDietDay: DietSnapshotProviding {
          "today":{"date":"\(day)","exercise":[],"meals":[],"targets":{"calories":2100}},
          "errors":[]}
         """.utf8))
+    }
+}
+
+/// A diet endpoint that cannot be reached, so the model goes read-only.
+private struct NoBridge: DietSnapshotProviding {
+    func fetchDietSnapshot(date: String?) async throws -> DietSnapshot {
+        throw URLError(.cannotConnectToHost)
     }
 }
 

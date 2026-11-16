@@ -14,6 +14,14 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (219)] - 2026-11-16
+
+**The health block's sleep line never presents an older night as last night, and when last night reaches HealthKit after a turn already went out without it, the iPhone sends exactly one automatic turn carrying it.** (#342) On 2026-11-08 the owner woke at 08:36, a health turn at 08:51 carried the previous night as `Sleep (last night)`, and the real night reached the phone about 10:16. Root cause: the Watch hands a night to the phone some time after waking, `SleepReducer.reduce` returns the newest session in the 36 hour lookback, and `DailySummaryFormatter.sleepLine` labelled any non-nap session "last night" without a date; nothing observed sleep, so a night that synced late was never sent.
+
+- **Dated line:** `SleepSummary` keeps the session's `start` and `end`, and `SleepReducer.isLastNight` asks whether it ended on today's diet day (`HealthLateSleep.endsOnDietDay`). Last night keeps exactly `Sleep (last night): …`; an older night prints `Sleep: last night not synced from the Watch yet; newest night on the phone ended <EEE yyyy-MM-dd HH:mm>: …`; a nap prints `Sleep (nap, ended <yyyy-MM-dd HH:mm>): …`.
+- **Late sleep turn:** `JesseClient.send` stamps the diet day of a sent not synced line (`healthSleepNotSyncedDay`) or last night line (`healthSleepLastNightSentDay`). `HealthDataObserver` observes sleep, and `HealthAutoTrigger.receiveSleep` (and `settle()`, for a hold) stages one `HealthLateSleep.prompt` turn when `HealthLateSleep.shouldFire` says so: held while locked, never captured offline, stamped in the same step it is staged, and held at send time by `HealthContextLockHold` if the phone locks.
+- **Sleep frequency:** `HealthArchiveObserver.frequency(for:)` asks `.immediate` for sleep too, the same as `HealthDataObserver`, since background delivery is one setting per type.
+
 ## [App 1.0 (218)] - 2026-11-16
 
 **The iPhone and the Mac Settings each have an "Owner name" field, so an offline question about "my" or "I" can be matched to the owner, and the offline notice says where that field is.** On 2026-10-21 an offline answer on the iPhone ended "No owner name is set in Settings, so "my" and "I" could not be matched to your notes." The notice pointed at a setting that did not exist: no screen on either platform wrote `jesse.owner.name`, so on every install the retriever never resolved the first person and locally built prompts called the owner "the user". Root cause: the owner name plumbing (`OfflineLookupSettings.ownerName`, `LookupQuery.ownerForms`, the notice) landed without its Settings field, and the only setter, `PromptStore.ownerName`'s, lived in a file that belongs to the iPhone target alone and that nothing called.

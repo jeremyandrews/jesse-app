@@ -23,7 +23,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read,ToolSearch,Workflow,Agent,TodoWrite,Skill"
       ],
       "cwd": "/scratch",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "main-read": {
       "argv": [
@@ -50,7 +54,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent,ToolSearch,Workflow,TodoWrite,Skill"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "main-write": {
       "argv": [
@@ -75,7 +83,11 @@
         "NotebookEdit"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "main-write-resume": {
       "argv": [
@@ -102,7 +114,11 @@
         "sess-1"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "title": {
       "argv": [
@@ -127,7 +143,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read,ToolSearch,Workflow,Agent,TodoWrite,Skill"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     },
     "vaultqa": {
       "argv": [
@@ -152,7 +172,11 @@
         "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent,ToolSearch,Workflow,TodoWrite,Skill"
       ],
       "cwd": "/vault",
-      "env_keys": []
+      "env_keys": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
+      ]
     }
   },
   "codex": {
@@ -174,7 +198,10 @@
       ],
       "cwd": "/scratch",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "main-read": {
@@ -417,7 +444,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "main-write": {
@@ -668,7 +698,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "main-write-resume": {
@@ -919,7 +952,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "title": {
@@ -940,7 +976,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     },
     "vaultqa": {
@@ -961,7 +1000,10 @@
       ],
       "cwd": "/vault",
       "env_keys": [
-        "CODEX_HOME"
+        "CODEX_HOME",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0"
       ]
     }
   }

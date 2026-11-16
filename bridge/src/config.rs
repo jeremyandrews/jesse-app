@@ -5124,11 +5124,16 @@ impl Config {
             devjob: crate::devjob::DevJobSettings::from_toml(load_devjob_table(&home), &home),
             // The `[hostrun]` table. Off when absent; its service is built in `main`. Its
             // `claude` defaults to the binary the bridge runs for its own turns.
-            hostrun: crate::hostrun::HostRunSettings::from_toml(
-                load_hostrun_table(&home),
-                &home,
-                &env_string("JESSE_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
-            ),
+            hostrun: crate::hostrun::HostRunSettings {
+                attribution_dir: state_dir
+                    .as_deref()
+                    .map(|d| crate::attribution::root(Path::new(d))),
+                ..crate::hostrun::HostRunSettings::from_toml(
+                    load_hostrun_table(&home),
+                    &home,
+                    &env_string("JESSE_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
+                )
+            },
             // 90m default; clamped to [1, HARD_TIMEOUT_CEILING].
             timeout_secs: clamp_timeout_secs(env_parse("JESSE_TIMEOUT", DEFAULT_TIMEOUT_SECS)),
             // The cut-off turn's partial-answer ring. Blocks are floored at 1 (a

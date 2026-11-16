@@ -240,6 +240,12 @@
 //! the two new `mcp__devjob__*` grants. No `--mcp-config` digest moved and no Codex site moved
 //! (`devjob` is `in_process` and renders into no gateway-off config). No other site moved.
 //!
+//! **AND AGAIN, in bridge 0.207.0, for the attribution hooks, on every site of both harnesses,
+//! and only in `env_keys`.** Each child's `env_keys` gained `GIT_CONFIG_COUNT`,
+//! `GIT_CONFIG_KEY_0` and `GIT_CONFIG_VALUE_0`, which point its git at the bridge's hooks
+//! (`core.hooksPath`). No argv moved: the fixture's state dir holds no installed settings file,
+//! so no `--settings` is added. No `cwd` moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

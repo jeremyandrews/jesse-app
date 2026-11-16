@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import Synchronization
 import JesseCore
 import JesseVault
 
@@ -282,17 +283,38 @@ public nonisolated func searchThreads(_ docs: [ThreadSearchDocument],
     guard let typed = CompiledThreadQuery(trimmed) else { return .inactive }
     let expansion = CompiledConceptQuery(concepts)
 
-    var found: [(doc: ThreadSearchDocument, kind: ThreadMatchKind, source: Int)] = []
-    for (i, doc) in docs.enumerated() {
-        if i % 64 == 0 && Task.isCancelled { break }
-        if let m = typed.match(doc) {
-            found.append((doc, m.kind, m.snippetSource))
-            continue
-        }
-        if let source = expansion?.match(doc) {
-            found.append((doc, .expansion, source))
+    // THE PASS RUNS ACROSS THE CORES. Every thread is matched on its own, and a miss
+    // reads its whole body once per needle: `lost keys` with its concepts is seven reads
+    // of every body. On one core that took 64 to 143 ms for 500 threads on a hosted CI
+    // Mac, against a 100 ms budget for a settled result. Each worker takes chunks of
+    // threads in turn and fills its own slot; the sort below orders the hits fully, so
+    // which worker found what never shows. Only the calling thread can see that the
+    // pass's task was cancelled; it raises `stopped`, and every worker stops at its
+    // next chunk.
+    typealias Found = (doc: ThreadSearchDocument, kind: ThreadMatchKind, source: Int)
+    let chunk = 32
+    let chunks = (docs.count + chunk - 1) / chunk
+    var parts = [[Found]](repeating: [], count: chunks)
+    let stopped = Atomic<Bool>(false)
+    parts.withUnsafeMutableBufferPointer { slots in
+        nonisolated(unsafe) let out = slots
+        DispatchQueue.concurrentPerform(iterations: chunks) { c in
+            if Task.isCancelled { stopped.store(true, ordering: .relaxed) }
+            if stopped.load(ordering: .relaxed) { return }
+            var mine: [Found] = []
+            for doc in docs[(c * chunk)..<min(docs.count, (c + 1) * chunk)] {
+                if let m = typed.match(doc) {
+                    mine.append((doc, m.kind, m.snippetSource))
+                    continue
+                }
+                if let source = expansion?.match(doc) {
+                    mine.append((doc, .expansion, source))
+                }
+            }
+            out[c] = mine
         }
     }
+    var found = parts.flatMap { $0 }
     found.sort {
         if $0.kind != $1.kind { return $0.kind < $1.kind }
         if $0.doc.updatedAt != $1.doc.updatedAt { return $0.doc.updatedAt > $1.doc.updatedAt }

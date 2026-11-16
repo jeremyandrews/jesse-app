@@ -1932,7 +1932,7 @@ mod tests {
         // exactly what 0.146.0 did to `MessagesBuildPlacesInbound`, 0.163.0 to
         // `MessagesBuildPlacesInboundKubernetes`, 0.164.0 to `…Rybbit`, 0.166.0 to `…Tag1`, 0.167.0 to `…Plex`, 0.169.0 to `…Clockify`, 0.173.0 to `…House`, 0.175.0 to `…Healthdb`, 0.176.0 to `…ClockifyHouseHealthdbClockifyRs`, 0.180.0 to `…PlexHouseHealthdbClockifyRs`, 0.182.0 to `…ClockifyRsRunnRs` and 0.188.0 to `…RunnRsGoogleSheets`.
         let main_turn =
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
                 .label();
         assert!(
             read_row_passes(&record(), &format!("read/{main_turn}")),

@@ -510,6 +510,18 @@ public struct StudioRunDetailView: View {
             }
             if let run = model.run {
                 top(run)
+                // Cancel run sits above the Log, not after it. Below the
+                // 280-point Log and Details it was the last row, and where the screen is
+                // short (768 points: a sheet holds about 677) it was scrolled out of sight.
+                if model.canCancel {
+                    Section {
+                        Button(role: .destructive) {
+                            confirmsCancel = true
+                        } label: {
+                            Label("Cancel run", systemImage: "stop.circle")
+                        }
+                    }
+                }
                 Section("Log") {
                     StudioRunLogView(lines: model.lines)
                         .frame(height: 280)
@@ -518,15 +530,6 @@ public struct StudioRunDetailView: View {
                 Section {
                     DisclosureGroup("Details", isExpanded: $showsDetails) {
                         details(run)
-                    }
-                }
-                if model.canCancel {
-                    Section {
-                        Button(role: .destructive) {
-                            confirmsCancel = true
-                        } label: {
-                            Label("Cancel run", systemImage: "stop.circle")
-                        }
                     }
                 }
             } else if model.loadError == nil {

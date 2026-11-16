@@ -29,10 +29,12 @@ pub const NOFILE_CAP: rlim_t = 8192;
 /// from 10 descriptors to 132 and back to 10: 122, five per stdio upstream (listener,
 /// connection, three pipes) and two for the in-process `devjob`. On Linux (CI) it went from 12
 /// to 158 and back to 12: 146, one more per stdio upstream (the child's pidfd, through which
-/// tokio reaps it). This is the larger, since the bridge runs on both. Under launchd's 256 a
-/// turn of either size leaves room for two. The test fails when a turn costs more than this, so
-/// the constant cannot fall behind a growing server list.
-pub const TURN_PEAK_FDS: rlim_t = 146;
+/// tokio reaps it). On 2026-11-16 (bridge 0.208.0) the `reminders` stdio server made it 26:
+/// macOS went from 10 to 137 (+127) and Linux (CI) from 12 to 164 (+152). The Linux figure is
+/// the larger, since the bridge runs on both. The bridge raises its own limit toward
+/// [`NOFILE_CAP`], so [`MIN_CONCURRENT_TURNS`] turns fit with room to spare. The test fails when
+/// a turn costs more than this, so the constant cannot fall behind a growing server list.
+pub const TURN_PEAK_FDS: rlim_t = 152;
 
 /// Fewer whole turns than this fitting under the soft limit is a startup warning.
 pub const MIN_CONCURRENT_TURNS: rlim_t = 8;

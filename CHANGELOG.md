@@ -80,6 +80,10 @@ process.
 - **Added: `GET /jesse/reminders`, `POST /jesse/reminders/{id}/done` and `POST
   /jesse/reminders/{id}/snooze`** (`{"minutes": N}`, default 10), on the `/jesse/schedule` auth.
   The app's notification actions call them.
+- **Changed: `TURN_PEAK_FDS` is 152 (was 146).** The `reminders` stdio upstream adds six
+  descriptors to a gateway-on turn on Linux (five on macOS), re-measured by
+  `tests/gateway_fds.rs`: +152 on CI, +127 on macOS, 26 servers admitted.
+
 
 ## [bridge 0.207.0] - 2026-11-16
 

@@ -435,15 +435,15 @@ extension View {
     /// (`MacTodayConversationSheet`, `MacAskSheet`) carry a frame for the same reason. An
     /// iPhone sheet fills the screen, so nothing changes there.
     ///
-    /// `.fitted` is what makes it open at the IDEAL size. Without it macOS 26 opened a run's
-    /// sheet 560 by 677: the minimum width, and the list's own height without the 48-point
-    /// bar above it, so the last row (Cancel run) was under the bottom edge until scrolled.
-    /// macOS 27 kept the minimum width too, and only its height reached the ideal.
+    /// A definite size, not a minimum and an ideal: a sheet does not open at its content's
+    /// ideal on every macOS. macOS 26 opened a run's sheet 560 by 677 from a min and ideal
+    /// frame (the minimum width, and the list's own height without the 48-point bar above
+    /// it), so its last row, Cancel run, was under the bottom edge until scrolled; macOS 27
+    /// kept the minimum width too. `.presentationSizing(.fitted)` measured the list rather
+    /// than the ideal (720 by 645). A definite frame opened at 720 by 780 there.
     func studioRunSheetFrame() -> some View {
         #if os(macOS)
-        frame(minWidth: StudioRunSheet.minSize.width, idealWidth: StudioRunSheet.idealSize.width,
-              minHeight: StudioRunSheet.minSize.height, idealHeight: StudioRunSheet.idealSize.height)
-        .presentationSizing(.fitted)
+        frame(width: StudioRunSheet.size.width, height: StudioRunSheet.size.height)
         #else
         self
         #endif
@@ -481,10 +481,8 @@ extension View {
 
 /// The Mac's size for a Runs or run sheet.
 enum StudioRunSheet {
-    /// The smallest it is drawn.
-    static let minSize = CGSize(width: 560, height: 520)
-    /// What it opens at, where the window has the room.
-    static let idealSize = CGSize(width: 720, height: 780)
+    /// What it opens at.
+    static let size = CGSize(width: 720, height: 780)
 }
 
 /// A run, question first: its title, the question it asks (or its report's first line), the

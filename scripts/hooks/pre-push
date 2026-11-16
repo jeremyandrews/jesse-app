@@ -22,6 +22,12 @@
 #                                   version guard. Use when you already ran
 #                                   scripts/local-ci-macos.sh by hand.
 #
+# FAIL FAST. The macOS suite runs every step and reports every failure, not only
+# the first (scripts/local-ci-macos.sh says how). For the old behaviour, stopping
+# at the first failing step, set it in the environment, since a hook takes no
+# arguments:
+#     JESSE_CI_FAIL_FAST=1 git push   same as scripts/local-ci-macos.sh --fail-fast
+#
 # Depends only on git and the in-repo scripts.
 set -euo pipefail
 

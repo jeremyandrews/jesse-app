@@ -655,7 +655,7 @@ dependency = "no credential; headless Playwright Chromium fetched by npx, output
 workflows = "pages WebFetch cannot render, Friday tag1.com status checks, research"
 reason = "Drives a headless isolated browser against public pages."
 
-[grant."mcp__homeassistant__GetLiveContext"]
+[grant."mcp__homeassistant__homeassistant__GetLiveContext"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -664,7 +664,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Reads Home Assistant state, time or to-do items."
 
-[grant."mcp__homeassistant__GetDateTime"]
+[grant."mcp__homeassistant__llm__GetDateTime"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -673,7 +673,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Reads Home Assistant state, time or to-do items."
 
-[grant."mcp__homeassistant__todo_get_items"]
+[grant."mcp__homeassistant__todo__get_items"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -682,7 +682,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Reads Home Assistant state, time or to-do items."
 
-[grant."mcp__homeassistant__HassTurnOn"]
+[grant."mcp__homeassistant__intent__HassTurnOn"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -691,7 +691,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassTurnOff"]
+[grant."mcp__homeassistant__intent__HassTurnOff"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -700,7 +700,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassSetPosition"]
+[grant."mcp__homeassistant__intent__HassSetPosition"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -709,7 +709,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassStopMoving"]
+[grant."mcp__homeassistant__intent__HassStopMoving"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -718,7 +718,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassCancelAllTimers"]
+[grant."mcp__homeassistant__intent__HassCancelAllTimers"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -727,7 +727,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassLightSet"]
+[grant."mcp__homeassistant__light__HassLightSet"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -736,7 +736,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassClimateSetTemperature"]
+[grant."mcp__homeassistant__climate__HassClimateSetTemperature"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -745,7 +745,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaUnpause"]
+[grant."mcp__homeassistant__media_player__HassMediaUnpause"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -754,7 +754,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaPause"]
+[grant."mcp__homeassistant__media_player__HassMediaPause"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -763,7 +763,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaNext"]
+[grant."mcp__homeassistant__media_player__HassMediaNext"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -772,7 +772,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaPrevious"]
+[grant."mcp__homeassistant__media_player__HassMediaPrevious"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -781,7 +781,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassSetVolume"]
+[grant."mcp__homeassistant__media_player__HassSetVolume"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -790,7 +790,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassSetVolumeRelative"]
+[grant."mcp__homeassistant__media_player__HassSetVolumeRelative"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -799,7 +799,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaPlayerMute"]
+[grant."mcp__homeassistant__media_player__HassMediaPlayerMute"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -808,7 +808,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaPlayerUnmute"]
+[grant."mcp__homeassistant__media_player__HassMediaPlayerUnmute"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -817,7 +817,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassMediaSearchAndPlay"]
+[grant."mcp__homeassistant__todo__HassListAddItem"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -826,7 +826,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassListAddItem"]
+[grant."mcp__homeassistant__todo__HassListCompleteItem"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -835,7 +835,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassListCompleteItem"]
+[grant."mcp__homeassistant__todo__HassListRemoveItem"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]
@@ -844,16 +844,7 @@ dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assis
 workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
 reason = "Actuates the house through a Home Assistant intent."
 
-[grant."mcp__homeassistant__HassListRemoveItem"]
-kind = "mcp"
-server = "homeassistant"
-harnesses = ["claude-code", "codex"]
-placement = "upstream-pod"
-dependency = "HA_MCP_TOKEN (Home Assistant long-lived token, bearer), Home Assistant MCP endpoint on the tailnet (address in mcp_homeassistant!)"
-workflows = "house control from the phone: lights, climate, media, lists, broadcasts"
-reason = "Actuates the house through a Home Assistant intent."
-
-[grant."mcp__homeassistant__HassBroadcast"]
+[grant."mcp__homeassistant__assist_satellite__HassBroadcast"]
 kind = "mcp"
 server = "homeassistant"
 harnesses = ["claude-code", "codex"]

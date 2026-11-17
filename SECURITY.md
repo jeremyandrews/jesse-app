@@ -1192,18 +1192,28 @@ Home Assistant's built-in **Model Context Protocol Server** (the Assist API),
 reached over HTTP at `/api/mcp` with a long-lived access token as a bearer
 credential, declared in the compiled `MAIN_CHILD_MCP_CONFIG` as `homeassistant`.
 
-**All twenty-three advertised tools are granted.** This is the only server in the
+**All twenty-two advertised tools are granted.** This is the only server in the
 set granted whole, and it is a deliberate operator decision rather than an
-oversight: three read intents (`GetLiveContext`, `GetDateTime`,
-`todo_get_items`) and eighteen control intents (`HassTurnOn`, `HassTurnOff`,
-`HassLightSet`, `HassSetPosition`, `HassStopMoving`,
-`HassClimateSetTemperature`, `HassMediaUnpause`, `HassMediaPause`,
-`HassMediaNext`, `HassMediaPrevious`, `HassSetVolume`,
-`HassSetVolumeRelative`, `HassMediaPlayerMute`, `HassMediaPlayerUnmute`,
-`HassMediaSearchAndPlay`, `HassListAddItem`, `HassListCompleteItem`,
-`HassCancelAllTimers`, `HassListRemoveItem`, `HassBroadcast`). Nothing is
-withheld. The list was enumerated live (`initialize` + `tools/list`) against HA
-1.26.0.
+oversight: three read intents (`homeassistant__GetLiveContext`,
+`llm__GetDateTime`, `todo__get_items`) and nineteen control intents
+(`intent__HassTurnOn`, `intent__HassTurnOff`, `intent__HassSetPosition`,
+`intent__HassStopMoving`, `intent__HassCancelAllTimers`, `light__HassLightSet`,
+`climate__HassClimateSetTemperature`, `media_player__HassMediaUnpause`,
+`media_player__HassMediaPause`, `media_player__HassMediaNext`,
+`media_player__HassMediaPrevious`, `media_player__HassSetVolume`,
+`media_player__HassSetVolumeRelative`, `media_player__HassMediaPlayerMute`,
+`media_player__HassMediaPlayerUnmute`, `todo__HassListAddItem`,
+`todo__HassListCompleteItem`, `todo__HassListRemoveItem`,
+`assist_satellite__HassBroadcast`). Nothing is withheld. The list was
+enumerated live (`initialize` + `tools/list`) on 2026-11-17.
+
+**The names changed on 2026-11-17.** Home Assistant now prefixes every MCP tool
+with its domain (`HassTurnOn` became `intent__HassTurnOn`) and no longer
+advertises `HassMediaSearchAndPlay`. The grant still named the old bare names,
+and a grant is an exact-name allowlist on every harness, so for that window no
+child was offered a single house tool. Nothing reported it: the server answered
+and advertised tools. The battery's pre-flight now fails on any granted tool its
+server does not advertise (`preflight_unserved_grants`).
 
 **The count moved from 21 to 23 in a single day**, and that is the part worth
 remembering. `HassBroadcast` (speaks a message through Assist satellites) and
@@ -1224,17 +1234,17 @@ installation's 1199 entities are exposed** — 282 `light`, 36 `switch`, 23
 
 | Asked about | Exposed? | Reachable by a turn? |
 | --- | --- | --- |
-| **Entrance gate** | **Yes**, as `switch.cancello_ingresso` | **Yes** — `HassTurnOn` / `HassTurnOff` operate it |
+| **Entrance gate** | **Yes**, as `switch.cancello_ingresso` | **Yes** — `intent__HassTurnOn` / `intent__HassTurnOff` operate it |
 | **Locks** | No such entity **anywhere in the installation** | No — there is no `lock` domain to grant |
 | **Alarm** | No such entity **anywhere in the installation** | No — there is no `alarm_control_panel` domain to grant |
-| Covers | 4 (Office shutters) | Yes — `HassSetPosition`, `HassStopMoving` |
-| Climate | 23 zones | Yes — `HassClimateSetTemperature` |
-| Pool pump, irrigation | Yes, as switches | Yes — `HassTurnOn` / `HassTurnOff` |
+| Covers | 4 (Office shutters) | Yes — `intent__HassSetPosition`, `intent__HassStopMoving` |
+| Climate | 23 zones | Yes — `climate__HassClimateSetTemperature` |
+| Pool pump, irrigation | Yes, as switches | Yes — `intent__HassTurnOn` / `intent__HassTurnOff` |
 
 So "locks and alarm are granted" is **not** an accurate description of this
 posture, and the reason is that those entities do not exist rather than that
 they were withheld. If either is ever added to HA and exposed, it becomes
-reachable **with no bridge change at all** — `HassTurnOn`/`HassTurnOff` are
+reachable **with no bridge change at all** — `intent__HassTurnOn`/`intent__HassTurnOff` are
 multiplexers over every exposed domain, and their own descriptions say they
 lock/unlock a lock and open/close a cover. That is the property to keep in mind
 when adding entities to HA.
@@ -1243,7 +1253,7 @@ when adding entities to HA.
 
 **A main turn holds both this server and a headless browser.** A malicious page
 that the browser visits can attempt to steer the turn into calling
-`HassTurnOn` — and the turn runs as the operator's own unix user, triggered from
+`intent__HassTurnOn` — and the turn runs as the operator's own unix user, triggered from
 a phone, with **no human in the loop mid-turn**. There is no confirmation step
 between a model deciding to open the gate and the gate opening.
 

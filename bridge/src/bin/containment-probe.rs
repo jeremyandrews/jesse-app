@@ -441,7 +441,11 @@ async fn run(args: Vec<String>) {
     // about the set it names.
     let servers = jesse_bridge::preflight_servers(&opts.rows);
     if !servers.is_empty() {
-        let counts = jesse_bridge::count_server_tools(&cfg, &servers).await;
+        let names = jesse_bridge::server_tool_names(&cfg, &servers).await;
+        let counts: Vec<(String, Result<usize, String>)> = names
+            .iter()
+            .map(|(n, r)| (n.clone(), r.as_ref().map(Vec::len).map_err(Clone::clone)))
+            .collect();
         let listed: Vec<String> = counts
             .iter()
             .map(|(n, r)| match r {
@@ -467,8 +471,17 @@ async fn run(args: Vec<String>) {
             }
             std::process::exit(1);
         }
+        // THE GRANT AGAINST THE SERVER. A server can keep advertising tools while renaming
+        // every one of them, and an exact-name grant then offers the child nothing. See
+        // `preflight_unserved_grants`.
+        let granted = jesse_bridge::granted_tools_by_server(&cfg, &opts.rows);
+        if let Err(e) = jesse_bridge::preflight_unserved_grants(&granted, &names) {
+            eprintln!("containment-probe: {e}");
+            std::process::exit(1);
+        }
         eprintln!(
-            "containment-probe: pre-flight passed, all {} MCP server(s) registered tools",
+            "containment-probe: pre-flight passed, all {} MCP server(s) registered tools and \
+             serve every granted one",
             counts.len()
         );
     }

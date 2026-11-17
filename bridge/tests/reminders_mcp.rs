@@ -12,10 +12,17 @@ use serde_json::{json, Value};
 
 const BIN: &str = env!("CARGO_BIN_EXE_jesse-reminders-mcp");
 
+/// One store per test. The counter is what makes it one: the tests run in parallel threads of
+/// one process, and the timestamp alone collided, because macOS's clock resolves to the
+/// microsecond, not the nanosecond. Two tests starting in the same microsecond then shared
+/// `reminders.json` and each saw the other's reminder (an id that was not its own, a list
+/// that was not empty).
 fn scratch() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "jesse-reminders-mcp-{}-{}",
+        "jesse-reminders-mcp-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
     std::fs::create_dir_all(&dir).unwrap();
@@ -263,4 +270,14 @@ fn cancel_and_snooze_act_on_a_created_reminder() {
     let all: Value = serde_json::from_str(&text_of(&replies[4]).1).unwrap();
     assert_eq!(all["reminders"][0]["state"], "cancelled");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Back-to-back calls never share a store, however coarse the clock.
+#[test]
+fn every_scratch_store_is_its_own() {
+    let a = scratch();
+    let b = scratch();
+    assert_ne!(a, b);
+    let _ = std::fs::remove_dir_all(a);
+    let _ = std::fs::remove_dir_all(b);
 }

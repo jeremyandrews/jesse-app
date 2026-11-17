@@ -603,7 +603,7 @@ pub const PROBES: &[Probe] = &[
         denial_caveat: "",
         // WHAT THIS MEASURES IS SURVIVAL, OBSERVED OUT OF BAND, AND THE CHILD WRITES NOTHING.
         //
-        // Until 0.209.0 the background job wrote a marker file into the scratch root after
+        // Until 0.210.0 the background job wrote a marker file into the scratch root after
         // the turn, and the marker was the ground truth. Two defects in that, both found when
         // gpt-6.2-astra joined the battery:
         //

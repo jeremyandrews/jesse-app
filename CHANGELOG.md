@@ -14,6 +14,31 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (222)] - 2026-11-17
+
+**A timed reminder pushed to the Mac has Done and Snooze 10 min too, and pressing one acts on the
+reminder without bringing the app forward.** Until now the Mac app registered no notification
+categories and set no notification-center delegate, so a `JESSE_REMINDER` push arrived there with
+no buttons.
+
+- **Mac delegate.** `MacNotificationDelegate` is installed in `applicationWillFinishLaunching`. It
+  registers every category the Mac uses in one `setNotificationCategories` call
+  (`MacNotificationCategories`; today only `JESSE_REMINDER`, since the Mac's own turn banners carry
+  none), presses Done or Snooze on the bridge in the background, and on a reminder's body tap brings
+  the app forward and does nothing else. Every other response, including the Mac's own "Jesse
+  replied" banners, brings the app forward as before. While the app is frontmost a reminder is
+  shown; the Mac's own banners are still not.
+- **Unreachable bridge, on the Mac.** The Mac has no offline capture queue, so a press the bridge
+  cannot take is retried once five seconds later, then logged and dropped. The reminder is left as
+  it was on the bridge. A `404` is dropped without a retry, as on the iPhone.
+- **Shared code.** The category, the parsing of a pressed button, the reminder half of response
+  routing (`ReminderResponse`) and `ReminderActionHandler` moved from the iPhone app into JesseKit
+  (`JesseNetworking/ReminderNotification.swift`). The handler takes a `ReminderUndeliveredPolicy`:
+  the iPhone's is the offline capture queue, unchanged; the Mac's is retry-once. iPhone behaviour,
+  categories and tests are unchanged.
+- **Time Sensitive.** The Mac app now carries the time-sensitive notifications entitlement. The App
+  ID `com.tag1.JesseMac` needs the capability too; automatic signing adds it on the next signed build.
+
 ## [App 1.0 (221)] - 2026-11-16
 
 **A timed reminder can be finished or snoozed from the notification, without opening the app.**

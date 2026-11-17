@@ -49,6 +49,14 @@ final class MacPushRegistrar: NSObject, NSApplicationDelegate {
     /// False in a unit-test host, which must not register anything anywhere.
     static var isEnabled = true
 
+    /// The notification-center delegate and the reminder's Done / Snooze category, before
+    /// launch finishes (`MacReminderNotifications.swift`). Not gated on `isEnabled` or on a
+    /// pairing: it touches no network and raises no prompt, and a reminder delivered before
+    /// the pairing loads must still be drawn with its buttons.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        MacNotificationDelegate.shared.install()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard Self.isEnabled, Self.config().isConfigured else { return }
         NSApplication.shared.registerForRemoteNotifications()

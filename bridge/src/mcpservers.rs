@@ -466,7 +466,11 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
             ),
             ToolClass::Write,
         ),
-        &["GetLiveContext", "GetDateTime", "todo_get_items"],
+        &[
+            "homeassistant__GetLiveContext",
+            "llm__GetDateTime",
+            "todo__get_items",
+        ],
     ),
     writes(
         http("roon", "http://10.40.0.2:8088/mcp", HttpAuthSpec::None),

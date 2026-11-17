@@ -485,13 +485,22 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // after a delay, and without it the browser returns a 403 interstitial on exactly
 // the pages it was added to read (measured on stackoverflow.com, 2026-08-07).
 //
-// HOME ASSISTANT: twenty-three of twenty-three — the ENTIRE advertised surface, and
+// HOME ASSISTANT: twenty-two of twenty-two — the ENTIRE advertised surface, and
 // the only server here granted whole. That is an explicit operator decision, not an
 // oversight and not a default: full house control was asked for knowingly, against
 // the stated risk that the browser above makes a prompt-injected page a route to
 // physical actuation. Nothing is omitted because nothing on this server is both
-// dangerous and unused — the three read intents (`GetLiveContext`, `GetDateTime`,
-// `todo_get_items`) and the twenty control intents are the capability.
+// dangerous and unused — the three read intents (`homeassistant__GetLiveContext`,
+// `llm__GetDateTime`, `todo__get_items`) and the nineteen control intents are the
+// capability.
+//
+// THE NAMES CARRY A DOMAIN PREFIX SINCE 2026-11-17. Home Assistant renamed every MCP
+// tool to `<domain>__<intent>` (`HassTurnOn` is now `intent__HassTurnOn`, `HassLightSet`
+// is `light__HassLightSet`, and so on) and stopped advertising `HassMediaSearchAndPlay`.
+// The grant kept the old bare names for a day, and since a grant is an exact-name
+// allowlist on every harness, no child was offered a single house tool while the server
+// itself looked healthy. `preflight_unserved_grants` in `probe.rs` now stops the battery
+// on any granted name its server does not advertise.
 //
 // IT WAS TWENTY-ONE IN 0.67.0. The live enumeration on 2026-08-08 returned two more
 // that the running server had not advertised the day before: `HassBroadcast` (speaks
@@ -510,10 +519,10 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // todo. There is NO `lock` and NO `alarm_control_panel` entity in the whole
 // installation, so "locks and alarm" are not granted by this list and cannot be:
 // they do not exist. The entrance gate DOES, as `switch.cancello_ingresso`, and it
-// is exposed — so `HassTurnOn`/`HassTurnOff` move it. Changing that reach is an HA
+// is exposed — so `intent__HassTurnOn`/`intent__HassTurnOff` move it. Changing that reach is an HA
 // Expose edit, not a bridge change.
 //
-// Note `HassTurnOn`/`HassTurnOff` are multiplexers over every exposed domain (their
+// Note `intent__HassTurnOn`/`intent__HassTurnOff` are multiplexers over every exposed domain (their
 // own descriptions say they lock/unlock a lock and open/close a cover), which is
 // why granting them IS granting the gate. There is no narrower intent to prefer.
 //
@@ -1064,19 +1073,18 @@ mcp__browser__browser_hover,mcp__browser__browser_select_option,\
 mcp__browser__browser_drag,mcp__browser__browser_handle_dialog,\
 mcp__browser__browser_tabs,mcp__browser__browser_resize,\
 mcp__browser__browser_close,mcp__browser__browser_take_screenshot,\
-mcp__homeassistant__GetLiveContext,mcp__homeassistant__GetDateTime,\
-mcp__homeassistant__todo_get_items,\
-mcp__homeassistant__HassTurnOn,mcp__homeassistant__HassTurnOff,\
-mcp__homeassistant__HassSetPosition,mcp__homeassistant__HassStopMoving,\
-mcp__homeassistant__HassCancelAllTimers,mcp__homeassistant__HassLightSet,\
-mcp__homeassistant__HassClimateSetTemperature,\
-mcp__homeassistant__HassMediaUnpause,mcp__homeassistant__HassMediaPause,\
-mcp__homeassistant__HassMediaNext,mcp__homeassistant__HassMediaPrevious,\
-mcp__homeassistant__HassSetVolume,mcp__homeassistant__HassSetVolumeRelative,\
-mcp__homeassistant__HassMediaPlayerMute,mcp__homeassistant__HassMediaPlayerUnmute,\
-mcp__homeassistant__HassMediaSearchAndPlay,\
-mcp__homeassistant__HassListAddItem,mcp__homeassistant__HassListCompleteItem,\
-mcp__homeassistant__HassListRemoveItem,mcp__homeassistant__HassBroadcast,\
+mcp__homeassistant__homeassistant__GetLiveContext,mcp__homeassistant__llm__GetDateTime,\
+mcp__homeassistant__todo__get_items,\
+mcp__homeassistant__intent__HassTurnOn,mcp__homeassistant__intent__HassTurnOff,\
+mcp__homeassistant__intent__HassSetPosition,mcp__homeassistant__intent__HassStopMoving,\
+mcp__homeassistant__intent__HassCancelAllTimers,mcp__homeassistant__light__HassLightSet,\
+mcp__homeassistant__climate__HassClimateSetTemperature,\
+mcp__homeassistant__media_player__HassMediaUnpause,mcp__homeassistant__media_player__HassMediaPause,\
+mcp__homeassistant__media_player__HassMediaNext,mcp__homeassistant__media_player__HassMediaPrevious,\
+mcp__homeassistant__media_player__HassSetVolume,mcp__homeassistant__media_player__HassSetVolumeRelative,\
+mcp__homeassistant__media_player__HassMediaPlayerMute,mcp__homeassistant__media_player__HassMediaPlayerUnmute,\
+mcp__homeassistant__todo__HassListAddItem,mcp__homeassistant__todo__HassListCompleteItem,\
+mcp__homeassistant__todo__HassListRemoveItem,mcp__homeassistant__assist_satellite__HassBroadcast,\
 mcp__roon__hifi_zones,mcp__roon__hifi_now_playing,mcp__roon__hifi_control,\
 mcp__roon__hifi_search,mcp__roon__hifi_play,mcp__roon__hifi_status,\
 mcp__google__list_calendars,mcp__google__get_events,mcp__google__query_freebusy,\

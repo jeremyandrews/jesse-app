@@ -3307,7 +3307,7 @@ mod tests {
     /// would register zero tools).
     #[test]
     fn an_http_server_travels_as_a_url_with_its_token_named_not_valued() {
-        let allowed = "mcp__homeassistant__GetLiveContext,mcp__homeassistant__HassTurnOn,\
+        let allowed = "mcp__homeassistant__homeassistant__GetLiveContext,mcp__homeassistant__intent__HassTurnOn,\
                        mcp__roon__hifi_zones";
         let args =
             codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG.as_str(), allowed).expect("translates");
@@ -3365,7 +3365,7 @@ mod tests {
         // The allowlist still governs, transport notwithstanding.
         assert!(
             flat.contains(
-                r#"mcp_servers.homeassistant.enabled_tools=["GetLiveContext", "HassTurnOn"]"#
+                r#"mcp_servers.homeassistant.enabled_tools=["homeassistant__GetLiveContext", "intent__HassTurnOn"]"#
             ),
             "{args:?}"
         );

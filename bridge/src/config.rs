@@ -2854,11 +2854,12 @@ pub struct CodexTuning {
     ///
     /// **The operator-facing key is `auto_compact_token_limit`; the wire key is
     /// `model_auto_compact_token_limit`**, and the prefix is not optional — measured on
-    /// codex-cli 0.153.4, `-c auto_compact_token_limit=…` is rejected as an unknown field
-    /// under `--strict-config` while the prefixed spelling is accepted.
+    /// codex-cli 0.153.4 and again on 0.169.0, `-c auto_compact_token_limit=…` is rejected as
+    /// an unknown field under `--strict-config` while the prefixed spelling is accepted.
     ///
-    /// It exists because a large context is not uniformly priced: `gpt-6-astra` carries
-    /// ~1.05M tokens but bills input at 2x and output at 1.5x above 272K, so an operator
+    /// It exists because a large context is not uniformly priced: `gpt-6.2-astra` (and
+    /// `gpt-6.2-sol`) carry a 1.05M-token window but bill input and cached input at 2x and
+    /// output at 1.5x for a request above 272K input tokens, so an operator
     /// who wants the model without the surcharge needs a way to cap a session below that
     /// line. Absent, the child keeps its own built-in limit.
     pub auto_compact_token_limit: Option<u64>,
@@ -8041,11 +8042,11 @@ mod tests {
         let _g = ENV_LOCK.lock_ok();
         std::env::set_var("JESSE_TEST_ASTRA_TOKEN", "tok");
 
-        let bare = model_toml("gpt-6-astra", "hosted", Some("JESSE_TEST_ASTRA_TOKEN"));
+        let bare = model_toml("gpt-6.2-astra", "hosted", Some("JESSE_TEST_ASTRA_TOKEN"));
         let m = registry_model_from_toml(&bare, None, None).unwrap();
         assert_eq!(m.codex, CodexTuning::default(), "the quiet default");
 
-        let mut t = model_toml("gpt-6-astra", "hosted", Some("JESSE_TEST_ASTRA_TOKEN"));
+        let mut t = model_toml("gpt-6.2-astra", "hosted", Some("JESSE_TEST_ASTRA_TOKEN"));
         t.reasoning_effort = Some("  XHigh ".into());
         t.auto_compact_token_limit = Some(272_000);
         let m = registry_model_from_toml(&t, None, None).unwrap();
@@ -8072,11 +8073,11 @@ mod tests {
         let _g = ENV_LOCK.lock_ok();
         std::env::set_var("JESSE_TEST_ASTRA_TOKEN2", "tok");
 
-        let mut t = model_toml("gpt-6-astra", "hosted", Some("JESSE_TEST_ASTRA_TOKEN2"));
+        let mut t = model_toml("gpt-6.2-astra", "hosted", Some("JESSE_TEST_ASTRA_TOKEN2"));
         t.reasoning_effort = Some("ludicrous".into());
         let m = registry_model_from_toml(&t, None, None)
             .expect("a typo in an optional tuning key must not drop the entry");
-        assert_eq!(m.id, "gpt-6-astra");
+        assert_eq!(m.id, "gpt-6.2-astra");
         assert_eq!(
             m.codex.reasoning_effort, None,
             "an unparsed effort asks for nothing rather than guessing"

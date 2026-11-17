@@ -754,12 +754,13 @@ Answer the question I asked, not the one you wish I had asked.
 #                  own built-in limit.
 #
 #                  NOTE THE `model_` PREFIX ON THE WIRE KEY. The unprefixed
-#                  `auto_compact_token_limit` is rejected by codex-cli 0.153.4 as an unknown
-#                  configuration field; the operator-facing key here is the short name and
-#                  the bridge emits the long one.
+#                  `auto_compact_token_limit` is rejected by codex-cli 0.153.4 and 0.169.0
+#                  as an unknown configuration field; the operator-facing key here is the
+#                  short name and the bridge emits the long one.
 #
-#                  WHAT IT IS FOR: a large context is not uniformly priced. `gpt-6-astra`
-#                  carries ~1.05M tokens but bills input at 2x and output at 1.5x above 272K,
+#                  WHAT IT IS FOR: a large context is not uniformly priced. `gpt-6.2-astra`
+#                  and `gpt-6.2-sol` carry a 1.05M-token window, but a request above 272K
+#                  input tokens bills input and cached input at 2x and output at 1.5x,
 #                  so an operator who wants the model without the surcharge caps the session
 #                  below that line — e.g. `auto_compact_token_limit = 272000`. It is a cost
 #                  control, not a containment control.
@@ -944,9 +945,16 @@ Answer the question I asked, not the one you wish I had asked.
 # picker label and nothing else, so the turn silently ran on the CLI's built-in default. If
 # you are reading an older deployment's logs, that is why its argv names no model.
 #
-# THE CLI VERSION MATTERS FOR THE SLUG YOU PICK. `gpt-6-astra` needs codex-cli 0.153.1 or
-# newer; the whole harness is measured against 0.153.4. An older binary takes the override
-# and then rejects the model name. `JESSE_CODEX_BIN` names the binary this harness runs.
+# THE CLI VERSION MATTERS FOR THE SLUG YOU PICK. `gpt-6.2-astra` and `gpt-6.2-sol` need
+# codex-cli 0.166.0 or newer; the whole harness is measured against 0.169.0. On the ChatGPT
+# subscription login the model list is served by OpenAI per client version, and on
+# 2026-11-17 it listed neither model to 0.165.0 or older (0.153.4 included) and both to
+# 0.166.0 onward. An older binary takes the override and then rejects the model name.
+# `JESSE_CODEX_BIN` names the binary this harness runs.
+#
+# Prices are OpenAI's published Standard rates per 1M tokens for requests up to 272K input
+# tokens (developers.openai.com/api/docs/models/gpt-6.2-astra and .../gpt-6.2-sol). They feed
+# the cost badge only; a subscription login is not billed per token.
 #
 # Arm it with: JESSE_CODEX_TOKEN=...
 # [[models]]
@@ -957,16 +965,34 @@ Answer the question I asked, not the one you wish I had asked.
 # base_url = "http://127.0.0.1:8900"       # health probe only on this path; the turn does
 #                                          # not use it — auth and endpoint come from the
 #                                          # subscription login in ~/.codex
-# model = "gpt-6-astra"                    # emitted as `-c model="gpt-6-astra"`; needs
-#                                          # codex-cli >= 0.153.1
+# model = "gpt-6.2-astra"                  # emitted as `-c model="gpt-6.2-astra"`; needs
+#                                          # codex-cli >= 0.166.0
 # auth_token_env = "JESSE_CODEX_TOKEN"     # the NAME of the env var, never the token
 #                                          # read-write by default: OS-sandboxed writes,
 #                                          # scoped to the vault
 # reasoning_effort = "xhigh"               # optional; low|medium|high|xhigh|max. Omit for
 #                                          # the model's own default — there is no "none"
-# auto_compact_token_limit = 272000        # optional; caps the session under Astra's 272K
-#                                          # line, above which input bills 2x and output 1.5x
-# price = { in_per_m = 1.25, cached_per_m = 0.13, out_per_m = 10.00 }
+# auto_compact_token_limit = 272000        # optional; caps the session under the 272K
+#                                          # input line, above which input and cached input
+#                                          # bill 2x and output 1.5x
+# price = { in_per_m = 8.00, cached_per_m = 0.40, out_per_m = 40.00 }
+# health = { interval_secs = 30, timeout_secs = 3 }
+#
+# A SECOND CODEX ENTRY, ON GPT 6.2 SOL. Same harness, same login, same binary; only the slug,
+# the effort and the price differ. Each entry is its own picker row. Sol has the same 1.05M
+# window and the same 272K pricing line as Astra, at a quarter of the price.
+# [[models]]
+# id = "codex-sol"
+# label = "Codex Sol"
+# kind = "hosted"
+# harness = "codex"
+# base_url = "http://127.0.0.1:8900"
+# model = "gpt-6.2-sol"                    # emitted as `-c model="gpt-6.2-sol"`; needs
+#                                          # codex-cli >= 0.166.0
+# auth_token_env = "JESSE_CODEX_TOKEN"
+# reasoning_effort = "medium"
+# auto_compact_token_limit = 272000
+# price = { in_per_m = 2.00, cached_per_m = 0.10, out_per_m = 10.00 }
 # health = { interval_secs = 30, timeout_secs = 3 }
 
 # ---------------------------------------------------------------------------

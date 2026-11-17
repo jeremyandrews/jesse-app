@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn an_unparseable_reasoning_effort_is_refused_and_names_the_model_and_the_value() {
         let decl = vec![ModelToml {
-            id: Some("gpt-6-astra".to_string()),
+            id: Some("gpt-6.2-astra".to_string()),
             reasoning_effort: Some("evar so high".to_string()),
             ..ModelToml::default()
         }];
@@ -1138,13 +1138,13 @@ mod tests {
             .iter()
             .find(|e| e.message.contains("reasoning_effort"))
             .expect("an unparseable reasoning_effort must be refused");
-        assert_eq!(e.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(e.model.as_deref(), Some("gpt-6.2-astra"));
         assert!(
             e.message.contains("'evar so high'"),
             "the error must quote the value the operator wrote: {e}"
         );
         assert!(e.message.contains("\"xhigh\""), "{e}");
-        assert!(e.to_string().starts_with("model 'gpt-6-astra'"), "{e}");
+        assert!(e.to_string().starts_with("model 'gpt-6.2-astra'"), "{e}");
     }
 
     /// `none` IS REFUSED, AND THE ERROR SAYS WHAT TO DO INSTEAD.
@@ -1157,7 +1157,7 @@ mod tests {
     #[test]
     fn a_none_reasoning_effort_is_refused_and_points_at_deleting_the_key() {
         let decl = vec![ModelToml {
-            id: Some("gpt-6-astra".to_string()),
+            id: Some("gpt-6.2-astra".to_string()),
             reasoning_effort: Some("none".to_string()),
             ..ModelToml::default()
         }];
@@ -1178,7 +1178,7 @@ mod tests {
     fn every_accepted_reasoning_effort_starts() {
         for effort in ReasoningEffort::ALL {
             let decl = vec![ModelToml {
-                id: Some("gpt-6-astra".to_string()),
+                id: Some("gpt-6.2-astra".to_string()),
                 // Upper case on purpose: the parser is case-insensitive like its siblings.
                 reasoning_effort: Some(effort.as_str().to_ascii_uppercase()),
                 ..ModelToml::default()
@@ -1192,7 +1192,7 @@ mod tests {
             );
         }
         let absent = vec![ModelToml {
-            id: Some("gpt-6-astra".to_string()),
+            id: Some("gpt-6.2-astra".to_string()),
             ..ModelToml::default()
         }];
         let errors = validate(&test_config(), &absent, &claude_only(claude_record()));

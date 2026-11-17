@@ -10,5 +10,12 @@
 	-->
 	<key>com.apple.developer.aps-environment</key>
 	<string>development</string>
+	<!--
+	  Lets a timed reminder's push (interruption-level time-sensitive) break through a
+	  Focus, as on the iPhone. The App ID must carry the capability too, which automatic
+	  signing adds on the next signed build.
+	-->
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
 </dict>
 </plist>

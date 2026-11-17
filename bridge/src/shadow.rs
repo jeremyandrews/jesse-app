@@ -103,23 +103,25 @@ pub const GEMINI_3P1_PRO_IN_PER_M: f64 = 2.00;
 pub const GEMINI_3P1_PRO_CACHED_PER_M: f64 = 0.20;
 pub const GEMINI_3P1_PRO_OUT_PER_M: f64 = 12.00;
 
-/// Gemini 3.8 Flash: $0.75 in / $0.075 cached / $3.75 out (Gemini API pricing page, read
-/// 2026-09-16). The DEFAULT deck for the `gemini-flash` registry entry, overridable via
-/// `JESSE_MODEL_GEMINI_FLASH_PRICE_{IN,CACHED,OUT}`.
+/// Gemini 4 Hydrogen: $1.50 in / $0.075 cached / $7.50 out (Google's Gemini API pricing page,
+/// <https://aistudio.google.com/docs/pricing>, read 2026-11-17; the slug was confirmed served by
+/// the live OpenAI-compatible `/models` listing the same day). The DEFAULT deck for the
+/// `gemini-flash` registry entry, overridable via `JESSE_MODEL_GEMINI_FLASH_PRICE_{IN,CACHED,OUT}`.
 ///
-/// **THIS IS THE INTRODUCTORY RATE AND IT EXPIRES ON 2026-12-31.** From 2027-01-01 Google
-/// charges $1.50 in / $0.15 cached / $7.50 out — exactly double on all three. [`PriceDeck`]
-/// holds four scalars and consults no clock, and is resolved ONCE at registry build, so
-/// nothing here changes on that date by itself: from 2027-01-01 this deck under-reports every
-/// Flash turn by half until a human acts.
+/// One flat rate, no prompt-size tier and no introductory expiry on the page. It REPLACES the
+/// Gemini 3.8 Flash deck ($0.75 / $0.075 / $3.75), which was an introductory rate due to double
+/// on 2027-01-01 to $1.50 / $0.15 / $7.50: Hydrogen's input and output equal 3.8 Flash's
+/// post-introductory rate and its cache read is half of it. Against the rate the badge showed
+/// until now, input and output double. Pinning a deploy back to 3.8 Flash is
+/// `JESSE_MODEL_GEMINI_FLASH_MODEL=gemini-3.8-flash`, `_VERSION=3.8 Flash`, and
+/// `_PRICE_IN=0.75`, `_PRICE_CACHED=0.075`, `_PRICE_OUT=3.75` (through 2026-12-31).
 ///
-/// TWO WAYS TO ACT, NEITHER AUTOMATIC. Either set `JESSE_MODEL_GEMINI_FLASH_PRICE_IN=1.50`,
-/// `_PRICE_CACHED=0.15` and `_PRICE_OUT=7.50` in the bridge's launch environment (no release),
-/// or double these three constants (a release). A dated rate was attempted first and is not
-/// expressible by this type.
-pub const GEMINI_3P8_FLASH_IN_PER_M: f64 = 0.75;
-pub const GEMINI_3P8_FLASH_CACHED_PER_M: f64 = 0.075;
-pub const GEMINI_3P8_FLASH_OUT_PER_M: f64 = 3.75;
+/// Google drops explicit context caching on Hydrogen (no `cachedContents`), so the hourly
+/// cache-STORAGE charge the other Gemini decks cannot express does not apply to it; implicit
+/// caching bills cache hits at the cached rate above.
+pub const GEMINI_4_HYDROGEN_IN_PER_M: f64 = 1.50;
+pub const GEMINI_4_HYDROGEN_CACHED_PER_M: f64 = 0.075;
+pub const GEMINI_4_HYDROGEN_OUT_PER_M: f64 = 7.50;
 
 /// Gemini 3.5 Flash-Lite: $0.30 in / $0.03 cached / $2.50 out (Gemini API pricing page, read
 /// 2026-09-16). The DEFAULT deck for the `gemini-flash-lite` registry entry, overridable via
@@ -142,18 +144,20 @@ pub const OPUS_5_5_IN_PER_M: f64 = 4.00;
 pub const OPUS_5_5_CACHED_PER_M: f64 = 0.20;
 pub const OPUS_5_5_OUT_PER_M: f64 = 20.00;
 
-/// Claude Fable 5.1 prices: $10 in / $0.25 cached / $50 out (Anthropic pricing page,
-/// 2026-09-10). The DEFAULT deck for the `fable` registry entry, overridable via
-/// `JESSE_MODEL_FABLE_PRICE_{IN,CACHED,OUT}`.
+/// Claude Fable 5.2 prices: $8 in / $0.20 cached / $40 out (Anthropic pricing page,
+/// <https://platform.claude.com/docs/en/about-claude/pricing>, read 2026-11-17). The DEFAULT
+/// deck for the `fable` registry entry, overridable via `JESSE_MODEL_FABLE_PRICE_{IN,CACHED,OUT}`.
 ///
-/// **The cached rate is NOT a tenth of input**, and not Opus 5.5's 0.05x either: cache hits on
-/// Fable 5.1 are priced at 0.025x input, and a deck derived by the old tenth rule would read
-/// $1.00 and over-report every cache read four-fold. On the subscription login none of this
-/// is billed per token; the badge reports what the turn would have cost on the metered API,
-/// the same thing it reports for ambient Opus.
-pub const FABLE_5_1_IN_PER_M: f64 = 10.00;
-pub const FABLE_5_1_CACHED_PER_M: f64 = 0.25;
-pub const FABLE_5_1_OUT_PER_M: f64 = 50.00;
+/// **The cached rate is NOT a tenth of input**, and not Opus 5.5's 0.05x either: the page
+/// prices cache hits on Fable 5.2 (as on 5.1) at 0.025x input, and a deck derived by the old
+/// tenth rule would read $0.80 and over-report every cache read four-fold. It replaces Fable
+/// 5.1's deck ($10 / $0.25 / $50), still the right one for a deploy pinned back to
+/// `claude-fable-5-1` through those three env keys. On the subscription login none of this is
+/// billed per token; the badge reports what the turn would have cost on the metered API, the
+/// same thing it reports for ambient Opus.
+pub const FABLE_5_2_IN_PER_M: f64 = 8.00;
+pub const FABLE_5_2_CACHED_PER_M: f64 = 0.20;
+pub const FABLE_5_2_OUT_PER_M: f64 = 40.00;
 
 /// Claude Sonnet 5.5 prices: $2 in / $0.10 cached / $10 out (Anthropic pricing page,
 /// <https://platform.claude.com/docs/en/about-claude/pricing>, read 2026-10-17). The DEFAULT

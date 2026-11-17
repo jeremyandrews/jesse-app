@@ -14,6 +14,51 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.209.0] - 2026-11-17
+
+**Model audit: every model the bridge runs checked against its provider's newest GA release;
+two were stale and move.** Fable 5.1 → 5.2 on the subscription login, and the `gemini-flash`
+entry from Gemini 3.8 Flash → Gemini 4 Hydrogen. Every other model was already current: Opus 5.5,
+Sonnet 5.5, GLM 5.3, Kimi K3.1 Pro, Qwen 3.8 Max, Muse Spark Open, Gemini 3.5 Flash-Lite and the
+local Qwen3.8-Flash-Next. Gemini 3.1 Pro is left alone: Google names no Pro successor in Gemini 4.
+Codex is untouched.
+
+| entry | old | new | deck (in / cached / out per 1M) |
+|---|---|---|---|
+| `fable` | `claude-fable-5-1` (Fable 5.1) | `claude-fable-5-2` (Fable 5.2) | 10.00 / 0.25 / 50.00 → 8.00 / 0.20 / 40.00 |
+| `gemini-flash` | `gemini-3.8-flash` (3.8 Flash) | `gemini-4-hydrogen` (4 Hydrogen) | 0.75 / 0.075 / 3.75 (intro, 1.50 / 0.15 / 7.50 from 2027-01-01) → 1.50 / 0.075 / 7.50 |
+
+- **Changed: the `fable` deck is Fable 5.2's** (`FABLE_5_2_*`, from Anthropic's pricing page);
+  `FABLE_5_1_*` are gone. `fable` still has no compiled-in slug: it is armed by
+  `JESSE_MODEL_FABLE_MODEL`, which a deploy moves to `claude-fable-5-2` with
+  `JESSE_MODEL_FABLE_VERSION=5.2`. Real turns on the login with CLI 2.1.322 and no API-key
+  variable billed `claude-fable-5-2`.
+- **Changed: Fable's effort scale is chosen by the armed slug** (`fable_effort_scale`). With no
+  `--effort` the CLI sends `medium` for `claude-fable-5-2` and `high` for `claude-fable-5-1`
+  (captured against a local listener). The default is the one value env cannot move, so one
+  scale for both would mislabel one of them. 5.2 declares `medium, xhigh, max` (default
+  `medium`), measured on two prompts with two samples per level: `xhigh` and `max` each beat
+  their neighbours in all four samples; `high` beat `medium` on one prompt only and `low` on
+  neither. A deploy pinned to `claude-fable-5-1` keeps `high, max` (default `high`).
+  `JESSE_MODEL_FABLE_EFFORT` still overrides.
+- **Changed: `gemini-flash` defaults to `gemini-4-hydrogen`**, labelled "Gemini 4 Hydrogen".
+  Google's "What's new in Gemini 4 Hydrogen" page calls it the "Recommended upgrade from Gemini
+  3.8 Flash". The id stays `gemini-flash`, so persisted selections still resolve. The new deck is
+  `GEMINI_4_HYDROGEN_*` (`GEMINI_3P8_FLASH_*` are gone): input and output are double what the badge
+  showed, equal to 3.8 Flash's post-introductory rate, and the cache read stays the same. On
+  the OpenAI-compatible surface the three quirks the entry pins were re-measured and still hold.
+  Hydrogen's breaking changes (sampling parameters removed, `minimal` rejected, no explicit
+  caching, thought signatures) do not reach this wire. Image input, `input_audio` transcription
+  and the `max_tokens: 1` probe (2.3–3.5 s) all work. Pin back with
+  `JESSE_MODEL_GEMINI_FLASH_MODEL=gemini-3.8-flash`, `_VERSION=3.8 Flash` and the three `_PRICE_*`
+  keys.
+- **Tests:** `gemini_flash_defaults_to_gemini_4_hydrogen_and_the_env_pins_it_back` (new). The Fable
+  test now asserts the 5.2 slug, label, deck and both slug-keyed scales. The transcription test
+  uses the new slug.
+- **Containment:** no re-record. The `direct` battery runs a scripted provider with no model, and
+  `containment.toml` was probed by the ambient Opus, not Fable.
+- **Docs:** `jesse.example.toml` lists the new Fable lines and the Gemini table and caveats.
+
 ## [App 1.0 (222)] - 2026-11-17
 
 **A timed reminder pushed to the Mac has Done and Snooze 10 min too, and pressing one acts on the

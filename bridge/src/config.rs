@@ -2684,7 +2684,8 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 /// | Qwen 3.8 Max (09-10)     | 4,197 / 6,286 | —              | 8,365 / 8,953* | —              | 9,580 / 11,803   | low, high, max      |
 /// | Opus 5.5 (09-24)         | 3,547 / 2,728 | 4,418 / 4,327* | 6,514 / 5,312  | 8,220 / 6,647  | 34,436 / 33,839  | medium, high, max   |
 /// | Opus 5 (09-10, superseded)| 976 / 1,164  | —              | 682 / 1,774*   | —              | 4,974 / 4,095    | (was high, max)     |
-/// | Fable 5.1 (09-10)        | 973 / 3,470   | —              | 3,949 / 2,087* | —              | 5,635 / 5,547    | high, max           |
+/// | Fable 5.2 (11-17)        | 521 / 570     | 620 / 514*     | 743 / 720      | 862 / 830      | 1,273 / 1,493    | medium, xhigh, max  |
+/// | Fable 5.1 (09-10)        | 973 / 3,470   | —              | 3,949 / 2,087* | —              | 5,635 / 5,547    | high, max (5.1 pin) |
 /// | Sonnet 5.5 (10-17)       | 1,011 / 947   | 962 / 933*     | 1,169 / 1,162  | 1,256 / 1,306  | 2,211 / 3,353    | medium, high, max   |
 /// | Kimi K3.1 Pro (11-05)    | 917 / 947     | 1,828 / 1,297  | 1,355 / 1,405* | 4,162 / 3,888  | 3,605 / 4,223    | none (held, below)  |
 /// | Kimi K3 (09-10, superseded)| 6,039 / 3,035 | —            | —              | —              | 3,575 / 10,694   | none                |
@@ -2722,6 +2723,18 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 /// which is the binding one here. With no `--effort` the pinned CLI (2.1.300) sends `high` for
 /// this slug (captured against a local listener, nothing sent to a provider).
 ///
+/// **Fable 5.2 was measured on 2026-11-17**, on the pinned CLI (2.1.322) with
+/// `ANTHROPIC_MODEL=claude-fable-5-2`, no API-key variables and no tools, on two prompts, every
+/// turn billed to `claude-fable-5-2` and every answer correct. The row above is the second (a
+/// digit-sum-and-divisibility count to 1,000,000); the first (a digit-sum count to 10,000) read
+/// `low` 711 / 687, `medium` 739 / 718, `high` 695 / 679, `xhigh` 877 / 886, `max` 2,024 /
+/// 1,880. `xhigh` sat above `medium` and `high` in all four samples and `max` above `xhigh` in
+/// all four, so both are declared beside the default. `high` cleared `medium` on the second
+/// prompt only and fell below it on the first, and `low` overlapped `medium` on both, so neither
+/// cleared the bar — Fable 5.1's scale was `high, max` and this one is not, which is why the
+/// built-in is chosen by slug ([`fable_effort_scale`]). `JESSE_MODEL_FABLE_EFFORT` re-declares
+/// `high` if a workload shows it doing something.
+///
 /// **Opus 5.5 was measured on 2026-09-24**, on the pinned CLI (2.1.281) with
 /// `ANTHROPIC_MODEL=claude-opus-5-5` and no API-key variables, in two sweeps. The row above is
 /// the second; the first (the same prompt without a no-tools sentence) read `medium` 4,076 /
@@ -2744,7 +2757,8 @@ pub fn harness_effort_values(harness: &str) -> Option<Vec<&'static str>> {
 ///
 /// **The default is the model's CLI default, captured on the wire, and it is per model**: with
 /// no `--effort` the CLI sends `output_config.effort = "medium"` for `claude-opus-5-5` (pinned
-/// or as the unpinned default) and `"high"` for `claude-fable-5-1` (captured 2026-09-24 against a
+/// or as the unpinned default), `"medium"` for `claude-fable-5-2` (captured on 2.1.322,
+/// 2026-11-17) and `"high"` for `claude-fable-5-1` (captured 2026-09-24 against a
 /// local listener, nothing sent to a provider), `"medium"` for `claude-sonnet-5-5` (captured
 /// the same way on 2.1.302, 2026-10-17); `high` for the rest, captured 2026-09-10. An
 /// override that leaves out the built-in's default is refused with a warning and the built-in
@@ -3998,12 +4012,34 @@ fn gemini_pro_env_entry(
     )
 }
 
-/// `gemini-flash` — Gemini 3.8 Flash, GA since 2026-09-02 and the cheap default of this
-/// family. Armed by `JESSE_MODEL_GEMINI_FLASH_AUTH_TOKEN` alone.
+/// `gemini-flash` — Gemini 4 Hydrogen, GA (stable) since 2026-11-12 and the everyday tier of
+/// this family. Armed by `JESSE_MODEL_GEMINI_FLASH_AUTH_TOKEN` alone.
 ///
-/// Its deck is an INTRODUCTORY rate that expires on 2026-12-31 and cannot be expressed as a
-/// dated rate here — see [`GEMINI_3P8_FLASH_IN_PER_M`] for what has to happen on 2027-01-01
-/// and why nothing happens by itself.
+/// **THE ID STAYS `gemini-flash` WHILE THE NAME LEAVES "FLASH" BEHIND**, because the id names
+/// the tier and Google names Hydrogen as this tier's successor: its "What's new in Gemini 4
+/// Hydrogen" page calls it the "Recommended upgrade from Gemini 3.8 Flash", and the models page
+/// now lists 3.8 Flash as "Our previous-generation Flash model". A selection persisted as
+/// `gemini-flash` keeps resolving, and the picker reads "Gemini 4 Hydrogen".
+///
+/// **MEASURED ON THIS SURFACE ON 2026-11-17, not read off the migration page**, which does not
+/// mention the OpenAI-compatible endpoint at all:
+/// * the three quirks [`gemini_env_entry`] pins hold unchanged — `reasoning_effort` moved
+///   thinking tokens (`low` 1,809–1,990, `high` 2,510–2,930, two samples each), a schema
+///   invalid under strict rules was accepted with `strict: true`, and of two system messages
+///   only the second survived (both samples answered the first's fact with NONE);
+/// * the page's breaking changes do not reach this wire: the chat adapter sends no
+///   `temperature`, `top_p` or `top_k`, never sends `minimal` (which Hydrogen rejects), uses no
+///   explicit caching, and echoes the `thought_signature` Hydrogen returns on a tool call;
+/// * a turn naming no effort runs at the model's own default (`high` on this model, against
+///   3.8 Flash's `medium`) and fit the per-call `max_completion_tokens` of 8,192 with room to
+///   spare: about 2,400 thinking tokens on a hard counting prompt;
+/// * images and `input_audio` both work, so the entry's transcription capability (its own
+///   slug on [`gemini_transcription`]) carries over; the `max_tokens: 1` probe answered in
+///   2.3–3.5 s, inside [`REASONING_HEALTH_TIMEOUT_SECS`].
+///
+/// Its deck is one flat rate with no expiry, double 3.8 Flash's introductory input and output
+/// rates — see [`GEMINI_4_HYDROGEN_IN_PER_M`], which also gives the env lines that pin a
+/// deploy back to 3.8 Flash.
 fn gemini_flash_env_entry(
     default_interval_secs: u64,
     global_timeout_secs: Option<u64>,
@@ -4011,13 +4047,13 @@ fn gemini_flash_env_entry(
     gemini_env_entry(
         "gemini-flash",
         "JESSE_MODEL_GEMINI_FLASH",
-        "3.8 Flash",
-        "gemini-3.8-flash",
+        "4 Hydrogen",
+        "gemini-4-hydrogen",
         PriceDeck {
-            in_per_m: GEMINI_3P8_FLASH_IN_PER_M,
-            cached_per_m: GEMINI_3P8_FLASH_CACHED_PER_M,
+            in_per_m: GEMINI_4_HYDROGEN_IN_PER_M,
+            cached_per_m: GEMINI_4_HYDROGEN_CACHED_PER_M,
             cache_write_per_m: None,
-            out_per_m: GEMINI_3P8_FLASH_OUT_PER_M,
+            out_per_m: GEMINI_4_HYDROGEN_OUT_PER_M,
         },
         default_interval_secs,
         global_timeout_secs,
@@ -4345,14 +4381,34 @@ fn opus_env_entry() -> RegistryModel {
     }
 }
 
+/// The built-in effort scale for the `fable` entry, chosen by the slug it is armed with.
+///
+/// **KEYED ON THE SLUG, unlike every other entry's, because the CLI's DEFAULT differs between
+/// the two Fables a deploy may arm**, and the default is the one value an operator cannot move
+/// from the environment ([`effort_from_env`] keeps the built-in's default and refuses an
+/// override that leaves it out). With no `--effort` the pinned CLI (2.1.322) sends `medium` for
+/// `claude-fable-5-2` and `high` for `claude-fable-5-1` (both captured on 2026-11-17 against a
+/// local listener, nothing sent to a provider). One scale for both would mislabel whichever
+/// one it was not measured on, so a deploy pinned back to 5.1 keeps 5.1's measured scale and
+/// every other slug — 5.2, or one this build has not seen — gets 5.2's.
+fn fable_effort_scale(slug: Option<&str>) -> EffortScale {
+    match slug {
+        Some("claude-fable-5-1") => EffortScale::scale(&["high", "max"], "high"),
+        _ => EffortScale::scale(&["medium", "xhigh", "max"], "medium"),
+    }
+}
+
 /// The `fable` entry: Claude Fable on the bridge's OWN subscription login — no API key and no
 /// second billing relationship, which is the whole point of it.
 ///
-/// **Verified on the login, not inferred from documentation.** On 2026-09-10 a real `-p` turn
-/// on the pinned CLI with `ANTHROPIC_MODEL=claude-fable-5-1` and every API-key variable
-/// removed reported `apiKeySource: "none"` and `model: "claude-fable-5-1"`, answered, and
-/// billed its usage to `claude-fable-5-1`. Asked for `claude-fable-5-1[1m]`, the login served
-/// plain `claude-fable-5-1`: there is no separate 1M variant to pin.
+/// **What to arm it with today: `claude-fable-5-2`**, the current Fable on Anthropic's models
+/// overview (<https://platform.claude.com/docs/en/about-claude/models/overview>, read
+/// 2026-11-17), with `JESSE_MODEL_FABLE_VERSION=5.2`. Verified on the login rather than inferred
+/// from documentation: on 2026-11-17 real `-p` turns on the pinned CLI (2.1.322) with
+/// `ANTHROPIC_MODEL=claude-fable-5-2` and every API-key variable removed billed their usage to
+/// `claude-fable-5-2` and answered. History: `claude-fable-5-1` was verified the same way on
+/// 2026-09-10, and asked for `claude-fable-5-1[1m]` the login served plain `claude-fable-5-1`;
+/// 1M is the standard window on both, so there is no separate 1M variant to pin.
 ///
 /// ARMED BY ONE VARIABLE, `JESSE_MODEL_FABLE_MODEL`, which is the slug itself — there is no
 /// token to set. Unset, the entry is present and unconfigured, which keeps a bridge with no
@@ -4362,6 +4418,8 @@ fn opus_env_entry() -> RegistryModel {
 /// every deploy whether or not that deploy's login serves it.
 ///
 /// `Write`, like `opus`: the same harness, the same containment record, the same login.
+///
+/// Its effort scale follows the armed slug — see [`fable_effort_scale`].
 fn fable_env_entry() -> RegistryModel {
     let login_model = env_string("JESSE_MODEL_FABLE_MODEL");
     let version = model_version_from_env("JESSE_MODEL_FABLE", None);
@@ -4370,7 +4428,7 @@ fn fable_env_entry() -> RegistryModel {
         effort: effort_from_env(
             "JESSE_MODEL_FABLE",
             "fable",
-            Some(EffortScale::scale(&["high", "max"], "high")),
+            Some(fable_effort_scale(login_model.as_deref())),
         ),
         codex: CodexTuning::default(),
         id: "fable".to_string(),
@@ -4389,15 +4447,16 @@ fn fable_env_entry() -> RegistryModel {
         auth_scheme: None,
         quirks: DirectQuirks::default(),
         thinking: None,
-        // Fable 5.1's metered deck, reported for the same reason Opus's is on the same login:
-        // what the turn would have cost, not what it did.
+        // Fable 5.2's metered deck, reported for the same reason Opus's is on the same login:
+        // what the turn would have cost, not what it did. A deploy pinned back to 5.1 sets
+        // 5.1's deck through `JESSE_MODEL_FABLE_PRICE_*` (see [`FABLE_5_2_IN_PER_M`]).
         price: model_price_from_env(
             "JESSE_MODEL_FABLE",
             PriceDeck {
-                in_per_m: FABLE_5_1_IN_PER_M,
-                cached_per_m: FABLE_5_1_CACHED_PER_M,
+                in_per_m: FABLE_5_2_IN_PER_M,
+                cached_per_m: FABLE_5_2_CACHED_PER_M,
                 cache_write_per_m: None,
-                out_per_m: FABLE_5_1_OUT_PER_M,
+                out_per_m: FABLE_5_2_OUT_PER_M,
             },
         ),
         // Unused: a subscription entry is never probed.
@@ -6840,6 +6899,7 @@ mod tests {
             "JESSE_MODEL_QWEN_EFFORT",
             "JESSE_MODEL_LOCAL_EFFORT",
             "JESSE_MODEL_FABLE_EFFORT",
+            "JESSE_MODEL_FABLE_MODEL",
             "JESSE_MODEL_SONNET_EFFORT",
             "JESSE_MODEL_OPUS_EFFORT",
         ];
@@ -6853,7 +6913,12 @@ mod tests {
             vec!["low".to_string(), "high".into(), "max".into()],
             "high".to_string(),
         ));
-        let hm = Some((vec!["high".to_string(), "max".into()], "high".to_string()));
+        // Fable 5.2 (2026-11-17): its CLI default is `medium`, and `xhigh` cleared the bar where
+        // `high` did not. Fable 5.1's `high, max` is kept for a 5.1 pin — see the Fable test.
+        let mxm = Some((
+            vec!["medium".to_string(), "xhigh".into(), "max".into()],
+            "medium".to_string(),
+        ));
         assert_eq!(
             scale(glm_env_entry(DEFAULT_HEALTH_INTERVAL_SECS, None)),
             lhm
@@ -6867,7 +6932,7 @@ mod tests {
             vec!["medium".to_string(), "high".into(), "max".into()],
             "medium".to_string(),
         ));
-        assert_eq!(scale(fable_env_entry()), hm);
+        assert_eq!(scale(fable_env_entry()), mxm);
         // Sonnet 5.5 (2026-10-17): Opus 5.5's scale, and its CLI default is `medium` too.
         assert_eq!(scale(sonnet_env_entry()), mhm);
         assert_eq!(scale(opus_env_entry()), mhm);
@@ -7036,6 +7101,7 @@ mod tests {
             "JESSE_MODEL_FABLE_PRICE_IN",
             "JESSE_MODEL_FABLE_PRICE_CACHED",
             "JESSE_MODEL_FABLE_PRICE_OUT",
+            "JESSE_MODEL_FABLE_EFFORT",
         ];
         let saved: Vec<(&str, Option<String>)> =
             vars.iter().map(|k| (*k, std::env::var(k).ok())).collect();
@@ -7052,15 +7118,15 @@ mod tests {
         );
         assert_eq!(unarmed.login_model, None);
 
-        std::env::set_var("JESSE_MODEL_FABLE_MODEL", "claude-fable-5-1");
-        std::env::set_var("JESSE_MODEL_FABLE_VERSION", "5.1");
+        std::env::set_var("JESSE_MODEL_FABLE_MODEL", "claude-fable-5-2");
+        std::env::set_var("JESSE_MODEL_FABLE_VERSION", "5.2");
         let armed = fable_env_entry();
         assert!(
             armed.configured,
             "the slug is the whole of its configuration"
         );
-        assert_eq!(armed.login_model.as_deref(), Some("claude-fable-5-1"));
-        assert_eq!(armed.subagent_model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(armed.login_model.as_deref(), Some("claude-fable-5-2"));
+        assert_eq!(armed.subagent_model.as_deref(), Some("claude-fable-5-2"));
         assert!(
             armed.backend.is_none(),
             "no base url and no token: the login is the credential"
@@ -7072,15 +7138,125 @@ mod tests {
             Capability::Write,
             "the same posture as opus: same harness, same record, same login"
         );
-        assert_eq!(armed.label, "Claude Fable 5.1");
+        assert_eq!(armed.label, "Claude Fable 5.2");
         assert_eq!(
             (
                 armed.price.in_per_m,
                 armed.price.cached_per_m,
                 armed.price.out_per_m
             ),
-            (10.0, 0.25, 50.0),
-            "Fable 5.1's deck — its cache reads are 0.025x input, not a tenth"
+            (8.0, 0.20, 40.0),
+            "Fable 5.2's deck — its cache reads are 0.025x input, not a tenth"
+        );
+        // 5.2's measured scale, at the default the CLI sends it with no `--effort`.
+        assert_eq!(
+            armed.effort,
+            Some(EffortScale::scale(&["medium", "xhigh", "max"], "medium"))
+        );
+
+        // Pinned back to 5.1, the entry keeps 5.1's measured scale, whose default (`high`) no
+        // env override could restore — the reason the built-in is chosen by slug.
+        std::env::set_var("JESSE_MODEL_FABLE_MODEL", "claude-fable-5-1");
+        assert_eq!(
+            fable_env_entry().effort,
+            Some(EffortScale::scale(&["high", "max"], "high"))
+        );
+        // An unarmed entry, or one armed with a slug this build has never seen, gets 5.2's.
+        assert_eq!(
+            fable_effort_scale(None),
+            EffortScale::scale(&["medium", "xhigh", "max"], "medium")
+        );
+        assert_eq!(
+            fable_effort_scale(Some("claude-fable-5-3")),
+            EffortScale::scale(&["medium", "xhigh", "max"], "medium")
+        );
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// `gemini-flash` RUNS GEMINI 4 HYDROGEN BY DEFAULT, the model Google names the
+    /// "Recommended upgrade from Gemini 3.8 Flash", and everything that follows the slug moves
+    /// with it: the version and label the picker shows, the deck the badge prices, and the
+    /// speech slug the hosted transcription engine names. The id does not move, so a selection
+    /// persisted as `gemini-flash` still resolves. The operator's pin-back is the env pair, and
+    /// it moves every one of those together too.
+    #[test]
+    fn gemini_flash_defaults_to_gemini_4_hydrogen_and_the_env_pins_it_back() {
+        let _g = ENV_LOCK.lock_ok();
+        let extra = [
+            "JESSE_MODEL_GEMINI_FLASH_VERSION",
+            "JESSE_MODEL_GEMINI_FLASH_PRICE_IN",
+            "JESSE_MODEL_GEMINI_FLASH_PRICE_CACHED",
+            "JESSE_MODEL_GEMINI_FLASH_PRICE_OUT",
+        ];
+        let saved: Vec<(&str, Option<String>)> = MODEL_ENV_VARS
+            .iter()
+            .chain(extra.iter())
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for k in MODEL_ENV_VARS.iter().chain(extra.iter()) {
+            std::env::remove_var(k);
+        }
+
+        std::env::set_var("JESSE_MODEL_GEMINI_FLASH_AUTH_TOKEN", "g-key");
+        let m = gemini_flash_env_entry(300, None);
+        assert_eq!(
+            m.id, "gemini-flash",
+            "the id names the tier and does not move"
+        );
+        assert!(m.configured, "armed by its token alone");
+        let (base, token, slug) = m.backend.clone().expect("armed");
+        assert_eq!(base, GEMINI_OPENAI_BASE_URL);
+        assert_eq!(token, "g-key");
+        assert_eq!(slug, "gemini-4-hydrogen");
+        assert_eq!(m.subagent_model.as_deref(), Some("gemini-4-hydrogen"));
+        assert_eq!(m.version.as_deref(), Some("4 Hydrogen"));
+        assert_eq!(m.label, "Gemini 4 Hydrogen");
+        assert_eq!(
+            (m.price.in_per_m, m.price.cached_per_m, m.price.out_per_m),
+            (1.50, 0.075, 7.50),
+            "Hydrogen's flat deck, not 3.8 Flash's introductory one"
+        );
+        assert_eq!(m.harness, DIRECT_ID);
+        assert_eq!(m.wire, Wire::Chat);
+        // The quirks were re-measured on Hydrogen and held; they must not drift with the slug.
+        assert_eq!(m.quirks.reasoning_effort_supported, Some(true));
+        assert_eq!(m.quirks.multiple_system_messages, Some(false));
+        assert_eq!(m.quirks.strict_tools, Some(false));
+        assert_eq!(
+            m.transcription.as_ref().map(|t| t.model.as_str()),
+            Some("gemini-4-hydrogen"),
+            "the speech engine names the entry's own slug"
+        );
+
+        // Pinning back is configuration, and every derived field follows it.
+        std::env::set_var("JESSE_MODEL_GEMINI_FLASH_MODEL", "gemini-3.8-flash");
+        std::env::set_var("JESSE_MODEL_GEMINI_FLASH_VERSION", "3.8 Flash");
+        std::env::set_var("JESSE_MODEL_GEMINI_FLASH_PRICE_IN", "0.75");
+        std::env::set_var("JESSE_MODEL_GEMINI_FLASH_PRICE_CACHED", "0.075");
+        std::env::set_var("JESSE_MODEL_GEMINI_FLASH_PRICE_OUT", "3.75");
+        let pinned = gemini_flash_env_entry(300, None);
+        assert_eq!(
+            pinned.backend.as_ref().map(|(_, _, s)| s.as_str()),
+            Some("gemini-3.8-flash")
+        );
+        assert_eq!(pinned.label, "Gemini 3.8 Flash");
+        assert_eq!(
+            (
+                pinned.price.in_per_m,
+                pinned.price.cached_per_m,
+                pinned.price.out_per_m
+            ),
+            (0.75, 0.075, 3.75)
+        );
+        assert_eq!(
+            pinned.transcription.as_ref().map(|t| t.model.as_str()),
+            Some("gemini-3.8-flash")
         );
 
         for (k, v) in saved {
@@ -9146,9 +9322,9 @@ auth_token_env = "JESSE_TEST_FW_TOKEN"
             assert_eq!(cap.endpoint.as_deref(), Some(FIREWORKS_AUDIO_BASE_URL));
             assert!(cap.timestamps);
         }
-        let g = gemini_transcription("gemini-3.8-flash");
+        let g = gemini_transcription("gemini-4-hydrogen");
         assert_eq!(g.wire, TranscriptionWire::ChatInputAudio);
-        assert_eq!(g.model, "gemini-3.8-flash", "the entry's own slug");
+        assert_eq!(g.model, "gemini-4-hydrogen", "the entry's own slug");
         assert_eq!(g.endpoint, None, "the entry's own host");
         assert!(!g.timestamps);
         assert!(opus_entry().transcription.is_none());

@@ -105,7 +105,7 @@ pub struct TranscriptionCapability {
 pub struct HostedTarget {
     /// The registry entry's id (`gemini-flash`).
     pub id: String,
-    /// The registry entry's label (`Gemini 3.8 Flash`).
+    /// The registry entry's label (`Gemini 4 Hydrogen`).
     pub label: String,
     /// The base URL the request goes to: the capability's endpoint, or the entry's own.
     pub base_url: String,

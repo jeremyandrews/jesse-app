@@ -402,7 +402,7 @@ Answer the question I asked, not the one you wish I had asked.
 #
 #     id                 model                     version         deck (in / cached / out)
 #     gemini-pro         gemini-3.1-pro-preview    3.1 Pro         2.00 / 0.20  / 12.00
-#     gemini-flash       gemini-3.8-flash          3.8 Flash       0.75 / 0.075 /  3.75
+#     gemini-flash       gemini-4-hydrogen         4 Hydrogen      1.50 / 0.075 /  7.50
 #     gemini-flash-lite  gemini-3.5-flash-lite     3.5 Flash-Lite  0.30 / 0.03  /  2.50
 #
 #     JESSE_MODEL_GEMINI_PRO_AUTH_TOKEN=...          # an AI Studio / Gemini API key
@@ -416,14 +416,18 @@ Answer the question I asked, not the one you wish I had asked.
 # release. Worth knowing about that one: `gemini-3.1-pro-preview` is a PREVIEW model and no
 # Gemini 3.x Pro has ever reached GA — the newest stable Pro is `gemini-2.5-pro` from June
 # 2025 — so there is no stable slug to prefer, and Google retired its predecessor on about
-# four months' notice.
+# four months' notice. Gemini 4 dropped the tier names: Google calls `gemini-4-hydrogen` the
+# "Recommended upgrade from Gemini 3.8 Flash", which is why `gemini-flash` now runs it, but
+# names no Pro successor (`gemini-4-carbon` is "our strongest reasoning model"), so
+# `gemini-pro` stays on 3.1 Pro until someone decides Carbon is its tier.
 #
-# TWO THINGS THE COST BADGE UNDER-REPORTS FOR THIS FAMILY, both because `PriceDeck` is four
-# flat rates with no tier and no clock. Gemini 3.1 Pro charges DOUBLE input and 1.5x output
-# on a prompt over 200k tokens (4.00 / 0.40 / 18.00), and the Flash deck above is an
-# INTRODUCTORY rate that becomes 1.50 / 0.15 / 7.50 on 2027-01-01. Neither changes by itself:
-# on that date, either set `JESSE_MODEL_GEMINI_FLASH_PRICE_{IN,CACHED,OUT}` here or ship a
-# release. Context-cache STORAGE (billed per hour) has no field at all.
+# WHAT THE COST BADGE UNDER-REPORTS FOR THIS FAMILY, because `PriceDeck` is four flat rates
+# with no tier and no clock. Gemini 3.1 Pro charges DOUBLE input and 1.5x output on a prompt
+# over 200k tokens (4.00 / 0.40 / 18.00), and that does not change by itself. Context-cache
+# STORAGE (billed per hour on Pro and Flash-Lite) has no field at all; Hydrogen has no explicit
+# caching, so no storage charge. A deploy pinned back to `gemini-3.8-flash` must also set
+# `JESSE_MODEL_GEMINI_FLASH_PRICE_{IN,CACHED,OUT}`: its deck is 0.75 / 0.075 / 3.75 through
+# 2026-12-31 and 1.50 / 0.15 / 7.50 after.
 #
 # NO QUOTA SCOPE. `GET /jesse/models` reports `usage_scope: null` for all three and the picker
 # shows no usage subtitle, the same as a `local` model: the bridge can read Anthropic,
@@ -493,12 +497,12 @@ Answer the question I asked, not the one you wish I had asked.
 #               the same model with the same window for `claude-opus-5-5[1m]`.
 #   * `fable` — Claude Fable on the same login (kind "subscription"). ARMED BY ITS SLUG,
 #               because there is no token to set:
-#                   JESSE_MODEL_FABLE_MODEL=claude-fable-5-1
-#                   JESSE_MODEL_FABLE_VERSION=5.1              # picker reads "Claude Fable 5.1"
+#                   JESSE_MODEL_FABLE_MODEL=claude-fable-5-2
+#                   JESSE_MODEL_FABLE_VERSION=5.2              # picker reads "Claude Fable 5.2"
 #               Unset, the apps hide it (GET /jesse/models still reports it, with
-#               configured=false). Verified on the
-#               subscription login 2026-09-10: a real turn ran `claude-fable-5-1` with
-#               apiKeySource "none". Level `write`, like opus: same harness, same record.
+#               configured=false). Verified on the subscription login 2026-11-17: real
+#               turns ran `claude-fable-5-2` with no API-key variable set (5.1 was verified
+#               the same way on 2026-09-10). Level `write`, like opus: same harness, same record.
 #   * `sonnet` — Claude Sonnet on the same login (kind "subscription"), armed by its slug
 #               exactly as fable is:
 #                   JESSE_MODEL_SONNET_MODEL=claude-sonnet-5-5
@@ -513,7 +517,7 @@ Answer the question I asked, not the one you wish I had asked.
 # Pin opus when you arm fable or sonnet, so "Claude Opus" in the picker stays Opus if the CLI's own
 # default ever moves. A subscription entry is NOT health-probed (the login has no endpoint
 # to probe), so a slug the login does not serve shows up as a failed turn, not a red row.
-# Its deck (Fable 5.1: 10.00 / 0.25 / 50.00) is what the turn WOULD cost on the metered API,
+# Its deck (Fable 5.2: 8.00 / 0.20 / 40.00) is what the turn WOULD cost on the metered API,
 # the same thing the badge reports for opus; override with JESSE_MODEL_FABLE_PRICE_*.
 #
 # Adding a model is a PURE CONFIG EDIT here plus ONE env var for its token — no bridge

@@ -120,6 +120,10 @@ struct MacShellView: View {
         .environment(\.strandRecord, StrandRecordAction { slug, section in
             showStrandRecord(slug, section: section)
         })
+        // The conversation list's poll, once per window and HERE rather than on the Chats tab:
+        // a conversation started on the phone should be in the sidebar when Jeremy switches
+        // back to Chats, whichever tab he was reading. See `MacSessionPoller`.
+        .macSessionPolling()
         // The menu bar reads this window's commands while the window is key.
         .focusedSceneValue(\.macWindowCommands, commands)
         .onChange(of: tab, initial: true) { _, now in commands.tab = now }
@@ -296,14 +300,19 @@ struct MacRootView: View {
             // accumulate and read exactly like duplicates. The phone already prunes on its
             // list appear; this is the Mac's half.
             pruneEmptyThreads()
-            await coordinator.refreshSessions(context: context)
+            // Debounced like every automatic trigger, so the Chats tab coming back on screen
+            // right after a poll tick or an activation pull does not pay for a second one.
+            await coordinator.refreshSessionsUnlessRecent(context: context)
         }
         // The sidebar's half of the wake story. A Mac that slept holds a dead socket and
         // a `lastError` from the first request that noticed; without a re-pull on wake
         // the list stays stale and the window stays red until someone hits the refresh
         // button. See `MacWake`.
+        //
+        // Debounced: a return to `.active` arrives together with the app's
+        // `didBecomeActiveNotification`, which `macSessionPolling` also pulls on.
         .onReconnect {
-            Task { await coordinator.refreshSessions(context: context) }
+            Task { await coordinator.refreshSessionsUnlessRecent(context: context) }
         }
         // AND WHAT THIS MAC ANSWERED WHILE IT WAS AWAY. An exchange the on-device model
         // handled with the Studio asleep is persisted, not sent, because there was nowhere to

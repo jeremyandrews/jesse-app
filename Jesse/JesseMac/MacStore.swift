@@ -246,6 +246,19 @@ final class MacCoordinator {
     /// Guards `refreshSessions` against overlapping runs, exactly as the phone does.
     private var isRefreshingSessions = false
 
+    /// When the last `refreshSessions` that actually went to the bridge STARTED. Read by
+    /// `refreshSessionsUnlessRecent` (the debounce every automatic trigger goes through) and by
+    /// `MacSessionPoller`, which measures its cadence from here so a ⌘R or an activation
+    /// refresh pushes the next tick back instead of being followed by one a second later.
+    /// Ignored by observation: nothing renders it, and a write per refresh must not
+    /// re-evaluate the window.
+    @ObservationIgnored private(set) var lastSessionRefreshStartedAt: Date?
+
+    /// Consecutive `refreshSessions` failures, from any trigger; zero after any completed round
+    /// trip (`304` or a new list). The poller's backoff input. Ignored by observation for the
+    /// same reason as above.
+    @ObservationIgnored private(set) var sessionRefreshFailures = 0
+
     /// Context held against a thread that was OPENED without firing a turn — today
     /// only the Today tab's Discuss. There is nothing for the agent to do until Jeremy
     /// has said what he wants, so the frozen `TodayDiscuss.prompt` (the item's markdown,
@@ -1206,6 +1219,7 @@ final class MacCoordinator {
         guard !isRefreshingSessions else { return }
         isRefreshingSessions = true
         defer { isRefreshingSessions = false }
+        lastSessionRefreshStartedAt = Date()
         drainSessionDeletions()
         let cli = makeClient(configStore.config)
         do {
@@ -1217,6 +1231,7 @@ final class MacCoordinator {
                 // "disconnected" banner: `send` cleared this flag and nothing else did,
                 // so a Mac that failed a sync at 2am still looked broken at 9.
                 lastError = nil
+                sessionRefreshFailures = 0
                 return
             case let .conversations(list, deleted, etag):
                 await upsert(list, deleted: deleted, client: cli, context: context)
@@ -1228,10 +1243,25 @@ final class MacCoordinator {
                 // redundant full pull.
                 sessionsETag = etag
                 lastError = nil
+                sessionRefreshFailures = 0
             }
         } catch {
             lastError = Self.friendly(error)
+            sessionRefreshFailures += 1
         }
+    }
+
+    /// `refreshSessions`, unless one STARTED within `MacSessionPollRule.debounce` (2 s). The entry
+    /// point for every automatic trigger outside the poll's cadence (launch, a return to the
+    /// foreground, a wake, the app becoming frontmost), so two of them landing together cost one
+    /// list call. A poll tick calls `refreshSessions` itself: it is scheduled a full interval
+    /// after the last start, so it can never land inside the window. The
+    /// toolbar button and the menu's Refresh still call `refreshSessions` directly: a click is
+    /// a request, not a signal, and the re-entrancy guard already covers a click during a pull.
+    func refreshSessionsUnlessRecent(context: ModelContext) async {
+        guard !MacSessionPollRule.isDebounced(lastStart: lastSessionRefreshStartedAt, now: Date())
+        else { return }
+        await refreshSessions(context: context)
     }
 
     /// The same FOUR passes the phone runs, in the same order, so the two devices cannot

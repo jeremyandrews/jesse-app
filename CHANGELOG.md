@@ -14,6 +14,48 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (223)] - 2026-11-19
+
+**The Mac's conversation list keeps itself current: a conversation started or updated on another
+device appears in the sidebar within about 30 seconds while Jesse is frontmost, with no reload
+click.** Before this the Mac pulled the list at launch, on a wake and on ⌘R only, because a Mac
+window left open never leaves `scenePhase == .active`. Mac only; iPhone behaviour is unchanged.
+
+- **Cadence (`MacSessionPollRule`, pure).** Every 30 s while Jesse is the frontmost app, every
+  5 min while it runs behind another app. No polling while the bridge is known unreachable
+  (`BridgeReachabilityModel.shared.state == .unreachable`; `.unknown` still polls) or while the Mac
+  is asleep (`NSWorkspace.willSleepNotification` / `didWakeNotification`). Consecutive failures
+  double the interval, capped at 5 min; a completed round trip resets it. While unreachable, a
+  reachability probe (`GET /health`, already throttled to one per 30 s) is requested at the cap, so a
+  window nobody touches notices the bridge coming back and resumes.
+- **One fetch path.** Every tick is the existing `MacCoordinator.refreshSessions(context:)`, so its
+  ETag, its re-entrancy guard and its write-the-ETag-after-the-adopt ordering are untouched. An
+  idle list is a `304` with no store writes. No bridge or API change.
+- **Pulls at once on activation.** `NSApplication.didBecomeActiveNotification` refreshes outside the
+  cadence, so switching back to Jesse from another app pulls immediately.
+- **No double firing.** Every automatic trigger (launch, the `scenePhase` return to `.active`, the
+  wake, activation) goes through the new `refreshSessionsUnlessRecent`, which drops a call landing
+  within 2 s of the last pull's start. The poller measures its cadence from that same start, so a
+  pull from any trigger, ⌘R included, pushes the next tick back a full interval. A click during a
+  pull is still the re-entrancy guard's.
+- **Where it runs.** `MacSessionPoller` is attached once per window on `MacShellView`, the window's
+  root, so it runs whichever tab is on screen, as a `.task` loop on `Task.sleep` that a nudge
+  (activation, deactivation, reachability, sleep, wake) cuts short, and is cancelled with the
+  window. No `Timer`.
+- **A failed tick does not stay red.** `refreshSessions` already cleared `lastError` on any completed
+  round trip; it now also keeps `sessionRefreshFailures`, the backoff input.
+- **Tests:** `MacSessionPollerTests` (new): the rule (frontmost, background, unknown, unreachable,
+  asleep, backoff growth and cap, reset on success, remaining, debounce), a tick after a `304` makes
+  no store writes, a tick after a changed list adopts the new conversation, a failed then successful
+  tick leaves `lastError` nil, two automatic triggers together cost one list call, and the loop
+  ticks, stops on cancel, halts while unreachable or asleep and resumes on a nudge.
+  `MacLiveSessionPollTests` (new, skipped unless `MR1_BRIDGE` is set) is the live check: the real
+  window root hosted off screen against a running bridge, an in-memory store, no click.
+- **Measured against the live bridge (5,721 conversations, 2026-11-19):** idle at the frontmost
+  cadence, 4 list calls in 2.0 min, all `304` with no body (2.0 a minute). A conversation started
+  with `curl` `POST /jesse` was in the sidebar 26.4 s later, brought in by one `200`. Screenshots in
+  `docs/mr1-screenshots/`.
+
 ## [bridge 0.210.0] - 2026-11-17
 
 **The Codex harness moves to GPT 6.2 Astra (`gpt-6.2-astra`) on codex-cli 0.169.0, with GPT 6.2

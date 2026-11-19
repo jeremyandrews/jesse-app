@@ -154,8 +154,9 @@ public struct TodayListView: View {
                                         onTodayCount: { [model] slug in
                                             StrandOnToday.items(forSlug: slug,
                                                                 in: model.snapshot).count
-                                        })
-                            .navigationTitle("Strands")
+                                        },
+                                        runs: runs)
+                            .navigationTitle("Work")
                     }
                 }
             } else {
@@ -195,14 +196,17 @@ public struct TodayListView: View {
                 }
             } else if let strands {
                 if let runs {
-                    // The Runs list: a sheet over the board, not a tab of its own.
+                    // The Runs list of every run across every project: a sheet over the
+                    // board, one tap away, read daily. A text label, not an icon, so it says
+                    // what it opens.
                     ToolbarItem(placement: .primaryAction) {
                         Button {
                             runs.presentsList = true
                         } label: {
-                            Label("Studio runs", systemImage: "desktopcomputer")
+                            Text("Runs")
                         }
-                        .accessibilityLabel("Studio runs")
+                        .accessibilityLabel("Runs")
+                        .accessibilityHint("Every run across all projects")
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {

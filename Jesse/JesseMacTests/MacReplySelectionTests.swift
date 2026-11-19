@@ -121,9 +121,8 @@ final class MacReplySelectionTests: XCTestCase {
 
     private func host<V: View>(_ view: V, width: CGFloat = 1200) -> NSHostingView<V> {
         let host = NSHostingView(rootView: view)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 900),
-                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 900),
+                                    styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = host
         windows.append(window)
         host.layoutSubtreeIfNeeded()

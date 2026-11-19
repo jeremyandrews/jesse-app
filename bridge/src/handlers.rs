@@ -3042,6 +3042,22 @@ pub fn app(state: AppState) -> Router {
             "/jesse/runs/:run_id/close",
             post(crate::hostrun::jesse_run_close),
         )
+        // A flag on the run, never a move or a delete: the list leaves archived runs out.
+        .route(
+            "/jesse/runs/:run_id/archive",
+            post(crate::hostrun::jesse_run_archive),
+        )
+        .route(
+            "/jesse/runs/:run_id/unarchive",
+            post(crate::hostrun::jesse_run_unarchive),
+        )
+        // The Work view's one shared timestamp: when the board was last looked at, on any
+        // device. Same auth as the run routes; works whether or not runs are enabled.
+        .route(
+            "/jesse/work/last-look",
+            get(crate::hostrun::work::jesse_work_last_look)
+                .post(crate::hostrun::work::jesse_work_last_look_set),
+        )
         .route("/jesse/strands", get(crate::strands::jesse_strands))
         .route("/jesse/strands/:slug", get(crate::strands::jesse_strand))
         .route(
@@ -3122,6 +3138,17 @@ pub fn app(state: AppState) -> Router {
         .route("/jesse/schedule/reload", post(jesse_schedule_reload))
         .route("/jesse/schedule/:id/fire", post(jesse_schedule_fire))
         .route("/jesse/schedule/:id/enable", post(jesse_schedule_enable))
+        // TIMED REMINDERS, beside the schedule and on its auth: the list, and the two verbs the
+        // app's `JESSE_REMINDER` notification actions call. See `remindersvc`.
+        .route("/jesse/reminders", get(crate::remindersvc::jesse_reminders))
+        .route(
+            "/jesse/reminders/:id/done",
+            post(crate::remindersvc::jesse_reminder_done),
+        )
+        .route(
+            "/jesse/reminders/:id/snooze",
+            post(crate::remindersvc::jesse_reminder_snooze),
+        )
         // RECORDED AUDIO, transcribed on this machine. The upload route is THE ONE DOOR audio
         // enters by, and it carries its own limit — the audio cap, enforced as the body
         // streams — in place of the one below, which is sized for base64 photos. See

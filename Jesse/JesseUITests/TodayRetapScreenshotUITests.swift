@@ -74,7 +74,7 @@ final class TodayRetapScreenshotUITests: XCTestCase {
         waitSelected(todaySegment, "the day is still showing")
 
         // The board, then away to Chats and back: the first tap keeps the board.
-        let strandsSegment = app.segmentedControls.buttons["Strands"]
+        let strandsSegment = app.segmentedControls.buttons["Work"]
         strandsSegment.tap()
         XCTAssertTrue(element(app, containing: strand).waitForExistence(timeout: 30),
                       "the board has drawn")

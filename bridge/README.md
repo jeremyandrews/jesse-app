@@ -77,7 +77,7 @@ A clean `cargo build --release` is the gate — if it doesn't compile, it isn't 
 ### Under launchd: the open files limit
 
 launchd starts an agent with a soft open files limit of **256**, and a gateway-on turn costs the
-bridge 122 descriptors on macOS and 146 on Linux (a socket, a connection and an upstream's pipes
+bridge 127 descriptors on macOS and 152 on Linux (26 servers, 0.208.0; a socket, a connection and an upstream's pipes
 per server; measured by `tests/gateway_fds.rs`), so two turns at once ran out (`EMFILE`, 0.189.0). The bridge raises
 its own soft limit to the hard limit at startup, capped at 8192, logs one line saying so, and
 reports the limit as `open_files_limit` on authenticated `/health`; the plist keys below are the
@@ -792,10 +792,10 @@ bearer_env = "SLACK_ADAPTER_TOKEN"
   environment), `--max-result-bytes`, then `-- <command> [args…]`. It is how a vendor server
   becomes a pod; point a row at it with an `[mcp.<name>]` override.
 - **The activity ledger** is `<state_dir>/activity/YYYY-MM-DD.jsonl`: one content-free line per
-  turn and per gateway call, kept 90 days. Since 0.203.0 also per model call, egress request,
+  turn and per gateway call, kept 90 days. Since 0.211.0 also per model call, egress request,
   vault write-lock grant and bridge commit (see the proxies section below).
 
-### The model proxy and the egress proxy (`[proxy]`, `[egress]`, `[sandbox]`, 0.203.0)
+### The model proxy and the egress proxy (`[proxy]`, `[egress]`, `[sandbox]`, 0.211.0)
 
 Off by default; both need `[gateway] enabled = true`. SECURITY.md has the posture, the measured
 facts, the CA trust table and the residuals; `src/proxy/` is the code.
@@ -859,6 +859,63 @@ hosts = ["www.ecb.europa.eu", ".frankfurter.dev"]
   runs one real call per route through the proxy and compares the ledger with the CLI's own
   usage. `K04_FP_VAULT=... K04_FP_URLS=... [K04_FP_REPLAY=1] cargo test --lib
   false_positive_rate -- --ignored --nocapture` measures the content check's false positives.
+
+### The iMCP helper (`[mcp.imcp] command`, 0.206.0)
+
+The `imcp` row starts `/Applications/iMCP.app/Contents/MacOS/imcp-server`, the helper inside
+the installed app. A deployment can run another build of the helper instead:
+
+```toml
+[mcp.imcp]
+command = "/opt/imcp/imcp-server"   # an absolute path; imcp only
+```
+
+The gateway resolves every upstream through `resolve_row`, so the path reaches every place the
+helper is started: a Claude Code, Codex or `direct` turn's `imcp` upstream, the containment
+battery's probe children, and its pre-flight. Like every `[mcp.<name>]` key it is read only while
+the gateway is on. With the gateway off, children start the table's path. `imcp` is the only row
+whose command can be configured (`COMMAND_OVERRIDE_ROWS`), and the path must be absolute: a
+relative path, or a `command` on any other row, stops the bridge at boot. Without the key,
+nothing changes.
+
+**Why a patched helper exists.** The stock helper (iMCP 1.4.1) browses `_mcp._tcp` and then
+connects to the browsed *service* endpoint, so Network.framework resolves the service and
+connects on whichever interface mDNSResponder answers on. On the Studio that answer is an
+OrbStack VM bridge (`bridge104`, ifindex 48, address `192.168.117.0`). The scoped connect
+there fails with `EADDRNOTAVAIL`. The Bonjour resolver then waits for another answer that never
+comes, and the helper, which has no connect deadline, stays in `.preparing` and never answers
+`initialize`. Measured 2026-11-15: stock 0 of 26 starts answered within 5 s; the patched helper
+answered 26 of 26, `tools/list` in 62–128 ms. The patch pins the connection to loopback; the
+app always runs on the same Mac.
+
+**Provenance of the patched helper:**
+
+- Repository: `https://github.com/mattt/iMCP`, tag `1.4.1` (`b84f266`), which matches the
+  installed app's `CFBundleShortVersionString` 1.4.1.
+- Local branch `jesse-local-resolve` (not published upstream), two commits:
+  `919ba3b` "Connect to the iMCP app over loopback, not the resolved Bonjour interface" and
+  `e8c2dc7` "Build with Swift 6.4: capture self weakly in the outer state handlers" (1.4.1 does
+  not compile under Swift 6.4 without it; no behaviour change).
+- Built with Xcode 27.2: `xcodebuild -project iMCP.xcodeproj -target imcp-server -configuration
+  Release CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build`, ad-hoc signed.
+  The 2026-11-15 build's SHA-256 is
+  `ede97943536fe9c8ddbd959d9cac1b674695575234206c291ce4557d63e01ede`.
+- The behavioural change, in `CLI/main.swift`'s `MCPService.run()`:
+
+```diff
++                let connectionParameters = parameters.copy()
++                connectionParameters.requiredInterfaceType = .loopback
++
+                 // Create the proxy
+                 let proxy = StdioProxy(
+                     endpoint: endpoint,
+-                    parameters: parameters,
++                    parameters: connectionParameters,
+```
+
+The app still advertises over Bonjour, and the helper still browses for it and takes the port
+from the service, so an app restart on a new port is still found. Only the interface the
+connection uses is fixed.
 
 ### Coding agents on the cluster (`[devjob]`, 0.186.0)
 
@@ -997,6 +1054,68 @@ That is where a bridge session reads the work; it cannot read the run root. A ru
 deleted with its worktree only once it is merged into the repository's `main`, and is restored
 from the local branch for a reply. Cleanup, reconcile and the disk cap never delete
 `<root>/local/`.
+
+**The Work view's fields (0.203.0, `src/hostrun/work.rs`).** All derived on read; nothing is
+written to a note.
+
+- Every run served (`GET /jesse/runs`, `GET /jesse/runs/:id`, a reply's and a cancel's answer)
+  carries `title` (its Drafts line's title, else its prompt's H1 without its leading id, else its
+  branch as words, never its run id), `last_line` (the last non blank line of the readable log,
+  at most 200 characters, or `null`) and `report_line` (the first line of its newest report, or
+  `null`).
+- Every `drafts[]` item of `GET /jesse/strands` carries `title`, `startable` and
+  `startable_reason`. A line's title is its text without the id, any `(waits on: …)` and the
+  wiki links it ends on, Markdown stripped, the words before the first `": "`, cut at 57
+  characters on a word with `…`. `startable` is `studio_runnable` and: not under `### Later`, no
+  `(waits on: …)`, the draft says `devjob-host: studio`, and no live run of the step.
+- `GET /jesse/work/last-look` answers `{ "last_look": "<RFC 3339>" | null }`;
+  `POST /jesse/work/last-look` sets it to now. One value for every device, in
+  `<state_dir>/work-last-look.json`, behind the paired device token.
+- `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
+  refused with 409: the run asked a question, and an empty continue would answer it blind.
+
+**The board row's phrases (0.205.0, `src/hostrun/work/row.rs`).** Three more fields on every
+strand of `GET /jesse/strands`, derived on read from what the note already says, so a Work board
+row can say what a project is about and what is the owner's to do. No model call, nothing written
+back, `null` when the note gives nothing usable. Design and rules: `docs/ho5-work-board-rows.md`.
+
+- `headline`: the lead clause of `**Now:**` in plain words (Markdown, parentheticals and PR
+  numbers gone; a bare build number such as `(213)` kept). The sentence naming today's date wins
+  (its weekday and date dropped, its time kept), else the first of more than one word that is not
+  a `No …` remark or a lone verb. A clause opening on step ids is reworded around the step's title
+  (`GO123 merged` → `Merged: arm64 Chromium fallback chain`), or the quoted name after its colon.
+  Branch names, machine short names (`ks1`), paths, commit hashes and other ids are dropped; a run
+  of ids reads `N drafts`; `Jeremy` reads `you`.
+- `your_action`: the first action of a `you:` `**Waiting on:**`: the first gate (cut at `; `), its
+  first sentence, a lead in (`for S23, Part 0:`) and a tail (`, which …`, `, and …`, `, then …`,
+  `boarded …`) dropped. A gate opening on a step's possessive id is that step, from its whole text;
+  leading `-ing` verbs read as instructions; `whether …` reads `decide whether …`; a branch reads as
+  its kind (`on the release branch`). A gate that is a remark about the note (`… of yours`, `… only
+  you can have`, `… is yours to run`) gives way to the first queued line (with the remark's verb).
+  The case is kept as written. `null` for any gate that is not `you:`.
+- `next_title`: the first queued Drafts line, named from its whole text (its first clause; a one
+  or two word label keeps the first clause of its tail), scrubbed as above.
+
+**Archiving (0.204.0).** A flag on `run.json`, never a move or a delete: the run's directory, log
+and reports stay where they are.
+
+- `archived_at` (RFC 3339) and `archived_reason` on the record, absent until a run is archived and
+  after an unarchive; older records read unchanged.
+- `POST /jesse/runs/:id/archive` (paired device token) refuses a `queued`, `running` or `paused`
+  run with 409 naming its status; a `needs_you` or `interrupted` run is closed first (`closed_reason`
+  `archived by Jeremy`). `POST /jesse/runs/:id/unarchive` clears both fields and nothing else. Both
+  are idempotent and silent (no push, no turn), and answer the run as `GET /jesse/runs/:id` does.
+- `GET /jesse/runs` leaves archived runs out; `?archived=only` serves only them, newest archived
+  first; `?archived=all` serves both. `counts` gains `needs_me` (`needs_you`, `interrupted`,
+  `failed`), `moving` (`queued`, `running`, `paused`), `finished` (everything else not archived)
+  and `archived`, over the whole store in the same scan. A run a reply puts back to work shows in
+  the list again while it is moving or waiting, even with `archived_at` still set.
+- The watcher pass, after closing settled runs, archives every `reported`, `cancelled` or `closed`
+  run not already archived when its Drafts line is ticked (`item ticked`), every report has moved
+  to `Inbox/archive/` (`report archived`), or its last status change is more than
+  `AUTO_ARCHIVE_AFTER_DAYS` (14) days old (`finished over 14 days ago`). Never a `needs_you`,
+  `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts,
+  so an Undo is not taken back by the next pass.
 
 ### How `claude` is run
 

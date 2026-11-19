@@ -258,7 +258,7 @@ the four and answers any other request itself with method-not-found (Claude Code
 every server with `server/discover`).
 
 Each turn gets a token: an HMAC-SHA256 over the job id, the capability, the granted server set,
-the turn's egress tier (0.203.0; see "The model proxy and the egress proxy"), the model proxy
+the turn's egress tier (0.211.0; see "The model proxy and the egress proxy"), the model proxy
 route and metering id when the model proxy is on, and an expiry of the turn deadline plus 60 s, under a key generated at boot
 and never written down. The unix socket path is the Studio's access control (a `0700` directory
 per turn under `<state_dir>/gw/`, or `[gateway] socket_dir`). The optional TCP listener
@@ -273,7 +273,7 @@ is revoked with its session, and the directory is removed; a startup sweep remov
 `<state_dir>/activity/YYYY-MM-DD.jsonl`, `0600`, one line per turn (`kind: "turn"`: job id,
 harness, model id, capability, origin `phone` or `schedule:<id>`, start, end, outcome) and per
 gateway call (`kind: "tool_call"`: job id, server, tool, duration, `ok`, `refused`, `failed` or
-`truncated`, request and response byte counts). Since 0.203.0 also `model_call` (job id, route,
+`truncated`, request and response byte counts). Since 0.211.0 also `model_call` (job id, route,
 model id, the provider's four token counts, cost in micro-dollars, status), `egress` (job id,
 tier, HOST, port, `read`/`send`, bytes out and in, `allowed`/`refused` and a reason code),
 `vault_write` (job id, vault-relative path, operation; written where the write-lock broker
@@ -303,7 +303,7 @@ overnight digest from the same lines.
 - **Results are capped per server** (8 MiB, 32 MiB for `browser` and `house`); a larger result
   is withheld as a tool error and recorded `truncated`.
 
-## The model proxy and the egress proxy (0.203.0; off by default)
+## The model proxy and the egress proxy (0.211.0; off by default)
 
 `[proxy] model = true` and `[proxy] egress = true` make the bridge the route to a model and to
 the open web. Both are off by default and the Studio behaves exactly as before until the flags
@@ -1175,6 +1175,7 @@ and read-only). Only the servers named in that config load:
 | `house` | The owner's house model on the home k3s cluster, added 2026-10-10: all twenty-four `mcp__house__*` tools, twelve reads and twelve writes, each write with a recorded `reason`. Registered only when the bridge config has a `[house]` table. See [House model](#house-model-spatial-reads-and-writes-2026-10-10) |
 | `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
 | `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
+| `reminders` | Timed reminders, added 2026-11-10 (bridge 0.208.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0208)
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1354,18 +1355,28 @@ Home Assistant's built-in **Model Context Protocol Server** (the Assist API),
 reached over HTTP at `/api/mcp` with a long-lived access token as a bearer
 credential, declared in the compiled `MAIN_CHILD_MCP_CONFIG` as `homeassistant`.
 
-**All twenty-three advertised tools are granted.** This is the only server in the
+**All twenty-two advertised tools are granted.** This is the only server in the
 set granted whole, and it is a deliberate operator decision rather than an
-oversight: three read intents (`GetLiveContext`, `GetDateTime`,
-`todo_get_items`) and eighteen control intents (`HassTurnOn`, `HassTurnOff`,
-`HassLightSet`, `HassSetPosition`, `HassStopMoving`,
-`HassClimateSetTemperature`, `HassMediaUnpause`, `HassMediaPause`,
-`HassMediaNext`, `HassMediaPrevious`, `HassSetVolume`,
-`HassSetVolumeRelative`, `HassMediaPlayerMute`, `HassMediaPlayerUnmute`,
-`HassMediaSearchAndPlay`, `HassListAddItem`, `HassListCompleteItem`,
-`HassCancelAllTimers`, `HassListRemoveItem`, `HassBroadcast`). Nothing is
-withheld. The list was enumerated live (`initialize` + `tools/list`) against HA
-1.26.0.
+oversight: three read intents (`homeassistant__GetLiveContext`,
+`llm__GetDateTime`, `todo__get_items`) and nineteen control intents
+(`intent__HassTurnOn`, `intent__HassTurnOff`, `intent__HassSetPosition`,
+`intent__HassStopMoving`, `intent__HassCancelAllTimers`, `light__HassLightSet`,
+`climate__HassClimateSetTemperature`, `media_player__HassMediaUnpause`,
+`media_player__HassMediaPause`, `media_player__HassMediaNext`,
+`media_player__HassMediaPrevious`, `media_player__HassSetVolume`,
+`media_player__HassSetVolumeRelative`, `media_player__HassMediaPlayerMute`,
+`media_player__HassMediaPlayerUnmute`, `todo__HassListAddItem`,
+`todo__HassListCompleteItem`, `todo__HassListRemoveItem`,
+`assist_satellite__HassBroadcast`). Nothing is withheld. The list was
+enumerated live (`initialize` + `tools/list`) on 2026-11-17.
+
+**The names changed on 2026-11-17.** Home Assistant now prefixes every MCP tool
+with its domain (`HassTurnOn` became `intent__HassTurnOn`) and no longer
+advertises `HassMediaSearchAndPlay`. The grant still named the old bare names,
+and a grant is an exact-name allowlist on every harness, so for that window no
+child was offered a single house tool. Nothing reported it: the server answered
+and advertised tools. The battery's pre-flight now fails on any granted tool its
+server does not advertise (`preflight_unserved_grants`).
 
 **The count moved from 21 to 23 in a single day**, and that is the part worth
 remembering. `HassBroadcast` (speaks a message through Assist satellites) and
@@ -1386,17 +1397,17 @@ installation's 1199 entities are exposed** — 282 `light`, 36 `switch`, 23
 
 | Asked about | Exposed? | Reachable by a turn? |
 | --- | --- | --- |
-| **Entrance gate** | **Yes**, as `switch.cancello_ingresso` | **Yes** — `HassTurnOn` / `HassTurnOff` operate it |
+| **Entrance gate** | **Yes**, as `switch.cancello_ingresso` | **Yes** — `intent__HassTurnOn` / `intent__HassTurnOff` operate it |
 | **Locks** | No such entity **anywhere in the installation** | No — there is no `lock` domain to grant |
 | **Alarm** | No such entity **anywhere in the installation** | No — there is no `alarm_control_panel` domain to grant |
-| Covers | 4 (Office shutters) | Yes — `HassSetPosition`, `HassStopMoving` |
-| Climate | 23 zones | Yes — `HassClimateSetTemperature` |
-| Pool pump, irrigation | Yes, as switches | Yes — `HassTurnOn` / `HassTurnOff` |
+| Covers | 4 (Office shutters) | Yes — `intent__HassSetPosition`, `intent__HassStopMoving` |
+| Climate | 23 zones | Yes — `climate__HassClimateSetTemperature` |
+| Pool pump, irrigation | Yes, as switches | Yes — `intent__HassTurnOn` / `intent__HassTurnOff` |
 
 So "locks and alarm are granted" is **not** an accurate description of this
 posture, and the reason is that those entities do not exist rather than that
 they were withheld. If either is ever added to HA and exposed, it becomes
-reachable **with no bridge change at all** — `HassTurnOn`/`HassTurnOff` are
+reachable **with no bridge change at all** — `intent__HassTurnOn`/`intent__HassTurnOff` are
 multiplexers over every exposed domain, and their own descriptions say they
 lock/unlock a lock and open/close a cover. That is the property to keep in mind
 when adding entities to HA.
@@ -1405,7 +1416,7 @@ when adding entities to HA.
 
 **A main turn holds both this server and a headless browser.** A malicious page
 that the browser visits can attempt to steer the turn into calling
-`HassTurnOn` — and the turn runs as the operator's own unix user, triggered from
+`intent__HassTurnOn` — and the turn runs as the operator's own unix user, triggered from
 a phone, with **no human in the loop mid-turn**. There is no confirmation step
 between a model deciding to open the gate and the gate opening.
 
@@ -2523,6 +2534,30 @@ launchd-spawned job in the `gui/501` Aqua domain discovered the service and comp
 `messages_fetch`, matching the interactive read exactly. Anything that changes the bridge's
 launchd domain invalidates that proof.
 
+### The iMCP helper's path is configurable, for `imcp` only (0.206.0)
+
+By default the `imcp` row starts `/Applications/iMCP.app/Contents/MacOS/imcp-server`, the
+helper shipped inside the app. `[mcp.imcp] command = "<absolute path>"` replaces it. The
+Studio uses this to run a locally patched helper that connects to the app over loopback,
+because the stock helper wedges when the Bonjour resolve answers on a VM bridge interface
+(bridge README, "The iMCP helper", has the cause and the patch's provenance).
+
+What this does and does not widen:
+
+- **Only `imcp`.** `COMMAND_OVERRIDE_ROWS` names one row. A `command` on any other row stops the
+  bridge at boot, so a config file still cannot point a credentialed server (Google, GitHub,
+  Slack) at another binary. `imcp` holds no credential and gets no variable beyond `BASE_ENV`.
+  It reads nothing itself: the app does the reading, under its own grant.
+- **Absolute paths only**, so the helper is never resolved off `PATH`.
+- **Gateway on only**, like every `[mcp.<name>]` key. With the gateway off, every child starts
+  the table's path, and the shipped posture cannot be edited from a config file.
+- **The patched helper lives in a directory Jeremy's user can write to, and it is ad-hoc
+  signed.** Anything running as that user could replace it. That is the same trust every
+  `~/.local/bin` server on the Studio already carries. It is not new exposure, but it is not
+  the app bundle's signature either.
+- **The tool surface is unchanged.** The helper proxies whatever the app advertises, and the
+  grant (`messages_fetch`, `maps_search`) is still applied by the gateway.
+
 ### iMessage is only alive while iMCP.app is running — accepted
 
 iMCP.app is a **menubar application in Jeremy's GUI login session**, not a launchd-supervised
@@ -3009,6 +3044,45 @@ Over SSH, `launchctl getenv PATH` prints nothing; take `EnvironmentVariables.PAT
 bridge plist with `plutil -extract` instead. Rotate the token before it expires by minting a new
 one on a machine with the admin kubeconfig (`kubectl -n jesse create token jesse
 --duration=2160h`) and replacing the file; see the k3s README, "Jesse's access to kc1".
+
+## Timed reminders (`reminders`, 0.208.0)
+
+"Remind me at 6:45 to start the pancakes" and "every weekday at 7:30 remind me to take the bins
+out" are set from any turn through `reminders`, this repository's own `jesse-reminders-mcp`, the
+twenty-eighth server in the main set on Claude Code and Codex. At the minute, in the active
+profile's zone, the bridge sends one push to the registered phone with `Done` and `Snooze 10 min`
+actions.
+
+### What the server can do
+
+| | |
+|---|---|
+| Tools | `create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`: the whole `tools/list` (`ReminderTool::ALL`), **all four granted, none withheld**, pinned by equality in `the_reminders_grant_is_all_four_tools_and_nothing_else` |
+| Classes | `create_reminder`, `cancel_reminder` and `snooze_reminder` are `write` (write turns only, like every main-set write); `list_reminders` is a read |
+| Reads | `<state_dir>/reminders.json` and `<state_dir>/profile.json` (the zone, read through `ProfileStore` exactly as the bridge reads it) |
+| Writes | `<state_dir>/reminders.json` only, atomically (`write_atomic`), under an exclusive advisory `flock` on `reminders.json.lock`, which it creates `0600` |
+| Environment | `JESSE_STATE_DIR` beside the base five; `HOME/.jesse-bridge` when it is unset, as the bridge itself does |
+| Network | none. It starts no process and sends nothing |
+
+**What a turn gains is a scheduled push to the owner's phone**, with text the turn wrote (at most
+300 characters, control characters replaced) at a minute the turn chose. That is the whole new
+capability. The push goes through the bridge's existing APNs client to the one registered device,
+so it can reach nobody else. A prompt-injected turn could set a misleading reminder; the owner
+sees every one as a notification titled `Reminder` and can list and cancel them from chat.
+
+**A reminder is never a turn.** The bridge's ticker (`remindersvc.rs`, every 30 s) reads the
+store, records each fired occurrence BEFORE it sends (so a restart can lose a push but never
+send one twice), and sends title `Reminder`, the text, a sound, `interruption-level:
+time-sensitive`, category `JESSE_REMINDER`, the id and the usual badge. It spawns no model
+process. Push errors are logged and swallowed and cannot touch the store, which is already
+written. A store that does not parse is never overwritten.
+
+**The routes** `GET /jesse/reminders`, `POST /jesse/reminders/{id}/done` and `POST
+/jesse/reminders/{id}/snooze` take the same bearer token and rate limiter as `/jesse/schedule`.
+They are what the app's notification actions call.
+
+**Not in the vault.** The store is the bridge's state directory, never the vault, so no reminder
+reaches git, qmd or a turn's file tools.
 
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 

@@ -548,9 +548,12 @@ pub fn codex_provider_args_for(base_url: &str, model: Option<&str>) -> Vec<Strin
 /// forced — but `-c` is the form the rest of this argv already speaks, it is what the
 /// provider path emits, and picking the same spelling on both paths is what makes "do not
 /// emit the slug twice" a thing the code can ask rather than a thing a reader must notice.
-/// Verified live on 0.153.4: `codex exec resume --strict-config -c model="gpt-6-astra" -c
+/// Verified live on 0.153.4 with `gpt-6-astra`, and again on 0.169.0 with `gpt-6.2-astra`:
+/// `codex exec resume --strict-config -c model="gpt-6.2-astra" -c
 /// model_reasoning_effort="xhigh" -c model_auto_compact_token_limit=200000 <id> "x"` gets
-/// past config loading and fails only on the fake session id.
+/// past config loading and fails only on what comes after it (the fake session id, or the
+/// trusted-directory check when run outside a git repository). Both flags are still declared
+/// on `resume --help` at 0.169.0.
 ///
 /// # NOT EMITTED TWICE
 ///
@@ -1863,6 +1866,10 @@ impl Codex {
         if !cfg.gateway.enabled {
             apply_child_mcp_env(&mut cmd, cfg, req.mcp_config);
         }
+        // NO AI ATTRIBUTION: every git the child runs uses the bridge's hooks.
+        if let Some(hooks) = crate::attribution::hooks_dir_of(cfg) {
+            crate::attribution::apply_git_env(&mut cmd, &hooks, !cfg.gateway.enabled);
+        }
         Ok(cmd)
     }
 }
@@ -2302,8 +2309,9 @@ mod tests {
 
     // ---- The resume-shaped argv -----------------------------------------------------
 
-    /// Exactly the option list `codex --help` prints on codex-cli 0.153.4 for the ROOT
-    /// command — the installed binary, read rather than assumed. Everything this builder
+    /// Exactly the option list `codex --help` prints on codex-cli 0.169.0 for the ROOT
+    /// command — the installed binary, read rather than assumed. Re-measured from 0.153.4:
+    /// 0.169.0 added `--worktree` and `--no-daemon` and removed nothing. Everything this builder
     /// emits ahead of the subcommand is parsed by the root, so this is the list that matters
     /// for those arguments.
     const ROOT_ACCEPTS: &[&str] = &[
@@ -2311,6 +2319,8 @@ mod tests {
         "--config",
         "-C",
         "--cd",
+        "--worktree",
+        "--no-daemon",
         "--enable",
         "--disable",
         "--add-dir",
@@ -2340,7 +2350,9 @@ mod tests {
         "--sandbox",
     ];
 
-    /// Exactly the option list `codex app-server --help` prints on codex-cli 0.153.4. Note
+    /// Exactly the option list `codex app-server --help` prints on codex-cli 0.169.0, which
+    /// added `--startup-sign-out`, `--print-startup-config`, `--startup-client-info` and
+    /// `--cloud-skills-snapshot` to the 0.153.4 list and removed nothing. Note
     /// what is NOT here and used to be: `--json`, `--skip-git-repo-check`,
     /// `--ignore-user-config`, `--ignore-rules` and `--dangerously-bypass-hook-trust` are all
     /// `exec` flags with no App Server spelling. See `build_codex_args` for what each became.
@@ -2349,6 +2361,10 @@ mod tests {
         "--config",
         "--enable",
         "--disable",
+        "--startup-sign-out",
+        "--print-startup-config",
+        "--startup-client-info",
+        "--cloud-skills-snapshot",
         "--code-mode-host",
         "--strict-config",
         "--listen",
@@ -2721,14 +2737,14 @@ mod tests {
     /// Before this it did not, and nothing said so — `codex_provider_args` returned `None`
     /// for a non-`openai` kind, the builder emitted no `-m`, and `--ignore-user-config`
     /// blocked the config file. The turn ran on the CLI's built-in default while the picker,
-    /// the badge and the health probe all reported `gpt-6-astra`.
+    /// the badge and the health probe all reported `gpt-6.2-astra`.
     #[test]
     fn a_hosted_codex_entry_puts_its_declared_slug_in_the_argv() {
-        let m = hosted_codex_model("gpt-6-astra");
+        let m = hosted_codex_model("gpt-6.2-astra");
         let model = codex_model_args(&m);
         assert_eq!(
             model,
-            vec!["-c".to_string(), "model=\"gpt-6-astra\"".to_string()],
+            vec!["-c".to_string(), "model=\"gpt-6.2-astra\"".to_string()],
             "the subscription posture must name its model"
         );
 
@@ -2784,7 +2800,7 @@ mod tests {
     /// this test only has to prove the mapping is faithful.
     #[test]
     fn reasoning_effort_is_emitted_only_when_declared() {
-        let mut m = hosted_codex_model("gpt-6-astra");
+        let mut m = hosted_codex_model("gpt-6.2-astra");
         assert!(
             codex_model_args(&m)
                 .iter()
@@ -2825,7 +2841,7 @@ mod tests {
     /// Codex a string where it wants a number.
     #[test]
     fn the_auto_compact_limit_is_emitted_with_the_prefix_codex_requires() {
-        let mut m = hosted_codex_model("gpt-6-astra");
+        let mut m = hosted_codex_model("gpt-6.2-astra");
         assert!(
             codex_model_args(&m)
                 .iter()
@@ -2861,7 +2877,7 @@ mod tests {
     /// order is part of what the record pins.
     #[test]
     fn the_model_overrides_leave_the_containment_argv_untouched() {
-        let mut m = hosted_codex_model("gpt-6-astra");
+        let mut m = hosted_codex_model("gpt-6.2-astra");
         m.codex.reasoning_effort = Some(ReasoningEffort::XHigh);
         m.codex.auto_compact_token_limit = Some(272_000);
 
@@ -2906,7 +2922,7 @@ mod tests {
     /// argv shape to check.
     #[test]
     fn a_tuned_turn_emits_no_flag_the_root_command_rejects() {
-        let mut m = hosted_codex_model("gpt-6-astra");
+        let mut m = hosted_codex_model("gpt-6.2-astra");
         m.codex.reasoning_effort = Some(ReasoningEffort::Max);
         m.codex.auto_compact_token_limit = Some(272_000);
         let args = build_codex_args(
@@ -2938,7 +2954,7 @@ mod tests {
             }
         }
         assert!(
-            args.contains(&"model=\"gpt-6-astra\"".to_string()),
+            args.contains(&"model=\"gpt-6.2-astra\"".to_string()),
             "{args:?}"
         );
     }
@@ -3317,7 +3333,7 @@ mod tests {
     /// would register zero tools).
     #[test]
     fn an_http_server_travels_as_a_url_with_its_token_named_not_valued() {
-        let allowed = "mcp__homeassistant__GetLiveContext,mcp__homeassistant__HassTurnOn,\
+        let allowed = "mcp__homeassistant__homeassistant__GetLiveContext,mcp__homeassistant__intent__HassTurnOn,\
                        mcp__roon__hifi_zones";
         let args =
             codex_mcp_args(CODEX_ID, MAIN_CHILD_MCP_CONFIG.as_str(), allowed).expect("translates");
@@ -3375,7 +3391,7 @@ mod tests {
         // The allowlist still governs, transport notwithstanding.
         assert!(
             flat.contains(
-                r#"mcp_servers.homeassistant.enabled_tools=["GetLiveContext", "HassTurnOn"]"#
+                r#"mcp_servers.homeassistant.enabled_tools=["homeassistant__GetLiveContext", "intent__HassTurnOn"]"#
             ),
             "{args:?}"
         );

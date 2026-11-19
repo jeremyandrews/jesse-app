@@ -19,6 +19,7 @@ nonisolated public enum PromptSender {
     public static let morningRoutine = "Morning routine"
     public static let healthNewDay = "Health: start new day"
     public static let healthWorkoutLog = "Health: workout log"
+    public static let healthLateSleep = "Health: late sleep"
     /// A Today item's action (Discuss, Propagate, a wiki chip), composed from the item.
     public static let todayAction = "Today action"
     /// The Today tab's Process updates, composed from the checked items.
@@ -37,6 +38,7 @@ extension HealthAutoTurn {
         switch self {
         case .morningRefresh: return PromptSender.healthNewDay
         case .workoutLog: return PromptSender.healthWorkoutLog
+        case .lateSleep: return PromptSender.healthLateSleep
         }
     }
 }

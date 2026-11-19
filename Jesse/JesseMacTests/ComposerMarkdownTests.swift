@@ -107,9 +107,8 @@ final class ComposerMarkdownTests: XCTestCase {
     private func hosted<V: View>(_ view: V, size: NSSize = NSSize(width: 1200, height: 400))
         -> NSHostingView<V> {
         let host = NSHostingView(rootView: view)
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -20_000, y: -20_000), size: size),
-                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: NSRect(origin: NSPoint(x: -20_000, y: -20_000), size: size),
+                                    styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = host
         windows.append(window)
         settle(host)

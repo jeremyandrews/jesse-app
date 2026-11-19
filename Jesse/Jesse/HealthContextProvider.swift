@@ -705,7 +705,10 @@ nonisolated struct HealthContextProvider: HealthContextProviding {
 
     // MARK: Sleep (last night)
 
-    private static func liveSleep() async throws -> SleepSummary? {
+    /// The newest sleep session in the last 36 hours, the same read the health block's sleep
+    /// line comes from. Internal so `HealthAutoTrigger` asks the same question when last
+    /// night arrives late, rather than a second sleep query of its own.
+    static func liveSleep() async throws -> SleepSummary? {
         guard HKHealthStore.isHealthDataAvailable() else { return nil }
         let store = HKHealthStore()
         // Look back 36h and take the most recent contiguous session (the last night).

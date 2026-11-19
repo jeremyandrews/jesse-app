@@ -71,6 +71,11 @@ public enum IntentReplayOutcome: Equatable, Sendable {
     /// Nothing was attempted — no network, no day, or the run was cut short. The intent
     /// stays queued.
     case deferred
+    /// The bridge answered with a final no for something nobody is shown — a timed
+    /// reminder's action against a reminder the bridge no longer has. The row is DELETED
+    /// rather than kept as a refusal: neither pending list shows reminder actions, so a
+    /// refused row would sit in the store forever with nobody able to see or dismiss it.
+    case dropped
 }
 
 /// Replays the offline capture queue, oldest first.
@@ -86,6 +91,9 @@ public final class IntentReplayer {
     /// diet snapshot, which is a reason to defer rather than to refuse: not knowing what
     /// day it is is not evidence that the day changed.
     private let dietDay: @MainActor () -> String?
+    /// The bridge's reminder routes, for the two reminder kinds. `nil` defers them — a
+    /// replayer with no way to reach the routes must not drop a pressed button.
+    private let reminders: (@MainActor () -> any ReminderActing)?
     private let now: @MainActor () -> Date
 
     /// Whether a run is in progress. One at a time — see the file note.
@@ -96,12 +104,14 @@ public final class IntentReplayer {
                 makeClient: @escaping @MainActor () -> any TodayProviding,
                 tell: (any IntentTellSending)? = nil,
                 dietDay: @escaping @MainActor () -> String? = { nil },
+                reminders: (@MainActor () -> any ReminderActing)? = nil,
                 now: @escaping @MainActor () -> Date = { Date() }) {
         self.store = store
         self.day = day
         self.makeClient = makeClient
         self.tell = tell
         self.dietDay = dietDay
+        self.reminders = reminders
         self.now = now
     }
 
@@ -157,6 +167,8 @@ public final class IntentReplayer {
             outcome = await replayStartNewDay(intent)
         case .logWorkouts:
             outcome = await replayWorkoutLog(intent)
+        case .reminderDone, .reminderSnooze:
+            outcome = await replayReminderAction(intent)
         case .processUpdates:
             // Never captured (see `PendingIntentKind.processUpdates`); a row of this
             // kind can only have come from a build that did capture it, and running a
@@ -356,6 +368,40 @@ public final class IntentReplayer {
         intent.payload.origin.flatMap(ThreadOrigin.init(rawValue:)) ?? .phone
     }
 
+    // MARK: - The reminder kinds
+
+    /// A held Done or Snooze, sent now. No day guard: the reminder is the bridge's own
+    /// object and its id is the whole identity. A throw — still unreachable, a `5xx`, an
+    /// auth failure — leaves it queued; any final answer settles it.
+    ///
+    /// A snooze replayed late is still sent: the bridge reschedules from the moment it
+    /// RECEIVES the snooze, so a late one is a reminder that comes back later than asked,
+    /// which is the honest consequence of the button having been pressed offline.
+    private func replayReminderAction(_ intent: PendingIntentRecord) async -> IntentReplayOutcome {
+        guard let id = intent.payload.reminderId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !id.isEmpty else { return .dropped }
+        guard let reminders else { return .deferred }
+        let client = reminders()
+        let result: ReminderActionResult
+        do {
+            if intent.kind == .reminderSnooze {
+                result = try await client.reminderSnooze(
+                    id: id, minutes: intent.payload.minutes ?? Self.defaultSnoozeMinutes)
+            } else {
+                result = try await client.reminderDone(id: id)
+            }
+        } catch {
+            return .deferred
+        }
+        switch result {
+        case .applied: return .applied
+        case .unknownReminder, .refused: return .dropped
+        }
+    }
+
+    /// What a held snooze with no stored length asks for — the bridge's own default.
+    nonisolated static let defaultSnoozeMinutes = 10
+
     // MARK: - Store bookkeeping
 
     private func fetch(_ client: any TodayProviding) async -> TodaySnapshot? {
@@ -390,6 +436,9 @@ public final class IntentReplayer {
             if let itemId = next.itemId { day.settleOptimism(itemId: itemId) }
         case .deferred:
             next.state = .queued
+        case .dropped:
+            store.delete(id: intent.id)
+            return
         }
         store.update(next)
     }

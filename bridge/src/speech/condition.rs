@@ -432,8 +432,7 @@ impl Fft {
     /// In place. The inverse is scaled by `1/n`, so `run(fwd)` then `run(inv)` is identity.
     fn run(&self, re: &mut [f32], im: &mut [f32], inverse: bool) {
         let n = self.n;
-        for i in 0..n {
-            let j = self.rev[i];
+        for (i, &j) in self.rev.iter().enumerate() {
             if i < j {
                 re.swap(i, j);
                 im.swap(i, j);

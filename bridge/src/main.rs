@@ -440,6 +440,26 @@ async fn main() {
     // and registered as the gateway's `devjob` in-process server BEFORE the gateway is first built
     // (it copies the registry then). Building the client connects to nothing, so a cluster that is
     // down costs the runs, never the boot; a kubeconfig that configures no client refuses it.
+    // NO AI ATTRIBUTION: the git hooks and the Claude Code settings every child is pointed at,
+    // rewritten from this binary at every start, before anything can spawn. A bridge that
+    // cannot write them does not start: a child pointed at a missing hooks directory would run
+    // no hook at all, its repository's own included.
+    if let Some(dir) = cfg.state_dir.as_deref() {
+        match jesse_bridge::attribution::install(Path::new(dir)) {
+            Ok(hooks) => {
+                eprintln!("jesse-bridge: attribution hooks at {}", hooks.display());
+                jesse_bridge::attribution::set_global(hooks);
+            }
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: refusing to start — could not write the attribution hooks \
+                     under {dir}: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let devjobs = if cfg.devjob.enabled {
         match jesse_bridge::devjob::DevJobs::connect(cfg.devjob.clone()).await {
             Ok(d) => {
@@ -847,6 +867,9 @@ async fn main() {
         eprintln!("jesse-bridge: could not write the boot line to the schedule ledger: {e}");
     }
     spawn_scheduler(state.clone());
+    // THE REMINDER TICKER, beside the scheduler: every 30 s it fires due reminders as pushes.
+    // A notification, never a turn. See `remindersvc`.
+    jesse_bridge::remindersvc::spawn_reminder_ticker(state.clone());
     // THE NIGHTLY STRANDS AUDIT, beside the scheduler and on its clock: once a day at 03:20
     // in the scheduler's zone (an away profile moves it), and at startup when today's file
     // is missing and the hour has passed. It writes one Inbox file and nothing else.

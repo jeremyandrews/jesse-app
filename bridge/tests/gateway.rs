@@ -835,6 +835,11 @@ async fn a_scratch_bridge_turn_drives_three_upstreams_through_the_gateway() {
     );
     for name in r["env"].as_array().unwrap() {
         let name = name.as_str().unwrap();
+        // `GIT_CONFIG_KEY_<n>` names a git setting (the attribution hooks' `core.hooksPath`),
+        // not a credential.
+        if name.starts_with("GIT_CONFIG_KEY_") {
+            continue;
+        }
         assert!(
             !name.starts_with("JESSE_GWPROBE") && !name.contains("TOKEN") && !name.contains("KEY"),
             "the child inherited {name}"
@@ -1032,4 +1037,35 @@ async fn direct_set_withholds_a_refused_tool_and_keeps_the_others() {
         set.report()
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `[mcp.imcp] command` IS WHAT THE CONTAINMENT PRE-FLIGHT STARTS. The configured path is the
+/// probe server, so a tool count can only come back if the pre-flight spawned THAT binary in
+/// place of the installed app's helper; the installed helper's absence, or its wedge, would be
+/// an error here instead.
+#[cfg(feature = "containment-probe")]
+#[tokio::test]
+async fn the_preflight_starts_the_configured_imcp_helper() {
+    let _env = ENV_LOCK.lock().await;
+    let dir = short_tmp("imcp-cmd");
+    plant_bridge_env(&dir);
+    let mut cfg = test_config();
+    cfg.gateway = GatewaySettings {
+        enabled: true,
+        ..GatewaySettings::default()
+    };
+    cfg.gateway.overrides.insert(
+        "imcp".into(),
+        McpOverrideToml {
+            command: Some(PROBE.into()),
+            ..McpOverrideToml::default()
+        },
+    );
+    let counts = count_server_tools(&cfg, &["imcp".to_string()]).await;
+    assert_eq!(counts.len(), 1, "{counts:?}");
+    assert_eq!(counts[0].0, "imcp");
+    assert!(
+        matches!(counts[0].1, Ok(n) if n > 0),
+        "the configured helper started and listed its tools: {counts:?}"
+    );
 }

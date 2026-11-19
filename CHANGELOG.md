@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.203.0, agent 0.15.0, eval 0.9.0 - 2026-11-11
+## [K04: the model proxy, the egress proxy and egress tiers per turn] - Bridge 0.211.0, agent 0.15.0, eval 0.9.0 - 2026-11-19
 
 **The bridge can be the only route to a model and to the open web: a model proxy that holds every
 model credential and meters every call, an egress proxy that enforces a per-turn tier and logs
@@ -68,6 +68,424 @@ every child is spawned exactly as before.**
   `model-credential-absent`, `egress-private-address`, `egress-send-unknown-host`,
   `egress-long-query`, `egress-canary`, `egress-fingerprint`, `egress-opaque`), run when the
   proxies are on.
+
+## [App 1.0 (223)] - 2026-11-19
+
+**The Mac's conversation list keeps itself current: a conversation started or updated on another
+device appears in the sidebar within about 30 seconds while Jesse is frontmost, with no reload
+click.** Before this the Mac pulled the list at launch, on a wake and on ⌘R only, because a Mac
+window left open never leaves `scenePhase == .active`. Mac only; iPhone behaviour is unchanged.
+
+- **Cadence (`MacSessionPollRule`, pure).** Every 30 s while Jesse is the frontmost app, every
+  5 min while it runs behind another app. No polling while the bridge is known unreachable
+  (`BridgeReachabilityModel.shared.state == .unreachable`; `.unknown` still polls) or while the Mac
+  is asleep (`NSWorkspace.willSleepNotification` / `didWakeNotification`). Consecutive failures
+  double the interval, capped at 5 min; a completed round trip resets it. While unreachable, a
+  reachability probe (`GET /health`, already throttled to one per 30 s) is requested at the cap, so a
+  window nobody touches notices the bridge coming back and resumes.
+- **One fetch path.** Every tick is the existing `MacCoordinator.refreshSessions(context:)`, so its
+  ETag, its re-entrancy guard and its write-the-ETag-after-the-adopt ordering are untouched. An
+  idle list is a `304` with no store writes. No bridge or API change.
+- **Pulls at once on activation.** `NSApplication.didBecomeActiveNotification` refreshes outside the
+  cadence, so switching back to Jesse from another app pulls immediately.
+- **No double firing.** Every automatic trigger (launch, the `scenePhase` return to `.active`, the
+  wake, activation) goes through the new `refreshSessionsUnlessRecent`, which drops a call landing
+  within 2 s of the last pull's start. The poller measures its cadence from that same start, so a
+  pull from any trigger, ⌘R included, pushes the next tick back a full interval. A click during a
+  pull is still the re-entrancy guard's.
+- **Where it runs.** `MacSessionPoller` is attached once per window on `MacShellView`, the window's
+  root, so it runs whichever tab is on screen, as a `.task` loop on `Task.sleep` that a nudge
+  (activation, deactivation, reachability, sleep, wake) cuts short, and is cancelled with the
+  window. No `Timer`.
+- **A failed tick does not stay red.** `refreshSessions` already cleared `lastError` on any completed
+  round trip; it now also keeps `sessionRefreshFailures`, the backoff input.
+- **Tests:** `MacSessionPollerTests` (new): the rule (frontmost, background, unknown, unreachable,
+  asleep, backoff growth and cap, reset on success, remaining, debounce), a tick after a `304` makes
+  no store writes, a tick after a changed list adopts the new conversation, a failed then successful
+  tick leaves `lastError` nil, two automatic triggers together cost one list call, and the loop
+  ticks, stops on cancel, halts while unreachable or asleep and resumes on a nudge.
+  `MacLiveSessionPollTests` (new, skipped unless `MR1_BRIDGE` is set) is the live check: the real
+  window root hosted off screen against a running bridge, an in-memory store, no click.
+- **Measured against the live bridge (5,721 conversations, 2026-11-19):** idle at the frontmost
+  cadence, 4 list calls in 2.0 min, all `304` with no body (2.0 a minute). A conversation started
+  with `curl` `POST /jesse` was in the sidebar 26.4 s later, brought in by one `200`. Screenshots in
+  `docs/mr1-screenshots/`.
+
+## [bridge 0.210.0] - 2026-11-17
+
+**The Codex harness moves to GPT 6.2 Astra (`gpt-6.2-astra`) on codex-cli 0.169.0, with GPT 6.2
+Sol (`gpt-6.2-sol`) documented as a second Codex entry.** The Home Assistant grant follows that
+server's renamed tools, the battery's pre-flight now catches a grant its server no longer serves,
+and two probes are rewritten so they measure the boundary rather than the model's willingness.
+**The model change takes effect only once the live config's Codex `model` line is edited and the
+bridge restarted.** The Home Assistant grant takes effect on the next restart.
+
+- **Models and prices (Standard, per 1M tokens, up to 272K input tokens).** `gpt-6.2-astra`: $8
+  input, $0.40 cached, $40 output (was $10 / $1 / $50 on `gpt-6-astra`). `gpt-6.2-sol`: $2 / $0.10 /
+  $10. Both have a 1,050,000-token window (922,000 max input) and 128,000 max output. Above 272K
+  input tokens, input and cache rates double and output is 1.5x for the whole request, so the example
+  `auto_compact_token_limit = 272000` is unchanged. Sources:
+  developers.openai.com/api/docs/models/gpt-6.2-astra, .../gpt-6.2-sol, .../gpt-6-astra.
+- **CLI.** On the ChatGPT subscription login, OpenAI serves the model list per client version: on
+  2026-11-17, codex-cli 0.165.0 and older (0.153.4 included) got neither 6.2 model and 0.166.0 onward
+  got both. Measured by asking each release's `codex debug models`. The Studio's `JESSE_CODEX_BIN`
+  (`~/.local/bin/codex`) moved from 0.153.4 to 0.169.0, the newest stable release. Both catalog
+  entries list efforts low, medium, high, xhigh, max and ultra. `reasoning_effort` here still
+  accepts low to max; `ultra` is not added.
+- **Changed: `ROOT_ACCEPTS` and `APP_SERVER_ACCEPTS`** are re-measured on 0.169.0. Root added
+  `--worktree` and `--no-daemon`; `app-server` added `--startup-sign-out`, `--print-startup-config`,
+  `--startup-client-info` and `--cloud-skills-snapshot`. Nothing was removed, so the argv this
+  harness builds is unchanged. Re-checked on 0.169.0: `-c model_auto_compact_token_limit` loads and
+  the unprefixed key is still rejected under `--strict-config`; an effort value is still not
+  validated by the CLI.
+- **Live checks on 0.169.0.** `codex exec` and `codex exec resume` each ran one turn on both models,
+  and the rollouts record `gpt-6.2-astra` and `gpt-6.2-sol`. The ignored live tests `codex_live_turn`
+  (turn contract, Kimi on a provider), `codex_session_home` (resume inside its own home),
+  `codex_write_turn` (write, out-of-vault denial, both harnesses at once) and `writelock_live` pass.
+  The exception is `a_refused_write_reaches_the_client_as_activity_not_silence`, which fails the
+  same way on 0.153.4.
+- **Fixed: no harness was offered a single Home Assistant tool.** Root cause: Home Assistant
+  renamed every tool on its MCP server to `<domain>__<intent>` (`HassTurnOn` is now
+  `intent__HassTurnOn`, `GetLiveContext` is `homeassistant__GetLiveContext`, `todo_get_items` is
+  `todo__get_items`) and stopped advertising `HassMediaSearchAndPlay`. The rename landed after the
+  2026-11-16 records and the server now advertises 22 tools, not 23. The grant still named the 23
+  old bare names. A grant is an exact-name allowlist on every harness: Codex's `enabled_tools`
+  matched nothing, so the Codex write child's root carried no `mcp__homeassistant__*` tool, and
+  Claude Code's and the direct harness's allowlists named tools that no longer existed. The
+  battery's pre-flight only checked that each server advertised at least one tool, so it passed.
+  The grant (`DEFAULT_ALLOWED_TOOLS`, the read list in `mcpservers.rs`, `capability-map.toml`,
+  SECURITY.md) now names the 22 served tools, enumerated live (`initialize` + `tools/list`). This
+  was not codex-cli 0.169.0.
+- **Added: the pre-flight holds the grant against the server.** `server_tool_names` lists what
+  each server advertises, and `preflight_unserved_grants` stops the battery, naming the tool and
+  what the server does serve, when any granted tool is not advertised. Regression tests:
+  `the_preflight_stops_on_a_grant_its_server_no_longer_serves` (the rename, pinned), and
+  `the_shipped_homeassistant_grant_is_served_by_the_2026_11_17_server` (the shipped grant against
+  the 22 names enumerated today).
+- **Fixed: two probes measured whether the model was willing, not the boundary.** Root cause:
+  their prompts were open-ended ("by any means, read a credential"; "start it in the background
+  so it outlives the turn"), and `gpt-6.2-astra` declines both on principle. In the first
+  re-record it never invoked Bash in 30 attempts on any of 8 (probe, row) pairs, so each was
+  recorded `inconclusive`, which `no_probe_is_recorded_in_a_state_the_scoring_rules_could_not_produce`
+  rightly refuses.
+  - `read_env_token` now says the variable holds a stand-in generated for the test (it does) and
+    names two exact routes, in order: `printenv JESSE_PROBE_AUTH_TOKEN`, then the read tool on
+    `/proc/self/environ`. These are the routes every harness already took. Scoring is
+    unchanged.
+  - `background_process` kept the marker for six rewordings, and the model still declined a
+    delayed write past a read-only boundary at least 2 times in 3 in isolation. So the instrument
+    changed instead: the script starts a background `sleep` tagged with the probe's nonce and
+    writes nothing. Ground truth is a live tagged process `settle_secs` after the child exited,
+    found by `pgrep` and then killed. This measures the property the probe is named for (a
+    process that outlives the turn); the marker had conflated survival with the write boundary.
+    The two routes (direct, then through a git alias), the class and the verdict rules are
+    unchanged.
+- **Fixed: `reminders_mcp` tests intermittently saw each other's reminders.** Root cause: each
+  test's store directory was named from the process id and `timestamp_nanos`, and the tests run as
+  parallel threads of one process; macOS's realtime clock resolves to the microsecond, so two tests
+  starting in the same microsecond got the same directory and shared one `reminders.json` (seen as
+  an id that was not the test's own, and a list that should have been empty holding another
+  test's reminder). The name now carries a per-process counter as well.
+  `every_scratch_store_is_its_own` holds two back-to-back stores apart. Test-only; the server was
+  never at fault.
+- **Containment.** All three records were re-recorded, because the probe text and the Home
+  Assistant grant changed for every harness.
+  - Codex (`bridge/containment-codex.toml`), on codex-cli 0.169.0 probing as `codex-write` on
+    `gpt-6.2-astra`: every one of 120 probes has the same class, verdict and status as the record
+    on main. No stale acceptances. The write row's root carries the 22 Home Assistant tools.
+  - Direct (`bridge/containment-direct.toml`): every one of 111 probes unchanged; only the tool
+    lists moved to the new names.
+  - Claude Code (`bridge/containment.toml`), on 2.1.322: gate pass, every one of 120 probes
+    unchanged, $12.12.
+
+## [bridge 0.209.0] - 2026-11-17
+
+**Model audit: every model the bridge runs checked against its provider's newest GA release;
+two were stale and move.** Fable 5.1 → 5.2 on the subscription login, and the `gemini-flash`
+entry from Gemini 3.8 Flash → Gemini 4 Hydrogen. Every other model was already current: Opus 5.5,
+Sonnet 5.5, GLM 5.3, Kimi K3.1 Pro, Qwen 3.8 Max, Muse Spark Open, Gemini 3.5 Flash-Lite and the
+local Qwen3.8-Flash-Next. Gemini 3.1 Pro is left alone: Google names no Pro successor in Gemini 4.
+Codex is untouched.
+
+| entry | old | new | deck (in / cached / out per 1M) |
+|---|---|---|---|
+| `fable` | `claude-fable-5-1` (Fable 5.1) | `claude-fable-5-2` (Fable 5.2) | 10.00 / 0.25 / 50.00 → 8.00 / 0.20 / 40.00 |
+| `gemini-flash` | `gemini-3.8-flash` (3.8 Flash) | `gemini-4-hydrogen` (4 Hydrogen) | 0.75 / 0.075 / 3.75 (intro, 1.50 / 0.15 / 7.50 from 2027-01-01) → 1.50 / 0.075 / 7.50 |
+
+- **Changed: the `fable` deck is Fable 5.2's** (`FABLE_5_2_*`, from Anthropic's pricing page);
+  `FABLE_5_1_*` are gone. `fable` still has no compiled-in slug: it is armed by
+  `JESSE_MODEL_FABLE_MODEL`, which a deploy moves to `claude-fable-5-2` with
+  `JESSE_MODEL_FABLE_VERSION=5.2`. Real turns on the login with CLI 2.1.322 and no API-key
+  variable billed `claude-fable-5-2`.
+- **Changed: Fable's effort scale is chosen by the armed slug** (`fable_effort_scale`). With no
+  `--effort` the CLI sends `medium` for `claude-fable-5-2` and `high` for `claude-fable-5-1`
+  (captured against a local listener). The default is the one value env cannot move, so one
+  scale for both would mislabel one of them. 5.2 declares `medium, xhigh, max` (default
+  `medium`), measured on two prompts with two samples per level: `xhigh` and `max` each beat
+  their neighbours in all four samples; `high` beat `medium` on one prompt only and `low` on
+  neither. A deploy pinned to `claude-fable-5-1` keeps `high, max` (default `high`).
+  `JESSE_MODEL_FABLE_EFFORT` still overrides.
+- **Changed: `gemini-flash` defaults to `gemini-4-hydrogen`**, labelled "Gemini 4 Hydrogen".
+  Google's "What's new in Gemini 4 Hydrogen" page calls it the "Recommended upgrade from Gemini
+  3.8 Flash". The id stays `gemini-flash`, so persisted selections still resolve. The new deck is
+  `GEMINI_4_HYDROGEN_*` (`GEMINI_3P8_FLASH_*` are gone): input and output are double what the badge
+  showed, equal to 3.8 Flash's post-introductory rate, and the cache read stays the same. On
+  the OpenAI-compatible surface the three quirks the entry pins were re-measured and still hold.
+  Hydrogen's breaking changes (sampling parameters removed, `minimal` rejected, no explicit
+  caching, thought signatures) do not reach this wire. Image input, `input_audio` transcription
+  and the `max_tokens: 1` probe (2.3–3.5 s) all work. Pin back with
+  `JESSE_MODEL_GEMINI_FLASH_MODEL=gemini-3.8-flash`, `_VERSION=3.8 Flash` and the three `_PRICE_*`
+  keys.
+- **Tests:** `gemini_flash_defaults_to_gemini_4_hydrogen_and_the_env_pins_it_back` (new). The Fable
+  test now asserts the 5.2 slug, label, deck and both slug-keyed scales. The transcription test
+  uses the new slug.
+- **Containment:** no re-record. The `direct` battery runs a scripted provider with no model, and
+  `containment.toml` was probed by the ambient Opus, not Fable.
+- **Docs:** `jesse.example.toml` lists the new Fable lines and the Gemini table and caveats.
+
+## [App 1.0 (222)] - 2026-11-17
+
+**A timed reminder pushed to the Mac has Done and Snooze 10 min too, and pressing one acts on the
+reminder without bringing the app forward.** Until now the Mac app registered no notification
+categories and set no notification-center delegate, so a `JESSE_REMINDER` push arrived there with
+no buttons.
+
+- **Mac delegate.** `MacNotificationDelegate` is installed in `applicationWillFinishLaunching`. It
+  registers every category the Mac uses in one `setNotificationCategories` call
+  (`MacNotificationCategories`; today only `JESSE_REMINDER`, since the Mac's own turn banners carry
+  none), presses Done or Snooze on the bridge in the background, and on a reminder's body tap brings
+  the app forward and does nothing else. Every other response, including the Mac's own "Jesse
+  replied" banners, brings the app forward as before. While the app is frontmost a reminder is
+  shown; the Mac's own banners are still not.
+- **Unreachable bridge, on the Mac.** The Mac has no offline capture queue, so a press the bridge
+  cannot take is retried once five seconds later, then logged and dropped. The reminder is left as
+  it was on the bridge. A `404` is dropped without a retry, as on the iPhone.
+- **Shared code.** The category, the parsing of a pressed button, the reminder half of response
+  routing (`ReminderResponse`) and `ReminderActionHandler` moved from the iPhone app into JesseKit
+  (`JesseNetworking/ReminderNotification.swift`). The handler takes a `ReminderUndeliveredPolicy`:
+  the iPhone's is the offline capture queue, unchanged; the Mac's is retry-once. iPhone behaviour,
+  categories and tests are unchanged.
+- **Time Sensitive.** The Mac app now carries the time-sensitive notifications entitlement. The App
+  ID `com.tag1.JesseMac` needs the capability too; automatic signing adds it on the next signed build.
+
+## [App 1.0 (221)] - 2026-11-16
+
+**A timed reminder can be finished or snoozed from the notification, without opening the app.**
+The bridge pushes a reminder when it falls due; its notification now carries two buttons.
+
+- **Done** and **Snooze 10 min** (category `JESSE_REMINDER`). Neither opens the app: each posts
+  `POST /jesse/reminders/{id}/done` or `/snooze` with `{"minutes": 10}` in the background, and
+  the notification's completion is reported only once the press has landed or been queued.
+- **Offline.** A press the bridge cannot be reached for (no network, a timeout, a 5xx, a refused
+  pairing) waits on the offline capture queue and is sent on the next recovery, alongside held
+  check-offs and quick logs. A `404` (a reminder the bridge no longer has) is final: the press is
+  dropped, never retried. Reminder presses are not shown on the Today or Health pending lists.
+- **Tapping the reminder itself** opens the app and does nothing else; it is never routed to a
+  conversation.
+- **Time Sensitive.** The app now carries the time-sensitive notifications entitlement, so a
+  reminder (`interruption-level: time-sensitive`) can break through a Focus. The App ID needs
+  the capability too; automatic signing adds it on the next signed build.
+- JesseKit: `reminderDone(id:)` and `reminderSnooze(id:minutes:)` on `JesseBridgeClient` behind
+  `ReminderActing`, and `PendingIntentKind.reminderDone` / `.reminderSnooze` with
+  `PendingIntentPayload.reminderId` and `.minutes`.
+
+## [bridge 0.208.0] - 2026-11-16
+
+**Timed reminders: a turn can set a push for a chosen minute, one off or repeating.** "Remind me
+at 6:45 to start the pancakes" and "every weekday at 7:30 remind me to take the bins out" now work
+from any turn. At the minute, in the active profile's zone, the bridge sends one push with `Done`
+and `Snooze 10 min`. A reminder is a notification, never an agent turn: firing one spawns no model
+process.
+
+- **Added: `reminders.rs`**, the model and the store. A reminder has an id, text, `created_at`,
+  `next_fire` (UTC), `local_time` (`HH:MM`), a zone mode (`profile` or a fixed IANA zone), an
+  optional recurrence (`daily`, `weekdays`, `weekly` on a set of days, `monthly` on a day of the
+  month with the 31st falling back to the month's last day, `every_n_days`, each with an optional
+  `until` date or `count`), a state (active, done, cancelled, missed), `fired_count` and
+  `last_fired_at`. The store is one file, `<state_dir>/reminders.json`, written atomically under an
+  exclusive advisory `flock` on `reminders.json.lock`, because the MCP child and the bridge both
+  write it. A file that does not parse is never overwritten. Done, cancelled and missed reminders
+  are pruned 30 days after they close.
+- **Added: `compute_next_fire` and `due`**, pure and tested without a clock. A pending occurrence
+  is named by its local date, so a profile change re-resolves the same occurrence in the new zone
+  rather than inventing another. DST: a local time missing on the spring-forward day fires at the
+  first valid minute after it; one that happens twice on the fall-back day fires once, at the
+  first.
+- **Added: the reminder ticker**, beside the scheduler, every 30 seconds. It records each fired
+  occurrence before sending, so a restart can lose a push but never send one twice. Payload:
+  title `Reminder`, the text, a sound, `interruption-level: time-sensitive`, category
+  `JESSE_REMINDER`, `reminder_id` and the badge every push carries. A one-off becomes done and
+  stays listed as `fired` until acknowledged; a series advances. After downtime a reminder fires
+  at most 6 hours late with `(late: due HH:MM)`; older than that it is marked missed and ONE
+  summary push lists every missed one. A repeating reminder fires at most once per catch-up, for
+  its latest passed occurrence. Push errors are logged and swallowed, as `push_schedule_outcome`
+  does. `POST /jesse/profile` re-resolves profile-mode reminders at once.
+- **Added: `jesse-reminders-mcp`**, a stdio server over `reminders.rs` in the style of
+  `jesse-places-mcp`: `create_reminder(text, at, recurrence?, zone?)` (`at` is `HH:MM`, the next
+  such minute, or a local date-time; the reply gives the next fire in local time and UTC),
+  `list_reminders(include_inactive?)`, `cancel_reminder(id)` and `snooze_reminder(id, minutes)`.
+  A past time, an empty text and an `until` before the first fire are each refused with a reason.
+  It reads the profile zone as the bridge does and writes only `reminders.json`.
+- **Added: `reminders` on every main turn**, on Claude Code and Codex, registered as
+  `jesse-places-mcp` is (a row in the server table, a bare name on the child's `PATH`). All four
+  tools are granted by name; three are `write`, `list_reminders` is a read. New row label
+  `...+kubernetes-cloud+reminders`; the 0.188.0 set is kept as a retired label. In
+  `deploy-bins.toml`, the startup resolve check, the capability map and SECURITY.md.
+- **Added: `GET /jesse/reminders`, `POST /jesse/reminders/{id}/done` and `POST
+  /jesse/reminders/{id}/snooze`** (`{"minutes": N}`, default 10), on the `/jesse/schedule` auth.
+  The app's notification actions call them.
+- **Changed: `TURN_PEAK_FDS` is 152 (was 146).** The `reminders` stdio upstream adds six
+  descriptors to a gateway-on turn on Linux (five on macOS), re-measured by
+  `tests/gateway_fds.rs`: +152 on CI, +127 on macOS, 26 servers admitted.
+
+
+## [bridge 0.207.0] - 2026-11-16
+
+**No run the bridge starts can push AI attribution** ([#344](https://github.com/jeremyandrews/jesse-app/pull/344)): every Claude Code child gets bridge-owned settings with attribution off and hook-skipping git denied, every spawned git uses bridge-owned `commit-msg`/`pre-push` hooks (chained to the repository's own), and a run whose pushed pull request or commits still carry it ends `needs_you` with an `ATTRIBUTION:` line.
+
+## [JesseKit: a thread search pass runs across the cores] - 2026-11-16
+
+**Root cause:** `searchThreads` matched every thread in turn on one core, and a thread with no match is read in full once per search term. `lost keys` with its expansion concepts reads every body seven times. On the hosted macOS 26 runner that took 64 to 98 ms per pass against the 100 ms budget in `testKeystrokeBudgetOnFiveHundredThreads`, and 143 ms in iOS CI run 43855177726, which failed. Fix: the pass splits the threads into 32-thread chunks across the cores, and the full sort keeps the hit order unchanged. A cancelled pass still stops at the next chunk. Locally: 50 to 5 ms for `lost keys`.
+
+## [JesseKit: a Drafts block presents its run and its Runs list from one sheet] - 2026-11-16
+
+**Root cause:** `StrandDraftsBlock` hung two `.sheet` modifiers on one view, one for a run and one for the Runs list. When the run sheet closed and the Runs list was asked for moments later, the Runs sheet sometimes never came up on the hosted macOS 26 runner (iOS CI runs 43771482946 and 43779485347). Fix: one `.sheet(item:)` over `DraftsSheet` (`.run` or `.runs`), so SwiftUI replaces one presentation with the next. Test: `testTheDraftsBlockOpensItsRunAndItsRunsList`.
+
+## [JesseKit: a run's Cancel run sits above its Log] - 2026-11-16
+
+**Root cause:** Cancel run was the last row of a run's page, under the 280-point Log and Details. On a 1024x768 display (the hosted runner) a sheet holds about 677 points, so a run pushed inside the Runs sheet left Cancel run scrolled out of sight (iOS CI runs 43830475376 and 43841362466). Sheet sizing cannot fix this, because the screen sets the limit. Fix: the Cancel run section comes before the Log, on the Mac and the iPhone. Test: `testTheRunsListFromTheToolbarShowsItsRowsAndOpensARun`.
+
+## [App 1.0 (220)] - 2026-11-16
+
+**Two Mac tests assumed macOS 27; the hosted runner is macOS 26 (iOS CI run 43764732997).** `testARequestFor240LandsAtTheNarrowestSidebar` stood for "narrower than the minimum" with a 250 request, below the 257 minimum on macOS 27 but above the 248 one on macOS 26; it now requests one point under the measured minimum. `testTheDraftsBlockOpensItsRunAndItsRunsList` matched "Runs" exactly, but macOS 26's Vision reads the button's SF Symbol as "• Runs"; an exact match now starts at the first letter or digit.
+
+## [JesseKit: the Studio poll wait is a function, not a default closure] - 2026-11-15
+
+**Root cause:** `StudioFirstTranscriber.init`'s `sleep:` default was an async closure. A public default argument is compiled into every module that calls the initializer without it, and Swift 6.3.3 (Xcode 26.6) gave those weak copies different async frame sizes (swiftlang/swift#86204). The linked copy's frame was too small, so the first poll aborted with "freed pointer was not the last allocation", which killed every `RecordingRunsTests` test. Fix: the default is `nil` and the wait is `taskSleep`; test `testTheDefaultWaitBetweenPollsFollowsARunToItsEnd`.
+
+## [App 1.0 (219)] - 2026-11-16
+
+**The health block's sleep line never presents an older night as last night, and when last night reaches HealthKit after a turn already went out without it, the iPhone sends exactly one automatic turn carrying it.** (#342) On 2026-11-08 the owner woke at 08:36, a health turn at 08:51 carried the previous night as `Sleep (last night)`, and the real night reached the phone about 10:16. Root cause: the Watch hands a night to the phone some time after waking, `SleepReducer.reduce` returns the newest session in the 36 hour lookback, and `DailySummaryFormatter.sleepLine` labelled any non-nap session "last night" without a date; nothing observed sleep, so a night that synced late was never sent.
+
+- **Dated line:** `SleepSummary` keeps the session's `start` and `end`, and `SleepReducer.isLastNight` asks whether it ended on today's diet day (`HealthLateSleep.endsOnDietDay`). Last night keeps exactly `Sleep (last night): …`; an older night prints `Sleep: last night not synced from the Watch yet; newest night on the phone ended <EEE yyyy-MM-dd HH:mm>: …`; a nap prints `Sleep (nap, ended <yyyy-MM-dd HH:mm>): …`.
+- **Late sleep turn:** `JesseClient.send` stamps the diet day of a sent not synced line (`healthSleepNotSyncedDay`) or last night line (`healthSleepLastNightSentDay`). `HealthDataObserver` observes sleep, and `HealthAutoTrigger.receiveSleep` (and `settle()`, for a hold) stages one `HealthLateSleep.prompt` turn when `HealthLateSleep.shouldFire` says so: held while locked, never captured offline, stamped in the same step it is staged, and held at send time by `HealthContextLockHold` if the phone locks.
+- **Sleep frequency:** `HealthArchiveObserver.frequency(for:)` asks `.immediate` for sleep too, the same as `HealthDataObserver`, since background delivery is one setting per type.
+
+## [App 1.0 (218)] - 2026-11-16
+
+**The iPhone and the Mac Settings each have an "Owner name" field, so an offline question about "my" or "I" can be matched to the owner, and the offline notice says where that field is.** On 2026-10-21 an offline answer on the iPhone ended "No owner name is set in Settings, so "my" and "I" could not be matched to your notes." The notice pointed at a setting that did not exist: no screen on either platform wrote `jesse.owner.name`, so on every install the retriever never resolved the first person and locally built prompts called the owner "the user". Root cause: the owner name plumbing (`OfflineLookupSettings.ownerName`, `LookupQuery.ownerForms`, the notice) landed without its Settings field, and the only setter, `PromptStore.ownerName`'s, lived in a file that belongs to the iPhone target alone and that nothing called.
+
+- **Setter (`OfflineLookupSettings.ownerName`, JesseVault):** a `nonmutating set` in the style of `isEnabled`. It stores the trimmed value and removes the key when that is empty. The getter is unchanged. `PromptStore.ownerName`'s setter now delegates to it, so the key is written in one place; its getter is unchanged.
+- **Field (`OwnerNameSettingsRows`, JesseVault):** one shared view, a `TextField` labelled "Owner name" with the prompt `Jeremy, Jeremiah, Andrews`, and a caption row under it (a row, not a footer, so the Mac does not truncate it): "How your notes name you. Separate several forms with commas, the one you go by first. On-device answers use it for questions about "me" and "my"." It loads on appear and writes through the setter when editing ends (on submit, on losing focus, and when the view disappears), the way the offline toggle beside it writes, not through Save. On the iPhone the label sits above the field, because a `Form` shows only a text field's prompt. Embedded in the Vault folder section of `SettingsView` (iPhone) and `MacSettingsView.vaultFolderSection` (Mac), under the offline toggle and its budget line. The Mac window keeps its 480 by 520 size.
+- **Notice (`OfflineLookupReply.ownerNameMissing`):** now `No owner name is set (Settings › Vault folder › Owner name), so "my" and "I" could not be matched to your notes.` It still comes only for a first person question with no name.
+- **Doc comments** on `OfflineLookupSettings.ownerNameKey`, `OfflineLookupSettings.ownerName` and `PromptStore.ownerName` name the shared view, the two screens that embed it and the setter that writes the key.
+- **Tests:** `OwnerNameSettingsTests` (7, each on a throwaway `UserDefaults` suite): a single name and `Jeremy, Jeremiah, Andrews` read back trimmed and split in order; blank, whitespace and nil remove the key; the field's `commit(_:to:)` stores through the same setter; the label, prompt and caption; the notice text; the notice only for a first person question with no name. `OwnerNameSettingsRenderTests` (iOS only, skipped unless `OWNER_NAME_PNG_DIR` is set) draws the filled field, the empty field and the notice reply at 375 by 667.
+
+## [App 1.0 (217)] - 2026-11-16
+
+**One run of the local gate, the pre-push hook or the nightly reports every failing step, not only the first, and a test can build an AppKit window only through a helper that sets `isReleasedWhenClosed = false`.** Root cause: `run_step` in `scripts/local-ci-macos.sh` printed the summary and exited at the first FAIL, the hook ran that script, and Actions stops a job at its first failing step, so on 2026-09-28 a crash in step 1 hid ten failures in five suites for days. The crash itself was a test window closed without `isReleasedWhenClosed = false`, over released under ARC, which nothing stopped the next test from repeating. The app is unchanged; the build number moves only because the Mac tests changed.
+
+- **Gate (`scripts/local-ci-macos.sh`):** the step plumbing moved to `scripts/lib/ci-runner.sh`. A failing step is recorded as FAIL and the run carries on; after the last step the summary lists every FAIL, the final line reads `local-ci-macos: N FAILED (<names>)`, and the script exits 1. A step that consumes another step's output runs only when that step passed, and is otherwise `SKIP (needs <step>, which failed)`: a dependency skip, not counted in the host SKIP total. Chains: Resolve iOS simulator, iOS build, iOS test; Resolve watchOS simulator, watch build, watch test; Mac build, Mac test. The guards, the JesseKit steps and Test counts stand alone. Every result bundle is cleared before the first step and Test counts reads only the bundles of test steps that ran in this invocation, printing a skipped suite as not run.
+- **Fail fast:** the old behaviour is `--fail-fast`, or `JESSE_CI_FAIL_FAST=1` in the environment for the hook, documented in the script and hook headers.
+- **Hook (`scripts/hooks/pre-push`):** unchanged in what it runs; it now sees every failure, and its header documents `JESSE_CI_FAIL_FAST=1` beside `JESSE_SKIP_MAC_CI`.
+- **Nightly (`ios-ci.yml`, job `ios-app`):** every build and test step has an `id`, and every one after the JesseKit package step runs under `if: ${{ !cancelled() && ... }}` on the steps it needs, per the same map, so a failed iOS Test no longer hides the watch and Mac suites. The report, coverage and upload steps are as they were.
+- **Window helper:** `makeTestWindow` in `Jesse/JesseMacTests/MacTestWindow.swift` and in `JesseKit/Tests/JesseVaultTests/TestWindow.swift` (fenced with `#if canImport(AppKit)`), generic over the window class so the two `OffscreenWindow` subclasses keep their overrides. The 14 window constructions in 12 test files moved onto it and lost their own `isReleasedWhenClosed = false` lines; no test changed otherwise.
+- **Guards:** `scripts/swift-test-guards.sh` fails any test file, other than the two helpers, that constructs a window directly (`NSWindow(`, `NSPanel(`, `.init`, or a subclass's `(contentRect:`), with no suppression. `scripts/test-ci-runner.sh` tests the runner with stub steps. Both run in `ci.yml` (job `ios-deployment-target`) on Linux and as the first two steps of the local gate.
+
+## [bridge 0.206.1] - 2026-11-15
+
+**CI lints the bridge's default features build too, on a pinned Rust 1.100.0.** Root cause: the `bridge` job ran clippy only on the `containment-probe` build, on whatever stable the `ubuntu-latest` image carried, so a lint that exists only without the feature could land unseen, and a new toolchain's lints could turn `main` red without a commit. Clippy 1.100 (stable 2026-11-09) already reports `needless_range_loop` on seven loops nobody had touched; CI was green only because its runner had not moved yet.
+
+- **Fixed (bridge):** the seven `needless_range_loop` loops, rewritten over iterators with the same elements in the same order. Library: the `24/7` branch of `parse_opening_hours` (`places.rs`) and the always-open branch of `hours_from_google` (`places_google.rs`) set every day through `days.iter_mut()`; `Fft::run`'s bit-reversal permutation (`speech/condition.rs`) walks `rev.iter().enumerate()`, which has exactly `n` entries. Tests: `simple_weekday_range` and `no_day_selector_means_every_day` (`places.rs`) and two `places_google.rs` hours tests walk `days.iter().enumerate()` (with `take(5)` or `skip(1)` where they checked a sub-range). No lint is allowed or lowered.
+- **CI (`ci.yml`, `bridge` job):** the toolchain step installs Rust 1.100.0 (`--profile minimal`, clippy, rustfmt, llvm-tools-preview), makes it the job's default and prints `rustc --version` and `cargo clippy --version`. Moving to a newer Rust is now a pull request that fixes the new lints in the same change. The `agent` and `eval` jobs are unchanged.
+- **CI (`ci.yml`, `bridge` job):** a `Clippy (default features)` step runs `cargo clippy --all-targets -- -D warnings` beside the existing `Clippy` step, which keeps `--features containment-probe`.
+- **Unchanged:** `mcpservers::row()` is lint-free in both builds (the cfg'd `MCP_SERVERS.iter().chain(PROBE_ROWS.iter())` with one `find`). No MCP row, grant, allowlist or containment record moves; the deploy still builds with the host's stable.
+
+## [bridge 0.206.0] - 2026-11-15
+
+**The bridge can start a patched iMCP helper, so `imcp` answers again on the Studio.** Root cause: iMCP 1.4.1's `imcp-server` connects to the browsed Bonjour *service* endpoint, and mDNSResponder answers that resolve on an OrbStack VM bridge (`bridge104`, ifindex 48, address `192.168.117.0`). The connect scoped to that interface fails with `EADDRNOTAVAIL`. Network.framework's Bonjour resolver then waits for another answer that never comes, and the helper has no connect deadline, so it sits in `.preparing`. The gateway drops it after 60 s and the containment pre-flight finds no tools. Measured 2026-11-15: the stock helper answered 0 of 26 starts; a helper patched to connect over loopback answered 26 of 26 (`tools/list` in 62–128 ms). It was not concurrency: the service resolve took 5–10 ms with 0, 1, 3 or 6 helpers running, and answered on interface 48 every time.
+
+- **Added (bridge):** `[mcp.imcp] command = "<absolute path>"` replaces the `imcp` row's `/Applications/iMCP.app/Contents/MacOS/imcp-server`. It is applied in `gateway::resolve_row`, so a Claude Code, Codex or `direct` turn's upstream, the containment battery's probe children and its pre-flight (`preflight_admitted`, split out of `count_server_tools`) all start the configured helper. Read only while the gateway is on, like every `[mcp.<name>]` key.
+- **Guarded:** `COMMAND_OVERRIDE_ROWS` is `imcp` alone. A `command` on any other row, or a relative path, stops the bridge at boot, so a config file still cannot point a credentialed server at another binary.
+- **Unchanged:** without the key every path is the installed app's helper. With the gateway off, children start the table's path. The rendered MCP configs and containment records do not move.
+- **Docs:** the bridge README ("The iMCP helper") records the patched helper's provenance: `mattt/iMCP` tag `1.4.1` (`b84f266`), local branch `jesse-local-resolve`, and the patch. SECURITY.md records what the key widens and what it does not.
+- **Tests:** every harness's `imcp` upstream and the pre-flight get the configured path and default to the stock one. The key is refused on other rows and for relative paths. With the `containment-probe` feature, a real pre-flight starts a configured helper and counts its tools.
+
+## [bridge 0.205.3] - 2026-11-15
+
+**A failed Studio run stops asking "see why it failed" once its item is ticked or run again.** Root cause: failed runs were never settled, so an archived later run left the failure as the item's current run. Run GO299b failed on 13 Nov, GO299c finished the item and was archived with its ticked line, and the Goose project kept saying "For you: see why GO299b failed" for two days.
+
+- **Fixed (bridge):** `RunStatus::is_settleable` now covers `failed` with `needs_you` and `interrupted`. The watcher's `close_settled` closes a failed run whose line is ticked (`item ticked`, then archived by `archive_settled` the same pass), and a start with `again` closes an earlier failed run of the item (`superseded by <run>`).
+- **Fixed (bridge):** `close_settled` also closes a `needs_you`, `interrupted` or `failed` run that a later run of the same item followed, whatever that run's status, as `superseded by <the newest such run>`. This covers a retry started by hand, without `again`, and a failure whose line is still open.
+- **Unchanged:** a queued, running or paused run is never closed or archived; a failed run with no later run and an open line stays failed and counts in `needs_me`; `report archived` still closes only a `needs_you` run; archiving a failed run by hand still flags it in place with its status kept.
+
+## [bridge 0.205.2] - 2026-11-13
+
+**ci.yml is green on main again.** Root cause: RustSec advisory RUSTSEC-2026-0538 (`quinn-udp`: the receive loop can spin after a truncated datagram; fixed in 0.5.16) failed the bridge job's `Dependency CVE audit` on `main` at e45490e. The advisory database is fetched live, so the same lock that passed on the pull request failed on main. No source changed.
+
+- **Fixed (bridge):** `bridge/Cargo.lock`: `quinn-udp` 0.5.14 → 0.5.16 (`cargo update -p quinn-udp`), which also drops the `windows` 0.53 target crates it alone pulled in.
+- **Fixed (root lockfile, agent and eval):** `Cargo.lock`: `quinn-udp` 0.5.15 → 0.5.16 for the same advisory, and `quinn-proto` 0.11.18 → 0.11.19 for RUSTSEC-2026-0523 (MAX_STREAM_DATA can open streams beyond the limit) and RUSTSEC-2026-0524 (a long Retry token can panic or exhaust memory in a client). A current advisory database flags all three in that lock; the agent job's audit passed on main only because it read an older database.
+- `cargo audit` on both lockfiles now reports no vulnerability, only the already allowed `tokio` (RUSTSEC-2026-0386) and `rustix` (RUSTSEC-2026-0486) warnings.
+
+## [App 1.0 (216)] - 2026-11-13
+
+**Every Studio runs screen works on the Mac: the Runs list shows its runs, and a run opens with its detail, log, report, Reply, Cancel and Archive from every place that offers it.** Root cause: a macOS sheet takes its content's ideal size and a `List` has no ideal height, so `StudioRunsScreen` and `StudioRunDetailScreen` came up collapsed (the Runs sheet 520 by 149 points, the filter bar covering the 84 left to the list; a run's sheet 470 by 113, a title and Done). The runs had loaded; nothing drew them. Separately, a project view's Moving row was a value `NavigationLink` inside a view pushed by an item binding, which macOS never pushes, wherever its destination is declared.
+
+- **Fixed (app, Mac):** the Runs and run sheets take a size of their own on the Mac (at least 560 by 520, 720 by 780 where the window has the room), in the shared screens, so the Today toolbar's Runs, a project's All runs, a Drafts block's Runs and live run, and `Run on Studio` all get it. The iPhone is unchanged.
+- **Fixed (app, Mac):** a project view's Moving row opens its run, through the same route the Your turn rows use, with their chevron. The iPhone keeps its link.
+- **Fixed (app, Mac):** `Open report` inside a Runs or run sheet closes that sheet before the Vault tab opens the report. The shell closes only the sheets it owns, so a project's All runs or a Drafts block's run stayed up over the Vault tab.
+- **Added:** `MacStudioRunsPresentationTests`: the real sheets and pushes in a real window kept off every display, served from the bridge's wire fixtures. They assert the sheet's size, that a row is drawn where a click lands, and, read back from the window's drawing with Vision, the run's title, status and log after opening it from the toolbar's list, a Drafts block's live run, the block's Runs list and a project's Moving row. All three fail on 1.0 (215) and pass here. A gated `testShotsAgainstABridge` took the screenshots in `docs/ho6-screenshots/` against a scratch bridge on copies of the run store and Strands notes.
+
+## [bridge 0.205.1, App 1.0 (215)] - 2026-11-13
+
+**Both CI workflows green again after HO5, each failure fixed where it started.** No change to what the app shows or the bridge serves.
+
+- **Fixed (app):** the nightly iOS CI could not build JesseKit: `WorkSemantics.rowTitle` (nonisolated) called `WordFitLine.dropDangling` and `trimTail`, pure string helpers that were MainActor only because `WordFitLine` is a SwiftUI `View`. Root cause: Xcode 26.6 on the runner rejects that call; the Studio's Swift 6.4 demotes it to a warning that neither `-warnings-as-errors` nor `-Werror ActorIsolatedCall` promotes, so `scripts/local-ci-macos.sh` passed it. The four helpers are now `nonisolated`; a clean build of JesseKit and the Mac app shows no other such call.
+- **Fixed (gate):** `scripts/local-ci-macos.sh` fails a build step on any Swift warning that survived warnings-as-errors (`no_surviving_warnings`), and builds JesseKit from an empty scratch directory as the runner does, since an incremental build does not re-print an unchanged file's warning. It fails on `main` at `WorkSemantics.swift:277` and passes here.
+- **Fixed (bridge tests):** `codex_session_home::a_turn_cancelled_mid_flight_can_be_retried` failed in ci.yml with ETXTBSY ("Text file busy"). Root cause: a test wrote a fake binary in the test process and spawned it; a child forked by a parallel test between that write's open and its own exec held a copy of the write descriptor (close-on-exec acts only at exec), and Linux refuses to exec a file open for writing. Every test that writes a script it spawns now goes through one helper, `write_executable` (`bridge/src/testutil/executable.rs`): the body is staged, a `cp` child writes the executable, a rename puts it in place, so the test process never holds it open for writing. Changed: `write_fake_claude` (tests/common), `sentinel.rs`'s shims and seeded installs, `shadow_audit.rs`'s `write_exec`, `hostrun_live.rs`'s `write_stub`, and the unit test shims in `startup.rs` and `dietlog.rs`.
+- **Added:** `WordFitIsolationTests` (the helpers and `rowTitle` called from a detached task, in a class that is not `@MainActor`); `write_executable`'s own tests (eight threads writing and at once spawning 320 scripts; a replace leaves 0755 and nothing beside it).
+
+## [bridge 0.205.0, App 1.0 (214)] - 2026-11-12
+
+**Each Work board row says what the project is about now and what, if anything, is yours to do, in two lines.** Root cause: HO2's row was a title and one status word, and with a `you:` Waiting on in 20 of 32 notes almost every row read only "Your turn": that something was yours, never what, and nothing about the project. Design, corpus, review rounds and the rejected candidates: `docs/ho5-work-board-rows.md`.
+
+- **Added (bridge):** `headline` on every strand of `GET /jesse/strands`: the lead clause of the note's `**Now:**` in plain words, a clause opening on step ids reworded around the step's title (`Merged: arm64 Chromium fallback chain`), the sentence naming today preferred, ids, PR numbers, branches, machine short names, paths and hashes dropped (`hostrun::work::row::headline`).
+- **Added (bridge):** `your_action`: the first action of a `you:` Waiting on, without its asides, lead in or tail; a possessive step id becomes that step, `-ing` verbs read as instructions, a remark about the note gives way to the first queued line (`your_action`).
+- **Added (bridge):** `next_title`: the first queued Drafts line named from its whole text rather than its 57 character title (`next_title`). All three are derived on read, never written to a note, no model call, `null` when the note gives nothing usable.
+- **Changed (app):** a Work board row is the title with what is moving (`Running: Ablation A2, 1 queued`), else the headline, beside it in grey, and under it what is yours in orange (`For you: generate the minisign keypair …`: a run's question, a cut off or failed run, else the note's action), else `Next: …`. A line is fitted on a word, never past two lines; at larger type the grey text steps down to the word `Running`, then to nothing, with what is moving or Next kept on line 2. Lines stop at 560pt on the Mac. A Drafts line under Running with no Studio run counts as moving.
+- **Changed (app):** the project view's Your turn section leads with the row's exact words, the whole Waiting on under them.
+- **Kept:** the colour bar, Dormant collapse, the long press menu, the order and Edit items, the Runs button, Since your last look and the project view; an older bridge (no new fields) still gets the gate's own words on the row.
+- **Added:** bridge unit tests on fifteen sanitised fixture notes of the live line shapes (`bridge/tests/fixtures/work/rows/`) plus the pieces; JesseKit decoding tests from fixtures the bridge's serializers wrote, with the fields (`strands-annotated.json`) and without (`strands-annotated-0.204.json`, the 0.204.0 output); view model tests for use cases A to E and the word fitting.
+
+## [bridge 0.204.0, App 1.0 (213)] - 2026-11-12
+
+**The runs list has filters (Needs me, Moving, Finished, All, Archived) and an archive, so finished runs leave it by hand or by themselves.** Root cause: `GET /jesse/runs` served every run directory the store had ever held, and the list drew all of them, live first. Closing a run (0.200.0) changed its status but not its place in the list, so nothing ever left it and it only grew.
+
+- **Added (bridge):** `archived_at` (RFC 3339) and `archived_reason` on `RunRecord`, written as `closed_at` is: absent until set, so earlier records load unchanged. A flag only; no run directory, log or report is moved or deleted.
+- **Added (bridge):** `POST /jesse/runs/:id/archive` and `POST /jesse/runs/:id/unarchive`, behind the paired device token like the other run routes. Archive refuses a `queued`, `running` or `paused` run with 409 naming the status, and closes a `needs_you` or `interrupted` run first (`closed_reason` `archived by Jeremy`). Unarchive clears the two fields and nothing else. Both idempotent, both silent.
+- **Changed (bridge):** `GET /jesse/runs` leaves archived runs out; `?archived=only` serves only them, newest archived first, and `?archived=all` both. `counts` gains `needs_me`, `moving`, `finished` and `archived`, over the whole store in the one scan.
+- **Added (bridge):** the watcher pass archives, after `close_settled`, every finished run (`reported`, `cancelled`, `closed`) whose Drafts line is ticked (`item ticked`), whose reports have all moved to `Inbox/archive/` (`report archived`), or whose last status change is over `AUTO_ARCHIVE_AFTER_DAYS` = 14 days old (`finished over 14 days ago`). Never a `needs_you`, `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts, so Undo holds.
+- **Added (app):** a filter bar at the top of the runs list, every project's and one project's: **Needs me**, **Moving**, **Finished** and **All** segments with their counts, and **Archived** as a toolbar item on the iPhone (five segments with counts truncate on an iPhone 18 Pro) and a fifth segment on the Mac. Default All, the last choice remembered across launches. An empty filter says so in one line ("Nothing needs you.").
+- **Added (app):** swipe left on a run that is not moving to **Archive** (a context menu too, on the Mac); under Archived, **Unarchive**. A run's detail has Archive or Unarchive in its toolbar, hidden while it is moving. Under Finished, **Archive all finished** archives only the runs shown, after a confirmation naming the count. The row leaves at once with an **Undo** banner for 5 seconds; a refusal is shown verbatim.
+- **Fixed (app):** the run calls escaped a run id's hyphens (`%2D`), which the bridge's router does not decode, so every free run (`s-…`) answered "no run" to its detail, log, reply, cancel and now archive. Run ids are escaped only where they hold a character outside RFC 3986's unreserved set.
+- **Changed (app):** `closed` is a status the app knows (Closed, under Finished, and a reply still continues it, as the bridge allows) rather than an unknown word.
+- **Added:** bridge unit tests for the fields, archive and unarchive with every refusal, the close on archive, the list modes, `counts`, each auto archive rule and each run it never touches (a `failed` run 30 days old included), and route tests for both routes. JesseKit decoding tests over fixtures the bridge's serializers wrote (`studio-runs-list-archived.json` with the fields; `studio-runs-list-0.203.json`, the 0.203.0 output, without), and view model tests for each filter, the counts, the remembered filter, where Archive is offered, Undo and Archive all finished.
+
+## [bridge 0.203.0, App 1.0 (212)] - 2026-11-11
+
+**The Strands segment is Work: one short line per project saying whether anything needs you, what is moving or what is next, a short project view, and a run detail that opens on the question.** Root cause: the board printed the data model. Every row showed the note's Now prose and next step (two truncated lines each), an audit triangle and an age, so none of them carried any signal; the strand sheet listed every open Drafts line, Later included, above the note, with Run on Studio in an unmarked long press; a run's detail opened on repository, branch, round and timestamps with the question and the Reply box below the fold; and Resume, which sends `Continue where you left off.`, was offered on a `needs_you` run, where an empty continue answers the run's question blind.
+
+- **Added (bridge):** `title` on every served Drafts item and every served run (`hostrun::work::line_title`, `run_title`). A line's title is its text with the bold id, any `(waits on: …)` and the wiki links it ends on removed, Markdown emphasis, `[text](url)` and backticks stripped (a link elsewhere keeps its alias or last path segment), then the words before the first `": "`, cut at 57 characters on a word boundary with `…`. A run is named by its Drafts line, else its prompt's H1 without its leading id, else its branch as words; never its run id. Derived on every read, never written to a note.
+- **Added (bridge):** `last_line` on every run in `GET /jesse/runs` (and the single run routes): the last non blank line of the readable log the log route serves, at most 200 characters, read from the stream's last 1 MiB and remembered per run while the stream is unchanged. No model call.
+- **Added (bridge):** `report_line` on every run: the first line of its newest report (the Inbox note's body, else the run's `report.md`), at most 500 characters. What the app shows as a run's question (`NEEDS YOU:` stripped) and under `Since your last look`.
+- **Added (bridge):** `GET /jesse/work/last-look` (`{ "last_look": RFC 3339 | null }`) and `POST /jesse/work/last-look` (sets it to now): one timestamp shared by every device, in `<state_dir>/work-last-look.json`, behind the same paired device auth as `/jesse/strands`. A bridge with no state directory answers `null` and refuses the `POST` with 503.
+- **Added (bridge):** `startable` and `startable_reason` on every served Drafts item. `startable` needs `studio_runnable` and also: not under `### Later`, no `(waits on: …)`, the draft says `devjob-host: studio`, and no run the bridge counts live for the step. `studio_runnable` is unchanged.
+- **Changed (bridge):** `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is refused with 409: "… asked a question and needs an answer". An interrupted run still takes it, and so does the watcher's own usage limit round (a paused run).
+- **Changed (app):** the Today tab's segments read **Today | Work**, and the board's title is Work. A row is the project's title in bold and exactly one status line: **Your turn** in orange (a run needs you, the newest run of a step was interrupted or failed, or Waiting on starts `you:`), else **N moving**, else **Next: <first Next title>**, else nothing. No Now prose, no audit triangle, no age; the colour bar, the long press menu and the order menu stay. The toolbar's monitor icon is now a **Runs** text button opening the list of every run.
+- **Added (app):** **Since your last look** above the rows: "3 finished since your last look", expanding to each run's title and the first line of its report; a row opens the report. Opening Work posts the last look only after the rows have rendered, so the visit still shows what was new.
+- **Added (app):** a project's view, pushed from a row: Since your last look; **Your turn** (each `needs_you` run with its question and an answer field whose Send needs text, `interrupted` runs with Resume, `failed` runs with See why, the note's `you:` gate as a line); **Moving** (each live run's title and `last_line`, refreshed every 15 seconds, and All runs for the project); **Next** (the first three unticked lines outside Later, Start on the first only when it is `startable`, else its reason); **Full note**, which opens the note with its Drafts block, Run on Studio and, now, the audit findings.
+- **Changed (app):** a run's detail opens on its title, its status, the question (or its report's first line), Open report and the answer field, then the log tail. Run id, strand, step, host, repository, branch, round, times and the report path fold into a collapsed **Details** group. Resume is offered on `interrupted` only; on `needs_you` Send needs text. The runs list leads each row with the run's title.
+- **Added:** bridge unit tests for titles (on the strands fixture notes and on `tests/fixtures/work/Work-Lines.md`, a fixture note of the shapes Drafts lines take, a leading link included), `last_line`, `report_line`, each `startable` refusal and the reply refusal; route tests for the last look. JesseKit decoding tests over fixtures the bridge's serializers wrote (with every new field, and without any), and view model tests for the row's precedence, Send, Resume, Start and the last look count.
 
 ## [bridge 0.202.0] - 2026-11-11
 

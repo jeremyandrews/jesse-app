@@ -40,7 +40,7 @@ final class TodayRetapUITests: XCTestCase {
                        line: line)
         let anchor = label == "Today"
             ? app.navigationBars.buttons["Order every section: File order"]
-            : app.navigationBars.buttons["Studio runs"]
+            : app.navigationBars.buttons["Runs"]
         XCTAssertTrue(anchor.waitForExistence(timeout: 10),
                       "\(message): the \(label) segment's toolbar is up", line: line)
     }
@@ -64,7 +64,7 @@ final class TodayRetapUITests: XCTestCase {
     /// Behaviours 1 and 2: from Chats with Strands remembered, the first tap on Today keeps
     /// Strands showing and the second lands on the day.
     func testTwoTapsFromChatsWithStrandsRememberedLandOnTheDay() {
-        let app = launchAndPick("Strands")
+        let app = launchAndPick("Work")
 
         let chats = app.tabBars.buttons["Chats"]
         XCTAssertTrue(chats.waitForExistence(timeout: 10))
@@ -72,7 +72,7 @@ final class TodayRetapUITests: XCTestCase {
         XCTAssertTrue(chats.isSelected, "on Chats")
 
         todayTabButton(app).tap()
-        assertShowing(app, "Strands", "the first tap keeps the remembered segment")
+        assertShowing(app, "Work", "the first tap keeps the remembered segment")
 
         todayTabButton(app).tap()
         assertShowing(app, "Today", "the re-tap returns to the day")
@@ -84,6 +84,6 @@ final class TodayRetapUITests: XCTestCase {
 
         todayTabButton(app).tap()
         assertShowing(app, "Today", "a re-tap on the day stays on the day")
-        XCTAssertFalse(segment(app, "Strands").isSelected, "Strands was not selected")
+        XCTAssertFalse(segment(app, "Work").isSelected, "Work was not selected")
     }
 }

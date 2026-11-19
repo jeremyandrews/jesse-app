@@ -62,9 +62,8 @@ final class MacLargePasteTests: XCTestCase {
     }
 
     private func window(for view: NSView, size: NSSize) -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: NSRect(origin: .zero, size: size),
+                                    styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = view
         windows.append(window)
         return window
@@ -297,9 +296,8 @@ final class MacLargePasteTests: XCTestCase {
     /// bridged string, with Unicode normalization: about 140 ms a key.
     func testAKeystrokeAfterA1MBPasteStaysCheap() throws {
         let host = NSHostingView(rootView: ComposerHost())
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = makeTestWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = host
         windows.append(window)
         settle(host)

@@ -114,7 +114,7 @@ public struct StudioRunsScreen: View {
     public var body: some View {
         NavigationStack {
             StudioRunsList(model: model, strand: strand)
-                .navigationTitle(strand.map { "Runs: \($0)" } ?? "Studio runs")
+                .navigationTitle(strand.map { "Runs: \($0)" } ?? "Runs")
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done", action: onDone)
@@ -124,6 +124,8 @@ public struct StudioRunsScreen: View {
                     StudioRunDetailView(model: model.detailModel(for: route.runID))
                 }
         }
+        .studioRunSheetFrame()
+        .closesBeforeReport(onDone)
     }
 }
 
@@ -134,21 +136,29 @@ public struct StudioRunRoute: Hashable, Identifiable, Sendable {
     public init(runID: String) { self.runID = runID }
 }
 
-/// The rows: live runs first, then the rest, newest first.
+/// The rows under the filter bar: Needs me, Moving, Finished and All as segments with their
+/// counts, Archived as a toolbar item on an iPhone (five segments with counts truncate there)
+/// and a fifth segment on the Mac, the
+/// last choice remembered across launches. A row that is not moving swipes to Archive (a
+/// context menu on the Mac too); under Archived, to Unarchive. An archive takes the row out at
+/// once, with an Undo banner for five seconds.
 struct StudioRunsList: View {
     @Bindable var model: StudioRunsModel
     let strand: String?
+    @AppStorage(StudioRunFilter.storageKey) private var filter: StudioRunFilter = .initial
+    @State private var confirmsArchiveAll = false
 
     var body: some View {
-        let runs = model.runs(strand: strand)
+        let runs = model.runs(filter: filter, strand: strand)
+        let loaded = filter == .archived ? model.hasLoadedArchived : model.hasLoaded
         List {
             if let error = model.loadError {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
-            if runs.isEmpty, model.hasLoaded {
-                Text(strand == nil ? "No Studio runs on this bridge." : "No Studio runs for this strand.")
+            if runs.isEmpty, loaded {
+                Text(filter.emptyLine)
                     .foregroundStyle(.secondary)
             } else if runs.isEmpty, model.loadError == nil {
                 ProgressView().frame(maxWidth: .infinity)
@@ -157,31 +167,196 @@ struct StudioRunsList: View {
                 NavigationLink(value: StudioRunRoute(runID: run.runID)) {
                     StudioRunRow(run: run, now: model.currentDate)
                 }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    actions(for: run)
+                }
+                .contextMenu {
+                    actions(for: run)
+                }
             }
         }
-        .refreshable { await model.load() }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            StudioRunFilterBar(model: model, strand: strand, filter: $filter)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let undo = model.undo {
+                StudioRunUndoBanner(undo: undo) {
+                    Task { await model.undoArchive() }
+                }
+                .task(id: undo.id) {
+                    try? await Task.sleep(for: .seconds(StudioRunsModel.undoSeconds))
+                    model.dismissUndo(undo.id)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.default, value: model.undo)
+        #if os(iOS)
+        // The filter bar sits under the navigation bar; a large title would scroll behind it.
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            #if os(iOS)
+            ToolbarItem(placement: Self.archivedPlacement) {
+                Button {
+                    filter = filter == .archived ? .initial : .archived
+                } label: {
+                    // Words and count drawn as text: a toolbar shows a `Label` as its icon alone.
+                    HStack(spacing: 4) {
+                        Image(systemName: filter == .archived ? "archivebox.fill" : "archivebox")
+                        Text(StudioRunFilter.archived.label(
+                            count: model.count(filter: .archived, strand: strand)))
+                            .monospacedDigit()
+                    }
+                }
+                .accessibilityIdentifier("studio-runs-archived")
+                .accessibilityAddTraits(filter == .archived ? .isSelected : [])
+                .accessibilityHint(filter == .archived ? "Shows every run again"
+                                                       : "Shows the archived runs")
+            }
+            #endif
+            if filter == .finished {
+                ToolbarItem(placement: Self.archiveAllPlacement) {
+                    Button {
+                        confirmsArchiveAll = true
+                    } label: {
+                        Text("Archive all finished")
+                    }
+                    .disabled(runs.isEmpty)
+                }
+            }
+        }
+        .confirmationDialog(Self.archiveAllQuestion(runs.count), isPresented: $confirmsArchiveAll,
+                            titleVisibility: .visible) {
+            Button(Self.archiveAllButton(runs.count)) {
+                Task { await model.archiveAllFinished(strand: strand) }
+            }
+            Button("Keep them", role: .cancel) {}
+        } message: {
+            Text("They leave the list. Nothing is deleted, and Archived still shows them.")
+        }
+        .refreshable {
+            await model.load()
+            if filter == .archived { await model.loadArchived() }
+        }
         // Every 15 seconds while the list is on screen, and never otherwise: the task ends
-        // with the view.
-        .task {
+        // with the view, and starts again when the filter turns to or from Archived.
+        .task(id: filter == .archived) {
             while !Task.isCancelled {
                 await model.load()
+                if filter == .archived { await model.loadArchived() }
                 try? await Task.sleep(for: .seconds(15))
             }
         }
         .studioRunAlert($model.alert)
     }
+
+    @ViewBuilder
+    private func actions(for run: StudioRun) -> some View {
+        if StudioRunSemantics.canUnarchive(run) {
+            Button {
+                Task { await model.unarchive(run) }
+            } label: {
+                Label("Unarchive", systemImage: "tray.and.arrow.up")
+            }
+            .tint(.blue)
+        } else if StudioRunSemantics.canArchive(run) {
+            Button {
+                Task { await model.archive(run) }
+            } label: {
+                Label("Archive", systemImage: "archivebox")
+            }
+            .tint(.indigo)
+        }
+    }
+
+    static func archiveAllQuestion(_ n: Int) -> String {
+        n == 1 ? "Archive 1 finished run?" : "Archive \(n) finished runs?"
+    }
+
+    static func archiveAllButton(_ n: Int) -> String {
+        n == 1 ? "Archive 1 run" : "Archive \(n) runs"
+    }
+
+    #if os(iOS)
+    static let archivedPlacement: ToolbarItemPlacement = .topBarLeading
+    static let archiveAllPlacement: ToolbarItemPlacement = .bottomBar
+    #else
+    static let archivedPlacement: ToolbarItemPlacement = .automatic
+    static let archiveAllPlacement: ToolbarItemPlacement = .automatic
+    #endif
 }
 
-/// One run: its id, its strand, its status, how old it is, and when a paused run resumes.
+/// Needs me, Moving, Finished and All, each with its count, and Archived too on the Mac. On
+/// an iPhone no segment is chosen under Archived; picking one leaves it.
+struct StudioRunFilterBar: View {
+    let model: StudioRunsModel
+    let strand: String?
+    @Binding var filter: StudioRunFilter
+
+    var body: some View {
+        Picker("Show", selection: $filter) {
+            ForEach(StudioRunFilter.barSegments, id: \.self) { f in
+                Text(f.label(count: model.count(filter: f, strand: strand)))
+                    .tag(f)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .accessibilityIdentifier("studio-runs-filter")
+    }
+}
+
+/// `Archived "…". Undo`, along the bottom for five seconds.
+struct StudioRunUndoBanner: View {
+    let undo: StudioRunUndo
+    let onUndo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "archivebox.fill")
+                .foregroundStyle(.secondary)
+            Text(undo.text)
+                .font(.subheadline)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Button("Undo", action: onUndo)
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("studio-runs-undo")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.regularMaterial, in: .rect(cornerRadius: 12))
+        .shadow(radius: 4, y: 2)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        // Its own element so Undo stays a button VoiceOver (and a test) can reach.
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// One run: its title, then its id, its strand, its status, how old it is, and when a paused
+/// run resumes.
 struct StudioRunRow: View {
     let run: StudioRun
     let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            if run.title != nil {
+                Text(WorkSemantics.title(run))
+                    .font(.body.weight(.semibold))
+                    .lineLimit(2)
+            }
             HStack(spacing: 6) {
                 Text(run.runID)
-                    .font(.body.monospaced().weight(.semibold))
+                    .font(run.title == nil ? .body.monospaced().weight(.semibold)
+                                           : .caption.monospaced())
+                    .foregroundStyle(run.title == nil ? .primary : .secondary)
                     .lineLimit(1)
                 if let strand = run.strand {
                     Text(strand)
@@ -209,7 +384,12 @@ struct StudioRunRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if let text = run.itemText, !text.isEmpty {
+            if run.status.isMoving, let line = run.lastLine, !line.isEmpty {
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if run.title == nil, let text = run.itemText, !text.isEmpty {
                 Text(text)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -242,17 +422,83 @@ public struct StudioRunDetailScreen: View {
                     }
                 }
         }
+        .studioRunSheetFrame()
+        .closesBeforeReport(onDone)
     }
 }
 
-/// Status, strand and draft, branch, round, times, the report, the log tail, Reply and Cancel.
+extension View {
+    /// The size a Runs or run sheet takes on the Mac. A macOS sheet sizes itself to its
+    /// content's ideal size, and a `List` has no ideal height: without this the sheet came up
+    /// about 150 points tall, the filter bar covering what was left of the list, so the Runs
+    /// list showed no rows and a run showed nothing but Done. The Mac's other sheets
+    /// (`MacTodayConversationSheet`, `MacAskSheet`) carry a frame for the same reason. An
+    /// iPhone sheet fills the screen, so nothing changes there.
+    func studioRunSheetFrame() -> some View {
+        #if os(macOS)
+        frame(minWidth: StudioRunSheet.minSize.width, idealWidth: StudioRunSheet.idealSize.width,
+              minHeight: StudioRunSheet.minSize.height, idealHeight: StudioRunSheet.idealSize.height)
+        #else
+        self
+        #endif
+    }
+}
+
+/// Inside a Runs or run sheet on the Mac, `Open report` closes that sheet before the shell
+/// opens the report. The shell closes only the sheets it owns (the Runs list and the strand
+/// note); a project's `All runs` and a Drafts block's run hang from views the shell cannot
+/// reach, and a Mac `TabView` keeps the Today tab alive, so one of them stayed up over the
+/// Vault tab. The iPhone keeps the shell's action as it is.
+private struct ClosesBeforeReport: ViewModifier {
+    @Environment(\.studioRunReport) private var outer
+    let close: () -> Void
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content.environment(\.studioRunReport, outer.map { action in
+            StudioRunReportAction { path in
+                close()
+                action.open(path)
+            }
+        })
+        #else
+        content
+        #endif
+    }
+}
+
+extension View {
+    fileprivate func closesBeforeReport(_ close: @escaping () -> Void) -> some View {
+        modifier(ClosesBeforeReport(close: close))
+    }
+}
+
+/// The Mac's size for a Runs or run sheet.
+enum StudioRunSheet {
+    /// The smallest it is drawn.
+    static let minSize = CGSize(width: 560, height: 520)
+    /// What it opens at, where the window has the room.
+    static let idealSize = CGSize(width: 720, height: 780)
+}
+
+/// A run, question first: its title, the question it asks (or its report's first line), the
+/// answer field, then the log tail. Run id, strand, step, repository, branch, round and times
+/// are folded into a collapsed Details group. Resume (the empty continue) is offered on an
+/// interrupted run only; on a `needs_you` run Send needs text.
 public struct StudioRunDetailView: View {
     @Bindable var model: StudioRunDetailModel
     @Environment(\.studioRunReport) private var reportAction
     @State private var confirmsCancel = false
+    @State private var showsDetails = false
 
     public init(model: StudioRunDetailModel) {
         self.model = model
+    }
+
+    /// Open with Details expanded (a screenshot of them, a test).
+    public init(model: StudioRunDetailModel, showsDetails: Bool) {
+        self.model = model
+        self._showsDetails = State(initialValue: showsDetails)
     }
 
     public var body: some View {
@@ -263,26 +509,10 @@ public struct StudioRunDetailView: View {
                     .foregroundStyle(.red)
             }
             if let run = model.run {
-                summary(run)
-                if let path = run.latestReportPath {
-                    Section("Report") {
-                        Button {
-                            reportAction?.open(path)
-                        } label: {
-                            Label(path, systemImage: "doc.text")
-                                .font(.footnote)
-                                .lineLimit(2)
-                        }
-                        .disabled(reportAction == nil)
-                        .accessibilityHint("Opens the report in the Vault tab")
-                    }
-                }
-                Section("Log") {
-                    StudioRunLogView(lines: model.lines)
-                        .frame(height: 280)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
-                }
-                Section("Reply") { composer }
+                top(run)
+                // Cancel run sits above the Log, not after it. Below the
+                // 280-point Log and Details it was the last row, and where the screen is
+                // short (768 points: a sheet holds about 677) it was scrolled out of sight.
                 if model.canCancel {
                     Section {
                         Button(role: .destructive) {
@@ -292,11 +522,21 @@ public struct StudioRunDetailView: View {
                         }
                     }
                 }
+                Section("Log") {
+                    StudioRunLogView(lines: model.lines)
+                        .frame(height: 280)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                }
+                Section {
+                    DisclosureGroup("Details", isExpanded: $showsDetails) {
+                        details(run)
+                    }
+                }
             } else if model.loadError == nil {
                 ProgressView().frame(maxWidth: .infinity)
             }
         }
-        .navigationTitle(model.runID)
+        .navigationTitle("Run")
         .refreshable { await model.refresh() }
         .task { await model.refresh() }
         // Every 5 seconds while the run can still change by itself; restarted when a reply
@@ -309,9 +549,30 @@ public struct StudioRunDetailView: View {
                 await model.refresh()
             }
         }
-        .confirmationDialog("Cancel run \(model.runID)?", isPresented: $confirmsCancel,
+        .toolbar {
+            if model.canArchive {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await model.archive() }
+                    } label: {
+                        Label("Archive", systemImage: "archivebox")
+                    }
+                    .accessibilityIdentifier("studio-run-archive")
+                }
+            } else if model.canUnarchive {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await model.unarchive() }
+                    } label: {
+                        Label("Unarchive", systemImage: "tray.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("studio-run-unarchive")
+                }
+            }
+        }
+        .confirmationDialog("Cancel this run?", isPresented: $confirmsCancel,
                             titleVisibility: .visible) {
-            Button("Cancel \(model.runID)", role: .destructive) {
+            Button("Cancel run", role: .destructive) {
                 Task { await model.cancel() }
             }
             Button("Keep running", role: .cancel) {}
@@ -321,40 +582,78 @@ public struct StudioRunDetailView: View {
         .studioRunAlert($model.alert)
     }
 
+    /// The first screen: the title, the status, the question or the report's first line, and
+    /// the answer field. No machine, run id, branch or step here.
     @ViewBuilder
-    private func summary(_ run: StudioRun) -> some View {
+    private func top(_ run: StudioRun) -> some View {
         let now = model.currentDate
         Section {
-            HStack {
-                StudioRunStatusLabel(status: run.status, font: .headline)
-                Spacer()
-                if let resume = StudioRunSemantics.resumeLine(run, now: now) {
-                    Text(resume).font(.subheadline).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.title)
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    StudioRunStatusLabel(status: run.status, font: .subheadline)
+                    if let resume = StudioRunSemantics.resumeLine(run, now: now) {
+                        Text(resume).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                if let headline = model.headline {
+                    Text(headline)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.top, 2)
+                }
+                if run.status.isMoving, let line = run.lastLine, !line.isEmpty {
+                    Text(line)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
-            if run.status == .queued, let waiting = run.waitingFor {
-                field("Waiting for", waiting)
-            }
-            if let error = run.error, !error.isEmpty {
-                Text(error).font(.footnote).foregroundStyle(.red)
-            }
-            if let strand = run.strand { field("Strand", strand) }
-            if let item = run.itemID {
-                field("Draft", [item, run.itemText].compactMap { $0 }.joined(separator: " "))
-            } else if let prompt = run.promptPath {
-                field("Draft", prompt)
-            }
-            field("Repository", run.repo)
-            field("Branch", run.branch, monospaced: true)
-            field("Round", "\(run.round)")
-            if let started = StudioRunSemantics.clock(run.startedAt ?? run.createdAt, now: now) {
-                field("Started", started)
-            }
-            if let updated = StudioRunSemantics.clock(run.updatedAt, now: now) {
-                let age = StudioRunSemantics.age(run.updatedAt, now: now).map { " (\($0))" } ?? ""
-                field("Updated", updated + age)
+            .padding(.vertical, 2)
+            if let path = run.latestReportPath {
+                Button {
+                    reportAction?.open(path)
+                } label: {
+                    Label("Open report", systemImage: "doc.text")
+                }
+                .disabled(reportAction == nil)
+                .accessibilityHint("Opens the report in the Vault tab")
             }
         }
+        Section(run.status == .needsYou ? "Your answer" : "Reply") { composer }
+    }
+
+    @ViewBuilder
+    private func details(_ run: StudioRun) -> some View {
+        let now = model.currentDate
+        field("Run", run.runID, monospaced: true)
+        if run.status == .queued, let waiting = run.waitingFor {
+            field("Waiting for", waiting)
+        }
+        if let error = run.error, !error.isEmpty {
+            Text(error).font(.footnote).foregroundStyle(.red)
+        }
+        if let strand = run.strand { field("Strand", strand) }
+        if let item = run.itemID {
+            field("Step", [item, run.itemText].compactMap { $0 }.joined(separator: " "))
+        } else if let prompt = run.promptPath {
+            field("Draft", prompt)
+        }
+        if let host = run.host, !host.isEmpty { field("Host", host) }
+        field("Repository", run.repo)
+        field("Branch", run.branch, monospaced: true)
+        field("Round", "\(run.round)")
+        if let started = StudioRunSemantics.clock(run.startedAt ?? run.createdAt, now: now) {
+            field("Started", started)
+        }
+        if let updated = StudioRunSemantics.clock(run.updatedAt, now: now) {
+            let age = StudioRunSemantics.age(run.updatedAt, now: now).map { " (\($0))" } ?? ""
+            field("Updated", updated + age)
+        }
+        if let path = run.latestReportPath { field("Report", path) }
     }
 
     private func field(_ name: String, _ value: String, monospaced: Bool = false) -> some View {
@@ -368,7 +667,8 @@ public struct StudioRunDetailView: View {
 
     @ViewBuilder
     private var composer: some View {
-        TextField("Reply to \(model.runID)", text: $model.composer, axis: .vertical)
+        TextField(model.status == .needsYou ? "Your answer" : "Reply", text: $model.composer,
+                  axis: .vertical)
             .lineLimit(1...6)
             .disabled(!model.isComposerEnabled)
         HStack {
@@ -445,6 +745,19 @@ struct StudioRunLogView: View {
 /// Studio` on a long press (a secondary click on the Mac), a line with a live run shows that
 /// run's status instead, and every other line is just its words.
 ///
+/// The one sheet a Drafts block shows at a time.
+enum DraftsSheet: Identifiable, Hashable {
+    case run(StudioRunRoute)
+    case runs
+
+    var id: String {
+        switch self {
+        case .run(let route): "run:\(route.runID)"
+        case .runs: "runs"
+        }
+    }
+}
+
 /// Nothing at all from a bridge that does not serve `drafts`, or for a strand with no open
 /// line.
 public struct StrandDraftsBlock: View {
@@ -453,8 +766,13 @@ public struct StrandDraftsBlock: View {
     /// Called after a start, so the board's badge catches up.
     var onStarted: () -> Void = {}
 
-    @State private var openedRun: StudioRunRoute?
-    @State private var showsRuns = false
+    /// What the block has up: one of its runs, or its Runs list. ONE optional and ONE `.sheet`,
+    /// not two: with a `.sheet(item:)` for the run and a `.sheet(isPresented:)` for the list on
+    /// the same view, closing a run and pressing Runs presented the list while the run's sheet
+    /// was still being torn down (its `onDisappear` ran after the list appeared), and on macOS
+    /// 26 that second presentation was sometimes dropped: Runs did nothing. One item makes
+    /// the switch from one sheet to the other a single presentation's change.
+    @State private var presented: DraftsSheet?
     @State private var startedLine: String?
 
     public init(strand: Strand, runs: StudioRunsModel, onStarted: @escaping () -> Void = {}) {
@@ -477,7 +795,7 @@ public struct StrandDraftsBlock: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
-                        showsRuns = true
+                        presented = .runs
                     } label: {
                         Label("Runs", systemImage: "desktopcomputer")
                             .font(.caption)
@@ -498,13 +816,15 @@ public struct StrandDraftsBlock: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
             .task { await runs.load() }
-            .sheet(item: $openedRun) { route in
-                StudioRunDetailScreen(model: runs.detailModel(for: route.runID)) {
-                    openedRun = nil
+            .sheet(item: $presented) { sheet in
+                switch sheet {
+                case .run(let route):
+                    StudioRunDetailScreen(model: runs.detailModel(for: route.runID)) {
+                        presented = nil
+                    }
+                case .runs:
+                    StudioRunsScreen(model: runs, strand: strand.slug) { presented = nil }
                 }
-            }
-            .sheet(isPresented: $showsRuns) {
-                StudioRunsScreen(model: runs, strand: strand.slug) { showsRuns = false }
             }
             .studioRunAlert($runs.alert)
         }
@@ -526,7 +846,7 @@ public struct StrandDraftsBlock: View {
                 ProgressView().controlSize(.mini)
             } else if let live {
                 Button {
-                    openedRun = StudioRunRoute(runID: live.runID)
+                    presented = .run(StudioRunRoute(runID: live.runID))
                 } label: {
                     StudioRunStatusLabel(status: live.status, font: .caption2)
                 }
@@ -539,7 +859,7 @@ public struct StrandDraftsBlock: View {
         .contextMenu {
             if let live {
                 Button {
-                    openedRun = StudioRunRoute(runID: live.runID)
+                    presented = .run(StudioRunRoute(runID: live.runID))
                 } label: {
                     Label("Open run \(live.runID)", systemImage: "desktopcomputer")
                 }
@@ -557,7 +877,7 @@ public struct StrandDraftsBlock: View {
         guard let started = await runs.start(strand: strand.slug, itemID: draft.id) else { return }
         startedLine = "Started \(started.runID): \(StudioRunSemantics.label(started.status))"
         onStarted()
-        openedRun = StudioRunRoute(runID: started.runID)
+        presented = .run(StudioRunRoute(runID: started.runID))
     }
 }
 
@@ -566,7 +886,7 @@ public struct StrandDraftsBlock: View {
 extension View {
     /// The bridge's refusal, verbatim, in an alert.
     func studioRunAlert(_ message: Binding<String?>) -> some View {
-        alert("Studio run",
+        alert("Run",
               isPresented: Binding(get: { message.wrappedValue != nil },
                                    set: { if !$0 { message.wrappedValue = nil } })) {
             Button("OK", role: .cancel) { message.wrappedValue = nil }

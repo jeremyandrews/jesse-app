@@ -62,9 +62,14 @@ enum PromptStore {
 
     /// How the app refers to the owner in prompt context it builds itself. Default
     /// "the user" (the generic identity a fresh install reads with). Set it in
-    /// Settings to a real name; the bridge's own wrappers are personalized
-    /// separately via its `jesse.local.toml` persona. A blank value reads as the
-    /// default so an empty field never sends "".
+    /// Settings › Vault folder › Owner name: the shared `OwnerNameSettingsRows` field,
+    /// embedded in the iPhone's `SettingsView` and the Mac's `MacSettingsView`, which
+    /// writes through `OfflineLookupSettings.ownerName`'s setter. The bridge's own
+    /// wrappers are personalized separately via its `jesse.local.toml` persona. A blank
+    /// value reads as the default so an empty field never sends "".
+    ///
+    /// THE SETTER DELEGATES to `OfflineLookupSettings.ownerName`, so the key is written in
+    /// one place: trimmed, and removed rather than stored empty.
     ///
     /// THE FIRST FORM ONLY. The setting may hold several spellings of the same person
     /// separated by commas, because the offline retriever needs every way his own notes
@@ -78,12 +83,7 @@ enum PromptStore {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
             return v.isEmpty ? "the user" : v
         }
-        set {
-            defaults.set(
-                newValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                forKey: ownerNameKey
-            )
-        }
+        set { OfflineLookupSettings(defaults: defaults).ownerName = newValue }
     }
 
     // MARK: - Reads

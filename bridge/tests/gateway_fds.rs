@@ -115,6 +115,7 @@ async fn one_turn(gw: &Arc<Gateway>, cfg: &Config, job: &str) -> (usize, usize) 
     let n = servers.len();
     let guard = gw
         .open_turn(TurnSpec {
+            proxy: Default::default(),
             job_id: job.to_string(),
             capability: Capability::Write,
             servers,

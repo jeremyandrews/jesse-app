@@ -2898,9 +2898,25 @@ pub async fn run_diet_hooks_for_days(vault: &Path, days: &[String]) -> Result<()
     Ok(())
 }
 
+/// The activity ledger's job id for a commit the live diet pipeline makes (it runs ahead of
+/// the turn and holds no turn id).
+pub const DIET_PIPELINE_JOB: &str = "diet-pipeline";
+
+/// The job id for a commit the diet queue's replay makes.
+pub const DIET_QUEUE_JOB: &str = "diet-queue";
+
 /// Commit the log change (one commit per log event, matching today's convention).
 /// Stages the diet-logs + regenerated cache and commits; a git failure is an `Err`.
-pub async fn commit_diet_logs(vault: &Path, date: &str, hhmm: &str) -> Result<(), String> {
+///
+/// A successful commit is recorded in the activity `ledger` under `job_id` (the turn, or a
+/// fixed id for the bridge's own pipelines) and wakes [`crate::activity::commit_notify`].
+pub async fn commit_diet_logs(
+    vault: &Path,
+    date: &str,
+    hhmm: &str,
+    ledger: Option<&crate::activity::ActivityLedger>,
+    job_id: &str,
+) -> Result<(), String> {
     let add = Command::new("git")
         .args(["add", "diet-logs", "vault/diet-today.js"])
         .current_dir(vault)
@@ -2926,6 +2942,7 @@ pub async fn commit_diet_logs(vault: &Path, date: &str, hhmm: &str) -> Result<()
             truncate_chars(&String::from_utf8_lossy(&commit.stderr), 200)
         ));
     }
+    crate::activity::record_commit(ledger, vault, job_id).await;
     Ok(())
 }
 
@@ -4187,7 +4204,16 @@ pub async fn run_diet_pipeline(
             reason: None,
         };
     }
-    if let Err(e) = commit_diet_logs(vault, &date, &commit_stamp_in(zone)).await {
+    let ledger = crate::activity::global(cfg);
+    if let Err(e) = commit_diet_logs(
+        vault,
+        &date,
+        &commit_stamp_in(zone),
+        ledger.as_deref(),
+        DIET_PIPELINE_JOB,
+    )
+    .await
+    {
         eprintln!("jesse-bridge: diet commit failed: {e}");
         snapshot.rollback();
         prov(false, Some(4), verify_word, verified.len(), false);

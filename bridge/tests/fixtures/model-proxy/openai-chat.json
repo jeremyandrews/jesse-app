@@ -1,0 +1,1 @@
+{"id":"chatcmpl-9","object":"chat.completion","created":1762800200,"model":"qwen3-coder","choices":[{"index":0,"message":{"role":"assistant","content":"PROMPT-ECHO-MARKER: two eggs."},"finish_reason":"stop"}],"usage":{"prompt_tokens":300,"completion_tokens":20,"total_tokens":320,"prompt_tokens_details":{"cached_tokens":200}}}

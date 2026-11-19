@@ -1605,6 +1605,9 @@ async fn run_one(
     // Not typed by the owner: the apps fold this prompt away under the schedule's name.
     req.set_sent_for(scheduled_sent_for(&job.id));
     req.set_origin(format!("schedule:{}", job.id));
+    // The job's egress tier (`closed` unless its entry says otherwise), for the gateway and
+    // the egress proxy. See `proxy::tier`.
+    req.set_egress(job.egress.clone());
     // A REJECTION HERE IS A FAILURE, NOT A SKIP — and the line between the two is
     // whose decision it was. The slot wait above is the SCHEDULER deciding to stand
     // down, which is a skip. Everything below is the turn path refusing a turn the

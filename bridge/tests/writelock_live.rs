@@ -511,6 +511,7 @@ async fn a_claude_write_and_a_codex_write_to_one_path_serialize() {
             tool_use_id: "claude-call".into(),
             target: Some(Some(key.clone())),
             git: false,
+            tool: None,
         })
         .await;
     assert!(allowed.allow, "the claude write takes the lock");
@@ -524,6 +525,7 @@ async fn a_claude_write_and_a_codex_write_to_one_path_serialize() {
             tool_use_id: "codex-call".into(),
             target: Some(Some(key)),
             git: false,
+            tool: None,
         }),
     )
     .await;

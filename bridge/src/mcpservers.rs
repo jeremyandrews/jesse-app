@@ -598,7 +598,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
             &[],
             &[],
         ),
-        &["maps_search"],
+        &["maps_search", "maps_directions", "maps_eta"],
     ),
     stdio(
         "google-perseido",
@@ -1380,6 +1380,8 @@ mod tests {
             ("places", "places_search"),
             ("places", "place_details"),
             ("imcp", "maps_search"),
+            ("imcp", "maps_directions"),
+            ("imcp", "maps_eta"),
             ("browser", "browser_navigate"),
         ] {
             assert_eq!(row(server).unwrap().class_of(tool), ToolClass::Egress);

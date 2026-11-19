@@ -113,6 +113,7 @@ pub fn test_config() -> Config {
         quota: QuotaSettings::default(),
         house: HouseConfig::Absent,
         gateway: jesse_bridge::gateway::GatewaySettings::default(),
+        proxy: jesse_bridge::proxy::ProxySettings::default(),
         devjob: jesse_bridge::devjob::DevJobSettings::default(),
         hostrun: jesse_bridge::hostrun::HostRunSettings::default(),
         healthdb: HealthDbConfig::Absent,

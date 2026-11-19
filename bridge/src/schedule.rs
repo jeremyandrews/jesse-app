@@ -372,6 +372,12 @@ pub struct ScheduleJob {
     /// today's behaviour for every job. Validated at LOAD against the registry, so a typo
     /// disables that entry by name rather than failing one turn a night later.
     pub model: Option<String>,
+    /// THE JOB'S EGRESS TIER ([`crate::proxy::tier`]): `closed` unless the entry says
+    /// `egress = "allowlist"` with `hosts = [...]`, or `egress = "open"`. Enforced only while
+    /// `[proxy] egress` is on (the egress proxy and the gateway's `egress`-class filter); the
+    /// two tools granted with tiers (iMCP's `maps_directions`, `maps_eta`) are hidden on a
+    /// `closed` job either way.
+    pub egress: crate::proxy::Egress,
     /// Set when this entry was a LINK in the config and was promoted into a missing head's
     /// clock slot — the id of the head it replaced. Reported on `GET /jesse/schedule` so
     /// the promotion is a visible fact rather than a log line someone has to have seen.
@@ -656,6 +662,7 @@ pub fn with_builtin_defaults(mut s: Schedule, speech_available: bool) -> Schedul
     }) || s.invalid.iter().any(|e| e.id == SPEECH_MODEL_UPDATE_JOB_ID);
     if !declared {
         s.jobs.push(ScheduleJob {
+            egress: crate::proxy::Egress::Closed,
             id: SPEECH_MODEL_UPDATE_JOB_ID.to_string(),
             enabled: true,
             // Sunday at 04:40, clear of the nightly chains and well before anyone records.
@@ -828,6 +835,10 @@ pub struct ScheduleToml {
     pub catch_up_secs: Option<u64>,
     pub expect_output: Option<Vec<String>>,
     pub model: Option<String>,
+    /// `closed` (the default), `allowlist` or `open` — see [`ScheduleJob::egress`].
+    pub egress: Option<String>,
+    /// `egress = "allowlist"` only: exact hosts or `.suffix` patterns.
+    pub hosts: Option<Vec<String>>,
     pub profiles: Option<Vec<String>>,
     /// A task the bridge runs itself, in place of a prompt — see [`BuiltinTask`].
     pub builtin: Option<String>,
@@ -983,6 +994,8 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
                 (t.mode.is_some(), "mode"),
                 (t.model.is_some(), "model"),
                 (t.expect_output.is_some(), "expect_output"),
+                (t.egress.is_some(), "egress"),
+                (t.hosts.is_some(), "hosts"),
             ] {
                 if present {
                     return Err(format!(
@@ -1069,7 +1082,18 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
         }
     };
 
+    // THE EGRESS TIER. A malformed value disables the entry by name, like every other
+    // per-entry mistake; whether the tier fits the job's MODEL is a boot gate
+    // ([`tier_model_problems`]), because a non-frontier model on an open tier is a posture
+    // decision, not a typo.
+    let egress = crate::proxy::Egress::from_schedule(
+        t.egress.as_deref().map(str::trim),
+        t.hosts.as_deref().unwrap_or(&[]),
+    )
+    .map_err(|e| format!("`egress`: {e}"))?;
+
     Ok(ScheduleJob {
+        egress,
         id,
         enabled: t.enabled.unwrap_or(true),
         trigger,
@@ -1087,6 +1111,31 @@ fn validate_entry(t: &ScheduleToml, ctx: &ValidationContext) -> Result<ScheduleJ
         devjob,
         devjob_strand,
     })
+}
+
+/// THE TIER/MODEL GATE. A job may name a NON-FRONTIER model (any `local` kind, or any entry
+/// served by Fireworks) only if its tier is `closed`: a weaker model is the likelier one to
+/// follow instructions embedded in what a scan reads, so it gets no route to act on them.
+/// `non_frontier(model_id)` is the registry's answer. Each problem names the job; the startup
+/// gate refuses the boot on any.
+pub fn tier_model_problems(
+    jobs: &[ScheduleJob],
+    non_frontier: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    jobs.iter()
+        .filter_map(|j| {
+            let m = j.model.as_deref()?;
+            (non_frontier(m) && j.egress != crate::proxy::Egress::Closed).then(|| {
+                format!(
+                    "[[schedule]] job '{}' runs the non-frontier model '{m}' on egress tier \
+                     '{}': a local or Fireworks model may run a scheduled job only on a \
+                     `closed` tier",
+                    j.id,
+                    j.egress.label()
+                )
+            })
+        })
+        .collect()
 }
 
 /// Validate a whole `[[schedule]]` array.
@@ -1441,6 +1490,52 @@ mod tests {
     use super::*;
     use chrono::FixedOffset;
     use chrono_tz::America::New_York;
+
+    #[test]
+    fn an_entry_carries_its_egress_tier_and_a_bad_one_is_disabled_by_name() {
+        let mut open = head("open-job", "03:00");
+        open.egress = Some("open".into());
+        let mut allow = head("allow-job", "03:00");
+        allow.egress = Some("allowlist".into());
+        allow.hosts = Some(vec!["api.github.com".into()]);
+        let mut bad = head("bad-job", "03:00");
+        bad.egress = Some("allowlist".into());
+        let s = validate_schedule(&[head("plain", "03:00"), open, allow, bad]);
+        let tier = |id: &str| s.jobs.iter().find(|j| j.id == id).unwrap().egress.clone();
+        assert_eq!(tier("plain"), crate::proxy::Egress::Closed);
+        assert_eq!(tier("open-job"), crate::proxy::Egress::OpenLogged);
+        assert_eq!(
+            tier("allow-job"),
+            crate::proxy::Egress::Allowlist(vec!["api.github.com".into()])
+        );
+        assert_eq!(s.invalid.len(), 1);
+        assert!(
+            s.invalid[0].reason.contains("egress"),
+            "{}",
+            s.invalid[0].reason
+        );
+    }
+
+    #[test]
+    fn a_non_frontier_model_on_an_open_tier_is_a_boot_error_naming_the_job() {
+        let mut a = head("scan-local", "03:00");
+        a.model = Some("qwen-local".into());
+        a.egress = Some("open".into());
+        let mut b = head("scan-fw", "03:00");
+        b.model = Some("glm".into());
+        b.egress = Some("allowlist".into());
+        b.hosts = Some(vec!["example.com".into()]);
+        let mut c = head("scan-closed", "03:00");
+        c.model = Some("qwen-local".into());
+        let mut d = head("frontier-open", "03:00");
+        d.model = Some("opus".into());
+        d.egress = Some("open".into());
+        let s = validate_schedule(&[a, b, c, d]);
+        let problems = tier_model_problems(&s.jobs, |m| m == "qwen-local" || m == "glm");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("scan-local") && problems[0].contains("open-logged"));
+        assert!(problems[1].contains("scan-fw") && problems[1].contains("allowlist"));
+    }
 
     fn toml_entry(id: &str) -> ScheduleToml {
         ScheduleToml {

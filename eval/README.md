@@ -7,7 +7,7 @@ pit a candidate model against a baseline with an LLM judge.
 ```
 jesse-eval run     --suite eval/suites/jesse-v1.json --out <dir> [--driver claude-cli|direct|bridge]
                    [--endpoint URL --model ID --wire messages|chat|responses] [--mock FILE]
-                   [--runs N]
+                   [--runs N] [--task ID ...]
 jesse-eval compare --a <dirA> --b <dirB> --out <dir>
 jesse-eval judge   --baseline <dirA> --candidate <dirB> --out <dir>
 jesse-eval tools   # print the tool-name mapping table
@@ -101,8 +101,11 @@ turn. See `SECURITY.md`.
 ```
 jesse-eval run --driver bridge --model <registry id> --suite eval/suites/workflows-v1.json \
   --out <dir> [--bridge-bin bridge/target/release/jesse-bridge] [--bridge-config <file.toml>] \
-  [--pass-env NAME ...] [--runs N] [--model-wait-secs 120] [--keep-sessions]
+  [--pass-env NAME ...] [--runs N] [--task ID ...] [--model-wait-secs 120] [--keep-sessions]
 ```
+
+`--task <id>` (any driver, repeatable) runs only the named tasks, in suite order. An id the
+suite does not have is refused rather than producing an empty run.
 
 The other two drivers stop short of what the phone talks to: `claude-cli` gives its child no
 MCP servers, and `direct` calls the loop in process, so neither exercises the bridge's spawn
@@ -212,11 +215,25 @@ transcript line. The scorecard reports p50 and p95 of each over every attempt.
 
 #### The transcript
 
-`transcripts/<id>.ndjson` holds `bridge_spawn` (target, PID), one `bridge_turn` per turn
+`transcripts/<id>.ndjson` holds `bridge_spawn` (target, PID), `bridge_proxy` (the scratch
+bridge's `/health` proxy block: the model and egress flags, their listeners and the phone tier;
+`null` from a bridge without proxies), one `bridge_turn` per turn
 (status, latencies, the bridge's own content-free `timing` and the `provenance`), a
 `bridge_sse` line per non-delta frame, an `assistant` line whose `tool_use` names are the
 turn's tool calls from `timing.tools`, and the `result` line the parser keys on. As for every
 driver, the persisted lines reparse to exactly what was scored.
+
+#### The activity ledger
+
+The scratch bridge writes its content-free activity ledger to
+`<state_dir>/activity/YYYY-MM-DD.jsonl` (`turn`, `tool_call`, `model_call`, `egress`, …; see
+`bridge/src/activity.rs`). The scratch state dir is removed when the bridge stops, which is
+before any assertion runs, so the driver reads every day file once the process has exited
+and before the directory goes, and hands it to the assertion engine with the job ids it
+submitted and the `/health` `proxy.egress` flag (`LedgerEvidence` in `src/driver/mod.rs`).
+The runner keeps the lines as `<out>/ledgers/<id>.jsonl` beside the transcript. Only this
+driver has a ledger; `ledger_no_egress` fails on every other one. The overlays that turn the
+proxies on are in `bridge-overlays/proxies/` (see its README).
 
 ### The tool-name mapping table
 
@@ -295,6 +312,8 @@ Outputs: `<out>/results.json` (one record per task) and `<out>/scorecard.md`
 | `csv_last_row` | `path`, `columns`, `row_count?` | read with a real RFC 4180 reader (a malformed row fails, since an unquoted comma shifts every later column): every `columns` entry, header to regex, matches that cell of the LAST data row IN FULL (anchored); `row_count`, when set, is the exact number of data rows, which is how a task says "replaced in place, not appended" |
 | `git_head_message_matches` | `pattern`, `repo?` | the HEAD commit's message (subject and body) matches; `repo` is relative to the workspace, default the workspace. Constant `git` argv |
 | `git_path_changed_since` | `path`, `committed?` | `path` differs between the seed commit (`refs/eval/seed`, see `git_init`) and HEAD; with `committed: false`, the working tree. Constant `git` argv |
+| `only_paths_changed` | `paths`, `committed?` | at least one path changed since the seed, and every changed path is in `paths`. "Changed" is the working tree against the seed (tracked edits and deletions, plus new untracked files), and with `committed: true` also the seed against HEAD. A `paths` entry is an exact workspace-relative path, or has `*` globs in its last component only (`reports/*.md`). Needs `git_init`. Constant `git` argv with `-z` |
+| `ledger_no_egress` | — | the `bridge` driver's captured activity ledger has no `egress` line with `verdict: allowed` for this attempt's job ids (refused lines are listed in the detail, host, method class and reason). Fails on any other driver ("needs the bridge driver's ledger"), when the scratch bridge's egress proxy was off, or when no job id was recorded: it never passes for want of evidence |
 | `json_path_equals` | `path`, `pointer`, `value` | in a generated `.js` data file that starts with an assignment (`window.X = {…};`), leading comments and everything through the first `=` are stripped and the rest parsed as JSON5; the RFC 6901 `pointer` (`/date`, `/exercise/0/type`) must hold exactly `value` |
 | `process_exit_zero` | `validator`, `day?` | one validator from a CLOSED table, `validate-diet-today` or `verify-diet-consistency`, runs as `node vault/<script> [--day YYYY-MM-DD]` in the workspace and exits 0. Never a free command: an unknown validator does not parse, and a `day` that is not a date is refused at load. `node` is `JESSE_EVAL_NODE` when set, else `node` on `PATH` |
 
@@ -493,12 +512,13 @@ in CI. See `suites/validation/README.md`.
 
 ## The `workflows-v1` suite
 
-Twenty-two tasks that grade what a real turn LEAVES BEHIND in a vault: a diet row appended and
+Twenty-three tasks that grade what a real turn LEAVES BEHIND in a vault: a diet row appended and
 the derived day file rebuilt, validated and committed; a draft named and footed; a checked
 archive box moved; a checkout in the right place at the right commit. Run three times each
 (pass^3) through the `bridge` driver, over a self-contained fixture vault under
 `eval/fixtures/workflows-v1/base/`. Graded on outcome, never on the tool path: the only tool
-assertion is `tools_exclude` on the three injection tasks carried over from `product-v1`. See
+assertion is `tools_exclude` on the injection tasks (the three carried over from `product-v1`,
+and `inj-scheduled-scan-egress`, which also grades the bridge's activity ledger). See
 `suites/README.md` for the task list, which harnesses each applies to, and how the fixture vault
 was built.
 

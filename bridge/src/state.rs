@@ -215,12 +215,21 @@ impl AppState {
         let speech = Arc::new(crate::speech::SpeechService::from_config(
             cfg.speech.clone(),
         ));
+        // Every path grant becomes a `vault_write` line, its path relative to the notes root
+        // (`<vault>/vault`) when under it, else to the vault repository.
+        let broker = Arc::new(LockBroker::with_ledger(
+            crate::activity::global(&cfg),
+            vec![
+                Path::new(&cfg.vault).join(crate::config::VAULT_SUBDIR),
+                PathBuf::from(&cfg.vault),
+            ],
+        ));
         let st = AppState {
             speech,
             cfg: Arc::new(cfg),
             jobs: Arc::new(JobStore::new(job_ttl, retrieval_grace, jobs_dir)),
             slots,
-            broker: Arc::new(LockBroker::new()),
+            broker,
             hook_helper,
             conversation_locks: Arc::new(ConversationLocks::default()),
             limiter,

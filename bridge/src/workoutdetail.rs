@@ -813,7 +813,10 @@ pub async fn write_workout_records(
         LockKey::Git,
     ];
     for key in &keys {
-        if !broker.acquire_direct(key, turn, call).await {
+        if !broker
+            .acquire_direct_op(key, turn, call, crate::activity::VaultOp::Edit)
+            .await
+        {
             broker.release_call_direct(turn, call);
             return Err("timed out waiting for the workout ledger's write lock".into());
         }
@@ -824,8 +827,14 @@ pub async fn write_workout_records(
         Ok((counts, days)) => {
             if counts.written() > 0 || counts.splits_written > 0 {
                 let day = days.first().cloned().unwrap_or_else(local_today);
-                if let Err(e) =
-                    commit_diet_logs(vault, &day, &commit_stamp_in(&SchedulerZone::Host)).await
+                if let Err(e) = commit_diet_logs(
+                    vault,
+                    &day,
+                    &commit_stamp_in(&SchedulerZone::Host),
+                    broker.ledger().map(|l| l.as_ref()),
+                    turn,
+                )
+                .await
                 {
                     eprintln!("workout ledger: commit failed ({e}); the rows are written");
                 }

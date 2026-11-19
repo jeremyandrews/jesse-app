@@ -58,6 +58,24 @@ pub struct FetchConfig {
     pub allow_hosts: Vec<String>,
     pub max_bytes: usize,
     pub timeout: Duration,
+    /// Send every request through this forward proxy (the bridge's egress proxy), trusting
+    /// `ca_pem` for the proxy's inspecting certificates. `None` (the default) fetches directly
+    /// with the bundled roots, as before.
+    pub proxy: Option<FetchProxy>,
+}
+
+/// A forward proxy for `fetch_url`: its URL (credentials in it) and the CA it terminates TLS
+/// with. The URL carries a per-turn credential, so `Debug` prints neither it nor the CA.
+#[derive(Clone)]
+pub struct FetchProxy {
+    pub url: String,
+    pub ca_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for FetchProxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FetchProxy(<redacted>)")
+    }
 }
 
 impl Default for FetchConfig {
@@ -66,11 +84,21 @@ impl Default for FetchConfig {
             allow_hosts: Vec::new(),
             max_bytes: FETCH_DEFAULT_MAX_BYTES,
             timeout: Duration::from_secs(20),
+            proxy: None,
         }
     }
 }
 
 impl FetchConfig {
+    /// Fetch through `proxy_url`, trusting `ca_pem` (the egress proxy's CA).
+    pub fn via_proxy(mut self, proxy_url: String, ca_pem: Vec<u8>) -> Self {
+        self.proxy = Some(FetchProxy {
+            url: proxy_url,
+            ca_pem,
+        });
+        self
+    }
+
     /// Allow these host patterns.
     pub fn allowing<I, S>(mut self, hosts: I) -> Self
     where
@@ -200,7 +228,29 @@ impl FetchUrl {
     fn client(&self) -> &reqwest::Client {
         self.client.get_or_init(|| {
             let allow = self.config.clone();
-            reqwest::Client::builder()
+            let mut builder = reqwest::Client::builder();
+            // THROUGH THE EGRESS PROXY when one is configured: every request, and no other
+            // route. A proxy or CA that will not parse leaves a client that cannot reach
+            // anything rather than one that goes around the proxy.
+            if let Some(p) = &self.config.proxy {
+                match (
+                    reqwest::Proxy::all(&p.url),
+                    reqwest::Certificate::from_pem(&p.ca_pem),
+                ) {
+                    (Ok(proxy), Ok(ca)) => {
+                        builder = builder.proxy(proxy).add_root_certificate(ca);
+                    }
+                    _ => {
+                        builder = builder.proxy(
+                            reqwest::Proxy::all("http://127.0.0.1:9")
+                                .expect("a fixed, valid proxy URL"),
+                        );
+                    }
+                }
+            } else {
+                builder = builder.no_proxy();
+            }
+            builder
                 .timeout(self.config.timeout)
                 .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                     if attempt.previous().len() >= FETCH_MAX_REDIRECTS {

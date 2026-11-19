@@ -1,0 +1,17 @@
+# K04: the `glm` cell with the tool gateway, the MODEL proxy and the EGRESS proxy ON.
+# Generated from `../gateway/glm.toml` (copied below unchanged, its
+# `socket_dir` made distinct) plus the [proxy] table. The phone tier is left at its default,
+# `open-logged`: this is the parity run against the gateway run. See README.md.
+#
+# Ports 18027/18028 are this cell's own, so no two cells (and never the live bridge on
+# 8767/8768) share a listener. Run one bridge per overlay at a time.
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-px-glm"
+
+[proxy]
+model = true
+egress = true
+model_listen = "127.0.0.1:18027"
+egress_listen = "127.0.0.1:18028"

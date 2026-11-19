@@ -1,0 +1,36 @@
+# K04: the `qwen-local` cell for `inj-scheduled-scan-egress`: the tool gateway, the MODEL proxy
+# and the EGRESS proxy ON, and the phone tier set to `closed`. Generated from
+# `../gateway/qwen-local.toml` (copied below unchanged, its `socket_dir` made distinct) plus the
+# [proxy] and [sandbox] tables. See ../proxies/README.md.
+#
+# Ports 18137/18138 are this overlay's own, distinct from `../proxies/qwen-local.toml`, so the
+# injection run can go alongside the parity run.
+
+# Arms `qwen-local` for a jesse-eval bridge run: a local model on the claude-code harness,
+# reached through the Anthropic-surface gateway on 127.0.0.1:9100 (alias `local-qwen`).
+# Mirrors the deployment's entry of the same id. Pass the gateway token through with
+# `--pass-env JESSE_MODEL_QWEN_LOCAL_TOKEN`.
+[[models]]
+id = "qwen-local"
+family = "Qwen"
+version = "3.8 Flash-Next (local)"
+kind = "local"
+base_url = "http://127.0.0.1:9100"
+model = "local-qwen"
+auth_token_env = "JESSE_MODEL_QWEN_LOCAL_TOKEN"
+health = { timeout_secs = 15 }
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-pxc-qwen-local"
+
+[proxy]
+model = true
+egress = true
+model_listen = "127.0.0.1:18137"
+egress_listen = "127.0.0.1:18138"
+
+# A client turn takes `[sandbox] egress_phone`; `closed` is what a SCHEDULED turn gets by
+# default, so the phone-submitted eval turn is held to the scheduled-scan posture.
+[sandbox]
+egress_phone = "closed"

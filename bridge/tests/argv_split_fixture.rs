@@ -246,6 +246,12 @@
 //! (`core.hooksPath`). No argv moved: the fixture's state dir holds no installed settings file,
 //! so no `--settings` is added. No `cwd` moved.
 //!
+//! **AND AGAIN, with per-turn egress tiers, for iMCP's `maps_directions` and `maps_eta`, on
+//! both harnesses' two write sites only.** Claude Code's `main-write` and `main-write-resume`
+//! moved their `--allowedTools` digest for the two new `mcp__imcp__*` grants; Codex's two write
+//! sites changed their `imcp` `enabled_tools` value to name them. No `--mcp-config` digest
+//! moved, no read or basic site moved, and no site gained or lost an argument.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

@@ -96,6 +96,9 @@ pub struct TurnSession {
     /// the upstream when it starts: a server that trusts clients by name (the iMCP app) then
     /// sees the same client it saw before the gateway. A name, never a credential.
     client_info: Mutex<HashMap<String, ClientInfo>>,
+    /// The turn's egress tier, with its allowlist hosts (the token carries only the label).
+    /// `None` when no tier was assigned (the gateway's own turns with both proxies off).
+    egress: Option<crate::proxy::Egress>,
 }
 
 impl std::fmt::Debug for TurnSession {
@@ -118,6 +121,7 @@ impl TurnSession {
         harness_env_value: Option<String>,
         env_overlay: BTreeMap<String, String>,
         dir: PathBuf,
+        egress: Option<crate::proxy::Egress>,
     ) -> TurnSession {
         TurnSession {
             gateway,
@@ -136,7 +140,13 @@ impl TurnSession {
             tasks: Mutex::new(Vec::new()),
             http_sessions: Mutex::new(HashMap::new()),
             client_info: Mutex::new(HashMap::new()),
+            egress,
         }
+    }
+
+    /// The turn's egress tier, when one was assigned.
+    pub fn egress_tier(&self) -> Option<&crate::proxy::Egress> {
+        self.egress.as_ref()
     }
 
     pub fn job_id(&self) -> &str {

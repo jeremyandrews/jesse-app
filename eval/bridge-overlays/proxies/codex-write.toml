@@ -1,0 +1,39 @@
+# K04: the `codex-write` cell with the tool gateway, the MODEL proxy and the EGRESS proxy ON.
+# Generated from `../gateway/codex-write.toml` (copied below with the one change marked K04, its
+# `socket_dir` made distinct) plus the [proxy] table. The phone tier is left at its default,
+# `open-logged`: this is the parity run against the gateway run. See README.md.
+#
+# Ports 18047/18048 are this cell's own, so no two cells (and never the live bridge on
+# 8767/8768) share a listener. Run one bridge per overlay at a time.
+
+# Arms `codex-write` for a jesse-eval bridge run: the Codex harness at write, off the codex
+# CLI's own subscription login (`~/.codex`, which the bridge copies into a per-turn
+# CODEX_HOME under the scratch state dir). Mirrors the deployment's entry of the same id.
+#
+# `base_url` exists only so the startup health probe has a target that answers; the turn
+# itself never uses it. `auth_token_env` names the variable the probe authenticates with;
+# pass it through with `--pass-env JESSE_CODEX_TOKEN`.
+[[models]]
+id = "codex-write"
+label = "Codex (write)"
+kind = "hosted"
+base_url = "http://127.0.0.1:9100"
+model = "gpt-6-astra"
+auth_token_env = "JESSE_CODEX_TOKEN"
+harness = "codex"
+level = "write"
+# K04: a STATED zero deck. The turn rides the ChatGPT subscription, which bills no tokens, and
+# the model proxy refuses to forward a metered call for a model with no complete four-rate
+# deck (`unpriced_model`), which this entry had none of. Zero here is the operator saying
+# "subscription", not a default: the proxy still writes every call's tokens to the ledger.
+price = { in_per_m = 0.0, cached_per_m = 0.0, cache_write_per_m = 0.0, out_per_m = 0.0 }
+
+[gateway]
+enabled = true
+socket_dir = "/tmp/jgw-px-codex-write"
+
+[proxy]
+model = true
+egress = true
+model_listen = "127.0.0.1:18047"
+egress_listen = "127.0.0.1:18048"

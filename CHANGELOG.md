@@ -68,6 +68,42 @@ restart.
   grants. The Codex record did not move. `golden/capability-args.json` and the argv fixture moved
   for the same two grants on the same write rows.
 
+## [App 1.0 (224)] - 2026-11-20
+
+**A Studio run under review shows as Reviewing, on the iPhone and the Mac, and a run's detail
+says who reviewed it and opens the review note.** Bridge 0.211.0 added the run status
+`reviewing` (a second model is reading the run's diff); the app decoded it as an unknown word,
+drew it with a question mark and left it out of the Moving filter. No bridge change.
+
+- **The status.** `StudioRunStatus.reviewing` decodes and encodes `reviewing`. Every predicate is
+  the bridge's (`RunStatus` in `bridge/src/hostrun.rs`): moving, live and active; not finished,
+  not needing you, not archivable. The status predicates now switch over every case with no
+  `default`, and gain `isActive`, `isArchivable` and `isCancellable`; `StudioRun.isArchived` reads
+  `isArchivable`. A reviewing run is under Moving and in its count, sorts with the live runs, and
+  keeps a detail polling.
+- **How it looks.** Labelled "Reviewing", with `magnifyingglass.circle.fill` in the running blue.
+  The row's second line, and the line under the title in the detail and in a project's Moving
+  section, name the reviewer ("Reviewing with GLM 5.3") instead of the log's last line. The Work
+  board row says "Reviewing: <title>" when that is what moves, or "…, 1 reviewing" beside a
+  running run.
+- **No reply while reviewed.** No composer and no Resume: the bridge hands the findings to the
+  run's own session. One line stands where the composer would be. Cancel is offered, because the
+  bridge's cancel route accepts a reviewing run: it cancels the run at once and records the
+  review as failed, so the findings never reach the session. The confirmation says so.
+- **The Review section.** A run's JSON now decodes `reviewer`, `reviewer_label`, `review_focus` and
+  `reviews[]` (each review's number, reviewer and label, origin, status, focus, auto reply,
+  requested and finished times, head, base and note path), all optional, so an older bridge's runs
+  decode as before; an unknown review status decodes as `.unknown`. When a run has a reviewer or
+  a review, its detail (iPhone and Mac) lists each review as reviewer, status and finish time,
+  and a review with a note opens it in the Vault tab the way Open report does. The findings stay
+  in the note.
+- **Tests.** Wire tests read two fixtures copied from what bridge 0.211.0's own `served_one`
+  wrote for a reviewed run (`studio-run-reviewing-served.json` during its review,
+  `studio-run-reviewed-served.json` once answered); every status's predicates against the
+  bridge's; the Moving filter and counts; the row's reviewer line; the review lines. The gated
+  screenshot tests (`StudioRunsScreenshotUITests.testReviewingRunScreens`,
+  `MacWorkScreenshotTests.testXR2MacReviewShots`) took `docs/xr2-screenshots/`.
+
 ## [App 1.0 (223)] - 2026-11-19
 
 **The Mac's conversation list keeps itself current: a conversation started or updated on another

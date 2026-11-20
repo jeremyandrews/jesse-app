@@ -9,8 +9,8 @@ import JesseNetworking
 final class StudioRunFilterTests: XCTestCase {
 
     private static let statuses: [StudioRunStatus] = [
-        .queued, .running, .paused, .needsYou, .interrupted, .failed, .reported, .cancelled,
-        .closed, .unknown("rebasing"),
+        .queued, .running, .paused, .reviewing, .needsYou, .interrupted, .failed, .reported,
+        .cancelled, .closed, .unknown("rebasing"),
     ]
 
     private func run(_ id: String, _ status: StudioRunStatus, strand: String? = "Gd",
@@ -46,7 +46,7 @@ final class StudioRunFilterTests: XCTestCase {
         XCTAssertEqual(ids(model.runs(filter: .needsMe, strand: "Gd")),
                        ["Needs you", "Interrupted", "Failed"])
         XCTAssertEqual(ids(model.runs(filter: .moving, strand: "Gd")),
-                       ["Queued", "Running", "Paused"])
+                       ["Queued", "Running", "Paused", "Reviewing"])
         XCTAssertEqual(ids(model.runs(filter: .finished, strand: "Gd")),
                        ["Reported", "Cancelled", "Closed", "rebasing"])
         let all = model.runs(filter: .all, strand: "Gd")

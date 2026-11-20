@@ -384,7 +384,7 @@ struct StudioRunRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if run.status.isMoving, let line = run.lastLine, !line.isEmpty {
+            if let line = StudioRunSemantics.movingLine(run) {
                 Text(line)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -577,7 +577,7 @@ public struct StudioRunDetailView: View {
             }
             Button("Keep running", role: .cancel) {}
         } message: {
-            Text("The agent is stopped and the round is reported as cancelled.")
+            Text(StudioRunSemantics.cancelMessage(model.status ?? .running))
         }
         .studioRunAlert($model.alert)
     }
@@ -605,7 +605,7 @@ public struct StudioRunDetailView: View {
                         .textSelection(.enabled)
                         .padding(.top, 2)
                 }
-                if run.status.isMoving, let line = run.lastLine, !line.isEmpty {
+                if let line = StudioRunSemantics.movingLine(run) {
                     Text(line)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -623,7 +623,50 @@ public struct StudioRunDetailView: View {
                 .accessibilityHint("Opens the report in the Vault tab")
             }
         }
-        Section(run.status == .needsYou ? "Your answer" : "Reply") { composer }
+        if model.showsComposer {
+            Section(run.status == .needsYou ? "Your answer" : "Reply") { composer }
+        } else if let reason = model.replyDisabledReason {
+            // No composer while a second model reads the work: one line where it would be.
+            Section("Reply") {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("studio-run-reply-reviewing")
+            }
+        }
+        if run.isReviewed { reviewSection(run) }
+    }
+
+    /// Who reviewed the run, where each review stands and when it finished, each opening its
+    /// note in the Vault tab as `Open report` opens a round's report. The findings stay in the
+    /// note.
+    @ViewBuilder
+    private func reviewSection(_ run: StudioRun) -> some View {
+        let now = model.currentDate
+        Section("Review") {
+            if let pending = StudioRunSemantics.pendingReviewLine(run) {
+                Text(pending)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(run.reviews, id: \.n) { review in
+                let line = StudioRunSemantics.reviewLine(review, now: now)
+                if let path = review.path {
+                    Button {
+                        reportAction?.open(path)
+                    } label: {
+                        Label(line, systemImage: "doc.text.magnifyingglass")
+                    }
+                    .disabled(reportAction == nil)
+                    .accessibilityHint("Opens the review note in the Vault tab")
+                    .accessibilityIdentifier("studio-run-review-\(review.n)")
+                } else {
+                    Label(line, systemImage: "doc.text.magnifyingglass")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("studio-run-review-\(review.n)")
+                }
+            }
+        }
     }
 
     @ViewBuilder

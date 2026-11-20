@@ -20,8 +20,8 @@ final class StudioRunsScreenshotUITests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
         continueAfterFailure = false
-        guard env["HO1B_BRIDGE"] != nil else {
-            throw XCTSkip("screenshots are taken only with HO1B_BRIDGE set")
+        guard env["HO1B_BRIDGE"] != nil || env["XR2_BRIDGE"] != nil else {
+            throw XCTSkip("screenshots are taken only with HO1B_BRIDGE (or XR2_BRIDGE) set")
         }
     }
 
@@ -47,6 +47,7 @@ final class StudioRunsScreenshotUITests: XCTestCase {
     }
 
     func testStudioRunScreens() throws {
+        guard env["HO1B_BRIDGE"] != nil else { throw XCTSkip("taken only with HO1B_BRIDGE set") }
         let strand = try XCTUnwrap(env["HO1B_STRAND"])
         let draft = try XCTUnwrap(env["HO1B_DRAFT"])
         let replyRun = try XCTUnwrap(env["HO1B_RUN_REPLY"])
@@ -150,5 +151,96 @@ final class StudioRunsScreenshotUITests: XCTestCase {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
         }
         XCTAssertTrue(confirm.waitForNonExistence(timeout: 10))
+    }
+
+    /// XR2: a run in review. Its row under Moving names the reviewer, its detail says why there
+    /// is no composer and lists its review, and a reviewed run's Review section opens the note.
+    /// Gated on `XR2_BRIDGE=host,port,token` (a bridge, or a read only copy of one, serving a
+    /// `reviewing` run and a reported run with an answered review), never run by the gate.
+    ///
+    /// - `XR2_RUN_REVIEWING`: the run in review.
+    /// - `XR2_RUN_REVIEWED`: a run whose review answered, with its note.
+    /// - `XR2_SHOTS_DIR`: where the PNGs are written (they are attached to the result too).
+    func testReviewingRunScreens() throws {
+        guard let bridge = env["XR2_BRIDGE"] else {
+            throw XCTSkip("taken only with XR2_BRIDGE set")
+        }
+        let reviewingRun = try XCTUnwrap(env["XR2_RUN_REVIEWING"])
+        let reviewedRun = try XCTUnwrap(env["XR2_RUN_REVIEWED"])
+        let shotsDir = env["XR2_SHOTS_DIR"]
+        func xr2Shot(_ name: String) {
+            let png = XCUIScreen.main.screenshot().pngRepresentation
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            if let shotsDir {
+                try? png.write(to: URL(fileURLWithPath: shotsDir)
+                    .appendingPathComponent("\(name).png"))
+            }
+        }
+        let app = XCUIApplication()
+        let row: (String) -> XCUIElement = { [unowned self] runID in
+            self.element(app, containing: ", \(runID),")
+        }
+        app.launchEnvironment["JESSE_UITEST_BRIDGE"] = bridge
+        app.launchEnvironment["JESSE_MUTE"] = "1"
+        app.launchArguments += ["-\(TodayViewPreferencesKey.segment)", "strands",
+                                "-studioRunsFilter", "moving"]
+        app.launch()
+
+        let today = app.tabBars.buttons["Today"]
+        XCTAssertTrue(today.waitForExistence(timeout: 30))
+        today.tap()
+        let runsButton = app.navigationBars.buttons["Runs"]
+        XCTAssertTrue(runsButton.waitForExistence(timeout: 30), "the Runs toolbar button")
+        runsButton.tap()
+
+        // The Moving filter, the reviewing row naming its reviewer.
+        let reviewing = row(reviewingRun)
+        XCTAssertTrue(reviewing.waitForExistence(timeout: 30), "the row of \(reviewingRun)")
+        var tries = 0
+        while !reviewing.isHittable && tries < 10 { app.swipeUp(velocity: .slow); tries += 1 }
+        XCTAssertTrue(reviewing.label.contains("Reviewing with "), reviewing.label)
+        sleep(1)
+        xr2Shot("xr2-ios-1-runs-moving")
+
+        // The run's detail: Reviewing, the line where the composer would be, the Review section.
+        reviewing.tap()
+        let line = app.staticTexts["studio-run-reply-reviewing"]
+        XCTAssertTrue(line.waitForExistence(timeout: 30), "the reviewing line")
+        sleep(2)
+        xr2Shot("xr2-ios-2-run-detail-reviewing")
+        let review = app.descendants(matching: .any)["studio-run-review-1"]
+        tries = 0
+        while !(review.exists && review.isHittable) && tries < 6 { app.swipeUp(); tries += 1 }
+        XCTAssertTrue(review.exists, "the Review section")
+        sleep(1)
+        xr2Shot("xr2-ios-3-run-detail-reviewing-review-section")
+
+        // A reviewed run: its answered review, which opens the note. Relaunched on the
+        // Finished filter, where it is the newest row.
+        app.terminate()
+        app.launchArguments = ["-\(TodayViewPreferencesKey.segment)", "strands",
+                               "-studioRunsFilter", "finished"]
+        app.launch()
+        XCTAssertTrue(today.waitForExistence(timeout: 30))
+        today.tap()
+        XCTAssertTrue(runsButton.waitForExistence(timeout: 30))
+        runsButton.tap()
+        let reviewed = row(reviewedRun)
+        tries = 0
+        while !(reviewed.exists && reviewed.isHittable) && tries < 15 {
+            app.swipeUp(velocity: .slow)
+            tries += 1
+        }
+        XCTAssertTrue(reviewed.exists, "the row of \(reviewedRun)")
+        reviewed.tap()
+        let answered = app.descendants(matching: .any)["studio-run-review-1"]
+        tries = 0
+        while !(answered.exists && answered.isHittable) && tries < 6 { app.swipeUp(); tries += 1 }
+        XCTAssertTrue(answered.exists, "the answered review")
+        sleep(1)
+        xr2Shot("xr2-ios-4-run-detail-reviewed-full-page")
     }
 }

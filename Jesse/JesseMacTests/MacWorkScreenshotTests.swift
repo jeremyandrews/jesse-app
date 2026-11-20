@@ -25,8 +25,9 @@ final class MacWorkScreenshotTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        guard let raw = ProcessInfo.processInfo.environment["HO2_BRIDGE"] else {
-            throw XCTSkip("screenshots are taken only with HO2_BRIDGE set")
+        let environment = ProcessInfo.processInfo.environment
+        guard let raw = environment["HO2_BRIDGE"] ?? environment["XR2_BRIDGE"] else {
+            throw XCTSkip("screenshots are taken only with HO2_BRIDGE (or XR2_BRIDGE) set")
         }
         let parts = raw.split(separator: ",").map(String.init)
         config = JesseConfig(host: parts[0], port: Int(parts[1]) ?? 0, token: parts[2])
@@ -46,7 +47,7 @@ final class MacWorkScreenshotTests: XCTestCase {
     }
 
     private func render<V: View>(_ view: V, _ name: String, width: CGFloat = 900,
-                                 height: CGFloat) async throws {
+                                 height: CGFloat, shotsKey: String = "HO2_SHOTS_DIR") async throws {
         let host = NSHostingView(rootView: view
             .frame(width: width, height: height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor)))
@@ -60,7 +61,7 @@ final class MacWorkScreenshotTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
             host.layoutSubtreeIfNeeded()
         }
-        let dir = URL(fileURLWithPath: try env("HO2_SHOTS_DIR"), isDirectory: true)
+        let dir = URL(fileURLWithPath: try env(shotsKey), isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         host.display()
         let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
@@ -145,5 +146,54 @@ final class MacWorkScreenshotTests: XCTestCase {
 
         // Every run, as the Runs button opens it.
         try await render(StudioRunsScreen(model: runs) {}, "mac-5-runs-list.png", height: 1_120)
+    }
+
+    /// XR2: a run in review, as the Mac draws it. Gated on `XR2_BRIDGE=host,port,token` (a
+    /// bridge, or a read only copy of one, serving a `reviewing` run and a reported run with an
+    /// answered review). `XR2_RUN_REVIEWING`, `XR2_RUN_REVIEWED`; the PNGs land in
+    /// `XR2_SHOTS_DIR`.
+    func testXR2MacReviewShots() async throws {
+        guard let raw = ProcessInfo.processInfo.environment["XR2_BRIDGE"] else {
+            throw XCTSkip("taken only with XR2_BRIDGE set")
+        }
+        let parts = raw.split(separator: ",").map(String.init)
+        let xr2 = JesseConfig(host: parts[0], port: Int(parts[1]) ?? 0, token: parts[2])
+        let make: @MainActor () -> JesseBridgeClient = { JesseBridgeClient(config: xr2) }
+        let runs = StudioRunsModel(makeClient: make)
+        await runs.load()
+        let reviewingID = try env("XR2_RUN_REVIEWING")
+        let reviewedID = try env("XR2_RUN_REVIEWED")
+        let reviewing = try XCTUnwrap(runs.runs.first { $0.runID == reviewingID })
+        XCTAssertEqual(reviewing.status, .reviewing)
+        XCTAssertTrue(runs.runs(filter: .moving, strand: nil).contains { $0.runID == reviewingID })
+        let shots = "XR2_SHOTS_DIR"
+
+        // The Runs list under Moving, the reviewing row naming its reviewer.
+        let key = StudioRunFilter.storageKey
+        let before = UserDefaults.standard.string(forKey: key)
+        defer { UserDefaults.standard.set(before, forKey: key) }
+        UserDefaults.standard.set(StudioRunFilter.moving.rawValue, forKey: key)
+        try await render(StudioRunsScreen(model: runs) {},
+                         "xr2-mac-1-runs-moving.png", height: 900, shotsKey: shots)
+
+        // The run in review: Reviewing, the line where the composer would be, its Review.
+        let detail = runs.detailModel(for: reviewingID)
+        await detail.refresh()
+        XCTAssertEqual(detail.status, .reviewing)
+        XCTAssertFalse(detail.showsComposer)
+        try await render(NavigationStack { StudioRunDetailView(model: detail) },
+                         "xr2-mac-2-run-detail-reviewing.png", height: 900, shotsKey: shots)
+
+        // A reviewed run: its answered review, which opens the note.
+        let reviewed = runs.detailModel(for: reviewedID)
+        await reviewed.refresh()
+        XCTAssertFalse(reviewed.run?.reviews.isEmpty ?? true)
+        try await render(NavigationStack { StudioRunDetailView(model: reviewed) },
+                         "xr2-mac-3-run-detail-reviewed.png", height: 900, shotsKey: shots)
+
+        // The whole page: the run in review with Details open, top to bottom.
+        try await render(NavigationStack {
+            StudioRunDetailView(model: detail, showsDetails: true)
+        }, "xr2-mac-4-run-detail-reviewing-full-page.png", height: 1_400, shotsKey: shots)
     }
 }

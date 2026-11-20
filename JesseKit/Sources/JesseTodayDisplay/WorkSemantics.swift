@@ -16,7 +16,7 @@ public enum WorkRowStatus: Equatable, Sendable {
     /// A run waits on the owner, a run was cut off or failed, or the note's Waiting on is a
     /// `you:` gate.
     case yourTurn
-    /// This many runs are queued, running or paused.
+    /// This many runs are queued, running, paused or being reviewed.
     case moving(Int)
     /// The first open Drafts line's title.
     case next(String)
@@ -90,7 +90,8 @@ public enum WorkSemantics {
         return out
     }
 
-    /// Queued, running or paused: what the Moving section lists.
+    /// Queued, running, paused or being reviewed (`StudioRunStatus.isMoving`): what the
+    /// Moving section lists.
     public static func moving(_ slug: String, in runs: [StudioRun]) -> [StudioRun] {
         StudioRunSemantics.sorted(runs.filter { $0.strand == slug && $0.status.isMoving })
     }
@@ -104,7 +105,9 @@ public enum WorkSemantics {
             case .needsYou: return 0
             case .interrupted: return 1
             case .failed: return 2
-            default: return nil
+            case .queued, .running, .reported, .cancelled, .paused, .closed, .reviewing,
+                 .unknown:
+                return nil
             }
         }
         return current
@@ -211,7 +214,16 @@ public enum WorkSemantics {
             let n = max(0, (strand.runsActive ?? 0) - (strand.runsNeedsYou ?? 0))
             return n > 0 ? "\(n) moving" : nil
         }
-        let rank: (StudioRunStatus) -> Int = { $0 == .running ? 0 : ($0 == .paused ? 1 : 2) }
+        let rank: (StudioRunStatus) -> Int = { status in
+            switch status {
+            case .running: return 0
+            case .reviewing: return 1
+            case .paused: return 2
+            case .queued, .needsYou, .reported, .failed, .cancelled, .interrupted, .closed,
+                 .unknown:
+                return 3
+            }
+        }
         let live = moving(strand.slug, in: runs)
             .enumerated()
             .sorted { (rank($0.element.status), $0.offset) < (rank($1.element.status), $1.offset) }
@@ -221,7 +233,10 @@ public enum WorkSemantics {
         switch first.status {
         case .queued: word = "Queued"
         case .paused: word = "Paused"
-        default: word = "Running"
+        case .reviewing: word = "Reviewing"
+        case .running, .needsYou, .reported, .failed, .cancelled, .interrupted, .closed,
+             .unknown:
+            word = "Running"
         }
         // The others by what they are doing: a queued run is not running.
         let others = live.dropFirst()
@@ -232,6 +247,9 @@ public enum WorkSemantics {
         if queued > 0 { more += ", \(queued) queued" }
         let paused = others.filter { $0.status == .paused && first.status != .paused }.count
         if paused > 0 { more += ", \(paused) paused" }
+        let reviewing = others.filter { $0.status == .reviewing && first.status != .reviewing }
+            .count
+        if reviewing > 0 { more += ", \(reviewing) reviewing" }
         return "\(word): \(rowTitle(title(first)))\(more)"
     }
 
@@ -392,7 +410,7 @@ public enum WorkSemantics {
     public static func countsAsFinished(_ status: StudioRunStatus) -> Bool {
         switch status {
         case .reported, .needsYou, .failed, .interrupted: return true
-        default: return false
+        case .queued, .running, .cancelled, .paused, .closed, .reviewing, .unknown: return false
         }
     }
 

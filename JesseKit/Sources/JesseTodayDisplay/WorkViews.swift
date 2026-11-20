@@ -271,7 +271,7 @@ public struct WorkProjectView: View {
             Text(WorkSemantics.title(run))
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(2)
-            if let line = run.lastLine, !line.isEmpty {
+            if let line = StudioRunSemantics.movingLine(run) {
                 Text(line)
                     .font(.caption)
                     .foregroundStyle(.secondary)

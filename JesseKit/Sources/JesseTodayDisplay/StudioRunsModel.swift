@@ -30,6 +30,7 @@ public enum StudioRunSemantics {
         case .interrupted: return "Interrupted"
         case .paused: return "Paused"
         case .closed: return "Closed"
+        case .reviewing: return "Reviewing"
         case .unknown(let word): return word.isEmpty ? "Unknown" : word
         }
     }
@@ -45,6 +46,7 @@ public enum StudioRunSemantics {
         case .interrupted: return "exclamationmark.triangle.fill"
         case .paused: return "pause.circle.fill"
         case .closed: return "checkmark.circle"
+        case .reviewing: return "magnifyingglass.circle.fill"
         case .unknown: return "questionmark.circle"
         }
     }
@@ -60,13 +62,15 @@ public enum StudioRunSemantics {
         case .interrupted: return .yellow
         case .paused: return .purple
         case .closed: return .secondary
+        // A second model is working on it: drawn as running is.
+        case .reviewing: return .blue
         case .unknown: return .neutral
         }
     }
 
     // MARK: Order
 
-    /// Live runs first (queued, running, needs you, paused), then the rest; newest first
+    /// Live runs first (queued, running, needs you, paused, reviewing), then the rest; newest first
     /// within each, by creation and then by id so two runs created in one millisecond keep a
     /// stable order.
     public static func sorted(_ runs: [StudioRun]) -> [StudioRun] {
@@ -132,8 +136,15 @@ public enum StudioRunSemantics {
     public static func canReply(_ status: StudioRunStatus) -> Bool {
         switch status {
         case .needsYou, .interrupted, .reported, .closed: return true
-        default: return false
+        case .queued, .running, .failed, .cancelled, .paused, .reviewing, .unknown: return false
         }
+    }
+
+    /// Whether the run's detail draws a composer at all. Not while it is being reviewed: the
+    /// bridge hands the findings to the run's own session, so there is nothing to reply to and
+    /// the one line (`replyDisabledReason`) stands where the composer would be.
+    public static func showsComposer(_ status: StudioRunStatus) -> Bool {
+        status != .reviewing
     }
 
     /// Whether `Resume` is offered: an interrupted run, with nothing typed. Never a
@@ -143,17 +154,69 @@ public enum StudioRunSemantics {
         switch status {
         case .interrupted:
             return composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        default:
+        case .queued, .running, .needsYou, .reported, .failed, .cancelled, .paused, .closed,
+             .reviewing, .unknown:
             return false
         }
     }
 
-    /// Whether Cancel is offered: the bridge cancels only a queued, running or paused run.
+    /// Whether Cancel is offered: what the bridge's cancel route accepts (a queued, running,
+    /// paused or reviewing run).
     public static func canCancel(_ status: StudioRunStatus) -> Bool {
-        switch status {
-        case .queued, .running, .paused: return true
-        default: return false
+        status.isCancellable
+    }
+
+    /// What the Cancel confirmation says happens.
+    public static func cancelMessage(_ status: StudioRunStatus) -> String {
+        status == .reviewing
+            ? "The review is stopped and the run is cancelled. Its findings never reach the run."
+            : "The agent is stopped and the round is reported as cancelled."
+    }
+
+    /// The line under a run's title on a row and atop its detail while it moves: who is
+    /// reviewing it (`Reviewing with GLM 5.3`) while it is being reviewed, else the last line
+    /// of its log. Nil for a run that is not moving or has nothing to say.
+    public static func movingLine(_ run: StudioRun) -> String? {
+        guard run.status.isMoving else { return nil }
+        if run.status == .reviewing {
+            guard let name = run.reviewerName, !name.isEmpty else {
+                return "Reviewing with a second model"
+            }
+            return "Reviewing with \(name)"
         }
+        guard let line = run.lastLine, !line.isEmpty else { return nil }
+        return line
+    }
+
+    // MARK: Reviews
+
+    /// A review's status in words.
+    public static func reviewLabel(_ status: StudioRunReviewStatus) -> String {
+        switch status {
+        case .running: return "Reviewing"
+        case .ready: return "Note written"
+        case .handedOff: return "Handed to the run"
+        case .answered: return "Answered"
+        case .failed: return "Failed"
+        case .dropped: return "Dropped"
+        case .unknown(let word): return word.isEmpty ? "Unknown" : word
+        }
+    }
+
+    /// One line of the Review section: `Codex · Answered · 18:02`, the time only once it
+    /// finished.
+    public static func reviewLine(_ review: StudioRunReview, now: Date,
+                                  calendar: Calendar = .current) -> String {
+        var parts = [review.reviewerName.isEmpty ? "Reviewer" : review.reviewerName,
+                     reviewLabel(review.status)]
+        if let at = clock(review.finishedAt, now: now, calendar: calendar) { parts.append(at) }
+        return parts.joined(separator: " \u{00B7} ")
+    }
+
+    /// The Review section's line for a reviewed run whose review has not begun.
+    public static func pendingReviewLine(_ run: StudioRun) -> String? {
+        guard run.reviews.isEmpty, let name = run.reviewerName, !name.isEmpty else { return nil }
+        return "\(name) reviews the work when this round reports."
     }
 
     /// The one line under a disabled composer, or nil where it is enabled.
@@ -170,6 +233,8 @@ public enum StudioRunSemantics {
                 return "Paused for the usage limit. It continues by itself at \(at)."
             }
             return "Paused for the usage limit. It continues by itself."
+        case .reviewing:
+            return "Being reviewed. The findings go to the run itself; nothing to reply to yet."
         case .failed:
             return "Failed. Start it again from the strand's Drafts."
         case .cancelled:
@@ -184,14 +249,14 @@ public enum StudioRunSemantics {
     public static func keepsPolling(_ status: StudioRunStatus) -> Bool {
         switch status {
         case .reported, .failed, .cancelled, .closed, .unknown: return false
-        default: return true
+        case .queued, .running, .needsYou, .interrupted, .paused, .reviewing: return true
         }
     }
 
     // MARK: Archiving
 
     /// Whether Archive is offered: on a run that is not moving and not archived. The bridge
-    /// refuses a queued, running or paused run; a `needs_you` or `interrupted` run it closes
+    /// refuses a queued, running, paused or reviewing run; a `needs_you` or `interrupted` run it closes
     /// first, so those are offered too.
     public static func canArchive(_ run: StudioRun) -> Bool {
         !run.status.isMoving && !run.isArchived
@@ -639,6 +704,12 @@ public final class StudioRunDetailModel {
     /// The question it asks, or its report's first line.
     public var headline: String? {
         run.flatMap(WorkSemantics.headline)
+    }
+
+    /// Whether the detail draws a composer at all (not while the run is being reviewed).
+    public var showsComposer: Bool {
+        guard let status else { return true }
+        return StudioRunSemantics.showsComposer(status)
     }
 
     public var isComposerEnabled: Bool {

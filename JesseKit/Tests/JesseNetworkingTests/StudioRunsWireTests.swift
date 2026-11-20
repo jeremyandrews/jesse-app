@@ -142,7 +142,7 @@ final class StudioRunsWireTests: XCTestCase {
 
     func testEveryKnownStatusRoundTripsItsWireWord() {
         for word in ["queued", "running", "needs_you", "reported", "failed", "cancelled",
-                     "interrupted", "paused"] {
+                     "interrupted", "paused", "closed", "reviewing"] {
             let status = StudioRunStatus(wire: word)
             XCTAssertNotEqual(status, .unknown(word), word)
             XCTAssertEqual(status.wire, word)
@@ -183,6 +183,119 @@ final class StudioRunsWireTests: XCTestCase {
         stripped.servesYourAction = false
         stripped.nextTitle = nil
         XCTAssertEqual(gd, stripped)
+    }
+
+    // MARK: - Review (bridge 0.211.0)
+
+    /// `reviewing` is a status of its own, decoded and encoded as its wire word.
+    func testReviewingDecodesAndEncodesItsWireWord() throws {
+        XCTAssertEqual(StudioRunStatus(wire: "reviewing"), .reviewing)
+        XCTAssertEqual(StudioRunStatus.reviewing.wire, "reviewing")
+        let decoded = try JSONDecoder().decode([StudioRunStatus].self,
+                                               from: Data(#"["reviewing"]"#.utf8))
+        XCTAssertEqual(decoded, [.reviewing])
+        let encoded = try JSONEncoder().encode([StudioRunStatus.reviewing])
+        XCTAssertEqual(String(decoding: encoded, as: UTF8.self), #"["reviewing"]"#)
+    }
+
+    /// Every predicate, every status, against `RunStatus` in `bridge/src/hostrun.rs`:
+    /// `is_moving`, `is_live`, `is_active`, `needs_me`, `is_archivable` (`is_terminal`) and
+    /// what `cancel` accepts. `isFinished` is the app's Finished filter (the bridge's
+    /// `finished` count: neither moving nor needing its owner).
+    func testEveryStatusPredicateIsTheBridges() {
+        typealias Row = (moving: Bool, live: Bool, active: Bool, finished: Bool, needsMe: Bool,
+                         archivable: Bool, cancellable: Bool)
+        let bridge: [(StudioRunStatus, Row)] = [
+            (.queued, (true, true, false, false, false, false, true)),
+            (.running, (true, true, true, false, false, false, true)),
+            (.needsYou, (false, true, true, false, true, false, false)),
+            (.reported, (false, false, false, true, false, true, false)),
+            (.failed, (false, false, false, false, true, true, false)),
+            (.cancelled, (false, false, false, true, false, true, false)),
+            (.interrupted, (false, false, false, false, true, false, false)),
+            (.paused, (true, true, true, false, false, false, true)),
+            (.closed, (false, false, false, true, false, true, false)),
+            (.reviewing, (true, true, true, false, false, false, true)),
+        ]
+        for (status, want) in bridge {
+            XCTAssertEqual(status.isMoving, want.moving, "moving \(status)")
+            XCTAssertEqual(status.isLive, want.live, "live \(status)")
+            XCTAssertEqual(status.isActive, want.active, "active \(status)")
+            XCTAssertEqual(status.isFinished, want.finished, "finished \(status)")
+            XCTAssertEqual(status.needsMe, want.needsMe, "needs me \(status)")
+            XCTAssertEqual(status.isArchivable, want.archivable, "archivable \(status)")
+            XCTAssertEqual(status.isCancellable, want.cancellable, "cancellable \(status)")
+        }
+    }
+
+    /// A run in review, as bridge 0.211.0 serves it (`served_one` while the implementing
+    /// round's review runs, captured from `a_reviewed_run_implements_is_reviewed_hands_off_
+    /// and_finishes_once`): the status, who reviews it, the focus and the one running review.
+    func testAReviewingRunDecodesItsReviewerAndItsReview() throws {
+        let run = try StudioRun.decode(from: fixture("studio-run-reviewing-served"))
+        XCTAssertEqual(run.status, .reviewing)
+        XCTAssertEqual(run.reviewer, "codex-write")
+        XCTAssertEqual(run.reviewerLabel, "Codex")
+        XCTAssertEqual(run.reviewFocus, "the loop bounds")
+        XCTAssertTrue(run.isReviewed)
+        XCTAssertEqual(run.reviewerName, "Codex")
+        XCTAssertFalse(run.isArchived)
+        let review = try XCTUnwrap(run.reviews.first)
+        XCTAssertEqual(run.reviews.count, 1)
+        XCTAssertEqual(review.n, 1)
+        XCTAssertEqual(review.reviewer, "codex-write")
+        XCTAssertEqual(review.reviewerLabel, "Codex")
+        XCTAssertEqual(review.origin, "start")
+        XCTAssertEqual(review.status, .running)
+        XCTAssertNotNil(review.requestedAt)
+        XCTAssertNil(review.finishedAt)
+        XCTAssertNil(review.path, "no note before the reviewer answers")
+        XCTAssertNil(review.head)
+    }
+
+    /// The same run once its answering round reported: the review answered, its note where it
+    /// is now (`Inbox/archive/`), the head and base it read.
+    func testAnAnsweredReviewServesItsNoteWhereItIsNow() throws {
+        let run = try StudioRun.decode(from: fixture("studio-run-reviewed-served"))
+        XCTAssertEqual(run.status, .reported)
+        let review = try XCTUnwrap(run.reviews.first)
+        XCTAssertEqual(review.status, .answered)
+        XCTAssertTrue(review.path?.hasPrefix("Inbox/archive/") ?? false, "\(review.path ?? "nil")")
+        XCTAssertTrue(review.path?.hasSuffix("-review-1.md") ?? false)
+        XCTAssertNotNil(review.finishedAt)
+        XCTAssertNotNil(review.head)
+        XCTAssertNotNil(review.base)
+    }
+
+    /// A run never reviewed, and every run from a bridge before 0.211.0, sends none of the
+    /// review keys: it decodes with none of them.
+    func testARunWithoutReviewKeysDecodesWithNoReview() throws {
+        let run = try StudioRun.decode(from: fixture("studio-run-needs-you-served"))
+        XCTAssertNil(run.reviewer)
+        XCTAssertNil(run.reviewerLabel)
+        XCTAssertNil(run.reviewFocus)
+        XCTAssertTrue(run.reviews.isEmpty)
+        XCTAssertFalse(run.isReviewed)
+        XCTAssertNil(run.reviewerName)
+    }
+
+    /// A review status a newer bridge serves, and a review missing every key but `n`, decode
+    /// without failing the run.
+    func testAnUnknownReviewStatusDecodesWithoutFailing() throws {
+        var root = try json("studio-run-reviewing-served")
+        var reviews = try XCTUnwrap(root["reviews"] as? [[String: Any]])
+        reviews[0]["status"] = "re_reading"
+        reviews.append(["n": 2])
+        root["reviews"] = reviews
+        let run = try StudioRun.decode(from: JSONSerialization.data(withJSONObject: root))
+        XCTAssertEqual(run.reviews.map(\.status), [.unknown("re_reading"), .unknown("")])
+        XCTAssertEqual(run.reviews[0].status.wire, "re_reading")
+        XCTAssertEqual(run.reviews[1].reviewer, "")
+        XCTAssertEqual(run.reviewerName, "Codex", "an empty newest review falls back on the run")
+        for word in ["running", "ready", "handed_off", "answered", "failed", "dropped"] {
+            XCTAssertNotEqual(StudioRunReviewStatus(wire: word), .unknown(word), word)
+            XCTAssertEqual(StudioRunReviewStatus(wire: word).wire, word)
+        }
     }
 
     // MARK: - Refusals

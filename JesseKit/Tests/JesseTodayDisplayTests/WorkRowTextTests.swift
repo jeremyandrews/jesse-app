@@ -136,6 +136,12 @@ final class WorkRowTextTests: XCTestCase {
         XCTAssertEqual(WorkSemantics.doing(strand(), runs: [run("C", .queued, title: "Three")],
                                            runsLoaded: true),
                        "Queued: Three")
+        let reviewed = [run("A", .running, title: "One"), run("B", .reviewing, title: "Two")]
+        XCTAssertEqual(WorkSemantics.doing(strand(), runs: reviewed, runsLoaded: true),
+                       "Running: One, 1 reviewing")
+        XCTAssertEqual(WorkSemantics.doing(strand(), runs: [run("B", .reviewing, title: "Two")],
+                                           runsLoaded: true),
+                       "Reviewing: Two")
     }
 
     func testSeveralRunningLinesAreCountedAndTheCutTitleLosesItsEllipsis() {

@@ -2900,8 +2900,8 @@ reaches git, qmd or a turn's file tools.
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 
 `[devjob] enabled = true` (off by default) adds the `devjob` server to the main set: three tools,
-`devjob_start`, `devjob_status` and `devjob_list` (six with `[hostrun]` on: `devjob_reply`,
-`devjob_cancel` and `devjob_close` steer Studio runs, below), served **inside the bridge process**
+`devjob_start`, `devjob_status` and `devjob_list` (eight with `[hostrun]` on: `devjob_reply`,
+`devjob_cancel`, `devjob_close`, `devjob_review` and `devjob_review_reply` steer Studio runs, below), served **inside the bridge process**
 (`Transport::InProcess`, `bridge/src/devjob.rs`). A main turn hands it a repository, a prompt and
 an agent; the bridge creates one ConfigMap and one Job in the cluster's `jesse-dev` namespace from
 a copy of `apps/jesse-dev/job-template.yaml` in the k3s repository, watches the run to its end
@@ -2916,7 +2916,7 @@ pushes a notification. A `kind = "devjob"` schedule entry does the same unattend
 | The container holds | the Secret `jesse-dev-agent-keys`: the three agents' API keys and **a GitHub credential (`GH_TOKEN`) that can push branches and open pull requests on any repository that credential reaches** |
 | The container does | clone the repository, run the agent and the test command, push `jesse/<slug>`, open a pull request against `main`. It never merges and never pushes to `main`; that is the entrypoint's rule, on the cluster side |
 | The bridge does | create the ConfigMap and the Job (both labelled `jesse.dev/devjob=true`), resume queued Jobs, read the pod's log, annotate the Job, delete the ConfigMap, write one vault note under the write lock |
-| Classes | `devjob_start`, `devjob_reply`, `devjob_cancel` and `devjob_close` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
+| Classes | `devjob_start`, `devjob_reply`, `devjob_cancel`, `devjob_close`, `devjob_review` and `devjob_review_reply` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
 
 **The tool cannot choose a file path, a namespace, an image or a credential.** Its arguments are
 `repo`, `prompt`, `agent`, `model`, `branch_slug`, `test_command` and `timeout_minutes`, and any
@@ -3068,6 +3068,27 @@ nothing and deletes nothing: it marks a `needs_you`, `interrupted` or `failed` r
 watcher closes a waiting run by itself only when a further run of its item supersedes it, its
 Drafts line is ticked, or its report has moved to `Inbox/archive/`, and never a queued, running
 or paused one.
+**Since 0.211.0, `devjob_review` and `devjob_review_reply` join them, with `POST
+/jesse/runs/:id/review` (paired device)**, classed and granted exactly as `devjob_reply` (write
+turns only, on every harness that renders the server, and no read turn); the battery's stand-in
+lists eight tools and the claude-code and direct records were re-recorded, moving only the write
+rows' grants, by these two tools (Codex's record did not move: `devjob` renders into no
+gateway-off Codex config). A review has a second model read a Studio run's diff and the session
+judge what it says. **The reviewer is read only on every harness, by the posture the battery
+proved, not by its prompt:** `claude-code` and `codex` spawn it at `read` with no MCP servers
+(the recorded `read/none` rows, whose write, symlink, state-dir and delegated escapes are all
+recorded `denied`; Codex's sandbox is `read-only` with network and web search off), and `direct`
+runs it at `basic` with no tools at all. A harness with no such posture is refused by name;
+there is no fallback to another harness. It gets no session, no write lock, no gateway, no
+credential beyond its own model's key, and a detached worktree of the run's head under the run
+directory; the run's own worktree is never handed to it. If the reviewer's worktree is not clean
+at the head when it answers, the review is void and nothing it said is passed on. What it says
+reaches the original session only as data inside a fixed reply that tells the session to verify
+each claim and reject what does not hold. **Nothing about a review reaches GitHub:** the fixed
+reply forbids it in commit messages, the pull request and the code, and the bridge reads the
+answering round's commit messages, pull request title and body and added lines for the
+reviewer's name and the finding ids and puts a `REVIEW LEAK:` line on the Inbox report if it
+finds one. The review note stays in the vault.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or

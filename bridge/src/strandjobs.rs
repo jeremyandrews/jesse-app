@@ -497,6 +497,9 @@ pub async fn fire(
                     },
                     origin: origin.to_string(),
                     again: false,
+                    // A scheduled start's reviewer is its draft's `devjob-reviewer:`.
+                    reviewer: None,
+                    review_focus: None,
                 })
                 .await
             {

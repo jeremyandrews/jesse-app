@@ -254,6 +254,8 @@ fn main() {
                     },
                     origin: "turn".into(),
                     again: false,
+                    reviewer: None,
+                    review_focus: None,
                 })
                 .await
                 .unwrap();

@@ -272,6 +272,8 @@ printf 'Pushed the change.\n' > "$JESSE_RUN_REPORT"
                 },
                 origin: "turn".into(),
                 again: false,
+                reviewer: None,
+                review_focus: None,
             })
             .await
             .unwrap();

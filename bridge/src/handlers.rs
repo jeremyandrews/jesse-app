@@ -2999,6 +2999,10 @@ pub fn app(state: AppState) -> Router {
             post(crate::hostrun::jesse_run_reply),
         )
         .route(
+            "/jesse/runs/:run_id/review",
+            post(crate::hostrun::jesse_run_review),
+        )
+        .route(
             "/jesse/runs/:run_id/cancel",
             post(crate::hostrun::jesse_run_cancel),
         )

@@ -645,6 +645,53 @@ pub async fn run_brief_child(
     run_routed_oneshot(cfg, harness, &req, pick, timeout_secs, "today-brief").await
 }
 
+/// Run a Studio run's REVIEWER: one stateless answer from registry model `model`, through the
+/// harness its entry names, at `capability` ([`crate::hostrun::review::review_capability`]), in
+/// `cwd` (the reviewer's own detached worktree) with no MCP servers ([`review_child_request`]).
+/// The model is the one asked for, never another: a harness this bridge does not run is refused
+/// by name. Returns the raw answer for [`crate::hostrun::review::parse_review`].
+pub async fn run_review_child(
+    cfg: &Config,
+    model: &RegistryModel,
+    capability: Capability,
+    prompt: &str,
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Result<String, ApiError> {
+    let Some(harness) = cfg.harnesses.get(&model.harness) else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "reviewer {:?} names harness {:?}, which this bridge does not run",
+                model.id, model.harness
+            ),
+        ));
+    };
+    if !harness.expresses(capability) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "harness {} cannot express the {} posture a reviewer runs at",
+                model.harness,
+                capability_label(capability)
+            ),
+        ));
+    }
+    let pick = RoutedPick {
+        id: model.id.clone(),
+        harness: model.harness.clone(),
+        level: model.level,
+        backend: model.backend.clone(),
+        login_model: model.login_model.clone(),
+    };
+    let active = ActiveModel::from_registry(model);
+    let turn_id = oneshot_turn_id("review");
+    let req = review_child_request(prompt, &active, capability, cwd, &turn_id);
+    run_routed_oneshot(cfg, harness, &req, &pick, timeout_secs, "code review")
+        .await
+        .map(|(text, _usage)| text)
+}
+
 /// Invoke the agent in the vault, streaming its output. Returns (reply_text,
 /// session_id, usage). Pass session_id to continue a thread; the returned id is always
 /// captured so the client can follow up later. Resuming keeps CLAUDE.md loaded and retains

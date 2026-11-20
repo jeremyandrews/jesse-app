@@ -1051,6 +1051,62 @@ and reports stay where they are.
   `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts,
   so an Undo is not taken back by the next pass.
 
+**A second model reviews a run (0.211.0, `src/hostrun/review.rs`).** A Studio run can be checked
+by any model in the registry before it finishes, and the session that did the work judges what
+that model said.
+
+- **Starting a reviewed run.** `devjob_start` with `host: "studio"` and `reviewer: "<model id>"`
+  (optionally `review_focus`, at most 4 KiB), `POST /jesse/runs` with the same two keys, or a
+  draft whose front matter says `devjob-reviewer: <model id>`. The reviewer is checked before
+  anything is created: a model the registry does not know, one not configured, one marked
+  unhealthy, or one whose harness cannot give it a read only posture is refused, naming why. On
+  the cluster (`host` not `studio`) both keys are refused.
+- **The rounds.** The served prompt gains one sentence (GitHub: open the pull request as a draft,
+  do not merge it, do not mark it ready; local: commit on the branch, do not merge into `main`
+  yet). The implementing round's report is kept in the run directory but not written to the
+  Inbox and pushes nothing; the run goes to `reviewing`. The review runs, its note is written,
+  and the run's next round (same session, as a reply would) is the fixed hand off: verify each
+  finding, accept, reject or partial, fix only what holds with a regression test, rerun the
+  verification, push, then finish (mark ready, and merge only if the original prompt said to;
+  local: merge into `main`). That answering round's report is the one Inbox report and the one
+  push, with a link to the review note. Exactly one review per reviewed run: later rounds are not
+  reviewed again.
+- **When the review cannot run** (the reviewer down, a timeout, an answer that fails the schema
+  twice, a reviewer that changed its worktree), the run is handed off all the same with a reply
+  saying the check could not run and why, and the report's first line is `UNREVIEWED: <reason>`
+  (the bridge puts it there if the session did not).
+- **After the fact.** `devjob_review { run_id, reviewer, focus?, auto_reply? }` or `POST
+  /jesse/runs/:id/review` (paired device token) reviews a finished Studio run's commits. Refused
+  with the reason for a run that is not a Studio run, one queued or running, one with no commits
+  beyond its base, an unknown or unhealthy reviewer, and while another review of that run is
+  running or waiting. `auto_reply` (default true) hands off at once; false writes the note,
+  pushes `Run <id> reviewed`, and waits for `devjob_review_reply { run_id }`, which sends the
+  same fixed reply.
+- **How the reviewer runs.** Through its own harness (`claude-code` and `codex` at `read`, with no
+  MCP servers; `direct` at `basic`, with no tools), with no session, no write lock and no secret
+  beyond its own model's key, in a detached worktree of the run's head under the run directory
+  (`review-<n>`). The run's own worktree is never touched. It is given the diff from the merge
+  base with `main` to the head (cut at 192 KiB), the prompt's task section and the focus, and
+  answers one JSON object: findings `F1…` with severity `bug`, `risk` or `nit`, file, line,
+  claim, evidence and what would prove it wrong. An invalid answer is retried once; each raw
+  answer is kept as `review-<n>-answer-<k>.txt`. If its worktree is not clean at the head
+  afterwards, the review is void. `[hostrun] review_timeout_minutes` (default 30) bounds it.
+- **The note** is `Inbox/<date>-run-<run_id>-review-<n>.md`, front matter `run`, `review`,
+  `reviewer`, `reviewer-label`, `repo`, `branch`, `head`, `base`, `findings`, then the findings.
+  It moves to `Inbox/archive/` when the answering round's report is written, or when its run is
+  closed or archived with the review never handed off. It is not a round report: a run's
+  `report archived` close and archive look at its round reports only.
+- **The leak check.** After the answering round the bridge reads the round's commit messages, the
+  pull request's title and body and the diff's added lines for the reviewer's id and label, the
+  finding ids and the words `reviewer`, `code review` and `review finding`. A hit puts a
+  `REVIEW LEAK: …` line at the top of that Inbox report; it blocks nothing.
+- **In the JSON.** A reviewed run carries `reviewer`, `reviewer_label`, `review_focus`, status
+  `reviewing` while its review runs (counted as `moving`), and `reviews[]`: `n`, `reviewer`,
+  `reviewer_label`, `origin` (`start` or `request`), `status` (`running`, `ready`, `handed_off`,
+  `answered`, `failed`, `dropped`), `head`, `base`, `path` (where the note is now), `findings`
+  (a count), `error`, `answer_round`, `requested_at`, `finished_at`, `leaks`. A run with no
+  review serves no `reviews` key.
+
 ### How `claude` is run
 
 The bridge runs the turn as:

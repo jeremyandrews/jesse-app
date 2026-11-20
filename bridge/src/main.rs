@@ -494,6 +494,11 @@ async fn main() {
                 st: state.clone(),
             })),
         });
+        // Who reviews a reviewed run, or a run `devjob_review` names: any registry model,
+        // through the harness its entry names, read only.
+        h.attach_reviewer(std::sync::Arc::new(jesse_bridge::hostrun::AppReviewer {
+            st: state.clone(),
+        }));
         h.spawn_watcher();
     }
     // THE HEALTH ARCHIVE, only where `[healthdb]` is ready. The pool is LAZY, so a Postgres

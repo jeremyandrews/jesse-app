@@ -277,6 +277,8 @@ fn item(id: &str) -> StartRequest {
         },
         origin: "app".into(),
         again: false,
+        reviewer: None,
+        review_focus: None,
     }
 }
 
@@ -290,6 +292,8 @@ fn free(slug: &str) -> StartRequest {
         },
         origin: "turn".into(),
         again: false,
+        reviewer: None,
+        review_focus: None,
     }
 }
 
@@ -464,6 +468,7 @@ fn the_served_prompt_is_the_section_then_the_generated_section_exactly() {
         default_branch: "main",
         run_dir: Path::new("/Users/j/jesse-runs/runs/GD5b"),
         pr_title_tag: true,
+        reviewed: false,
     };
     let expected = format!(
         "{SECTION}### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of jeremyandrews/jesse-app on branch gd5b-run-the-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/GD5b/extra/ and work there.\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n"
@@ -498,6 +503,7 @@ async fn the_run_gets_the_served_prompt_on_disk() {
                 default_branch: "main",
                 run_dir: &dir,
                 pr_title_tag: false,
+                reviewed: false,
             }
         )
     );
@@ -580,7 +586,9 @@ fn devjob_args_keep_refusing_unknown_keys_and_without_host_build_the_same_cluste
                 repo: None,
                 scheduled: false,
             },
-            again: true
+            again: true,
+            reviewer: None,
+            review_focus: None,
         }
     );
 }
@@ -1637,6 +1645,8 @@ fn asked(strand: &str, id: &str, repo: Option<&str>) -> StartRequest {
         },
         origin: "turn".into(),
         again: false,
+        reviewer: None,
+        review_focus: None,
     }
 }
 
@@ -1700,6 +1710,8 @@ async fn a_strand_schedule_entry_still_needs_both_keys() {
             },
             origin: "schedule:x".into(),
             again: false,
+            reviewer: None,
+            review_focus: None,
         })
         .await
         .unwrap_err();
@@ -1730,6 +1742,8 @@ async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
             },
             origin: "turn".into(),
             again: false,
+            reviewer: None,
+            review_focus: None,
         })
         .await
         .unwrap();
@@ -1799,7 +1813,9 @@ async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
                 draft: "Projects/drafts/x.md".into(),
                 repo: Some("o/n".into())
             },
-            again: false
+            again: false,
+            reviewer: None,
+            review_focus: None,
         }
     );
     assert_eq!(
@@ -1811,7 +1827,9 @@ async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
                 repo: Some("o/n".into()),
                 scheduled: false
             },
-            again: false
+            again: false,
+            reviewer: None,
+            review_focus: None,
         }
     );
     assert!(plan(json!({ "host": "studio", "draft": "x", "prompt": "p" })).is_err());
@@ -1832,6 +1850,7 @@ fn the_generated_section_tags_the_title_only_where_pr_title_tag_says() {
         default_branch: "main",
         run_dir: dir,
         pr_title_tag: tag,
+        reviewed: false,
     };
     let where_ = |repo: &str| {
         format!(
@@ -1905,6 +1924,8 @@ fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
         "devjob_reply",
         "devjob_cancel",
         "devjob_close",
+        "devjob_review",
+        "devjob_review_reply",
     ];
     let row = crate::mcpservers::row(devjob::DEVJOB_SERVER).unwrap();
     for t in names {
@@ -3141,6 +3162,8 @@ fn free_in(repo: &str, slug: &str) -> StartRequest {
         },
         origin: "turn".into(),
         again: false,
+        reviewer: None,
+        review_focus: None,
     }
 }
 
@@ -3301,6 +3324,8 @@ async fn with_nothing_named_a_studio_run_falls_back_to_a_local_repository() {
             },
             origin: "turn".into(),
             again: false,
+            reviewer: None,
+            review_focus: None,
         })
         .await
         .unwrap();
@@ -3321,7 +3346,9 @@ async fn with_nothing_named_a_studio_run_falls_back_to_a_local_repository() {
                 slug: "x".into(),
                 model: None
             },
-            again: false
+            again: false,
+            reviewer: None,
+            review_focus: None,
         }
     );
 }
@@ -3430,6 +3457,7 @@ fn the_generated_section_for_a_local_repository_has_no_push_and_no_pull_request(
         default_branch: "main",
         run_dir: dir,
         pr_title_tag: true,
+        reviewed: false,
     };
     let local = served_prompt("Do it.\n", &place("local/x"));
     let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
@@ -3806,4 +3834,5 @@ async fn a_blind_continue_to_a_question_is_refused() {
 }
 
 mod archive;
+mod review;
 mod settle_failed;

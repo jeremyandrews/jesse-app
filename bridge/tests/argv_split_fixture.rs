@@ -246,6 +246,13 @@
 //! (`core.hooksPath`). No argv moved: the fixture's state dir holds no installed settings file,
 //! so no `--settings` is added. No `cwd` moved.
 //!
+//! **AND AGAIN, in bridge 0.211.0, for `devjob_review` and `devjob_review_reply`, on Claude
+//! Code's two write sites only.** `main-write` and `main-write-resume` moved their
+//! `--allowedTools` digest for the two new `mcp__devjob__*` grants. No `--mcp-config` digest
+//! moved and no Codex site moved, for the reason 0.197.0 gives. No other site moved.
+//! Regenerate with no `GIT_CONFIG_*` in the environment (a Studio run's own shell has them),
+//! or the `env_keys` of every site shift by the ambient count.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

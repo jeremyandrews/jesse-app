@@ -1489,6 +1489,33 @@ pub fn diet_child_request<'a>(
     }
 }
 
+/// A Studio run's REVIEWER child: `capability` is [`crate::hostrun::review::review_capability`]
+/// of its harness (`Read` on Claude Code and Codex, `Basic` on the direct harness), NO MCP
+/// servers at all (so no devjob, git, gh or network tool can be named, whatever the grant), no
+/// session, no write lock and no artifact or attachment directory. The cwd is the reviewer's own
+/// detached worktree of the run at its head: Claude Code's `Read`, `Grep` and `Glob` are scoped
+/// to it, and Codex's read-only sandbox refuses every write there and everywhere else.
+pub fn review_child_request<'a>(
+    prompt: &'a str,
+    active: &'a ActiveModel,
+    capability: Capability,
+    cwd: &Path,
+    turn_id: &'a str,
+) -> TurnRequest<'a> {
+    TurnRequest {
+        prompt,
+        session_id: None,
+        active,
+        capability,
+        cwd: cwd.to_path_buf(),
+        mcp_config: EMPTY_MCP_CONFIG,
+        write_lock: None,
+        turn_id,
+        artifact_dir: None,
+        attachment_dir: None,
+    }
+}
+
 /// The read-only VAULT-QA child's request (shared with the shadow child):
 /// [`Capability::Read`] and the child's own MCP server set (`JESSE_VAULTQA_MCP_CONFIG`,
 /// else NO servers). THE ONE INTENTIONAL DIVERGENCE from the diet child is the cwd: the

@@ -952,7 +952,7 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // HEALTHDB: BOTH TOOLS ON THE OWNER'S HEALTH ARCHIVE, READ ONLY.
 //
 // `jesse-healthdb-mcp` is this repository's own server and its `tools/list` is the closed set in
-// `HealthDbTool::ALL`: `healthdb_schema` and `healthdb_query`, both annotated `readOnlyHint`.
+// `DbTool::ALL` as `HEALTHDB` names it: `healthdb_schema` and `healthdb_query`, both `readOnlyHint`.
 // Both are granted by name. The query tool takes caller-written SQL; what keeps it a read is in
 // the server (one SELECT/WITH/TABLE/VALUES statement, `BEGIN READ ONLY`, a 15 s timeout, a 500
 // row cap) and in the `health_ro` role, not in this list. Never a wildcard.
@@ -1036,6 +1036,14 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // whole `tools/list` (`ReminderTool::ALL`), granted by name and none withheld. They read and
 // write `<state_dir>/reminders.json` and nothing else; a reminder becomes a push from the
 // bridge's ticker, never a turn. Never a wildcard.
+//
+// HOUSEDB: BOTH TOOLS ON THE HOUSE HISTORY, READ ONLY (0.212.0).
+//
+// `jesse-housedb-mcp` is `jesse-healthdb-mcp`'s code over Home Assistant's recorder, and its
+// `tools/list` is the closed set `DbTool::ALL` as `HOUSEDB` names it: `housedb_schema` and
+// `housedb_query`, both `readOnlyHint`. Granted by name. What keeps the query a read is in the
+// server (one statement, `BEGIN READ ONLY`, 15 s, 500 rows) and in the `house_ro` role, not in
+// this list. Never a wildcard.
 pub const DEFAULT_ALLOWED_TOOLS: &str = "\
 Read(//${WORKSPACE}/**),Edit(//${WORKSPACE}/**),\
 Grep(//${WORKSPACE}/**),Glob(//${WORKSPACE}/**),\
@@ -1254,6 +1262,7 @@ mcp__kubernetes-cloud__resources_create_or_update,mcp__kubernetes-cloud__resourc
 mcp__kubernetes-cloud__resources_delete,\
 mcp__reminders__create_reminder,mcp__reminders__list_reminders,\
 mcp__reminders__cancel_reminder,mcp__reminders__snooze_reminder,\
+mcp__housedb__housedb_query,mcp__housedb__housedb_schema,\
 mcp__devjob__devjob_start,mcp__devjob__devjob_status,mcp__devjob__devjob_list,\
 mcp__devjob__devjob_reply,mcp__devjob__devjob_cancel,mcp__devjob__devjob_close,\
 mcp__devjob__devjob_review,mcp__devjob__devjob_review_reply";
@@ -1324,6 +1333,9 @@ pub struct Config {
     /// The health archive (`[healthdb]`): absent, ready, or refused at startup. See
     /// [`crate::HealthDbConfig`]. Ready holds the connection URL, which carries a password.
     pub healthdb: HealthDbConfig,
+    /// The house history's read-only role (`[housedb]`): absent, ready, or refused at startup.
+    /// See [`crate::HouseDbConfig`]. Ready holds two PATHS, never the URL.
+    pub housedb: HouseDbConfig,
     /// The tool gateway (`[gateway]`, `[mcp.<name>]`): off unless the table turns it on. See
     /// [`crate::gateway`].
     pub gateway: crate::gateway::GatewaySettings,
@@ -5200,6 +5212,10 @@ impl Config {
             // The `[healthdb]` table, its URL file read and checked here, once. Refused stops
             // the bridge at the startup gate, exactly as `[house]` does.
             healthdb: HealthDbConfig::from_toml(load_healthdb_table(&home)),
+            // The `[housedb]` table, its URL file read and checked here, once, and its two
+            // files defaulted to the state directory. Refused stops the bridge at the startup
+            // gate, as `[healthdb]` does.
+            housedb: HouseDbConfig::from_toml(load_housedb_table(&home), state_dir.as_deref()),
             // The `[gateway]` table and `[mcp.*]` overrides. Off when absent.
             gateway: load_gateway_settings(&home),
             // The `[devjob]` table. Off when absent; its service is built in `main`.
@@ -6178,7 +6194,7 @@ mod tests {
     }
 
     /// THE HEALTHDB GRANT IS EXACTLY THE SERVER'S CLOSED TOOL SET, AND NEVER A WILDCARD.
-    /// Equality against `HealthDbTool::ALL`, so a tool added to the server is a compile-visible
+    /// Equality against `HEALTHDB.tool_names()`, so a tool added to the server is a compile-visible
     /// decision here rather than a grant that arrives by itself.
     #[test]
     fn the_healthdb_grant_is_both_tools_and_nothing_else() {
@@ -6197,6 +6213,30 @@ mod tests {
             [
                 "mcp__healthdb__healthdb_query",
                 "mcp__healthdb__healthdb_schema"
+            ]
+        );
+    }
+
+    /// THE HOUSEDB GRANT IS EXACTLY THE SERVER'S CLOSED TOOL SET, AND NEVER A WILDCARD, as
+    /// `healthdb`'s is.
+    #[test]
+    fn the_housedb_grant_is_both_tools_and_nothing_else() {
+        let mut granted: Vec<&str> = DEFAULT_ALLOWED_TOOLS
+            .split(',')
+            .filter(|e| e.starts_with("mcp__housedb"))
+            .collect();
+        granted.sort_unstable();
+        let expected: Vec<String> = crate::HOUSEDB
+            .tool_names()
+            .iter()
+            .map(|t| format!("mcp__housedb__{t}"))
+            .collect();
+        assert_eq!(granted, expected);
+        assert_eq!(
+            expected,
+            [
+                "mcp__housedb__housedb_query",
+                "mcp__housedb__housedb_schema"
             ]
         );
     }

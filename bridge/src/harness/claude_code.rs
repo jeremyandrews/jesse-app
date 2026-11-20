@@ -1571,19 +1571,28 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
 pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG: LazyLock<String> =
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets", "kubernetes-cloud"])));
 
-/// The twenty-seven-server set PLUS **`reminders`**: every main turn on BOTH harnesses from
-/// bridge 0.208.0. Twenty-eight servers.
+/// The twenty-seven-server set PLUS **`reminders`**, every main turn on BOTH harnesses from
+/// bridge 0.208.0 until 0.212.0. Twenty-eight servers.
 ///
-/// What it adds is this repository's own `jesse-reminders-mcp`: four tools that create, list,
+/// **RETIRED AS THE MAIN SET IN 0.212.0**, split out rather than grown in place for the reason
+/// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders`] still names it.
+pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_MCP_CONFIG: LazyLock<String> =
+    LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets", "kubernetes-cloud", "reminders"])));
+
+/// The twenty-eight-server set PLUS **`housedb`**: every main turn on BOTH harnesses from
+/// bridge 0.212.0. Twenty-nine servers.
+///
+/// What `housedb` adds is this repository's own `jesse-housedb-mcp`, the same read-only server
+/// as `healthdb` over Home Assistant's recorder on the home cluster, as `house_ro`
+/// ([`crate::HOUSEDB`]). What `reminders` added in 0.208.0 is this repository's own `jesse-reminders-mcp`: four tools that create, list,
 /// cancel and snooze timed reminders in `<state_dir>/reminders.json`, which the bridge's reminder
 /// ticker turns into pushes to the owner's phone at their minute. No credential, no host, no
 /// process: a BARE NAME on the child's `PATH`, like `jesse-places-mcp`, and in
 /// `deploy-bins.toml`. See the `reminders` row in `crate::mcpservers` and SECURITY.md.
 ///
-/// **TWO SERVERS ARE CONDITIONAL; THE SET IS NOT.** As for its predecessor:
-/// [`crate::render_child_mcp`] fills in `house`'s URL or drops it, and keeps `healthdb` only
-/// when `[healthdb]` has an `ro_url_file`. Every other server, `reminders` included, is
-/// unconditional.
+/// **THREE SERVERS ARE CONDITIONAL; THE SET IS NOT.** [`crate::render_child_mcp`] fills in
+/// `house`'s URL or drops it, keeps `healthdb` only when `[healthdb]` has an `ro_url_file`, and
+/// keeps `housedb` only when `[housedb]` is ready. Every other server is unconditional.
 ///
 /// **BOTH HARNESSES' MAIN SET**: Codex's main turn names this const too, so the two harnesses
 /// carry one server set and differ only in how each spells it on its command line.
@@ -1598,6 +1607,15 @@ pub static HEALTHDB_MCP_ENTRY: LazyLock<String> = LazyLock::new(|| {
     format!(
         ",{}",
         render_entry(mcp_row("healthdb").expect("a shipped row"))
+    )
+});
+
+/// The `housedb` entry exactly as [`MAIN_CHILD_MCP_CONFIG`] declares it, WITH its leading
+/// separator, for [`crate::render_housedb_mcp`]: the same string surgery as `healthdb`'s.
+pub static HOUSEDB_MCP_ENTRY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        ",{}",
+        render_entry(mcp_row("housedb").expect("a shipped row"))
     )
 });
 
@@ -1915,7 +1933,8 @@ pub fn read_allowed_tools(mcp: McpSet) -> &'static str {
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets
         | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud
-        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+        | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
             READ_ALLOWED_TOOLS
         }
         // THE ONE SET WHOSE READ GRANT IS NOT THE QMD-ONLY ONE. This is the line the whole
@@ -4579,105 +4598,111 @@ mod tests {
         let retired_clockify = servers(&mcp_config_json(&["clockify"]));
         for (label, older, added, removed) in [
             (
+                "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_MCP_CONFIG",
+                &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_MCP_CONFIG,
+                vec!["housedb"],
+                vec![],
+            ),
+            (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG,
-                vec!["reminders"],
+                vec!["housedb", "reminders"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud"],
+                vec!["housedb", "reminders", "kubernetes-cloud"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_CLOCKIFY_RS_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_HEALTHDB_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_HOUSE_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_CLOCKIFY_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
                 vec!["clockify"],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_INBOUND_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_PLACES_MCP_CONFIG",
                 &MESSAGES_BUILD_PLACES_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound"],
                 vec![],
             ),
             (
                 "MESSAGES_BUILD_MCP_CONFIG",
                 &MESSAGES_BUILD_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places"],
                 vec![],
             ),
             (
                 "MESSAGES_KUBERNETES_MCP_CONFIG",
                 &MESSAGES_KUBERNETES_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "inbound", "places", "build"],
                 vec![],
             ),
             (
                 "MESSAGES_MCP_CONFIG",
                 &MESSAGES_MCP_CONFIG,
-                vec!["reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
+                vec!["housedb", "reminders", "kubernetes-cloud", "google-sheets", "runn-rs", "clockify-rs", "healthdb", "house", "plex", "tag1", "rybbit", "kubernetes", "inbound", "places", "build"],
                 vec![],
             ),
         ] {

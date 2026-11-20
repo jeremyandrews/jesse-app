@@ -437,7 +437,21 @@ pub enum McpSet {
     /// schedule a push to the owner's phone at a chosen minute: the bridge's reminder ticker
     /// sends it, and no turn runs. A distinct row for the standing reason: the record must be
     /// able to say which rows held which server.
+    ///
+    /// Retired as the main set in 0.212.0; its config is now [`MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_MCP_CONFIG`].
     MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders,
+    /// The twenty-eight-server set PLUS **`housedb`** ([`MAIN_CHILD_MCP_CONFIG`]): every main
+    /// turn on BOTH harnesses from bridge 0.212.0. Twenty-nine servers.
+    ///
+    /// **WHAT IS NEW IS THIS REPOSITORY'S OWN `jesse-housedb-mcp`, READ ONLY**: the same server
+    /// as `healthdb` ([`crate::HOUSEDB`]) over Home Assistant's recorder on the home cluster,
+    /// connected as `house_ro`. Two tools, `housedb_schema` and `housedb_query`; the second
+    /// sends caller-written SQL off the host, held to one read statement in a `READ ONLY`
+    /// transaction, 15 s and 500 rows by the server and to `SELECT` by the role. Like `healthdb`
+    /// it is CONDITIONAL: a deployment without a ready `[housedb]` renders the set without it.
+    /// A distinct row for the standing reason: the record must be able to say which rows held
+    /// which server.
+    MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb,
     /// **The six servers the owner's own replies arrive on, and NOTHING else**
     /// ([`REPLIES_MCP_CONFIG`]): `google`, `google-perseido`, `fastmail`, `slack`, `whatsapp`
     /// and `imcp`. The TODAY-BRIEF child, when sent-message search is switched on.
@@ -607,6 +621,12 @@ slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+w
 google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs+\
 runn-rs+google-sheets+kubernetes-cloud+reminders";
 
+/// The label for [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb`], written ONCE for the reason every label above it is.
+const MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL: &str = "qmd+\
+slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+proxmox+whatsapp+imcp+\
+google-perseido+build+places+inbound+kubernetes+rybbit+tag1+plex+house+healthdb+clockify-rs+\
+runn-rs+google-sheets+kubernetes-cloud+reminders+housedb";
+
 /// The label for [`McpSet::Replies`], written ONCE for the reason every label above it is: a
 /// typo in the `parse` arm would fail the round trip for exactly the row a startup gate needs
 /// to resolve, and it would fail it by returning `None` rather than by failing to compile.
@@ -672,6 +692,9 @@ impl McpSet {
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_LABEL
             }
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL
+            }
             McpSet::Replies => REPLIES_LABEL,
         }
     }
@@ -731,6 +754,9 @@ impl McpSet {
             MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_LABEL => {
                 Some(McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders)
             }
+            MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL => {
+                Some(McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb)
+            }
             REPLIES_LABEL => Some(McpSet::Replies),
             _ => None,
         }
@@ -789,7 +815,10 @@ impl McpSet {
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud => {
                 MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_MCP_CONFIG.as_str()
             }
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => MAIN_CHILD_MCP_CONFIG.as_str(),
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+                MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_MCP_CONFIG.as_str()
+            }
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => MAIN_CHILD_MCP_CONFIG.as_str(),
             McpSet::Replies => REPLIES_MCP_CONFIG.as_str(),
         }
     }
@@ -801,7 +830,7 @@ impl McpSet {
     /// It is a literal array rather than something derived, so adding a variant without adding
     /// it here is caught by [`every_set_round_trips_through_its_config`] rather than silently
     /// making that set unresolvable from a spawn site's config string.
-    pub const ALL: [McpSet; 25] = [
+    pub const ALL: [McpSet; 26] = [
         McpSet::None,
         McpSet::Qmd,
         McpSet::QmdSlack,
@@ -826,6 +855,7 @@ impl McpSet {
         McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets,
         McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud,
         McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders,
+        McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb,
         McpSet::Replies,
     ];
 
@@ -877,7 +907,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -910,7 +940,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             // `Replies` loads Slack for the owner's own sent messages. Its SEND tools are
             // registered by the server and withheld by the allowlist ALONE — see the variant.
             | McpSet::Replies => true,
@@ -936,7 +966,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -969,7 +999,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -997,7 +1027,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1022,7 +1052,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             // `Replies` loads it for the work mailbox. Read-only at three layers: the
             // `--read-only` server flag, `*.readonly` OAuth scopes, and the allowlist —
             // which grants the GMAIL READ TOOLS ONLY, not Drive and not Calendar.
@@ -1051,7 +1081,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1075,7 +1105,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             // `Replies` loads it for the personal mailbox. The server registers three tools
             // and all three read: there is no write tool to withhold here.
             | McpSet::Replies => true,
@@ -1105,7 +1135,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
         }
     }
 
@@ -1131,7 +1161,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1160,7 +1190,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
         }
     }
 
@@ -1187,7 +1217,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             | McpSet::Replies => true,
         }
     }
@@ -1227,7 +1257,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             | McpSet::Replies => true,
         }
     }
@@ -1258,7 +1288,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             | McpSet::Replies => true,
         }
     }
@@ -1291,7 +1321,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1326,7 +1356,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1360,7 +1390,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1400,7 +1430,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1434,7 +1464,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1468,7 +1498,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1503,7 +1533,7 @@ impl McpSet {
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1534,7 +1564,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb
             | McpSet::Replies => false,
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
@@ -1574,7 +1604,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::Replies => false,
             McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
-            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1609,7 +1639,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
         }
     }
 
@@ -1642,7 +1672,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => {
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => {
                 true
             }
         }
@@ -1679,7 +1709,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
         }
     }
 
@@ -1717,7 +1747,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
         }
     }
 
@@ -1754,7 +1784,7 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
         }
     }
 
@@ -1790,7 +1820,45 @@ impl McpSet {
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets
             | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud
             | McpSet::Replies => false,
-            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders => true,
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
+        }
+    }
+
+    /// Whether this set DECLARES the **housedb** server, same exhaustiveness rule as every
+    /// sibling above, and never a `_` arm.
+    ///
+    /// A `true` means the row may start `jesse-housedb-mcp`, the house history read only as
+    /// `house_ro` (see [`McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb`]). Like `healthdb` it is conditional: a deployment with no
+    /// ready `[housedb]` renders the set WITHOUT the server; this predicate describes the most a
+    /// row can hold.
+    pub fn contains_housedb(&self) -> bool {
+        match self {
+            McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb => true,
+            McpSet::None
+            | McpSet::Qmd
+            | McpSet::QmdSlack
+            | McpSet::QmdSlackBrowser
+            | McpSet::House
+            | McpSet::Morning
+            | McpSet::Messages
+            | McpSet::MessagesBuild
+            | McpSet::MessagesBuildPlaces
+            | McpSet::MessagesBuildPlacesInbound
+            | McpSet::MessagesKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetes
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbit
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1Plex
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockify
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouse
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdb
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexClockifyHouseHealthdbClockifyRs
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRs
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRs
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheets
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloud
+            | McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders
+            | McpSet::Replies => false,
         }
     }
 
@@ -1883,6 +1951,9 @@ impl McpSet {
         if self.contains_reminders() {
             out.push("reminders");
         }
+        if self.contains_housedb() {
+            out.push("housedb");
+        }
         out
     }
 }
@@ -1953,11 +2024,11 @@ pub const CLAUDE_CODE_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb,
     },
     // The TODAY-BRIEF child with sent-message search on. A THIRD `Read` containment, which is
     // the whole reason a row is keyed on (capability, MCP set): this one reads the owner's own
@@ -2016,11 +2087,11 @@ pub const CODEX_SHIPPED_ROWS: [ContainmentRow; 5] = [
     },
     ContainmentRow {
         capability: Capability::Read,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb,
     },
     ContainmentRow {
         capability: Capability::Write,
-        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders,
+        mcp: McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudRemindersHousedb,
     },
     // The brief child on Codex, for the standing reason a capability lands on every harness in
     // the same change. Its LABEL is the same as Claude Code's — the set is one set — so unlike
@@ -2736,7 +2807,7 @@ mod tests {
         // The corrected row key: `Read` names TWO containments (the main read-only turn with
         // qmd, the vault-QA child with no servers), so one `Read` row would describe a
         // posture that was never probed.
-        // Claude Code's main rows carry the TWENTY-EIGHT-server set (from 0.208.0), and so do Codex's from
+        // Claude Code's main rows carry the TWENTY-NINE-server set (from 0.212.0), and so do Codex's from
         // 0.165.0 on. The old asymmetry is still why this asserts each harness: one harness
         // gaining a server — a code-execution one in 0.86.0, a network one in 0.100.0, a
         // document-fetching one in 0.115.0 — must not silently re-key the other harness's
@@ -2747,8 +2818,8 @@ mod tests {
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_LABEL}"),
-                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_LABEL}"),
+                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL}"),
+                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );
@@ -2950,8 +3021,8 @@ mod tests {
             vec![
                 "basic/none",
                 "read/none",
-                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_LABEL}"),
-                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_LABEL}"),
+                &format!("read/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL}"),
+                &format!("write/{MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_HOUSEDB_LABEL}"),
                 &format!("read/{REPLIES_LABEL}")
             ]
         );

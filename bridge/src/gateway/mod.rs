@@ -599,6 +599,11 @@ impl Gateway {
                 g.deployment_env.insert(k.to_string(), v);
             }
         }
+        if let Some(env) = crate::housedb_child_env(cfg) {
+            for (k, v) in env {
+                g.deployment_env.insert(k.to_string(), v);
+            }
+        }
         g
     }
 

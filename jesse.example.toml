@@ -254,6 +254,40 @@ Answer the question I asked, not the one you wish I had asked.
 # mirror_diet = true
 # ro_url_file = "/path/to/healthdb-ro-url"
 
+# =============================================================================
+# [housedb]: the house's history in Postgres, read only (optional)
+# =============================================================================
+#
+# With this table present the bridge can start jesse-housedb-mcp (housedb_schema,
+# housedb_query) over Home Assistant's recorder database on the home cluster: database
+# `homeassistant` on househistorydb.pozza:5432, with the daily rollups the cluster keeps in
+# schema `analytics` (house_daily_energy, house_daily_air, house_daily_plant,
+# house_alarm_changes, house_frozen_sensors, house_unavailable). It is the same server as
+# jesse-healthdb-mcp with another configuration: one statement, BEGIN READ ONLY, 15 s
+# statement timeout, at most 500 rows. The bridge itself never connects to this database.
+# Without the table nothing is started.
+#
+# ro_url_file (optional, default <state_dir>/housedb-ro-url, normally
+#   ~/.jesse-bridge/housedb-ro-url): a file holding the READ-ONLY role's URL, ONE line,
+#   password included, for example
+#   postgres://house_ro:PASSWORD@househistorydb.pozza:5432/homeassistant?sslmode=verify-full
+#   The ks-cluster repository prints it: apps/house-history/bin/credentials.sh ro (drop its
+#   sslrootcert parameter; ca_file below is what is checked). Same checks as [healthdb]'s
+#   url_file: a regular file owned by the user the bridge runs as, chmod 600, or the bridge
+#   refuses to start, naming the problem. The URL is never logged; the bridge hands the
+#   server the file's PATH and the server reads it.
+#
+# ca_file (optional, default <state_dir>/housedb-ca.crt, normally
+#   ~/.jesse-bridge/housedb-ca.crt): the PEM certificate of the house-history Cluster's own
+#   CA (apps/house-history/bin/credentials.sh ca), not pozza-ca and not healthdb's. TLS is
+#   always verify-full against it. A missing or unreadable file refuses to start.
+#
+# An empty table uses both defaults. Changing this table needs a restart.
+#
+# [housedb]
+# ro_url_file = "/path/to/housedb-ro-url"
+# ca_file = "/path/to/housedb-ca.crt"
+
 # -----------------------------------------------------------------------------
 # [gateway]: the tool gateway (optional, OFF by default)
 # -----------------------------------------------------------------------------

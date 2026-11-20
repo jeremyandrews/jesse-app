@@ -725,6 +725,13 @@ pub async fn health(State(st): State<AppState>, headers: HeaderMap) -> Json<Valu
                 "counters": healthdb_all_counters_json(st.cfg.state_dir.as_deref())
             });
         }
+        // THE HOUSE HISTORY's read server's call outcomes, present only where `[housedb]` is
+        // ready. Fixed words only, never a value.
+        if st.cfg.housedb.ready().is_some() {
+            body["housedb"] = json!({
+                "counters": housedb_counters_json(st.cfg.state_dir.as_deref())
+            });
+        }
         // THE TOOL GATEWAY: on or off, and with it on, each upstream of the main set with its
         // transport, placement and whether it can be reached (a stdio command that resolves on
         // PATH, an HTTP URL that parses, an in-process server that is registered). Names only.

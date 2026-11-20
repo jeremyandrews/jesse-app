@@ -14,6 +14,45 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.212.0] - 2026-11-20
+
+**`jesse-housedb-mcp`: the house's history, read only, as the same server `healthdb` is.** Two
+tools, `housedb_schema` and `housedb_query`, over Home Assistant's recorder on the home cluster
+(database `homeassistant` on `househistorydb.pozza:5432`, role `house_ro`), so a morning run can
+query daily house trends. Configured by a new `[housedb]` table; without it nothing starts.
+
+- **One implementation, two configurations.** `src/healthquery.rs` now holds the guards, the
+  limits and the stdio transport once (`serve_ro_db_stdio`), and each server is one
+  `RoDbServer` value: `HEALTHDB`, and `HOUSEDB` in the new `src/housequery.rs`. Both binaries
+  are one call to it. `healthdb`'s tool names, descriptions, replies, stderr lines, ledger and
+  counters are unchanged: its `tools/list` is pinned against the 0.211.0 text, and the new
+  binary's `initialize`, `tools/list`, a live query and a rejected call hash identically to the
+  deployed 0.211.0 binary's against the real archive.
+- **Read only in two places**, as `healthdb` is: the `house_ro` role, and the bridge (one
+  statement beginning `SELECT`, `WITH`, `TABLE` or `VALUES`, `BEGIN READ ONLY`, 15 s
+  `statement_timeout`, at most 500 rows, each string cut at 500 characters, `ROLLBACK`, a fresh
+  connection per call).
+- **`housedb_schema` lists the `analytics.house_*` views first** (`house_daily_energy`,
+  `house_daily_air`, `house_daily_plant`, `house_alarm_changes`, `house_alarm_sensors`,
+  `house_frozen_sensors`, `house_unavailable`), with columns, then the rest of `analytics`, then
+  the recorder tables in `public`, and leaves out the `_house_*` tables behind the views. Its
+  description and guide tell the turn to prefer the views, and the guide explains the recorder's
+  epoch-second times, `states_meta`, `statistics` and the `complete` flag.
+- **`[housedb]`**: `ro_url_file` (default `<state_dir>/housedb-ro-url`) and `ca_file` (default
+  `<state_dir>/housedb-ca.crt`, the house-history Cluster's own CA). The URL file gets the
+  same `0600` and owner checks as `[healthdb]`'s and is never logged; the server is handed its
+  path. A refused table stops the bridge at startup, by name. `GET /health` gains
+  `housedb.counters` (`housedb_mcp_query_total`, `housedb_mcp_schema_total` by outcome) when the
+  table is ready.
+- `jesse-housedb-mcp` joins `deploy-bins.toml`.
+- **Not registered on any harness yet.** Adding a server to the main set moves the containment
+  row labels, which needs the three batteries re-recorded live and Codex's two main-row
+  `[[accepted]]` blocks re-pointed by the owner.
+- Tests: `tests/housedb_mcp_pg.rs` (an `INSERT` refused by the guard, by the role and by the
+  read-only transaction; the 500-row cap; the 15 s timeout; the morning query; the schema
+  order), `tests/rodb_mcp_stdio.rs` (both built binaries' names and tool lists, and each
+  refusing the other's variables), and unit tests for `[housedb]` and both servers' tool names.
+
 ## [bridge 0.211.0] - 2026-11-20
 
 **A Studio run can be reviewed by a second model before it finishes, and the session that did the

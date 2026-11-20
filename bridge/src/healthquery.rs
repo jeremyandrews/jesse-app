@@ -30,6 +30,15 @@
 //! outcome, the duration and the row count. Never the SQL, a value, an error message or the
 //! URL. A Postgres error message goes back to the turn that asked, because the turn needs it to
 //! fix its query, and nowhere else.
+//!
+//! # One implementation, two servers
+//!
+//! Everything above is shared with `jesse-housedb-mcp` (`housedb_schema`, `housedb_query`,
+//! [`crate::housequery`]), which reads Home Assistant's recorder database as `house_ro`. What
+//! differs between the two is DATA, one [`RoDbServer`] each ([`HEALTHDB`], [`crate::HOUSEDB`]):
+//! the tool names and descriptions, the environment variable names, the ledger, the guide and
+//! the schemas `*_schema` describes. The guards, the limits and the transport are this file's
+//! and are the same for both.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -90,58 +99,123 @@ pub const HEALTHQ_GUIDE: &[&str] = &[
     "Quote the numbers from the result when you answer; do not estimate what a query could have returned.",
 ];
 
+// ---- The servers --------------------------------------------------------------------------
+
+/// What `*_schema` describes beyond the shared relation list, and in what order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaLayout {
+    /// `raw` and `analytics`, by schema and name, then the HealthKit sample types.
+    Health,
+    /// The `analytics.house_*` views first, then the rest of `analytics`, then Home Assistant's
+    /// recorder tables in `public`. See [`crate::housequery`].
+    House,
+}
+
+/// One read-only Postgres MCP server: everything that differs between `healthdb` and
+/// `housedb`. Every guard and limit is shared by both and is not configurable here.
+#[derive(Debug)]
+pub struct RoDbServer {
+    /// The server's name in every MCP set and grant: tools are `mcp__<server>__<tool>`.
+    pub server: &'static str,
+    /// The bare command every harness starts, resolved from the child's `PATH`. Also the
+    /// `application_name` it connects with, the `serverInfo` name and the stderr prefix.
+    pub command: &'static str,
+    pub schema_tool: &'static str,
+    pub query_tool: &'static str,
+    pub schema_description: &'static str,
+    pub query_description: &'static str,
+    /// How a reply names the database, as in "the health archive could not be reached".
+    pub archive: &'static str,
+    /// The advice a timeout carries, after "narrow the time range, ".
+    pub timeout_hint: &'static str,
+    pub env_ro_url_file: &'static str,
+    pub env_ca_file: &'static str,
+    pub env_ledger: &'static str,
+    pub ledger_file: &'static str,
+    pub metric_query: &'static str,
+    pub metric_schema: &'static str,
+    /// The fixed guide `*_schema` returns beside the live description.
+    pub guide: &'static [&'static str],
+    pub layout: SchemaLayout,
+}
+
+impl RoDbServer {
+    pub fn tool_name(&self, tool: DbTool) -> &'static str {
+        match tool {
+            DbTool::Schema => self.schema_tool,
+            DbTool::Query => self.query_tool,
+        }
+    }
+
+    pub fn parse(&self, name: &str) -> Option<DbTool> {
+        DbTool::ALL.into_iter().find(|t| self.tool_name(*t) == name)
+    }
+
+    pub fn description(&self, tool: DbTool) -> &'static str {
+        match tool {
+            DbTool::Schema => self.schema_description,
+            DbTool::Query => self.query_description,
+        }
+    }
+
+    /// The two tool names, from the closed set, in sorted order.
+    pub fn tool_names(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = DbTool::ALL.iter().map(|t| self.tool_name(*t)).collect();
+        names.sort_unstable();
+        names
+    }
+}
+
+/// The health archive's server, `jesse-healthdb-mcp`.
+pub static HEALTHDB: RoDbServer = RoDbServer {
+    server: HEALTHDB_SERVER,
+    command: HEALTHDB_COMMAND,
+    schema_tool: "healthdb_schema",
+    query_tool: "healthdb_query",
+    schema_description: "Describe Jeremy's health archive (Apple Health samples, workouts, GPS \
+                         routes and diet logs in Postgres): every table and view in the raw and \
+                         analytics schemas with columns, types and row counts, the sample types \
+                         present with units and date ranges, and a guide to reading them. Call \
+                         this before writing a healthdb_query.",
+    query_description: "Run ONE read-only SQL statement (SELECT, WITH, TABLE or VALUES) against \
+                        Jeremy's health archive and get the rows back as JSON. At most 500 rows, \
+                        each text value cut at 500 characters, 15 second timeout; flags say when \
+                        anything was cut. Aggregate in SQL. Use it for health questions that \
+                        reach past the health block attached to the turn, and quote the numbers \
+                        it returns.",
+    archive: "the health archive",
+    timeout_hint: "filter on an indexed column (type, start_ts)",
+    env_ro_url_file: HEALTHQ_ENV_RO_URL_FILE,
+    env_ca_file: HEALTHQ_ENV_CA_FILE,
+    env_ledger: HEALTHQ_ENV_LEDGER,
+    ledger_file: HEALTHQ_LEDGER_FILE,
+    metric_query: METRIC_MCP_QUERY,
+    metric_schema: METRIC_MCP_SCHEMA,
+    guide: HEALTHQ_GUIDE,
+    layout: SchemaLayout::Health,
+};
+
 // ---- The tools ----------------------------------------------------------------------------
 
-/// The two tools, as a closed set.
+/// The two tools every server has, as a closed set. Their names are the server's
+/// ([`RoDbServer::tool_name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HealthDbTool {
+pub enum DbTool {
     Schema,
     Query,
 }
 
-impl HealthDbTool {
-    pub const ALL: [HealthDbTool; 2] = [HealthDbTool::Schema, HealthDbTool::Query];
-
-    pub fn tool_name(self) -> &'static str {
-        match self {
-            HealthDbTool::Schema => "healthdb_schema",
-            HealthDbTool::Query => "healthdb_query",
-        }
-    }
-
-    pub fn parse(name: &str) -> Option<HealthDbTool> {
-        HealthDbTool::ALL
-            .into_iter()
-            .find(|t| t.tool_name() == name)
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            HealthDbTool::Schema => {
-                "Describe Jeremy's health archive (Apple Health samples, workouts, GPS routes \
-                 and diet logs in Postgres): every table and view in the raw and analytics \
-                 schemas with columns, types and row counts, the sample types present with \
-                 units and date ranges, and a guide to reading them. Call this before writing \
-                 a healthdb_query."
-            }
-            HealthDbTool::Query => {
-                "Run ONE read-only SQL statement (SELECT, WITH, TABLE or VALUES) against \
-                 Jeremy's health archive and get the rows back as JSON. At most 500 rows, each \
-                 text value cut at 500 characters, 15 second timeout; flags say when anything \
-                 was cut. Aggregate in SQL. Use it for health questions that reach past the \
-                 health block attached to the turn, and quote the numbers it returns."
-            }
-        }
-    }
+impl DbTool {
+    pub const ALL: [DbTool; 2] = [DbTool::Schema, DbTool::Query];
 
     pub fn input_schema(self) -> Value {
         match self {
-            HealthDbTool::Schema => json!({
+            DbTool::Schema => json!({
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false,
             }),
-            HealthDbTool::Query => json!({
+            DbTool::Query => json!({
                 "type": "object",
                 "properties": {
                     "sql": {
@@ -467,30 +541,36 @@ pub fn shape_rows(
 
 // ---- Running ------------------------------------------------------------------------------
 
-/// The server's connection settings: the read-only role's options with TLS forced to
-/// `verify-full` against the CA, whatever the URL's own `sslmode` says.
+/// A server's connection settings: the read-only role's options with TLS forced to
+/// `verify-full` against the CA, whatever the URL's own `sslmode` says, and which server they
+/// are for.
 #[derive(Clone, Debug)]
-pub struct HealthQueryConfig {
+pub struct RoDbConfig {
+    server: &'static RoDbServer,
     options: PgConnectOptions,
 }
 
-impl HealthQueryConfig {
-    /// From [`HEALTHQ_ENV_RO_URL_FILE`] and [`HEALTHQ_ENV_CA_FILE`], with the same file checks
+/// The health archive's settings, by its old name.
+pub type HealthQueryConfig = RoDbConfig;
+
+impl RoDbConfig {
+    /// From the server's `*_RO_URL_FILE` and `*_CA_FILE` variables, with the same file checks
     /// the bridge makes at startup, run again here as the uid this process actually has.
-    pub fn from_env() -> Result<HealthQueryConfig, String> {
+    pub fn from_env(server: &'static RoDbServer) -> Result<RoDbConfig, String> {
         let var = |k: &str| {
             std::env::var(k)
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .ok_or_else(|| format!("{k} is not set"))
         };
-        let url_file = PathBuf::from(var(HEALTHQ_ENV_RO_URL_FILE)?);
-        let ca_file = PathBuf::from(var(HEALTHQ_ENV_CA_FILE)?);
+        let url_file = PathBuf::from(var(server.env_ro_url_file)?);
+        let ca_file = PathBuf::from(var(server.env_ca_file)?);
         // SAFETY: `geteuid` takes no arguments, cannot fail, and touches no memory of ours.
         let uid = unsafe { libc::geteuid() };
         let url = read_url_file_keyed(&url_file, uid, "ro_url_file")?;
         check_ca_file(&ca_file)?;
-        Ok(HealthQueryConfig {
+        Ok(RoDbConfig {
+            server,
             options: url
                 .connect_options()
                 .ssl_mode(PgSslMode::VerifyFull)
@@ -499,8 +579,12 @@ impl HealthQueryConfig {
     }
 
     /// Over any options, as given. For tests against a server without TLS.
-    pub fn from_options(options: PgConnectOptions) -> HealthQueryConfig {
-        HealthQueryConfig { options }
+    pub fn from_options(server: &'static RoDbServer, options: PgConnectOptions) -> RoDbConfig {
+        RoDbConfig { server, options }
+    }
+
+    pub fn server(&self) -> &'static RoDbServer {
+        self.server
     }
 
     pub fn options(&self) -> &PgConnectOptions {
@@ -511,14 +595,17 @@ impl HealthQueryConfig {
         let options = self
             .options
             .clone()
-            .application_name("jesse-healthdb-mcp")
+            .application_name(self.server.command)
             .disable_statement_logging();
         match tokio::time::timeout(HEALTHQ_CONNECT_TIMEOUT, options.connect()).await {
             Ok(Ok(c)) => Ok(c),
-            Ok(Err(e)) => Err(failure(&e)),
+            Ok(Err(e)) => Err(failure(self.server, &e)),
             Err(_) => Err(ToolReply::fail(
                 QueryOutcome::Unavailable,
-                "the health archive did not answer within the connect timeout".to_string(),
+                format!(
+                    "{} did not answer within the connect timeout",
+                    self.server.archive
+                ),
             )),
         }
     }
@@ -526,7 +613,7 @@ impl HealthQueryConfig {
 
 /// A driver error as the turn should see it: Postgres's own message and SQLSTATE when it
 /// answered, a fixed phrase when it could not be reached. Never logged.
-fn failure(e: &sqlx::Error) -> ToolReply {
+fn failure(server: &RoDbServer, e: &sqlx::Error) -> ToolReply {
     if let sqlx::Error::Database(d) = e {
         let code = d.code().map(|c| c.into_owned()).unwrap_or_default();
         let outcome = if code == "57014" {
@@ -546,7 +633,8 @@ fn failure(e: &sqlx::Error) -> ToolReply {
         if outcome == QueryOutcome::Timeout {
             text.push_str(&format!(
                 "\nThe statement ran past {HEALTHQ_STATEMENT_TIMEOUT}; narrow the time range, \
-                 filter on an indexed column (type, start_ts) or aggregate less."
+                 {} or aggregate less.",
+                server.timeout_hint
             ));
         }
         return ToolReply::fail(outcome, text);
@@ -557,7 +645,7 @@ fn failure(e: &sqlx::Error) -> ToolReply {
     };
     ToolReply::fail(
         QueryOutcome::Unavailable,
-        format!("the health archive could not be reached ({why})"),
+        format!("{} could not be reached ({why})", server.archive),
     )
 }
 
@@ -577,7 +665,7 @@ async fn begin_read_only(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
 /// Run `body` inside the guarded transaction on a fresh connection, roll back whatever
 /// happened, and close. The client-side ceiling drops the connection outright, which Postgres
 /// sees as a disconnect and answers by ending the backend.
-async fn guarded<F, Fut>(cfg: &HealthQueryConfig, body: F) -> ToolReply
+async fn guarded<F, Fut>(cfg: &RoDbConfig, body: F) -> ToolReply
 where
     F: FnOnce(PgConnection) -> Fut,
     Fut: std::future::Future<Output = (PgConnection, ToolReply)>,
@@ -587,7 +675,7 @@ where
         Err(r) => return r,
     };
     if let Err(e) = begin_read_only(&mut conn).await {
-        return failure(&e);
+        return failure(cfg.server, &e);
     }
     match tokio::time::timeout(HEALTHQ_CALL_TIMEOUT, body(conn)).await {
         Ok((mut conn, reply)) => {
@@ -605,26 +693,35 @@ where
     }
 }
 
-/// `healthdb_query`.
-pub async fn run_health_query(cfg: &HealthQueryConfig, args: &Value) -> ToolReply {
+/// `healthdb_query`, `housedb_query`: the server's query tool.
+pub async fn run_db_query(cfg: &RoDbConfig, args: &Value) -> ToolReply {
     let Some(sql) = args.get("sql").and_then(Value::as_str) else {
         return ToolReply::fail(
             QueryOutcome::Rejected,
-            "healthdb_query takes one argument, `sql`, a string".to_string(),
+            format!(
+                "{} takes one argument, `sql`, a string",
+                cfg.server.query_tool
+            ),
         );
     };
     let stmt = match single_statement(sql) {
         Ok(s) => s.to_string(),
         Err(why) => return ToolReply::fail(QueryOutcome::Rejected, why),
     };
+    let server = cfg.server;
     guarded(cfg, |mut conn| async move {
-        let reply = query_rows(&mut conn, &stmt).await;
+        let reply = query_rows(server, &mut conn, &stmt).await;
         (conn, reply)
     })
     .await
 }
 
-async fn query_rows(conn: &mut PgConnection, stmt: &str) -> ToolReply {
+/// `healthdb_query`.
+pub async fn run_health_query(cfg: &RoDbConfig, args: &Value) -> ToolReply {
+    run_db_query(cfg, args).await
+}
+
+async fn query_rows(server: &RoDbServer, conn: &mut PgConnection, stmt: &str) -> ToolReply {
     // Describe prepares through the extended protocol: one statement or an error, and the
     // column names and types in order.
     let columns: Vec<(String, String)> = match conn.describe(stmt).await {
@@ -633,7 +730,7 @@ async fn query_rows(conn: &mut PgConnection, stmt: &str) -> ToolReply {
             .iter()
             .map(|c| (c.name().to_string(), c.type_info().name().to_string()))
             .collect(),
-        Err(e) => return failure(&e),
+        Err(e) => return failure(server, &e),
     };
     let wrapped = wrap_for_rows(stmt);
     let rows = match sqlx::query(&wrapped)
@@ -642,7 +739,7 @@ async fn query_rows(conn: &mut PgConnection, stmt: &str) -> ToolReply {
         .await
     {
         Ok(r) => r,
-        Err(e) => return failure(&e),
+        Err(e) => return failure(server, &e),
     };
     let raw: Vec<String> = rows
         .iter()
@@ -715,16 +812,22 @@ fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// `healthdb_schema`.
-pub async fn run_health_schema(cfg: &HealthQueryConfig) -> ToolReply {
+/// `healthdb_schema`, `housedb_schema`: the server's schema tool.
+pub async fn run_db_schema(cfg: &RoDbConfig) -> ToolReply {
+    let server = cfg.server;
     guarded(cfg, |mut conn| async move {
-        let reply = match describe_schema(&mut conn).await {
+        let reply = match describe_schema(server, &mut conn).await {
             Ok((body, n)) => ToolReply::ok(&body, n),
-            Err(e) => failure(&e),
+            Err(e) => failure(server, &e),
         };
         (conn, reply)
     })
     .await
+}
+
+/// `healthdb_schema`.
+pub async fn run_health_schema(cfg: &RoDbConfig) -> ToolReply {
+    run_db_schema(cfg).await
 }
 
 async fn json_text(conn: &mut PgConnection, sql: &str) -> Result<Value, sqlx::Error> {
@@ -735,8 +838,15 @@ async fn json_text(conn: &mut PgConnection, sql: &str) -> Result<Value, sqlx::Er
     Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
-async fn describe_schema(conn: &mut PgConnection) -> Result<(Value, usize), sqlx::Error> {
-    let mut relations = match json_text(conn, SCHEMA_RELATIONS_SQL).await? {
+async fn describe_schema(
+    server: &RoDbServer,
+    conn: &mut PgConnection,
+) -> Result<(Value, usize), sqlx::Error> {
+    let relations_sql = match server.layout {
+        SchemaLayout::Health => SCHEMA_RELATIONS_SQL,
+        SchemaLayout::House => crate::housequery::HOUSE_RELATIONS_SQL,
+    };
+    let mut relations = match json_text(conn, relations_sql).await? {
         Value::Array(a) => a,
         _ => Vec::new(),
     };
@@ -764,34 +874,186 @@ async fn describe_schema(conn: &mut PgConnection) -> Result<(Value, usize), sqlx
         };
         if let Value::Object(o) = r {
             o.remove("estimate");
+            // The House layout's sort key, which has done its work in the SQL.
+            o.remove("rank");
             o.insert("rows".to_string(), rows);
             o.insert("rows_estimated".to_string(), json!(estimated));
         }
     }
     let mut body = json!({ "relations": relations });
-    if present.contains("raw.quantity_sample") {
+    if server.layout == SchemaLayout::Health && present.contains("raw.quantity_sample") {
         body["quantity_types"] =
             json_text(conn, &sample_types_sql("raw.quantity_sample", true)).await?;
     }
-    if present.contains("raw.category_sample") {
+    if server.layout == SchemaLayout::Health && present.contains("raw.category_sample") {
         body["category_types"] =
             json_text(conn, &sample_types_sql("raw.category_sample", false)).await?;
     }
-    body["guide"] = json!(HEALTHQ_GUIDE);
+    body["guide"] = json!(server.guide);
     let n = present.len();
     Ok((body, n))
 }
 
-/// Run one tool.
-pub async fn run_health_tool(
-    cfg: &HealthQueryConfig,
-    tool: HealthDbTool,
-    args: &Value,
-) -> ToolReply {
+/// Run one tool on the server `cfg` is for.
+pub async fn run_db_tool(cfg: &RoDbConfig, tool: DbTool, args: &Value) -> ToolReply {
     match tool {
-        HealthDbTool::Schema => run_health_schema(cfg).await,
-        HealthDbTool::Query => run_health_query(cfg, args).await,
+        DbTool::Schema => run_db_schema(cfg).await,
+        DbTool::Query => run_db_query(cfg, args).await,
     }
+}
+
+// ---- The transport ------------------------------------------------------------------------
+
+/// The MCP protocol version a server falls back to when a client does not name one.
+const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// A server's whole life: read its config from the environment, then answer MCP over stdio
+/// until the client goes away. The binaries (`jesse-healthdb-mcp`, `jesse-housedb-mcp`) are
+/// one call to this and nothing else, for the reason `jesse-places-mcp` is a transport.
+///
+/// One stderr line per call: the tool, the outcome, the duration and the row count. Never the
+/// SQL, a value, an error message or the URL. A config that does not load exits 1 with its
+/// one-line reason, before any MCP traffic.
+pub async fn serve_ro_db_stdio(server: &'static RoDbServer) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let cfg = match RoDbConfig::from_env(server) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}: {e}", server.command);
+            std::process::exit(1);
+        }
+    };
+    let ledger = RoDbLedger::from_env(server);
+
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+    let mut stdout = tokio::io::stdout();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let req: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            // A malformed line is answered and survived, as in `jesse-places-mcp`.
+            Err(e) => {
+                let err = json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": {"code": -32700, "message": format!("parse error: {e}")}
+                });
+                let _ = write_mcp_line(&mut stdout, &err).await;
+                continue;
+            }
+        };
+
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        // A notification (no `id`) is never answered.
+        let Some(id) = req.get("id").cloned() else {
+            continue;
+        };
+
+        let response = match method {
+            "initialize" => {
+                let version = req
+                    .get("params")
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(FALLBACK_PROTOCOL_VERSION)
+                    .to_string();
+                mcp_ok(
+                    id,
+                    json!({
+                        "protocolVersion": version,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {
+                            "name": server.command,
+                            "version": env!("CARGO_PKG_VERSION"),
+                        }
+                    }),
+                )
+            }
+            "ping" => mcp_ok(id, json!({})),
+            "tools/list" => mcp_ok(id, json!({"tools": ro_db_tool_list(server)})),
+            "tools/call" => {
+                let params = req.get("params");
+                let name = params
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                let args = params
+                    .and_then(|p| p.get("arguments"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match server.parse(name) {
+                    Some(tool) => {
+                        let started = std::time::Instant::now();
+                        let reply = run_db_tool(&cfg, tool, &args).await;
+                        let elapsed = started.elapsed();
+                        eprintln!(
+                            "{}: {} {} in {}ms, {} rows",
+                            server.command,
+                            server.tool_name(tool),
+                            reply.outcome.as_str(),
+                            elapsed.as_millis(),
+                            reply.rows
+                        );
+                        ledger.record(tool, &reply, elapsed);
+                        // A failure is reported as a failure, with Postgres's message, so the
+                        // turn can correct its query rather than read "no rows" as an answer.
+                        mcp_ok(
+                            id,
+                            json!({
+                                "content": [{"type": "text", "text": reply.text}],
+                                "isError": reply.is_error,
+                            }),
+                        )
+                    }
+                    None => mcp_err(id, -32602, format!("unknown tool: {name}")),
+                }
+            }
+            other => mcp_err(id, -32601, format!("unknown method: {other}")),
+        };
+
+        if write_mcp_line(&mut stdout, &response).await.is_err() {
+            break; // the client is gone
+        }
+    }
+}
+
+/// A server's advertised tools, built from [`DbTool::ALL`].
+pub fn ro_db_tool_list(server: &RoDbServer) -> Vec<Value> {
+    DbTool::ALL
+        .into_iter()
+        .map(|t| {
+            json!({
+                "name": server.tool_name(t),
+                "description": server.description(t),
+                "inputSchema": t.input_schema(),
+                "annotations": {"readOnlyHint": true},
+            })
+        })
+        .collect()
+}
+
+fn mcp_ok(id: Value, result: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn mcp_err(id: Value, code: i64, message: String) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+async fn write_mcp_line<W>(w: &mut W, v: &Value) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWriteExt + Unpin,
+{
+    let mut s = serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string());
+    s.push('\n');
+    w.write_all(s.as_bytes()).await?;
+    w.flush().await
 }
 
 // ---- Registration -------------------------------------------------------------------------
@@ -803,9 +1065,7 @@ pub const HEALTHDB_COMMAND: &str = "jesse-healthdb-mcp";
 
 /// The two tool names, from the closed set, in sorted order.
 pub fn healthdb_tool_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = HealthDbTool::ALL.iter().map(|t| t.tool_name()).collect();
-    names.sort_unstable();
-    names
+    HEALTHDB.tool_names()
 }
 
 /// Whether this deployment starts the server at all: a ready `[healthdb]` table WITH an
@@ -937,37 +1197,44 @@ pub fn direct_healthdb_grant(cfg: &Config) -> Option<jesse_agent::mcp::ServerGra
 /// A file rather than an in-process counter for the reason `places-google-calls.log` is one:
 /// the server is spawned per turn, so a counter in it would reset with every question and the
 /// bridge would never see it. Each line is content-free: the time, the tool, the outcome, the
-/// duration and the row count.
+/// duration and the row count. One file per server ([`RoDbServer::ledger_file`]).
 #[derive(Debug, Clone)]
-pub struct HealthQueryLedger {
+pub struct RoDbLedger {
+    server: &'static RoDbServer,
     path: Option<PathBuf>,
 }
 
-impl HealthQueryLedger {
-    /// [`HEALTHQ_ENV_LEDGER`], else `<JESSE_STATE_DIR>/healthdb-mcp-calls.log`, else
-    /// `$HOME/.jesse-bridge/healthdb-mcp-calls.log`, the two-step the places ledger uses.
-    pub fn from_env() -> HealthQueryLedger {
+/// The health archive's ledger, by its old name.
+pub type HealthQueryLedger = RoDbLedger;
+
+impl RoDbLedger {
+    /// The server's `*_MCP_LEDGER`, else `<JESSE_STATE_DIR>/<ledger_file>`, else
+    /// `$HOME/.jesse-bridge/<ledger_file>`, the two-step the places ledger uses.
+    pub fn from_env(server: &'static RoDbServer) -> RoDbLedger {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        let path = var(HEALTHQ_ENV_LEDGER).map(PathBuf::from).or_else(|| {
+        let path = var(server.env_ledger).map(PathBuf::from).or_else(|| {
             var("JESSE_STATE_DIR")
                 .or_else(|| var("HOME").map(|h| format!("{h}/.jesse-bridge")))
-                .map(|d| PathBuf::from(d).join(HEALTHQ_LEDGER_FILE))
+                .map(|d| PathBuf::from(d).join(server.ledger_file))
         });
-        HealthQueryLedger { path }
+        RoDbLedger { server, path }
     }
 
-    pub fn at(path: PathBuf) -> HealthQueryLedger {
-        HealthQueryLedger { path: Some(path) }
+    pub fn at(server: &'static RoDbServer, path: PathBuf) -> RoDbLedger {
+        RoDbLedger {
+            server,
+            path: Some(path),
+        }
     }
 
     /// Append one line. A failure is reported on stderr, content-free, and never fails the call.
-    pub fn record(&self, tool: HealthDbTool, reply: &ToolReply, elapsed: Duration) {
+    pub fn record(&self, tool: DbTool, reply: &ToolReply, elapsed: Duration) {
         let Some(path) = &self.path else {
             return;
         };
         let line = json!({
             "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "tool": tool.tool_name(),
+            "tool": self.server.tool_name(tool),
             "outcome": reply.outcome.as_str(),
             "ms": elapsed.as_millis() as u64,
             "rows": reply.rows,
@@ -985,14 +1252,21 @@ impl HealthQueryLedger {
             writeln!(f, "{line}")
         })();
         if let Err(e) = res {
-            eprintln!("jesse-healthdb-mcp: the call ledger could not be written: {e}");
+            eprintln!(
+                "{}: the call ledger could not be written: {e}",
+                self.server.command
+            );
         }
     }
 }
 
-/// The ledger tallied into counters: `{metric: {outcome: n}}`, one metric per tool. Lines that
-/// do not parse are skipped. Lifetime of the ledger, not of the bridge process.
-pub fn healthdb_mcp_counters(ledger: &Path) -> BTreeMap<&'static str, BTreeMap<String, u64>> {
+/// A server's ledger tallied into counters: `{metric: {outcome: n}}`, one metric per tool.
+/// Lines that do not parse, or name another server's tool, are skipped. Lifetime of the
+/// ledger, not of the bridge process.
+pub fn ro_db_mcp_counters(
+    server: &RoDbServer,
+    ledger: &Path,
+) -> BTreeMap<&'static str, BTreeMap<String, u64>> {
     let mut out: BTreeMap<&'static str, BTreeMap<String, u64>> = BTreeMap::new();
     let Ok(text) = std::fs::read_to_string(ledger) else {
         return out;
@@ -1001,9 +1275,9 @@ pub fn healthdb_mcp_counters(ledger: &Path) -> BTreeMap<&'static str, BTreeMap<S
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let metric = match v["tool"].as_str().and_then(HealthDbTool::parse) {
-            Some(HealthDbTool::Query) => METRIC_MCP_QUERY,
-            Some(HealthDbTool::Schema) => METRIC_MCP_SCHEMA,
+        let metric = match v["tool"].as_str().and_then(|t| server.parse(t)) {
+            Some(DbTool::Query) => server.metric_query,
+            Some(DbTool::Schema) => server.metric_schema,
             None => continue,
         };
         let Some(outcome) = v["outcome"].as_str() else {
@@ -1015,6 +1289,11 @@ pub fn healthdb_mcp_counters(ledger: &Path) -> BTreeMap<&'static str, BTreeMap<S
             .or_default() += 1;
     }
     out
+}
+
+/// [`ro_db_mcp_counters`] for the health archive's ledger.
+pub fn healthdb_mcp_counters(ledger: &Path) -> BTreeMap<&'static str, BTreeMap<String, u64>> {
+    ro_db_mcp_counters(&HEALTHDB, ledger)
 }
 
 /// The `healthdb.counters` object `GET /health` serves: the bridge's own ingest counters, plus
@@ -1188,23 +1467,87 @@ mod tests {
 
     #[test]
     fn tools_parse_by_name_and_only_query_takes_sql() {
-        assert_eq!(
-            HealthDbTool::parse("healthdb_query"),
-            Some(HealthDbTool::Query)
-        );
-        assert_eq!(
-            HealthDbTool::parse("healthdb_schema"),
-            Some(HealthDbTool::Schema)
-        );
-        assert_eq!(HealthDbTool::parse("healthdb_write"), None);
-        assert_eq!(
-            HealthDbTool::Query.input_schema()["required"],
-            json!(["sql"])
-        );
-        assert!(HealthDbTool::Schema.input_schema()["properties"]
+        assert_eq!(HEALTHDB.parse("healthdb_query"), Some(DbTool::Query));
+        assert_eq!(HEALTHDB.parse("healthdb_schema"), Some(DbTool::Schema));
+        assert_eq!(HEALTHDB.parse("healthdb_write"), None);
+        // Each server answers to its own names only.
+        assert_eq!(HEALTHDB.parse("housedb_query"), None);
+        assert_eq!(crate::HOUSEDB.parse("healthdb_query"), None);
+        assert_eq!(DbTool::Query.input_schema()["required"], json!(["sql"]));
+        assert!(DbTool::Schema.input_schema()["properties"]
             .as_object()
             .unwrap()
             .is_empty());
+    }
+
+    /// THE HEALTHDB SERVER IS BYTE FOR BYTE WHAT IT WAS BEFORE IT WAS SHARED WITH HOUSEDB. Its
+    /// `tools/list` is pinned here against the text as it stood in 0.211.0, so a change to the
+    /// shared code that moves a name, a description or a schema fails here.
+    #[test]
+    fn the_healthdb_tool_list_is_unchanged_by_the_shared_server() {
+        let list = ro_db_tool_list(&HEALTHDB);
+        assert_eq!(
+            list,
+            vec![
+                json!({
+                    "name": "healthdb_schema",
+                    "description": "Describe Jeremy's health archive (Apple Health samples, workouts, GPS routes and diet logs in Postgres): every table and view in the raw and analytics schemas with columns, types and row counts, the sample types present with units and date ranges, and a guide to reading them. Call this before writing a healthdb_query.",
+                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+                    "annotations": {"readOnlyHint": true},
+                }),
+                json!({
+                    "name": "healthdb_query",
+                    "description": "Run ONE read-only SQL statement (SELECT, WITH, TABLE or VALUES) against Jeremy's health archive and get the rows back as JSON. At most 500 rows, each text value cut at 500 characters, 15 second timeout; flags say when anything was cut. Aggregate in SQL. Use it for health questions that reach past the health block attached to the turn, and quote the numbers it returns.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"sql": {"type": "string", "description": "One SELECT, WITH, TABLE or VALUES statement."}},
+                        "required": ["sql"],
+                        "additionalProperties": false,
+                    },
+                    "annotations": {"readOnlyHint": true},
+                }),
+            ]
+        );
+        assert_eq!(HEALTHDB.command, "jesse-healthdb-mcp");
+        assert_eq!(HEALTHDB.env_ro_url_file, "JESSE_HEALTHDB_RO_URL_FILE");
+        assert_eq!(HEALTHDB.env_ca_file, "JESSE_HEALTHDB_CA_FILE");
+        assert_eq!(HEALTHDB.env_ledger, "JESSE_HEALTHDB_MCP_LEDGER");
+        assert_eq!(HEALTHDB.ledger_file, "healthdb-mcp-calls.log");
+        assert_eq!(HEALTHDB.metric_query, "healthdb_mcp_query_total");
+        assert_eq!(HEALTHDB.metric_schema, "healthdb_mcp_schema_total");
+    }
+
+    /// THE TWO SERVERS' TOOL NAMES, and that they never collide: a grant names a tool by
+    /// `mcp__<server>__<tool>`, and the tool names are distinct across servers as well.
+    #[test]
+    fn both_servers_tool_names() {
+        assert_eq!(HEALTHDB.tool_names(), ["healthdb_query", "healthdb_schema"]);
+        assert_eq!(
+            crate::HOUSEDB.tool_names(),
+            ["housedb_query", "housedb_schema"]
+        );
+        assert_eq!(HEALTHDB.server, "healthdb");
+        assert_eq!(crate::HOUSEDB.server, "housedb");
+        assert_eq!(crate::HOUSEDB.command, "jesse-housedb-mcp");
+        let names: Vec<String> = ro_db_tool_list(&crate::HOUSEDB)
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["housedb_schema", "housedb_query"]);
+        for t in ro_db_tool_list(&crate::HOUSEDB) {
+            assert_eq!(t["annotations"], json!({"readOnlyHint": true}));
+        }
+    }
+
+    #[test]
+    fn a_failure_names_the_server_it_came_from() {
+        let e = sqlx::Error::PoolTimedOut;
+        assert!(failure(&HEALTHDB, &e)
+            .text
+            .starts_with("the health archive could not be reached"));
+        assert!(failure(&crate::HOUSEDB, &e)
+            .text
+            .starts_with("the house history database could not be reached"));
     }
 
     #[test]
@@ -1232,9 +1575,20 @@ mod tests {
         // Port 1 on loopback: nothing listens, so reaching the connect step would fail as
         // `unavailable`, not `rejected`.
         let cfg = HealthQueryConfig::from_options(
+            &HEALTHDB,
             healthq_options_from_url("postgres://u:p@127.0.0.1:1/db").unwrap(),
         );
         let r = run_health_query(&cfg, &json!({})).await;
+        assert_eq!(r.outcome, QueryOutcome::Rejected);
+        assert_eq!(r.text, "healthdb_query takes one argument, `sql`, a string");
+        let house = RoDbConfig::from_options(
+            &crate::HOUSEDB,
+            healthq_options_from_url("postgres://u:p@127.0.0.1:1/db").unwrap(),
+        );
+        let r = run_db_query(&house, &json!({})).await;
+        assert_eq!(r.outcome, QueryOutcome::Rejected);
+        assert_eq!(r.text, "housedb_query takes one argument, `sql`, a string");
+        let r = run_db_query(&house, &json!({"sql": "INSERT INTO states DEFAULT VALUES"})).await;
         assert_eq!(r.outcome, QueryOutcome::Rejected);
         let r = run_health_query(&cfg, &json!({"sql": "SELECT 1; SELECT 2"})).await;
         assert_eq!(r.outcome, QueryOutcome::Rejected);
@@ -1246,7 +1600,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("healthq-ledger-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join(HEALTHQ_LEDGER_FILE);
-        let ledger = HealthQueryLedger::at(path.clone());
+        let ledger = HealthQueryLedger::at(&HEALTHDB, path.clone());
         let mk = |outcome| ToolReply {
             text: "SECRET RESULT".to_string(),
             is_error: false,
@@ -1254,26 +1608,18 @@ mod tests {
             rows: 3,
         };
         ledger.record(
-            HealthDbTool::Query,
+            DbTool::Query,
             &mk(QueryOutcome::Ok),
             Duration::from_millis(5),
         );
         ledger.record(
-            HealthDbTool::Query,
+            DbTool::Query,
             &mk(QueryOutcome::Ok),
             Duration::from_millis(5),
         );
-        ledger.record(
-            HealthDbTool::Query,
-            &mk(QueryOutcome::Rejected),
-            Duration::ZERO,
-        );
-        ledger.record(
-            HealthDbTool::Query,
-            &mk(QueryOutcome::Timeout),
-            Duration::ZERO,
-        );
-        ledger.record(HealthDbTool::Schema, &mk(QueryOutcome::Ok), Duration::ZERO);
+        ledger.record(DbTool::Query, &mk(QueryOutcome::Rejected), Duration::ZERO);
+        ledger.record(DbTool::Query, &mk(QueryOutcome::Timeout), Duration::ZERO);
+        ledger.record(DbTool::Schema, &mk(QueryOutcome::Ok), Duration::ZERO);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("SECRET"));
         use std::os::unix::fs::PermissionsExt;
@@ -1287,6 +1633,8 @@ mod tests {
         assert_eq!(c[METRIC_MCP_QUERY]["timeout"], 1);
         assert_eq!(c[METRIC_MCP_SCHEMA]["ok"], 1);
         assert!(healthdb_mcp_counters(&dir.join("absent")).is_empty());
+        // One server's ledger is not the other's: housedb tallies none of these lines.
+        assert!(ro_db_mcp_counters(&crate::HOUSEDB, &path).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

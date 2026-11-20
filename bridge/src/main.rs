@@ -13,9 +13,10 @@ use jesse_bridge::{
     settings_permission_drift, shadowing_direct_mcp_grants, show_qr_opt_in, show_token_opt_in,
     spawn_diet_mirror, spawn_eviction_task, spawn_healthdb_migrations, spawn_scheduler,
     spawn_session_gc_task, start_health_prober, validate_healthdb, validate_house,
-    validate_model_config, validate_today_brief_mcp, validate_vaultqa_mcp, AppState, Config,
-    ConfigError, HealthDb, QrArt, Runner, TokenVisibility, BINARY_DRIFT, CONTAINMENT_RECORDS,
-    DIRECT_ID, INBOUND_DIR_NAME, SEARCH_SCALE, SETTINGS_DRIFT, SHADOWING_GRANTS, UNRESOLVED_MCP,
+    validate_housedb, validate_model_config, validate_today_brief_mcp, validate_vaultqa_mcp,
+    AppState, Config, ConfigError, HealthDb, QrArt, Runner, TokenVisibility, BINARY_DRIFT,
+    CONTAINMENT_RECORDS, DIRECT_ID, INBOUND_DIR_NAME, SEARCH_SCALE, SETTINGS_DRIFT,
+    SHADOWING_GRANTS, UNRESOLVED_MCP,
 };
 
 #[tokio::main]
@@ -73,6 +74,8 @@ async fn main() {
     // …and the `[healthdb]` table, the same way: a URL file open to group or other, or a
     // missing CA, refuses the boot by name. Absent is the default and fine.
     errors.extend(validate_healthdb(&cfg));
+    // …and `[housedb]`: a URL file open to group or other, or a missing CA, stops the bridge.
+    errors.extend(validate_housedb(&cfg));
     // …and the tool gateway: when `[gateway] enabled`, its stub must exist and every
     // `[mcp.<name>]` override must resolve. Off is the default and checks nothing.
     errors.extend(jesse_bridge::gateway::validate_gateway(&cfg));

@@ -35,7 +35,6 @@ use jesse_bridge::hostrun::{
 use jesse_bridge::{capability_label, Config, HealthStore};
 use serde_json::json;
 
-const PLIST: &str = "Library/LaunchAgents/com.jeremy.jesse-bridge.plist";
 const REPO: &str = "local/xr1-scratch";
 
 const PROMPT: &str = concat!(
@@ -208,7 +207,19 @@ fn inbox(notes: &Path) -> Vec<String> {
 async fn a_reviewed_run_live() {
     let reviewer = std::env::var("JESSE_XR1_REVIEWER").expect("set JESSE_XR1_REVIEWER");
     let home = std::env::var("HOME").unwrap();
-    jesse_bridge::plistenv::load_plist_env(&format!("{home}/{PLIST}")).expect("the plist");
+    // The bridge's own LaunchAgent plist (`JESSE_BRIDGE_PLIST`, else the one in
+    // ~/Library/LaunchAgents whose name ends `.jesse-bridge.plist`).
+    let plist = std::env::var("JESSE_BRIDGE_PLIST")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            jesse_bridge::plistenv::find_bridge_plist(
+                &Path::new(&home).join("Library/LaunchAgents"),
+                None,
+            )
+        })
+        .expect("the bridge plist: set JESSE_BRIDGE_PLIST");
+    jesse_bridge::plistenv::load_plist_env(&plist.to_string_lossy()).expect("the plist");
     let cfg = Arc::new(Config::from_env());
     let health = Arc::new(HealthStore::seeded(&cfg.model_registry));
     match check_reviewer(&cfg, &health, &reviewer) {

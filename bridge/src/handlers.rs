@@ -1096,6 +1096,8 @@ pub async fn start_turn(
             house: main_turn_loads_house(&st.cfg, st.cfg.harnesses.serving(&active)),
             // …and about the health archive only when it registers that server.
             healthdb: main_turn_loads_healthdb(&st.cfg, st.cfg.harnesses.serving(&active)),
+            // …and about the house history only when it registers that server.
+            housedb: main_turn_loads_housedb(&st.cfg, st.cfg.harnesses.serving(&active)),
         },
         &device_contexts,
         &st.cfg.persona,

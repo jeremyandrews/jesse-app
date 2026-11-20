@@ -3411,6 +3411,24 @@ dependency = "jesse-healthdb-mcp (this repository, in deploy-bins.toml); the [he
 workflows = "health questions past the per-turn health block: finding which tables, views and sample types exist before querying"
 reason = "Describes the health archive's tables, views, sample types and a fixed guide to reading them; reads only."
 
+[grant."mcp__housedb__housedb_query"]
+kind = "mcp"
+server = "housedb"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-housedb-mcp (this repository, in deploy-bins.toml); the [housedb] ro_url_file (house_ro role, 0600) and ca_file, handed to the server by path; Postgres househistorydb.pozza:5432 database homeassistant (Home Assistant recorder), verify-full TLS"
+workflows = "the morning house update and questions about how the house has been doing: daily heat pump and pool energy, outdoor temperature and degree days, CO2 and humidity by floor, pump and ventilation run hours, alarm changes, frozen and unavailable sensors"
+reason = "Runs one read-only SQL statement against Home Assistant's recorder and its analytics.house_* daily views; 500 row cap, 15 s timeout, read-only transaction."
+
+[grant."mcp__housedb__housedb_schema"]
+kind = "mcp"
+server = "housedb"
+harnesses = ["claude-code", "codex"]
+placement = "core"
+dependency = "jesse-housedb-mcp (this repository, in deploy-bins.toml); the [housedb] ro_url_file (house_ro role, 0600) and ca_file, handed to the server by path; Postgres househistorydb.pozza:5432 database homeassistant (Home Assistant recorder), verify-full TLS"
+workflows = "the morning house update: finding which house_* views and recorder tables exist before querying"
+reason = "Describes the house history's analytics.house_* views first, then the recorder tables, with a fixed guide to reading them; reads only."
+
 [grant."mcp__clockify-rs__list_users"]
 kind = "mcp"
 server = "clockify-rs"

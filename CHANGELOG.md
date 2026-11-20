@@ -45,9 +45,20 @@ query daily house trends. Configured by a new `[housedb]` table; without it noth
   `housedb.counters` (`housedb_mcp_query_total`, `housedb_mcp_schema_total` by outcome) when the
   table is ready.
 - `jesse-housedb-mcp` joins `deploy-bins.toml`.
-- **Not registered on any harness yet.** Adding a server to the main set moves the containment
-  row labels, which needs the three batteries re-recorded live and Codex's two main-row
-  `[[accepted]]` blocks re-pointed by the owner.
+- **Registered on all three harnesses, for every main turn** (chat and scheduled jobs alike),
+  wherever `healthdb` is: the twenty-ninth server in `MAIN_CHILD_MCP_CONFIG`, dropped from the
+  rendered config unless `[housedb]` is ready, as `healthdb`'s is; both tools in
+  `DEFAULT_ALLOWED_TOOLS`; Codex forwards the three `JESSE_HOUSEDB_*` path variables by name;
+  `direct` grants both tools as `egress`; `capability-map.toml` places both at `core`. A turn
+  that loads it is told so in one prompt line (`house_*` views first, quote the numbers).
+- **New main-set label** `...+reminders+housedb`, the `...+reminders` set retired with its
+  config kept. All three containment records were re-recorded live on the Studio with every one
+  of the 29 servers registering tools at pre-flight: Claude Code (24 probes), Codex (24) and
+  `direct` (37) each kept every probe's id, class, verdict and status, and the rows gained only
+  `housedb` and its two tools (Codex's write row also observes the two `devjob_review` tools
+  0.211.0 added). Codex's two main-row `[[accepted]]` blocks are re-pointed to the new labels by
+  Jeremy Andrews on that identical-probe result; Codex's gate is the standing `basic/none` fail,
+  unchanged. `golden/capability-args.json` and the argv fixture are re-blessed for the new tools.
 - Tests: `tests/housedb_mcp_pg.rs` (an `INSERT` refused by the guard, by the role and by the
   read-only transaction; the 500-row cap; the 15 s timeout; the morning query; the schema
   order), `tests/rodb_mcp_stdio.rs` (both built binaries' names and tool lists, and each

@@ -20,6 +20,8 @@
 //! again by the server itself. The bridge hands the server the file's PATH; the URL never travels
 //! through an argv, an environment or a config string, and is never logged.
 
+use std::collections::BTreeMap;
+
 use crate::*;
 
 /// The house history's server, `jesse-housedb-mcp`.
@@ -250,6 +252,112 @@ pub fn validate_housedb(cfg: &Config) -> Vec<ConfigError> {
     }
 }
 
+// ---- Registration -------------------------------------------------------------------------
+
+/// Whether this deployment starts the server at all: a ready `[housedb]` table. Without one, no
+/// harness registers it and no process is started.
+pub fn housedb_mcp_ready(cfg: &Config) -> Option<&HouseDbSettings> {
+    cfg.housedb.ready()
+}
+
+/// The `--mcp-config` a child is given, as far as `housedb` goes: a config that does not carry
+/// the shipped entry ([`HOUSEDB_MCP_ENTRY`]) is returned unchanged, byte for byte; one that does
+/// keeps it on a deployment that starts the server and loses it on any other. The same surgery
+/// as [`render_healthdb_mcp`].
+pub fn render_housedb_mcp<'a>(cfg: &Config, config: &'a str) -> std::borrow::Cow<'a, str> {
+    if !config.contains(HOUSEDB_MCP_ENTRY.as_str()) || housedb_mcp_ready(cfg).is_some() {
+        return std::borrow::Cow::Borrowed(config);
+    }
+    std::borrow::Cow::Owned(config.replacen(HOUSEDB_MCP_ENTRY.as_str(), "", 1))
+}
+
+/// The variables a `jesse-housedb-mcp` child reads, as `(name, value)`: the two paths, and the
+/// ledger's path when the bridge has a state directory, so the server's calls land where
+/// `GET /health` tallies them. `None` when the deployment does not start the server.
+pub fn housedb_child_env(cfg: &Config) -> Option<Vec<(&'static str, String)>> {
+    let s = housedb_mcp_ready(cfg)?;
+    let mut env: Vec<(&'static str, String)> = s.housedb_mcp_env().into_iter().collect();
+    if let Some(dir) = cfg.state_dir.as_deref() {
+        env.push((
+            HOUSEQ_ENV_LEDGER,
+            PathBuf::from(dir)
+                .join(HOUSEQ_LEDGER_FILE)
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
+    Some(env)
+}
+
+/// Put the server's variables on a child whose rendered set loads it, and on no other. Paths
+/// only: nothing here is a credential.
+pub fn apply_housedb_env(cmd: &mut Command, cfg: &Config, config: &str) {
+    if !config.contains(HOUSEDB_MCP_ENTRY.as_str()) {
+        return;
+    }
+    if let Some(env) = housedb_child_env(cfg) {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+    }
+}
+
+/// Whether a main turn on `harness` registers `housedb` on this deployment: the server is
+/// started here, and the harness's main set declares it, or it is `direct`, which connects it
+/// through [`direct_housedb_grant`].
+pub fn main_turn_loads_housedb(cfg: &Config, harness: &dyn Harness) -> bool {
+    if housedb_mcp_ready(cfg).is_none() {
+        return false;
+    }
+    match harness.runner() {
+        Runner::Spawned(h) => main_mcp_config(cfg, h).contains(HOUSEDB_MCP_ENTRY.as_str()),
+        Runner::InProcess(_) => harness.id() == DIRECT_ID,
+    }
+}
+
+/// The `housedb` grant as the `direct` record commits it, with or without the table, as
+/// [`healthdb_grant_shape`] is: names and classes, nothing a turn could connect with. Both tools
+/// are `egress`, for `healthdb`'s reason.
+pub fn housedb_grant_shape() -> DirectMcpGrant {
+    DirectMcpGrant {
+        name: HOUSEDB_SERVER.to_string(),
+        command: String::new(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        tools: HOUSEDB
+            .tool_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        class: jesse_agent::tools::ActionClass::Egress,
+        per_tool_class: BTreeMap::new(),
+    }
+}
+
+/// The `housedb` grant a direct turn connects with on this deployment, or `None` when the server
+/// is not started here. A stdio grant whose environment is the direct harness's forwarded
+/// variables plus the server's own paths, and nothing else.
+pub fn direct_housedb_grant(cfg: &Config) -> Option<jesse_agent::mcp::ServerGrant> {
+    let env = housedb_child_env(cfg)?;
+    let shape = housedb_grant_shape();
+    let mut vars: BTreeMap<String, String> = DIRECT_MCP_FORWARDED_ENV
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect();
+    vars.extend(env.into_iter().map(|(k, v)| (k.to_string(), v)));
+    Some(jesse_agent::mcp::ServerGrant {
+        name: HOUSEDB_SERVER.to_string(),
+        transport: jesse_agent::mcp::McpTransport::Stdio {
+            command: HOUSEDB_COMMAND.to_string(),
+            args: Vec::new(),
+            env: vars,
+        },
+        tools: shape.tools,
+        action_class_default: shape.class,
+        per_tool_class: Default::default(),
+    })
+}
+
 /// The `housedb.counters` object `GET /health` serves: the server's call counters, tallied
 /// from its ledger in `state_dir`.
 pub fn housedb_counters_json(state_dir: Option<&str>) -> Value {
@@ -457,5 +565,178 @@ Htby8Y5sp501
         );
         let text = std::fs::read_to_string(d.0.join(HOUSEQ_LEDGER_FILE)).unwrap();
         assert!(!text.contains("SECRET"));
+    }
+}
+
+/// Registration: which harness carries the server, and with what, configured and not. The
+/// same shape as `healthdb`'s (`healthquery::registration_tests`).
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::testutil::*;
+
+    const RO_FILE: &str = "/srv/jesse/state/housedb-ro-url";
+    const CA_FILE: &str = "/srv/jesse/state/housedb-ca.crt";
+
+    fn configured() -> Config {
+        let mut cfg = test_config();
+        cfg.housedb = HouseDbConfig::Ready(HouseDbSettings {
+            ro_url_file: PathBuf::from(RO_FILE),
+            ca_file: PathBuf::from(CA_FILE),
+        });
+        cfg.state_dir = Some("/srv/jesse/state".to_string());
+        cfg
+    }
+
+    fn unconfigured() -> Vec<Config> {
+        [HouseDbConfig::Absent, HouseDbConfig::Refused("x".into())]
+            .into_iter()
+            .map(|h| {
+                let mut cfg = test_config();
+                cfg.housedb = h;
+                cfg
+            })
+            .collect()
+    }
+
+    fn servers_on_argv(args: &[String]) -> serde_json::Map<String, Value> {
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let v: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        v["mcpServers"].as_object().unwrap().clone()
+    }
+
+    fn claude_main_args(cfg: &Config) -> Vec<String> {
+        build_claude_args(
+            cfg,
+            "hi",
+            None,
+            Capability::Write,
+            main_mcp_config(cfg, &ClaudeCode),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn the_rendered_set_keeps_housedb_exactly_when_the_table_is_ready() {
+        let with = render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG.as_str());
+        assert!(with.contains(HOUSEDB_MCP_ENTRY.as_str()));
+        for cfg in unconfigured() {
+            let without = render_child_mcp(&cfg, MAIN_CHILD_MCP_CONFIG.as_str());
+            assert!(!without.contains("housedb"), "{without}");
+        }
+        // Every set that does not declare it is untouched by its surgery either way.
+        for set in McpSet::ALL.into_iter().filter(|s| !s.contains_housedb()) {
+            for cfg in [configured(), test_config()] {
+                assert_eq!(
+                    render_housedb_mcp(&cfg, set.config()).as_ref(),
+                    set.config()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_code_registers_housedb_when_configured_and_not_otherwise() {
+        let args = claude_main_args(&configured());
+        assert_eq!(
+            servers_on_argv(&args)["housedb"],
+            json!({"type": "stdio", "command": HOUSEDB_COMMAND, "args": []})
+        );
+        assert!(args.join("\n").contains("mcp__housedb__housedb_query"));
+        assert!(main_turn_loads_housedb(&configured(), &ClaudeCode));
+        for cfg in unconfigured() {
+            let args = claude_main_args(&cfg);
+            assert!(!servers_on_argv(&args).contains_key("housedb"));
+            assert!(!main_turn_loads_housedb(&cfg, &ClaudeCode));
+            assert!(!main_turn_loads_housedb(&cfg, &Codex));
+            assert!(!main_turn_loads_housedb(&cfg, &Direct));
+        }
+    }
+
+    #[test]
+    fn codex_registers_housedb_with_its_paths_forwarded_by_name() {
+        let args = codex_mcp_args(
+            CODEX_ID,
+            &render_child_mcp(&configured(), MAIN_CHILD_MCP_CONFIG.as_str()),
+            DEFAULT_ALLOWED_TOOLS,
+        )
+        .expect("renders");
+        let flat = args.join("\n");
+        assert!(
+            flat.contains(r#"mcp_servers.housedb.command="jesse-housedb-mcp""#),
+            "{flat}"
+        );
+        assert!(
+            flat.contains(
+                r#"mcp_servers.housedb.enabled_tools=["housedb_query", "housedb_schema"]"#
+            ),
+            "{flat}"
+        );
+        let env_vars = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.housedb.env_vars="))
+            .expect("Codex forwards the server's variables by name");
+        for name in [
+            HOUSEQ_ENV_RO_URL_FILE,
+            HOUSEQ_ENV_CA_FILE,
+            HOUSEQ_ENV_LEDGER,
+        ] {
+            assert!(env_vars.contains(name), "{env_vars}");
+        }
+        assert!(main_turn_loads_housedb(&configured(), &Codex));
+    }
+
+    #[test]
+    fn direct_gets_a_stdio_grant_with_paths_only_when_configured() {
+        let g = direct_housedb_grant(&configured()).expect("configured");
+        assert_eq!(g.name, HOUSEDB_SERVER);
+        assert_eq!(g.tools, ["housedb_query", "housedb_schema"]);
+        assert_eq!(
+            g.action_class_default,
+            jesse_agent::tools::ActionClass::Egress
+        );
+        let jesse_agent::mcp::McpTransport::Stdio { command, env, .. } = &g.transport else {
+            panic!("housedb is stdio");
+        };
+        assert_eq!(command, HOUSEDB_COMMAND);
+        assert_eq!(env[HOUSEQ_ENV_RO_URL_FILE], RO_FILE);
+        assert_eq!(env[HOUSEQ_ENV_CA_FILE], CA_FILE);
+        assert_eq!(
+            env[HOUSEQ_ENV_LEDGER],
+            "/srv/jesse/state/housedb-mcp-calls.log"
+        );
+        assert!(main_turn_loads_housedb(&configured(), &Direct));
+        for cfg in unconfigured() {
+            assert!(direct_housedb_grant(&cfg).is_none());
+        }
+    }
+
+    #[test]
+    fn only_a_child_that_loads_housedb_gets_its_paths() {
+        let names = [
+            HOUSEQ_ENV_RO_URL_FILE,
+            HOUSEQ_ENV_CA_FILE,
+            HOUSEQ_ENV_LEDGER,
+        ];
+        let keys = |cmd: &Command| -> Vec<String> {
+            cmd.as_std()
+                .get_envs()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect()
+        };
+        let mut cmd = Command::new("true");
+        apply_child_mcp_env(&mut cmd, &configured(), MAIN_CHILD_MCP_CONFIG.as_str());
+        for n in names {
+            assert!(keys(&cmd).iter().any(|k| k == n), "{n}");
+        }
+        let mut cmd = Command::new("true");
+        apply_child_mcp_env(&mut cmd, &configured(), McpSet::Replies.config());
+        assert!(keys(&cmd).iter().all(|k| !names.contains(&k.as_str())));
+        for cfg in unconfigured() {
+            let mut cmd = Command::new("true");
+            apply_child_mcp_env(&mut cmd, &cfg, MAIN_CHILD_MCP_CONFIG.as_str());
+            assert!(keys(&cmd).iter().all(|k| !names.contains(&k.as_str())));
+        }
     }
 }

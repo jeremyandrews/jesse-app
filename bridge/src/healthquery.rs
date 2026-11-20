@@ -1088,11 +1088,12 @@ pub fn render_healthdb_mcp<'a>(cfg: &Config, config: &'a str) -> Cow<'a, str> {
 
 /// Every conditional server, rendered: the gateway's `in_process` rows
 /// ([`crate::gateway::render_in_process_mcp`]), then `house` ([`render_house_mcp`]), then
-/// `healthdb`. The one function a spawn site calls, so a further conditional server is a change
-/// here and not at each site.
+/// `healthdb`, then `housedb` ([`crate::render_housedb_mcp`]). The one function a spawn site
+/// calls, so a further conditional server is a change here and not at each site.
 pub fn render_child_mcp(cfg: &Config, config: &str) -> String {
     let config = crate::gateway::render_in_process_mcp(cfg, config);
-    render_healthdb_mcp(cfg, &render_house_mcp(cfg, &config)).into_owned()
+    let config = render_healthdb_mcp(cfg, &render_house_mcp(cfg, &config)).into_owned();
+    crate::render_housedb_mcp(cfg, &config).into_owned()
 }
 
 /// The variables a `jesse-healthdb-mcp` child reads, as `(name, value)`: the two paths, and the
@@ -1126,10 +1127,12 @@ pub fn apply_healthdb_env(cmd: &mut Command, cfg: &Config, config: &str) {
     }
 }
 
-/// Every conditional server's environment ([`apply_house_env`], [`apply_healthdb_env`]).
+/// Every conditional server's environment ([`apply_house_env`], [`apply_healthdb_env`],
+/// [`crate::apply_housedb_env`]).
 pub fn apply_child_mcp_env(cmd: &mut Command, cfg: &Config, config: &str) {
     apply_house_env(cmd, cfg, config);
     apply_healthdb_env(cmd, cfg, config);
+    crate::apply_housedb_env(cmd, cfg, config);
 }
 
 /// Whether a main turn on `harness` registers `healthdb` on this deployment: the server is

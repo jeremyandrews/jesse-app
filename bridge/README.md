@@ -1750,6 +1750,12 @@ tallied under `housedb.counters` on `GET /health` as `housedb_mcp_query_total` a
 `src/housequery.rs`, `tests/housedb_mcp_pg.rs` (an `INSERT` refused, the row cap, the timeout,
 the schema order) and `tests/rodb_mcp_stdio.rs` (both built binaries' names and tools).
 
+Registered on every main turn, chat and scheduled alike, on all three harnesses wherever
+`healthdb` is, and only when `[housedb]` is ready: the twenty-ninth server in
+`MAIN_CHILD_MCP_CONFIG` (main-set label `...+reminders+housedb`), both tools in
+`DEFAULT_ALLOWED_TOOLS`, the three path variables forwarded by name on Codex, and an `egress`
+grant on `direct`. A turn that loads it gets one prompt line pointing it at the `house_*` views.
+
 ## Recent-workouts context (`health_context`)
 
 **`POST /jesse` with an optional `"health_context"` field** — a compact,

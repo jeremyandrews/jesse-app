@@ -549,18 +549,22 @@ pub fn direct_gateway_mcp_names(cfg: &Config, level: Level) -> Vec<String> {
     out
 }
 
-/// Every grant the `direct` record commits on this deployment: the shipped `house` and
-/// `healthdb` grants, then the operator's `[[direct.mcp]]` grants in order. CREDENTIAL-FREE:
+/// Every grant the `direct` record commits on this deployment: the shipped `house`, `healthdb`
+/// and `housedb` grants, then the operator's `[[direct.mcp]]` grants in order. CREDENTIAL-FREE:
 /// the shipped entries are [`house_grant_shape`] and [`healthdb_grant_shape`], which carry names
 /// and classes and nothing a turn could connect with.
 ///
 /// Both are here whether or not the deployment has a `[house]` table or a `[healthdb]
 /// ro_url_file`, which is what lets one committed record boot every deployment.
 pub fn direct_record_grants(cfg: &Config) -> Vec<DirectMcpGrant> {
-    [house_grant_shape(), healthdb_grant_shape()]
-        .into_iter()
-        .chain(cfg.direct.mcp.iter().cloned())
-        .collect()
+    [
+        house_grant_shape(),
+        healthdb_grant_shape(),
+        housedb_grant_shape(),
+    ]
+    .into_iter()
+    .chain(cfg.direct.mcp.iter().cloned())
+    .collect()
 }
 
 /// The `mcp__<server>__<tool>` names the `direct` record commits at `level`, sorted.
@@ -1209,7 +1213,8 @@ impl Direct {
         // the record commits the grant.
         //
         // The configured stdio grants, then `house` when this deployment has a ready `[house]`
-        // table, then `healthdb` when `[healthdb]` has an `ro_url_file`. Without one the turn
+        // table, then `healthdb` when `[healthdb]` has an `ro_url_file`, then `housedb` when
+        // `[housedb]` is ready. Without one the turn
         // runs the recorded posture minus that server.
         //
         // WITH THE GATEWAY ON, `house` and `healthdb` are two of the gateway's servers rather
@@ -1241,6 +1246,7 @@ impl Direct {
         } else {
             grants.extend(direct_house_grant(cfg));
             grants.extend(direct_healthdb_grant(cfg));
+            grants.extend(direct_housedb_grant(cfg));
         }
         let mcp = if grants.is_empty() {
             None
@@ -1985,6 +1991,12 @@ mod tests {
                     .iter()
                     .map(|t| format!("mcp__healthdb__{t}")),
             )
+            .chain(
+                crate::HOUSEDB
+                    .tool_names()
+                    .iter()
+                    .map(|t| format!("mcp__housedb__{t}")),
+            )
             .collect();
         house_reads.sort();
         // THE SHIPPED POSTURE NAMES HOUSE AND HEALTHDB, table or no table: the record commits
@@ -2058,7 +2070,7 @@ mod tests {
         let shipped = "slack+browser+homeassistant+roon+google+github+fastmail+unifi+routeros+\
                        proxmox+whatsapp+imcp+google-perseido+build+places+inbound+kubernetes+\
                        rybbit+tag1+plex+house+healthdb+clockify-rs+runn-rs+google-sheets+kubernetes-cloud+\
-                       reminders+devjob";
+                       reminders+housedb+devjob";
         assert_eq!(direct_mcp_label(&cfg), shipped);
         assert_eq!(
             Direct.parse_record_mcp(&cfg, shipped),

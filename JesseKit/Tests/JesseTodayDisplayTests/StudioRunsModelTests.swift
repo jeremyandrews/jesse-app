@@ -9,7 +9,7 @@ final class StudioRunsModelTests: XCTestCase {
 
     private static let all: [StudioRunStatus] = [
         .queued, .running, .needsYou, .reported, .failed, .cancelled, .interrupted, .paused,
-        .unknown("rebasing"),
+        .reviewing, .unknown("rebasing"),
     ]
 
     private let now = Date(timeIntervalSince1970: 1_794_243_600) // 2026-11-09T17:00:00Z
@@ -40,9 +40,11 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertEqual(StudioRunSemantics.resumeText, "Continue where you left off.")
     }
 
-    func testCancelIsOfferedOnQueuedRunningAndPausedOnly() {
+    /// The bridge's cancel route accepts a queued, running, paused or reviewing run, and
+    /// nothing else.
+    func testCancelIsOfferedOnQueuedRunningPausedAndReviewingOnly() {
         let offered = Self.all.filter(StudioRunSemantics.canCancel)
-        XCTAssertEqual(offered, [.queued, .running, .paused])
+        XCTAssertEqual(offered, [.queued, .running, .paused, .reviewing])
     }
 
     func testEveryDisabledComposerSaysWhyInOneLineAndAnEnabledOneSaysNothing() {
@@ -66,7 +68,7 @@ final class StudioRunsModelTests: XCTestCase {
 
     func testPollingStopsOnlyOnceTheRunIsTerminal() {
         let polling = Self.all.filter(StudioRunSemantics.keepsPolling)
-        XCTAssertEqual(polling, [.queued, .running, .needsYou, .interrupted, .paused])
+        XCTAssertEqual(polling, [.queued, .running, .needsYou, .interrupted, .paused, .reviewing])
     }
 
     func testTheDetailModelFollowsTheSemanticsAndTheComposer() {
@@ -87,6 +89,107 @@ final class StudioRunsModelTests: XCTestCase {
         XCTAssertFalse(running.canSend)
         XCTAssertTrue(running.canCancel)
         XCTAssertNotNil(running.replyDisabledReason)
+    }
+
+    // MARK: - Reviewing
+
+    private func reviewing(_ id: String = "XR", label: String? = "GLM 5.3",
+                           reviews: [StudioRunReview] = [], lastLine: String? = "Reading diff",
+                           strand: String? = "Gd") -> StudioRun {
+        StudioRun(runID: id, strand: strand, itemID: id, status: .reviewing,
+                  createdAt: "2026-11-09T10:00:00.000Z", lastLine: lastLine,
+                  reviewer: "glm-5.3", reviewerLabel: label, reviews: reviews)
+    }
+
+    func testReviewingIsDrawnAsItsOwnStatusInTheRunningTint() {
+        XCTAssertEqual(StudioRunSemantics.label(.reviewing), "Reviewing")
+        XCTAssertEqual(StudioRunSemantics.symbol(.reviewing), "magnifyingglass.circle.fill")
+        XCTAssertEqual(StudioRunSemantics.tint(.reviewing), StudioRunSemantics.tint(.running))
+    }
+
+    /// No composer, no Resume, one line where the composer would be; Cancel, as the bridge's
+    /// cancel route takes a reviewing run; no Archive, as the bridge refuses one.
+    func testAReviewingRunOffersNoReplyNoResumeButCancel() {
+        XCTAssertFalse(StudioRunSemantics.canReply(.reviewing))
+        XCTAssertFalse(StudioRunSemantics.showsComposer(.reviewing))
+        XCTAssertTrue(Self.all.filter { $0 != .reviewing }.allSatisfy(StudioRunSemantics.showsComposer))
+        XCTAssertFalse(StudioRunSemantics.offersResume(.reviewing, composer: ""))
+        XCTAssertTrue(StudioRunSemantics.canCancel(.reviewing))
+        XCTAssertTrue(StudioRunSemantics.keepsPolling(.reviewing))
+        XCTAssertFalse(StudioRunSemantics.canArchive(reviewing()))
+        XCTAssertEqual(StudioRunSemantics.replyDisabledReason(reviewing(), now: now),
+                       "Being reviewed. The findings go to the run itself; nothing to reply to yet.")
+        XCTAssertTrue(StudioRunSemantics.cancelMessage(.reviewing).hasPrefix("The review is stopped"))
+
+        let model = StudioRunDetailModel(runID: "XR", run: reviewing(), makeClient: { FakeRuns() })
+        model.composer = "hello"
+        XCTAssertFalse(model.showsComposer)
+        XCTAssertFalse(model.isComposerEnabled)
+        XCTAssertFalse(model.canSend)
+        XCTAssertFalse(model.showsResume)
+        XCTAssertTrue(model.canCancel)
+        XCTAssertFalse(model.canArchive)
+        XCTAssertTrue(model.keepsPolling)
+    }
+
+    /// While reviewing, the row's second line names the reviewer instead of the log's last
+    /// line: the newest review's label, else the run's, else its reviewer id.
+    func testTheRowsSecondLineNamesTheReviewer() {
+        XCTAssertEqual(StudioRunSemantics.movingLine(reviewing()), "Reviewing with GLM 5.3")
+        let requested = reviewing(reviews: [StudioRunReview(n: 1, reviewer: "codex-write",
+                                                            reviewerLabel: "Codex")])
+        XCTAssertEqual(StudioRunSemantics.movingLine(requested), "Reviewing with Codex")
+        XCTAssertEqual(StudioRunSemantics.movingLine(reviewing(label: nil)),
+                       "Reviewing with glm-5.3")
+        var running = reviewing()
+        running.status = .running
+        XCTAssertEqual(StudioRunSemantics.movingLine(running), "Reading diff")
+        running.status = .reported
+        XCTAssertNil(StudioRunSemantics.movingLine(running))
+    }
+
+    func testAReviewingRunIsLiveSortsFirstAndReplacesRunOnStudio() {
+        let runs = [run("done", .reported, created: "2026-11-09T12:00:00.000Z"), reviewing()]
+        XCTAssertEqual(StudioRunSemantics.sorted(runs).map(\.runID), ["XR", "done"])
+        XCTAssertEqual(StudioRunSemantics.liveRun(strand: "Gd", itemID: "XR", in: runs)?.runID,
+                       "XR")
+    }
+
+    /// The Moving filter shows a reviewing run, Finished and Needs me do not, and a project's
+    /// counts include it under Moving.
+    func testTheMovingFilterAndItsCountIncludeAReviewingRun() async {
+        let fake = FakeRuns()
+        fake.list = StudioRunList(
+            runs: [reviewing(), run("R", .running), run("D", .reported), run("Q", .needsYou)],
+            counts: StudioRunCounts(running: 1, needsYou: 1, needsMe: 1, moving: 2, finished: 1,
+                                    archived: 0))
+        let model = StudioRunsModel(makeClient: { fake })
+        await model.load()
+        XCTAssertEqual(model.runs(filter: .moving, strand: "Gd").map(\.runID), ["XR", "R"])
+        XCTAssertFalse(model.runs(filter: .finished, strand: "Gd").contains { $0.runID == "XR" })
+        XCTAssertFalse(model.runs(filter: .needsMe, strand: "Gd").contains { $0.runID == "XR" })
+        XCTAssertEqual(model.count(filter: .moving, strand: "Gd"), 2)
+        XCTAssertEqual(model.count(filter: .finished, strand: "Gd"), 1)
+        XCTAssertEqual(model.count(filter: .all, strand: "Gd"), 4)
+        XCTAssertEqual(model.count(filter: .moving, strand: nil), 2, "the bridge's count")
+        XCTAssertEqual(WorkSemantics.moving("Gd", in: model.runs).map(\.runID), ["XR", "R"])
+    }
+
+    func testTheReviewSectionLinesNameTheReviewerTheStatusAndTheFinishTime() {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let answered = StudioRunReview(n: 1, reviewer: "codex-write", reviewerLabel: "Codex",
+                                       status: .answered, finishedAt: "2026-11-09T16:02:00.000Z",
+                                       path: "Inbox/archive/2026-11-09-run-XR-review-1.md")
+        XCTAssertEqual(StudioRunSemantics.reviewLine(answered, now: now, calendar: utc),
+                       "Codex \u{00B7} Answered \u{00B7} 16:02")
+        let running = StudioRunReview(n: 2, reviewer: "glm-5.3", status: .running)
+        XCTAssertEqual(StudioRunSemantics.reviewLine(running, now: now, calendar: utc),
+                       "glm-5.3 \u{00B7} Reviewing")
+        XCTAssertEqual(StudioRunSemantics.reviewLabel(.unknown("re_reading")), "re_reading")
+        XCTAssertEqual(StudioRunSemantics.pendingReviewLine(reviewing()),
+                       "GLM 5.3 reviews the work when this round reports.")
+        XCTAssertNil(StudioRunSemantics.pendingReviewLine(reviewing(reviews: [running])))
     }
 
     // MARK: - The badge

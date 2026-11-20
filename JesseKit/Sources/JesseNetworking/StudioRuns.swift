@@ -19,11 +19,11 @@ import Foundation
 //
 // A refusal is the bridge's sentence (`Refusal::message`), sent as the plain text body of a
 // 4xx. It is shown VERBATIM: the bridge already names the run and the state ("HO1b is
-// reported; only a queued, running or paused run can be cancelled"), and a client paraphrase
+// reported; only a queued, running, paused or reviewing run can be cancelled"), and a client paraphrase
 // is how the reason gets lost. `StudioRunError.refused` carries it untouched.
 
 /// How a run stands. The bridge's `RunStatus`, plus `unknown` for a word this build lacks.
-public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
+public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
     case queued
     case running
     case needsYou
@@ -36,6 +36,10 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
     /// Settled without a reply: superseded, its line ticked, its report archived, or closed
     /// (or archived) by its owner. A reply still continues it, as it does a reported run.
     case closed
+    /// The implementing round finished and a second model is reading the run's diff. The
+    /// bridge hands its findings to the run's own session: moving, like `running`, with
+    /// nothing to reply to yet.
+    case reviewing
     /// A status a newer bridge serves. Carries the word so the screen can still show it.
     case unknown(String)
 
@@ -50,6 +54,7 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
         case "interrupted": self = .interrupted
         case "paused": self = .paused
         case "closed": self = .closed
+        case "reviewing": self = .reviewing
         default: self = .unknown(wire)
         }
     }
@@ -57,6 +62,12 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
     public init(from decoder: any Decoder) throws {
         let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
         self.init(wire: raw)
+    }
+
+    /// The wire word, as the bridge writes it.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(wire)
     }
 
     /// The word on the wire.
@@ -71,25 +82,62 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
         case .interrupted: return "interrupted"
         case .paused: return "paused"
         case .closed: return "closed"
+        case .reviewing: return "reviewing"
         case .unknown(let w): return w
         }
     }
 
-    /// Queued, running, waiting on the owner or paused: the bridge's `is_live`, which is what
-    /// refuses a second start of the same draft.
+    // Every predicate below is the bridge's own (`RunStatus` in `bridge/src/hostrun.rs`),
+    // spelled out per case with no `default`, so a status added here must be decided in each.
+    // The views read these; none decides for itself what a status means.
+
+    /// Queued, running, waiting on the owner, paused or being reviewed: the bridge's
+    /// `is_live`, which is what refuses a second start of the same draft.
     public var isLive: Bool {
         switch self {
-        case .queued, .running, .needsYou, .paused: return true
-        default: return false
+        case .queued, .running, .needsYou, .paused, .reviewing: return true
+        case .reported, .failed, .cancelled, .interrupted, .closed, .unknown: return false
         }
     }
 
-    /// Something is still happening without anyone's help: queued, running or paused. What
-    /// keeps a detail screen polling, and what the bridge refuses to archive.
+    /// Something is still happening without anyone's help: queued, running, paused or being
+    /// reviewed. The bridge's `is_moving` (its `moving` count), what keeps a detail screen
+    /// polling, and what the bridge refuses to archive.
     public var isMoving: Bool {
         switch self {
-        case .queued, .running, .paused: return true
-        default: return false
+        case .queued, .running, .paused, .reviewing: return true
+        case .needsYou, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
+            return false
+        }
+    }
+
+    /// Running, waiting on the owner, paused or being reviewed: the bridge's `is_active`, what
+    /// a strand's `runs_active` counts.
+    public var isActive: Bool {
+        switch self {
+        case .running, .needsYou, .paused, .reviewing: return true
+        case .queued, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
+            return false
+        }
+    }
+
+    /// What may carry `archived_at` and leave the list: the bridge's `is_archivable`
+    /// (reported, failed, cancelled or closed). A word this build lacks is taken at the
+    /// bridge's word: archived when `archived_at` says so.
+    public var isArchivable: Bool {
+        switch self {
+        case .reported, .failed, .cancelled, .closed, .unknown: return true
+        case .queued, .running, .needsYou, .interrupted, .paused, .reviewing: return false
+        }
+    }
+
+    /// What the bridge's cancel route accepts: a queued, running, paused or reviewing run.
+    /// A reviewing run is cancelled at once and its review recorded as failed.
+    public var isCancellable: Bool {
+        switch self {
+        case .queued, .running, .paused, .reviewing: return true
+        case .needsYou, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
+            return false
         }
     }
 
@@ -98,7 +146,8 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Decodable {
     public var needsMe: Bool {
         switch self {
         case .needsYou, .interrupted, .failed: return true
-        default: return false
+        case .queued, .running, .reported, .cancelled, .paused, .closed, .reviewing, .unknown:
+            return false
         }
     }
 
@@ -158,6 +207,125 @@ public struct StudioRunRound: Decodable, Equatable, Hashable, Sendable {
     }
 }
 
+/// Where one review of a run stands: the bridge's `ReviewStatus`, plus `unknown` for a word
+/// this build lacks.
+public enum StudioRunReviewStatus: Equatable, Hashable, Sendable, Decodable {
+    /// The reviewer is reading the diff.
+    case running
+    /// The note is written and not yet handed to the run.
+    case ready
+    /// The run's session has the findings; its answering round is queued or running.
+    case handedOff
+    /// The answering round reported; the note is in `Inbox/archive/`.
+    case answered
+    /// The review could not run.
+    case failed
+    /// Never handed off, and the run was closed or archived.
+    case dropped
+    case unknown(String)
+
+    public init(wire: String) {
+        switch wire {
+        case "running": self = .running
+        case "ready": self = .ready
+        case "handed_off": self = .handedOff
+        case "answered": self = .answered
+        case "failed": self = .failed
+        case "dropped": self = .dropped
+        default: self = .unknown(wire)
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self.init(wire: raw)
+    }
+
+    public var wire: String {
+        switch self {
+        case .running: return "running"
+        case .ready: return "ready"
+        case .handedOff: return "handed_off"
+        case .answered: return "answered"
+        case .failed: return "failed"
+        case .dropped: return "dropped"
+        case .unknown(let w): return w
+        }
+    }
+}
+
+/// One review of a run, as the run routes serve it (`reviews_json`): who read it, where it
+/// stands and where its note is. The findings are in the note, never here.
+public struct StudioRunReview: Decodable, Equatable, Hashable, Sendable {
+    /// 1, 2, …: the note's `-review-<n>`.
+    public var n: Int
+    /// The registry id of the reviewing model.
+    public var reviewer: String
+    /// Its label when the review was asked for (`GLM 5.3`). Empty from a record that lacks it.
+    public var reviewerLabel: String
+    /// `start` (a reviewed run's own review) or `request` (asked for after the fact).
+    public var origin: String
+    public var status: StudioRunReviewStatus
+    public var focus: String?
+    public var autoReply: Bool?
+    public var requestedAt: String?
+    public var finishedAt: String?
+    /// The commit reviewed and the merge base its diff starts from.
+    public var head: String?
+    public var base: String?
+    /// The note under the notes directory, where it is now (`Inbox/` or `Inbox/archive/`).
+    public var path: String?
+
+    public init(n: Int, reviewer: String = "", reviewerLabel: String = "", origin: String = "",
+                status: StudioRunReviewStatus = .running, focus: String? = nil,
+                autoReply: Bool? = nil, requestedAt: String? = nil, finishedAt: String? = nil,
+                head: String? = nil, base: String? = nil, path: String? = nil) {
+        self.n = n
+        self.reviewer = reviewer
+        self.reviewerLabel = reviewerLabel
+        self.origin = origin
+        self.status = status
+        self.focus = focus
+        self.autoReply = autoReply
+        self.requestedAt = requestedAt
+        self.finishedAt = finishedAt
+        self.head = head
+        self.base = base
+        self.path = path
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case n, reviewer, origin, status, focus, head, base, path
+        case reviewerLabel = "reviewer_label"
+        case autoReply = "auto_reply"
+        case requestedAt = "requested_at"
+        case finishedAt = "finished_at"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        n = try c.decodeIfPresent(Int.self, forKey: .n) ?? 0
+        reviewer = try c.decodeIfPresent(String.self, forKey: .reviewer) ?? ""
+        reviewerLabel = try c.decodeIfPresent(String.self, forKey: .reviewerLabel) ?? ""
+        origin = try c.decodeIfPresent(String.self, forKey: .origin) ?? ""
+        status = try c.decodeIfPresent(StudioRunReviewStatus.self, forKey: .status)
+            ?? .unknown("")
+        focus = try c.decodeIfPresent(String.self, forKey: .focus)
+        autoReply = try c.decodeIfPresent(Bool.self, forKey: .autoReply)
+        requestedAt = try c.decodeIfPresent(String.self, forKey: .requestedAt)
+        finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
+        head = try c.decodeIfPresent(String.self, forKey: .head)
+        base = try c.decodeIfPresent(String.self, forKey: .base)
+        path = try c.decodeIfPresent(String.self, forKey: .path)
+    }
+
+    /// Who reviewed it, as a person reads it: the label, else the registry id.
+    public var reviewerName: String {
+        let label = reviewerLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? reviewer : label
+    }
+}
+
 /// One run, as `run_json` serves it.
 public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable {
     public var runID: String
@@ -199,6 +367,15 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
     public var archivedAt: String?
     /// Why: `archived by Jeremy`, `item ticked`, `report archived`, `finished over 14 days ago`.
     public var archivedReason: String?
+    /// A reviewed run's reviewer, a registry id. Nil for a run started without one, and from a
+    /// bridge that predates review (0.211.0).
+    public var reviewer: String?
+    /// The reviewer's label when the run was started (`GLM 5.3`).
+    public var reviewerLabel: String?
+    /// What the start asked the reviewer to look at most closely.
+    public var reviewFocus: String?
+    /// Every review of the run, oldest first. Empty for a run never reviewed.
+    public var reviews: [StudioRunReview]
 
     public var id: String { runID }
 
@@ -211,7 +388,9 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
                 rounds: [StudioRunRound] = [], model: String? = nil, error: String? = nil,
                 resumeAt: String? = nil, host: String? = nil, reportPaths: [String] = [],
                 title: String? = nil, lastLine: String? = nil, reportLine: String? = nil,
-                archivedAt: String? = nil, archivedReason: String? = nil) {
+                archivedAt: String? = nil, archivedReason: String? = nil,
+                reviewer: String? = nil, reviewerLabel: String? = nil,
+                reviewFocus: String? = nil, reviews: [StudioRunReview] = []) {
         self.runID = runID
         self.strand = strand
         self.itemID = itemID
@@ -239,10 +418,17 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         self.reportLine = reportLine
         self.archivedAt = archivedAt
         self.archivedReason = archivedReason
+        self.reviewer = reviewer
+        self.reviewerLabel = reviewerLabel
+        self.reviewFocus = reviewFocus
+        self.reviews = reviews
     }
 
     private enum CodingKeys: String, CodingKey {
         case strand, repo, branch, origin, status, rounds, model, error, host, title
+        case reviewer, reviews
+        case reviewerLabel = "reviewer_label"
+        case reviewFocus = "review_focus"
         case runID = "run_id"
         case itemID = "item_id"
         case promptPath = "prompt_path"
@@ -291,6 +477,10 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         reportLine = try c.decodeIfPresent(String.self, forKey: .reportLine)
         archivedAt = try c.decodeIfPresent(String.self, forKey: .archivedAt)
         archivedReason = try c.decodeIfPresent(String.self, forKey: .archivedReason)
+        reviewer = try c.decodeIfPresent(String.self, forKey: .reviewer)
+        reviewerLabel = try c.decodeIfPresent(String.self, forKey: .reviewerLabel)
+        reviewFocus = try c.decodeIfPresent(String.self, forKey: .reviewFocus)
+        reviews = try c.decodeIfPresent([StudioRunReview].self, forKey: .reviews) ?? []
     }
 
     public static func decode(from data: Data) throws -> StudioRun {
@@ -307,7 +497,20 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
     /// `is_archived`: a run a reply has queued again (or that is waiting on its owner) shows
     /// in the list even with `archived_at` still set.
     public var isArchived: Bool {
-        archivedAt != nil && !status.isMoving && status != .needsYou && status != .interrupted
+        archivedAt != nil && status.isArchivable
+    }
+
+    /// Whether the run has a Review section: a reviewer, or any review.
+    public var isReviewed: Bool { reviewer != nil || !reviews.isEmpty }
+
+    /// Who is reviewing (or will review) the run, as a person reads it: the newest review's
+    /// label, else the run's `reviewer_label`, else its reviewer id. Nil for a run never
+    /// reviewed.
+    public var reviewerName: String? {
+        if let latest = reviews.last, !latest.reviewerName.isEmpty { return latest.reviewerName }
+        if let label = reviewerLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !label.isEmpty { return label }
+        return reviewer
     }
 
     /// When anything last happened to the run: its last agent event, else the last of its
@@ -505,8 +708,8 @@ public protocol StudioRunsProviding: Sendable {
     func runLog(id: String, tail: Int?) async throws -> StudioRunLog
     func replyToRun(id: String, text: String) async throws -> StudioRun
     func cancelRun(id: String) async throws -> StudioRun
-    /// `POST /jesse/runs/:id/archive`: out of the list. Refused (409) for a queued, running or
-    /// paused run; a `needs_you` or `interrupted` run is closed first.
+    /// `POST /jesse/runs/:id/archive`: out of the list. Refused (409) for a queued, running,
+    /// paused or reviewing run; a `needs_you` or `interrupted` run is closed first.
     func archive(id: String) async throws -> StudioRun
     /// `POST /jesse/runs/:id/unarchive`: back in the list.
     func unarchive(id: String) async throws -> StudioRun

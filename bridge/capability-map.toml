@@ -4147,3 +4147,23 @@ dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only
 workflows = "closing a Studio run whose question is settled (needs you, interrupted or failed) from chat"
 reason = "Marks a Studio run closed so it no longer counts as needing Jeremy; nothing is stopped or deleted, and a reply still continues it."
 note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_start and devjob_cancel (0.200.0), so it reaches exactly the turns devjob_start reaches: write turns only."
+
+[grant."mcp__devjob__devjob_review"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only by the bridge process; [devjob] enabled; [gateway] enabled"
+workflows = "having a second model (Codex, a Fireworks model, a local model or another Claude) review a finished Studio run from chat"
+reason = "Runs a registry model over a finished Studio run's diff, read only in a worktree of its own, writes its findings to an Inbox note and, by default, hands them to the run's session as its next round, which can push a branch."
+note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_reply (0.211.0), so it reaches exactly the turns devjob_start reaches: write turns only."
+
+[grant."mcp__devjob__devjob_review_reply"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only by the bridge process; [devjob] enabled; [gateway] enabled"
+workflows = "handing a waiting Studio run review (auto_reply false) to the run's session from chat"
+reason = "Queues a new round of a Studio run with the fixed hand off reply carrying its waiting review's findings; the run can push a branch."
+note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_reply (0.211.0), so it reaches exactly the turns devjob_start reaches: write turns only."

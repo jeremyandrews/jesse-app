@@ -66,14 +66,21 @@ pub const TOOL_REPLY: &str = "devjob_reply";
 pub const TOOL_CANCEL: &str = "devjob_cancel";
 /// Close a Studio run that needs you, was interrupted or failed. Classed `write`.
 pub const TOOL_CLOSE: &str = "devjob_close";
-/// The six tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
-pub const STUDIO_TOOLS: [&str; 6] = [
+/// Have a registry model review a finished Studio run, read only, and (by default) hand its
+/// findings to the run's session as the next round. Classed `write`, beside `devjob_reply`.
+pub const TOOL_REVIEW: &str = "devjob_review";
+/// Hand off a review that is waiting (`auto_reply: false`). Classed `write`.
+pub const TOOL_REVIEW_REPLY: &str = "devjob_review_reply";
+/// The eight tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
+pub const STUDIO_TOOLS: [&str; 8] = [
     TOOL_START,
     TOOL_STATUS,
     TOOL_LIST,
     TOOL_REPLY,
     TOOL_CANCEL,
     TOOL_CLOSE,
+    TOOL_REVIEW,
+    TOOL_REVIEW_REPLY,
 ];
 
 /// On every object a run creates: the selector the watcher lists by.
@@ -208,6 +215,10 @@ pub struct DevJobArgs {
     /// `host: "studio"`: a draft by its path, run as a free run `s-<file stem>`.
     pub draft: Option<String>,
     pub again: Option<bool>,
+    /// `host: "studio"`: a registry model that reviews the run before it finishes.
+    pub reviewer: Option<String>,
+    /// `host: "studio"`, with `reviewer`: what the reviewer should look at most closely.
+    pub review_focus: Option<String>,
 }
 
 /// Where a `devjob_start` goes, decided from its arguments alone.
@@ -219,6 +230,9 @@ pub enum StartPlan {
     Studio {
         kind: crate::hostrun::StartKind,
         again: bool,
+        /// A reviewed run's reviewer (a registry id), checked when the run is created.
+        reviewer: Option<String>,
+        review_focus: Option<String>,
     },
 }
 
@@ -241,6 +255,13 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
             {
                 return Err(
                     "strand, item_id, draft and again apply only with host \"studio\"".into(),
+                );
+            }
+            if args.reviewer.is_some() || args.review_focus.is_some() {
+                return Err(
+                    "reviewer and review_focus apply only with host \"studio\": the cluster's \
+                     runs are not reviewed"
+                        .into(),
                 );
             }
             match args.repo.as_deref().map(str::trim) {
@@ -268,6 +289,13 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 }
             }
             let again = args.again.unwrap_or(false);
+            let reviewer = args
+                .reviewer
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_string);
+            let review_focus = args.review_focus.clone();
             let repo = match args.repo.as_deref().map(str::trim) {
                 None => None,
                 Some(r) if valid_repo(r) => Some(r.to_string()),
@@ -292,6 +320,8 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                         repo,
                     },
                     again,
+                    reviewer: reviewer.clone(),
+                    review_focus: review_focus.clone(),
                 });
             }
             match (args.strand, args.item_id) {
@@ -311,6 +341,8 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                             scheduled: false,
                         },
                         again,
+                        reviewer: reviewer.clone(),
+                        review_focus: review_focus.clone(),
                     })
                 }
                 (None, None) => {
@@ -327,6 +359,8 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                             model,
                         },
                         again,
+                        reviewer: reviewer.clone(),
+                        review_focus: review_focus.clone(),
                     })
                 }
                 _ => Err("strand and item_id go together".into()),
@@ -2332,7 +2366,12 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              loose draft local/scratch, and a free prompt local/<branch_slug>. The cluster \
              refuses local/<name>. It returns a run_id; the report lands in \
              Inbox/<date>-run-<run_id>.md. A second start of an item that is still queued, \
-             running, paused or needs Jeremy is refused unless again is true."
+             running, paused or needs Jeremy is refused unless again is true. On the Studio, \
+             reviewer (a model id from the model picker: a Codex, Fireworks, local or Claude \
+             model) makes it a reviewed run: when the run reports, that model reads its diff \
+             read only, the run's own session checks each finding and fixes what holds, and only \
+             then is the pull request marked ready (and merged if the prompt said so) and Jeremy \
+             told. A draft may name one as devjob-reviewer:."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
             props.insert(
@@ -2365,6 +2404,16 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
                 "again".into(),
                 json!({ "type": "boolean",
                         "description": "host studio: start a further run of an item whose run is still live" }),
+            );
+            props.insert(
+                "reviewer".into(),
+                json!({ "type": "string",
+                        "description": "host studio: a model id, exactly as the model picker names it, that reviews the run read only before it finishes; an unknown or unhealthy one is refused" }),
+            );
+            props.insert(
+                "review_focus".into(),
+                json!({ "type": "string",
+                        "description": "host studio, with reviewer: what the reviewer should look at most closely, at most 4 KiB" }),
             );
         }
         start["inputSchema"]["required"] = json!([]);
@@ -2412,6 +2461,41 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             },
         },
     }));
+    tools.push(json!({
+        "name": TOOL_REVIEW,
+        "description": "Have a second model review a finished Studio run: the model (any id the \
+            model picker names: Codex, a Fireworks model, a local model, another Claude) reads \
+            the run's diff from its merge base with main to its head, read only, in a worktree \
+            of its own, and the bridge writes its findings to \
+            Inbox/<date>-run-<run_id>-review-<n>.md. With auto_reply (the default) the findings \
+            then go to the run's own session as its next round, which checks each one, fixes \
+            only what holds and reports a verdict table. Refused for a run that is queued, \
+            running, paused or already being reviewed, one with no commits beyond its base, and \
+            a model that is unknown or unhealthy.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "reviewer"],
+            "properties": {
+                "run_id": { "type": "string" },
+                "reviewer": { "type": "string", "description": "a model id, exactly as the model picker names it" },
+                "focus": { "type": "string", "description": "what to look at most closely, at most 4 KiB" },
+                "auto_reply": { "type": "boolean", "description": "hand the findings to the run's session at once; default true" },
+            },
+        },
+    }));
+    tools.push(json!({
+        "name": TOOL_REVIEW_REPLY,
+        "description": "Hand a Studio run's waiting review (one asked for with auto_reply false) \
+            to the run's session as its next round, with the same reply an automatic hand off \
+            sends.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id"],
+            "properties": { "run_id": { "type": "string" } },
+        },
+    }));
     tools
 }
 
@@ -2456,6 +2540,15 @@ struct CloseArgs {
     reason: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewArgs {
+    run_id: String,
+    reviewer: String,
+    focus: Option<String>,
+    auto_reply: Option<bool>,
+}
+
 /// One Studio run, as `devjob_status` reports it: the record, `host`, and the readable log tail.
 fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) -> Value {
     let mut v = crate::hostrun::run_json_located(r, svc.notes_root());
@@ -2481,6 +2574,8 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "stalled_since": r.stalled_since,
         "resume_at": r.resume_at,
         "closed_reason": r.closed_reason,
+        "reviewer": r.reviewer,
+        "reviews": crate::hostrun::reviews_json(r, None),
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
     })
@@ -2488,7 +2583,13 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
 
 impl DevJobs {
     /// `devjob_start` with `host: "studio"`.
-    async fn start_studio(&self, kind: crate::hostrun::StartKind, again: bool) -> Value {
+    async fn start_studio(
+        &self,
+        kind: crate::hostrun::StartKind,
+        again: bool,
+        reviewer: Option<String>,
+        review_focus: Option<String>,
+    ) -> Value {
         let Some(svc) = self.studio.get() else {
             return error_result("host \"studio\" needs [hostrun] enabled on this bridge");
         };
@@ -2497,6 +2598,8 @@ impl DevJobs {
                 kind,
                 origin: "turn".into(),
                 again,
+                reviewer,
+                review_focus,
             })
             .await
         {
@@ -2532,8 +2635,13 @@ impl crate::gateway::InProcessServer for DevJobs {
                     };
                     let spec = match plan_start(args, self.default_agent) {
                         Ok(StartPlan::Cluster(s)) => s,
-                        Ok(StartPlan::Studio { kind, again }) => {
-                            return Ok(self.start_studio(kind, again).await)
+                        Ok(StartPlan::Studio {
+                            kind,
+                            again,
+                            reviewer,
+                            review_focus,
+                        }) => {
+                            return Ok(self.start_studio(kind, again, reviewer, review_focus).await)
                         }
                         Err(e) => return Ok(error_result(&e)),
                     };
@@ -2642,13 +2750,47 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Err(e) => Ok(error_result(e.message())),
                     }
                 }
+                TOOL_REVIEW => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: ReviewArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    match svc
+                        .request_review_and_start(
+                            args.run_id.trim(),
+                            &args.reviewer,
+                            args.focus,
+                            args.auto_reply.unwrap_or(true),
+                        )
+                        .await
+                    {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
+                TOOL_REVIEW_REPLY => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: CancelArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    match svc.review_reply_and_pump(args.run_id.trim()).await {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
                 other => Err(format!("devjob has no tool {other:?}")),
             }
         })
     }
 }
 
-/// The containment battery's `devjob`: the six tools, listed exactly as the real server lists
+/// The containment battery's `devjob`: the eight tools, listed exactly as the real server lists
 /// them on the Studio (with `[hostrun]` attached), and every call refused. Only in a
 /// `containment-probe` build.
 #[cfg(feature = "containment-probe")]

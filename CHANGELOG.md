@@ -14,6 +14,60 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.211.0] - 2026-11-20
+
+**A Studio run can be reviewed by a second model before it finishes, and the session that did the
+work judges what that model said.** Name a reviewer (any model in the registry: Codex, a Fireworks
+model, a local model, Claude) when starting a run, or ask for a review of a finished one. The
+reviewer reads the diff read only; the original session verifies each finding, fixes only what
+holds, and then finishes. Nothing about the review reaches GitHub. Takes effect on the next bridge
+restart.
+
+- **Starting a reviewed run.** `devjob_start` with `host: "studio"` gains `reviewer` and
+  `review_focus` (at most 4 KiB), as does `POST /jesse/runs`; a draft can say
+  `devjob-reviewer: <model id>` in its front matter. The reviewer is checked before anything is
+  created and refused by name if the registry does not know it, it is not configured, it is
+  marked unhealthy, or its harness has no read only posture. Both keys are refused on the cluster.
+- **The rounds.** The served prompt gains one fixed sentence: open the pull request as a draft and
+  do not merge or mark it ready (local repositories: commit, do not merge into `main` yet). The
+  implementing round writes no Inbox report and pushes nothing; the run's new status `reviewing`
+  covers the review. Then the run's next round, in the same session, is a fixed reply carrying the
+  findings: verify each, decide accept, reject or partial, fix the accepted ones with regression
+  tests, rerun the verification, push, then finish as the original prompt asked (mark ready and
+  merge only if it said to; local: merge into `main`). That answering round's report is the one
+  Inbox report and the one push, with the verdict table and a link to the review note. One review
+  per reviewed run; it never loops.
+- **A review that cannot run** (reviewer down, timeout, an answer invalid twice, a reviewer that
+  changed its worktree) hands off a reply saying so, and the final report's first line is
+  `UNREVIEWED: <reason>`.
+- **After the fact.** New tools `devjob_review` (`run_id`, `reviewer`, `focus`, `auto_reply`,
+  default true) and `devjob_review_reply` (`run_id`), and `POST /jesse/runs/:id/review`. Refused,
+  with the reason, for a run that is not a Studio run, one queued or running, one with no commits
+  beyond its base, an unknown or unhealthy reviewer, or a run already under review.
+- **The reviewer** runs through its own harness, read only and offline on each: `claude-code` and
+  `codex` at `read` with no MCP servers, `direct` at `basic` with no tools; no session, no write
+  lock, no extra credential. It works in a detached worktree of the run's head; the run's own
+  worktree is never touched, and a review whose worktree is not clean afterwards is void. Its input
+  is the diff from the merge base with `main` (cut at 192 KiB), the prompt's task and the focus;
+  its answer is one JSON object of findings `F1…` (severity `bug`, `risk` or `nit`, file, line,
+  claim, evidence, what would disprove it), validated, retried once, raw answers kept in the run
+  directory. New `[hostrun] review_timeout_minutes`, default 30.
+- **The note** `Inbox/<date>-run-<run_id>-review-<n>.md` (front matter: run, review, reviewer and
+  label, repo, branch, head, base, finding count) moves to `Inbox/archive/` when the answering
+  report is written, or when its run is closed or archived with the review never handed off. It
+  neither blocks nor fakes a run's `report archived` close or archive. A run's JSON gains
+  `reviewer`, `reviewer_label`, `review_focus` and, once reviewed, `reviews[]`.
+- **The leak check.** After the answering round the bridge reads its commit messages, the pull
+  request's title and body and the added lines for the reviewer's id and label, the finding ids
+  and the words "reviewer", "code review" and "review finding". A hit puts `REVIEW LEAK: …` at the
+  top of the Inbox report; it blocks nothing.
+- **Grants and containment.** `mcp__devjob__devjob_review` and `mcp__devjob__devjob_review_reply`
+  join the default allowlist and the capability map wherever `devjob_reply` is (write turns only,
+  every harness, never a read turn). The battery's `devjob` stand-in lists eight tools; the
+  claude-code and direct records were re-recorded and only their write rows moved, by these two
+  grants. The Codex record did not move. `golden/capability-args.json` and the argv fixture moved
+  for the same two grants on the same write rows.
+
 ## [App 1.0 (223)] - 2026-11-19
 
 **The Mac's conversation list keeps itself current: a conversation started or updated on another

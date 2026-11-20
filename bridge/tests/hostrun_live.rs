@@ -146,6 +146,8 @@ fn free(slug: &str) -> StartRequest {
         },
         origin: "turn".into(),
         again: false,
+        reviewer: None,
+        review_focus: None,
     }
 }
 

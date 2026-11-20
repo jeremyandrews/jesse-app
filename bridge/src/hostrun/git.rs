@@ -507,3 +507,45 @@ fn git_command() -> Command {
     crate::attribution::apply_global_std(&mut cmd);
     cmd
 }
+
+/// Add a DETACHED worktree of `repo` at `commit`, for a reviewer to read (under the repository
+/// lock). One left at `path` by an earlier attempt is removed first. It has no branch, so
+/// nothing a reviewer does there could move one.
+pub fn add_detached_worktree(
+    root: &Path,
+    repo: &str,
+    path: &Path,
+    commit: &str,
+) -> Result<(), String> {
+    let bare = bare_path(root, repo);
+    let _lock = lock_repo(root, repo)?;
+    let p = path.to_string_lossy().into_owned();
+    if path.exists() {
+        let _ = git(&bare, &["worktree", "remove", "--force", &p]);
+        if path.exists() {
+            crate::hostrun::sys::remove_tree(path)
+                .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+        }
+    }
+    let _ = git(&bare, &["worktree", "prune"]);
+    git(
+        &bare,
+        &["worktree", "add", "--quiet", "--detach", &p, commit],
+    )
+    .map(|_| ())
+}
+
+/// Remove a worktree [`add_detached_worktree`] made, and prune. Best effort: a leftover is
+/// removed by the next attempt.
+pub fn remove_detached_worktree(root: &Path, repo: &str, path: &Path) {
+    let bare = bare_path(root, repo);
+    let Ok(_lock) = lock_repo(root, repo) else {
+        return;
+    };
+    let p = path.to_string_lossy().into_owned();
+    let _ = git(&bare, &["worktree", "remove", "--force", &p]);
+    if path.exists() {
+        let _ = crate::hostrun::sys::remove_tree(path);
+    }
+    let _ = git(&bare, &["worktree", "prune"]);
+}

@@ -42,6 +42,7 @@
 //! directory.
 
 pub mod git;
+pub mod review;
 pub mod runner;
 pub mod stream;
 pub mod sys;
@@ -57,6 +58,7 @@ use crate::strandjobs::{fm, DRAFTS_DIR};
 use crate::strands::{parse_strand, resolve_target, StrandSection, ARCHIVE_SEGMENT, STRANDS_DIR};
 use crate::*;
 
+use self::review::{Finding, Review, ReviewStatus, AUTO_REVIEW};
 use self::sys::{Forge, Launcher, PrState};
 
 // ---- CONSTANTS -----------------------------------------------------------------------
@@ -222,6 +224,9 @@ pub struct HostRunToml {
     /// Where the readable checkout of each local repository's `main` is kept. Default
     /// [`DEFAULT_LOCAL_CHECKOUT_ROOT`] under the home; `~` is expanded.
     pub local_checkout_root: Option<PathBuf>,
+    /// How long one reviewer answer may take, in minutes. Default
+    /// [`review::DEFAULT_REVIEW_TIMEOUT_MINUTES`].
+    pub review_timeout_minutes: Option<u64>,
 }
 
 /// Where the running [`HostRuns`] lives once `main` has built it.
@@ -270,6 +275,8 @@ pub struct HostRunSettings {
     /// `<local_checkout_root>/<name>` is a plain checkout of `local/<name>`'s `main`, brought
     /// up to date after each finished round of a run on it.
     pub local_checkout_root: PathBuf,
+    /// How long one reviewer answer may take, in minutes.
+    pub review_timeout_minutes: u64,
     pub service: HostRunSlot,
     /// `<state_dir>/attribution`: the bridge's git hooks and Claude Code settings, which every
     /// round's agent is pointed at ([`crate::attribution`]). `None` without a state dir.
@@ -360,6 +367,9 @@ impl HostRunSettings {
                 Some(p) => expand_home(&p, home),
                 None => Path::new(home).join(DEFAULT_LOCAL_CHECKOUT_ROOT),
             },
+            review_timeout_minutes: t
+                .review_timeout_minutes
+                .unwrap_or(review::DEFAULT_REVIEW_TIMEOUT_MINUTES),
             service: HostRunSlot::default(),
             attribution_dir: None,
         }
@@ -518,6 +528,9 @@ impl HostRunSettings {
         if self.stall_minutes == 0 {
             out.push("[hostrun] stall_minutes must be at least 1".into());
         }
+        if self.review_timeout_minutes == 0 {
+            out.push("[hostrun] review_timeout_minutes must be at least 1".into());
+        }
         let lcr = &self.local_checkout_root;
         if !lcr.is_absolute() {
             out.push(format!(
@@ -573,6 +586,9 @@ pub enum RunStatus {
     /// its report archived, or closed by Jeremy. `closed_reason` says which. Terminal; a reply
     /// still continues it, as it does a reported run.
     Closed,
+    /// A second model is reading the run's work ([`review`]); the bridge hands its findings to
+    /// the run's session when it answers. Moving, like `running`: nothing to reply to yet.
+    Reviewing,
 }
 
 impl RunStatus {
@@ -587,6 +603,7 @@ impl RunStatus {
             RunStatus::Interrupted => "interrupted",
             RunStatus::Paused => "paused",
             RunStatus::Closed => "closed",
+            RunStatus::Reviewing => "reviewing",
         }
     }
 
@@ -598,12 +615,16 @@ impl RunStatus {
         }
     }
 
-    /// Queued, running, waiting on Jeremy or paused for the usage limit: a second start of the
-    /// item is refused.
+    /// Queued, running, waiting on Jeremy, paused for the usage limit or being reviewed: a
+    /// second start of the item is refused.
     pub fn is_live(self) -> bool {
         matches!(
             self,
-            RunStatus::Queued | RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused
+            RunStatus::Queued
+                | RunStatus::Running
+                | RunStatus::NeedsYou
+                | RunStatus::Paused
+                | RunStatus::Reviewing
         )
     }
 
@@ -629,7 +650,7 @@ impl RunStatus {
         )
     }
 
-    /// Queued, running or paused: the list's `moving` count.
+    /// Queued, running, paused or reviewing: the list's `moving` count.
     pub fn is_moving(self) -> bool {
         !self.is_finished()
     }
@@ -643,11 +664,21 @@ impl RunStatus {
         )
     }
 
-    /// Not queued, not running and not paused (a paused run continues by itself).
+    /// Not queued, not running, not paused (a paused run continues by itself) and not being
+    /// reviewed (a reviewed one continues by itself too).
     pub fn is_finished(self) -> bool {
         !matches!(
             self,
-            RunStatus::Queued | RunStatus::Running | RunStatus::Paused
+            RunStatus::Queued | RunStatus::Running | RunStatus::Paused | RunStatus::Reviewing
+        )
+    }
+
+    /// Running, waiting on Jeremy, paused or being reviewed: what a strand's `runs_active`
+    /// counts.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused | RunStatus::Reviewing
         )
     }
 }
@@ -774,6 +805,19 @@ pub struct RunRecord {
     /// [`ARCHIVED_REPORT_ARCHIVED`] or [`ARCHIVED_AGED`]. Set exactly with `archived_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_reason: Option<String>,
+    /// A REVIEWED run's reviewer: a registry id, from the start's `reviewer` or the draft's
+    /// `devjob-reviewer:`. Its implementing round is reviewed once before Jeremy hears of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
+    /// The reviewer's label when the run was started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_label: Option<String>,
+    /// What the start asked the reviewer to look at most closely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_focus: Option<String>,
+    /// Every review of the run, oldest first ([`review::Review`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<Review>,
 }
 
 impl RunRecord {
@@ -1125,6 +1169,8 @@ pub struct RunPlace<'a> {
     pub run_dir: &'a Path,
     /// Ask for `[<run_id>]` at the start of the pull request title.
     pub pr_title_tag: bool,
+    /// A reviewed run: [`review::REVIEWED_RUN_SENTENCE`] (or its local form) follows the rules.
+    pub reviewed: bool,
 }
 
 /// The generated section's first paragraph, exactly: where the run is, and that this replaces
@@ -1203,7 +1249,8 @@ pub fn generated_paragraph_local(run_id: &str) -> String {
 }
 
 /// The prompt a run is served: the section byte for byte, a blank line, then the generated
-/// section (where the run is, then the run's rules) and nothing else.
+/// section (where the run is, then the run's rules, then for a reviewed run
+/// [`review::REVIEWED_RUN_SENTENCE`] or [`review::REVIEWED_RUN_SENTENCE_LOCAL`]) and nothing else.
 pub fn served_prompt(section: &str, place: &RunPlace) -> String {
     let mut s = section.to_string();
     if !s.ends_with('\n') {
@@ -1220,6 +1267,14 @@ pub fn served_prompt(section: &str, place: &RunPlace) -> String {
     } else {
         s.push_str(&generated_paragraph(place.run_id, place.pr_title_tag));
     }
+    if place.reviewed {
+        s.push_str("\n\n");
+        s.push_str(if is_local_repo(place.repo) {
+            review::REVIEWED_RUN_SENTENCE_LOCAL
+        } else {
+            review::REVIEWED_RUN_SENTENCE
+        });
+    }
     s.push('\n');
     s
 }
@@ -1235,8 +1290,23 @@ pub struct StudioItem {
     pub prompt_path: String,
     pub repo: String,
     pub model: Option<String>,
+    /// The draft's `devjob-reviewer:`, when it names one.
+    pub reviewer: Option<String>,
     /// The `## PROMPT` section, byte for byte.
     pub section: String,
+}
+
+/// The front matter key that makes a draft's run a reviewed one.
+pub const REVIEWER_KEY: &str = "devjob-reviewer";
+
+/// A draft's `devjob-reviewer:`, checked to be the shape of a registry id. Whether the registry
+/// knows it is asked when the run is started.
+pub fn draft_reviewer(path: &str, src: &str) -> Result<Option<String>, String> {
+    match fm(src, REVIEWER_KEY) {
+        None => Ok(None),
+        Some(r) if review::valid_reviewer_id(&r) => Ok(Some(r)),
+        Some(r) => Err(format!("{path}: {REVIEWER_KEY} {r:?} is not a model id")),
+    }
 }
 
 /// Whether a draft's front matter sends it to the Studio.
@@ -1389,6 +1459,7 @@ pub fn studio_item_of(
     };
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
+    let reviewer = draft_reviewer(&path, &src)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -1399,6 +1470,7 @@ pub fn studio_item_of(
         prompt_path: path,
         repo,
         model,
+        reviewer,
         section,
     })
 }
@@ -1432,6 +1504,8 @@ pub struct StudioDraft {
     pub prompt_path: String,
     pub repo: String,
     pub model: Option<String>,
+    /// The draft's `devjob-reviewer:`, when it names one.
+    pub reviewer: Option<String>,
     pub section: String,
     /// The file's stem as a branch slug: the run is `s-<slug>`.
     pub slug: String,
@@ -1509,6 +1583,7 @@ fn studio_draft_with(
     };
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
+    let reviewer = draft_reviewer(&path, &src)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -1525,6 +1600,7 @@ fn studio_draft_with(
         prompt_path: path,
         repo,
         model,
+        reviewer,
         section,
         slug,
     })
@@ -1559,6 +1635,135 @@ impl TurnSender for AppTurns {
                     Err(format!("the turn was refused ({status}): {message}"))
                 }
             }
+        })
+    }
+}
+
+/// A registry model, as a reviewer: what [`Reviewer::check`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerInfo {
+    /// The registry id, canonical (an alias resolved).
+    pub id: String,
+    pub label: String,
+    pub harness: String,
+}
+
+/// One reviewer answer to get: the model, the whole prompt, the reviewer's own worktree and the
+/// longest it may take.
+#[derive(Debug, Clone)]
+pub struct ReviewCall {
+    pub reviewer: String,
+    pub prompt: String,
+    pub cwd: PathBuf,
+    pub timeout: Duration,
+}
+
+/// Runs a reviewer. The bridge's own ([`AppReviewer`]: the model registry, its health and its
+/// harnesses), or a test's.
+pub trait Reviewer: Send + Sync {
+    /// Whether `id` may review now: known to the registry, configured, healthy, and on a harness
+    /// with a read only posture its level allows ([`review::review_capability`]). `Err` says why
+    /// not, by name.
+    fn check(&self, id: &str) -> Result<ReviewerInfo, String>;
+    /// One answer, through the reviewer's own harness at its read only posture.
+    fn review(
+        &self,
+        call: ReviewCall,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+}
+
+/// The bridge's reviewer: any [`ModelRegistry`] entry, through whichever harness the entry names.
+pub struct AppReviewer {
+    pub st: AppState,
+}
+
+/// [`Reviewer::check`] against a config and a health store: the registry entry, its health, and
+/// its harness's read only posture.
+pub fn check_reviewer(
+    cfg: &Config,
+    health: &HealthStore,
+    id: &str,
+) -> Result<(ReviewerInfo, Capability), String> {
+    let id = id.trim();
+    let Some(m) = cfg.model_registry.get(id) else {
+        return Err(format!("reviewer {id:?} is not a model this bridge knows"));
+    };
+    let h = model_health(m, health);
+    if !h.configured {
+        return Err(format!(
+            "reviewer {:?} is not configured on this bridge",
+            m.id
+        ));
+    }
+    if !h.healthy {
+        return Err(format!("reviewer {:?} is unhealthy right now", m.id));
+    }
+    let cap = review::review_capability(&m.harness)
+        .map_err(|e| format!("reviewer {:?} cannot review: {e}", m.id))?;
+    let Some(harness) = cfg.harnesses.get(&m.harness) else {
+        return Err(format!(
+            "reviewer {:?} names harness {:?}, which this bridge does not run",
+            m.id, m.harness
+        ));
+    };
+    if !harness.expresses(cap) {
+        return Err(format!(
+            "reviewer {:?} cannot review: harness {} has no {} posture",
+            m.id,
+            m.harness,
+            capability_label(cap)
+        ));
+    }
+    if m.level < cap {
+        return Err(format!(
+            "reviewer {:?} cannot review: its level is {} and a review on {} needs {}",
+            m.id,
+            capability_label(m.level),
+            m.harness,
+            capability_label(cap)
+        ));
+    }
+    Ok((
+        ReviewerInfo {
+            id: m.id.clone(),
+            label: m.label.clone(),
+            harness: m.harness.clone(),
+        },
+        cap,
+    ))
+}
+
+impl Reviewer for AppReviewer {
+    fn check(&self, id: &str) -> Result<ReviewerInfo, String> {
+        check_reviewer(&self.st.cfg, &self.st.health, id).map(|(info, _)| info)
+    }
+
+    fn review(
+        &self,
+        call: ReviewCall,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let st = self.st.clone();
+        Box::pin(async move {
+            let (info, cap) = check_reviewer(&st.cfg, &st.health, &call.reviewer)?;
+            let Some(m) = st.cfg.model_registry.get(&info.id) else {
+                return Err(format!("reviewer {:?} left the registry", info.id));
+            };
+            eprintln!(
+                "jesse-bridge: hostrun REVIEW → model '{}' (harness {}, {})",
+                m.id,
+                m.harness,
+                capability_label(cap)
+            );
+            crate::claude::run_review_child(
+                &st.cfg,
+                m,
+                cap,
+                &call.prompt,
+                &call.cwd,
+                call.timeout.as_secs().max(1),
+            )
+            .await
+            .map_err(|(status, message)| format!("the reviewer failed ({status}): {message}"))
         })
     }
 }
@@ -1884,6 +2089,44 @@ pub fn reports_archived(notes_root: &Path, rec: &RunRecord) -> bool {
     })
 }
 
+/// Move a note the bridge wrote under `Inbox/` into `Inbox/archive/` under the same name.
+/// Returns where it is now; `None` when it is in neither place.
+pub fn archive_note(notes_root: &Path, rel: &str) -> Option<String> {
+    let name = Path::new(rel).file_name()?.to_str()?;
+    if name.is_empty() || name == ".." || name == "." {
+        return None;
+    }
+    let to_rel = format!("{INBOX_ARCHIVE_DIR}/{name}");
+    let (from, to) = (notes_root.join(rel), notes_root.join(&to_rel));
+    if !from.is_file() {
+        return to.is_file().then_some(to_rel);
+    }
+    if from == to {
+        return Some(to_rel);
+    }
+    std::fs::create_dir_all(to.parent()?).ok()?;
+    match std::fs::rename(&from, &to) {
+        Ok(()) => {
+            eprintln!("jesse-bridge: hostrun: archived {rel} to {to_rel}");
+            Some(to_rel)
+        }
+        Err(e) => {
+            eprintln!("jesse-bridge: hostrun: could not archive {rel}: {e}");
+            None
+        }
+    }
+}
+
+/// What a finished reviewer gave: the range it read, its findings and the note.
+#[derive(Debug, Clone)]
+struct ReviewDone {
+    head: String,
+    base: String,
+    findings: Vec<Finding>,
+    summary: String,
+    path: String,
+}
+
 // ---- THE SERVICE -------------------------------------------------------------------------
 
 /// How a run is asked for.
@@ -1915,6 +2158,11 @@ pub struct StartRequest {
     pub kind: StartKind,
     pub origin: String,
     pub again: bool,
+    /// A registry id: the run is a reviewed one ([`review`]). Wins over the draft's
+    /// `devjob-reviewer:`.
+    pub reviewer: Option<String>,
+    /// What the reviewer should look at most closely; needs a reviewer.
+    pub review_focus: Option<String>,
 }
 
 /// What a start answers.
@@ -2000,6 +2248,11 @@ pub struct HostRuns {
     /// alone, so an Undo is not taken back by the next watcher pass. Not run state; a restart
     /// forgets it, and the rules apply again.
     unarchived: Mutex<HashSet<String>>,
+    /// Who reviews ([`HostRuns::attach_reviewer`]). Until it is attached a reviewer is refused.
+    reviewer: OnceLock<Arc<dyn Reviewer>>,
+    /// The runs whose review task is running in this process. Not run state: a `reviewing` run
+    /// with no task here (a restart) gets one at the next pass.
+    reviewing: Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -2032,6 +2285,8 @@ impl HostRuns {
             house: Mutex::new(Housekeeping::default()),
             last_lines: work::LastLines::default(),
             unarchived: Mutex::new(HashSet::new()),
+            reviewer: OnceLock::new(),
+            reviewing: Mutex::new(HashSet::new()),
         }
     }
 
@@ -2053,6 +2308,22 @@ impl HostRuns {
 
     pub fn notes_root(&self) -> &Path {
         &self.notes_root
+    }
+
+    /// Who reviews. Until this is called a start with a reviewer, and every review, is refused.
+    pub fn attach_reviewer(&self, reviewer: Arc<dyn Reviewer>) {
+        let _ = self.reviewer.set(reviewer);
+    }
+
+    /// [`Reviewer::check`], or the refusal when no reviewer is attached.
+    fn check_reviewer(&self, id: &str) -> Result<ReviewerInfo, String> {
+        if !review::valid_reviewer_id(id.trim()) {
+            return Err(format!("reviewer {id:?} is not a model id"));
+        }
+        match self.reviewer.get() {
+            Some(r) => r.check(id.trim()),
+            None => Err("this bridge has no reviewer attached".into()),
+        }
     }
 
     /// Wake the watcher for a pass now.
@@ -2084,13 +2355,7 @@ impl HostRuns {
     pub fn active_count(&self, strand: &str) -> u32 {
         self.runs()
             .iter()
-            .filter(|(_, r)| {
-                r.strand.as_deref() == Some(strand)
-                    && matches!(
-                        r.status,
-                        RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused
-                    )
-            })
+            .filter(|(_, r)| r.strand.as_deref() == Some(strand) && r.status.is_active())
             .count() as u32
     }
 
@@ -2102,85 +2367,110 @@ impl HostRuns {
             .claude_path()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.settings.claude.clone());
-        let (base, repo, prompt_for, branch_text, model, step, prompt_path) = match &req.kind {
-            StartKind::Item {
-                strand,
-                item_id,
-                repo,
-                scheduled,
-            } => {
-                let opt_in = if *scheduled {
-                    OptIn::Schedule
-                } else {
-                    OptIn::RequestOrLocal {
-                        repo: repo.as_deref(),
-                    }
-                };
-                let item = studio_item(&self.notes_root, strand, item_id, opt_in)
-                    .map_err(Refusal::Invalid)?;
-                (
-                    item.item_id.clone(),
-                    item.repo.clone(),
-                    item.section.clone(),
-                    Some(item.item_text.clone()),
-                    item.model.clone(),
-                    Some((item.strand.clone(), item.item_id.clone())),
-                    Some(item.prompt_path.clone()),
-                )
-            }
-            StartKind::Draft { draft, repo } => {
-                let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
-                    .map_err(Refusal::Invalid)?;
-                (
-                    format!("s-{}", d.slug),
-                    d.repo,
-                    d.section,
-                    None,
-                    d.model,
-                    None,
-                    Some(d.prompt_path),
-                )
-            }
-            StartKind::Free {
-                repo,
-                prompt,
-                slug,
-                model,
-            } => {
-                // A free prompt that names no repository goes to `local/<branch_slug>`.
-                let repo = if repo.trim().is_empty() && valid_slug(slug) {
-                    local_repo(slug).unwrap_or_default()
-                } else {
-                    repo.clone()
-                };
-                if !valid_repo(&repo) {
-                    return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
-                }
-                if prompt.trim().is_empty() {
-                    return Err(Refusal::Invalid("prompt is empty".into()));
-                }
-                if prompt.len() > devjob::MAX_PROMPT_BYTES {
-                    return Err(Refusal::Invalid(format!(
-                        "prompt is {} bytes; the most is {}",
-                        prompt.len(),
-                        devjob::MAX_PROMPT_BYTES
-                    )));
-                }
-                if !valid_slug(slug) {
-                    return Err(Refusal::Invalid(format!(
-                        "branch_slug {slug:?} must be lowercase letters, digits and hyphens"
-                    )));
-                }
-                (
-                    format!("s-{slug}"),
+        let (base, repo, prompt_for, branch_text, model, step, prompt_path, draft_reviewer) =
+            match &req.kind {
+                StartKind::Item {
+                    strand,
+                    item_id,
                     repo,
-                    prompt.clone(),
-                    None,
-                    model.clone(),
-                    None,
-                    None,
-                )
+                    scheduled,
+                } => {
+                    let opt_in = if *scheduled {
+                        OptIn::Schedule
+                    } else {
+                        OptIn::RequestOrLocal {
+                            repo: repo.as_deref(),
+                        }
+                    };
+                    let item = studio_item(&self.notes_root, strand, item_id, opt_in)
+                        .map_err(Refusal::Invalid)?;
+                    (
+                        item.item_id.clone(),
+                        item.repo.clone(),
+                        item.section.clone(),
+                        Some(item.item_text.clone()),
+                        item.model.clone(),
+                        Some((item.strand.clone(), item.item_id.clone())),
+                        Some(item.prompt_path.clone()),
+                        item.reviewer.clone(),
+                    )
+                }
+                StartKind::Draft { draft, repo } => {
+                    let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
+                        .map_err(Refusal::Invalid)?;
+                    (
+                        format!("s-{}", d.slug),
+                        d.repo,
+                        d.section,
+                        None,
+                        d.model,
+                        None,
+                        Some(d.prompt_path),
+                        d.reviewer,
+                    )
+                }
+                StartKind::Free {
+                    repo,
+                    prompt,
+                    slug,
+                    model,
+                } => {
+                    // A free prompt that names no repository goes to `local/<branch_slug>`.
+                    let repo = if repo.trim().is_empty() && valid_slug(slug) {
+                        local_repo(slug).unwrap_or_default()
+                    } else {
+                        repo.clone()
+                    };
+                    if !valid_repo(&repo) {
+                        return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
+                    }
+                    if prompt.trim().is_empty() {
+                        return Err(Refusal::Invalid("prompt is empty".into()));
+                    }
+                    if prompt.len() > devjob::MAX_PROMPT_BYTES {
+                        return Err(Refusal::Invalid(format!(
+                            "prompt is {} bytes; the most is {}",
+                            prompt.len(),
+                            devjob::MAX_PROMPT_BYTES
+                        )));
+                    }
+                    if !valid_slug(slug) {
+                        return Err(Refusal::Invalid(format!(
+                            "branch_slug {slug:?} must be lowercase letters, digits and hyphens"
+                        )));
+                    }
+                    (
+                        format!("s-{slug}"),
+                        repo,
+                        prompt.clone(),
+                        None,
+                        model.clone(),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+            };
+        // A REVIEWED run: the reviewer is checked now, before anything is created, so an
+        // unknown or unhealthy id is refused rather than discovered after the implementing
+        // round. The start's own `reviewer` wins over the draft's.
+        let focus = review::checked_focus(req.review_focus.as_deref())
+            .map_err(|e| Refusal::Invalid(format!("review_{e}")))?;
+        let reviewer = match req
+            .reviewer
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+            .or(draft_reviewer)
+        {
+            Some(id) => Some(self.check_reviewer(&id).map_err(Refusal::Invalid)?),
+            None if focus.is_some() => {
+                return Err(Refusal::Invalid(
+                    "review_focus needs a reviewer: pass reviewer too".into(),
+                ))
             }
+            None => None,
         };
         // The repository's env file must be readable now; the runner reads it again at each
         // round. Its contents are dropped here: only the path is recorded.
@@ -2230,6 +2520,9 @@ impl HostRuns {
                 ..Cleanup::default()
             },
             env_file: env_file.map(|p| p.to_string_lossy().into_owned()),
+            reviewer: reviewer.as_ref().map(|r| r.id.clone()),
+            reviewer_label: reviewer.as_ref().map(|r| r.label.clone()),
+            review_focus: focus,
             ..RunRecord::default()
         };
         // `prompt.md` is rendered when the first round starts, once the worktree names the
@@ -2241,11 +2534,15 @@ impl HostRuns {
             return Err(Refusal::Internal(e));
         }
         eprintln!(
-            "jesse-bridge: hostrun CREATE {run_id} repo={} origin={}{}",
+            "jesse-bridge: hostrun CREATE {run_id} repo={} origin={}{}{}",
             rec.repo,
             rec.origin,
             step.as_ref()
                 .map(|(s, i)| format!(" strand={s} item={i}"))
+                .unwrap_or_default(),
+            rec.reviewer
+                .as_deref()
+                .map(|r| format!(" reviewer={r}"))
                 .unwrap_or_default()
         );
         // A further run of the item settles the earlier ones still waiting on Jeremy, cut off
@@ -2259,8 +2556,12 @@ impl HostRuns {
                         && r.step() == Some((strand.as_str(), item_id.as_str()))
                         && r.status.is_settleable()
                     {
-                        if let Err(e) = close_run(&d, &reason, RunStatus::is_settleable, now_ms()) {
-                            eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id);
+                        match close_run(&d, &reason, RunStatus::is_settleable, now_ms()) {
+                            Ok(Some(_)) => self.drop_ready_reviews(&d),
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id)
+                            }
                         }
                     }
                 }
@@ -2487,6 +2788,7 @@ impl HostRuns {
                         default_branch: &default_branch,
                         run_dir: dir,
                         pr_title_tag: self.settings.pr_title_tag(&rec.repo),
+                        reviewed: rec.reviewer.is_some(),
                     },
                 );
                 write_atomic(&dir.join(PROMPT_MD), served.as_bytes())
@@ -2615,18 +2917,39 @@ impl HostRuns {
         text: &str,
         auto: Option<&str>,
     ) -> Result<RunRecord, Refusal> {
+        self.queue_round_with(run_id, text, auto, |_, _| {})
+    }
+
+    /// [`HostRuns::queue_round_locked`], with `also` applied to the record in the same write,
+    /// given the new round's number. Only the review's own hand off ([`AUTO_REVIEW`]) may queue
+    /// a round on a `reviewing` run.
+    fn queue_round_with(
+        &self,
+        run_id: &str,
+        text: &str,
+        auto: Option<&str>,
+        also: impl FnOnce(&mut RunRecord, u32),
+    ) -> Result<RunRecord, Refusal> {
         let rec = self
             .get(run_id)
             .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
-        if !matches!(
-            rec.status,
-            RunStatus::NeedsYou
-                | RunStatus::Reported
-                | RunStatus::Failed
-                | RunStatus::Interrupted
-                | RunStatus::Paused
-                | RunStatus::Closed
-        ) {
+        let handing_off = auto == Some(AUTO_REVIEW) && rec.status == RunStatus::Reviewing;
+        if !handing_off
+            && !matches!(
+                rec.status,
+                RunStatus::NeedsYou
+                    | RunStatus::Reported
+                    | RunStatus::Failed
+                    | RunStatus::Interrupted
+                    | RunStatus::Paused
+                    | RunStatus::Closed
+            )
+        {
+            if rec.status == RunStatus::Reviewing {
+                return Err(Refusal::State(format!(
+                    "{run_id} is being reviewed; its next round is the review's hand off"
+                )));
+            }
             return Err(Refusal::State(format!(
                 "{run_id} is {}; a reply needs it to be needs_you, reported, failed, interrupted, \
                  paused or closed",
@@ -2665,6 +2988,7 @@ impl HostRuns {
             if auto == Some(AUTO_RESTART) {
                 r.restart_resumed = true;
             }
+            also(r, n);
         })
         .map_err(Refusal::Internal)?;
         eprintln!(
@@ -2743,6 +3067,25 @@ impl HostRuns {
                 }
             })
             .map_err(Refusal::Internal),
+            // A review in flight: the run is cancelled now and the review is recorded as such;
+            // the review task, when its reviewer answers, finds the run no longer reviewing and
+            // drops what it got. Nothing reaches the session.
+            RunStatus::Reviewing => {
+                let updated = update_run(&dir, |r| {
+                    r.status = RunStatus::Cancelled;
+                    r.finished_at = Some(now.clone());
+                    for v in r.reviews.iter_mut() {
+                        if matches!(v.status, ReviewStatus::Running | ReviewStatus::Ready) {
+                            v.status = ReviewStatus::Failed;
+                            v.error = Some("the run was cancelled".into());
+                            v.finished_at = Some(now.clone());
+                        }
+                    }
+                })
+                .map_err(Refusal::Internal)?;
+                eprintln!("jesse-bridge: hostrun CANCEL {run_id} (during its review)");
+                Ok(updated)
+            }
             RunStatus::Running => {
                 if rec.round().is_some_and(|r| r.cancel_requested_at.is_some()) {
                     return Ok(rec);
@@ -2765,7 +3108,7 @@ impl HostRuns {
                 Ok(updated)
             }
             other => Err(Refusal::State(format!(
-                "{run_id} is {}; only a queued, running or paused run can be cancelled",
+                "{run_id} is {}; only a queued, running, paused or reviewing run can be cancelled",
                 other.label()
             ))),
         }
@@ -2823,7 +3166,10 @@ impl HostRuns {
             return Err(refused(rec.status));
         }
         match close_run(&self.settings.run_dir(run_id), &reason, may, now_ms()) {
-            Ok(Some(r)) => Ok(r),
+            Ok(Some(r)) => {
+                self.drop_ready_reviews(&self.settings.run_dir(run_id));
+                Ok(self.get(run_id).unwrap_or(r))
+            }
             Ok(None) => Err(refused(
                 self.get(run_id).map(|r| r.status).unwrap_or(rec.status),
             )),
@@ -2884,7 +3230,10 @@ impl HostRuns {
                 _ => s.is_settleable(),
             };
             match close_run(dir, &reason, may, now) {
-                Ok(Some(_)) => out.push((r.run_id.clone(), reason)),
+                Ok(Some(_)) => {
+                    self.drop_ready_reviews(dir);
+                    out.push((r.run_id.clone(), reason))
+                }
                 Ok(None) => {}
                 Err(e) => eprintln!("jesse-bridge: hostrun {}: not closed: {e}", r.run_id),
             }
@@ -2920,7 +3269,10 @@ impl HostRuns {
             RunStatus::is_archivable,
             now_ms(),
         ) {
-            Ok(Ok(r)) => Ok(r),
+            Ok(Ok(r)) => {
+                self.drop_ready_reviews(&self.settings.run_dir(run_id));
+                Ok(self.get(run_id).unwrap_or(r))
+            }
             Ok(Err(s)) => Err(Refusal::State(format!(
                 "{run_id} is {}; a queued, running or paused run cannot be archived",
                 s.label()
@@ -3001,6 +3353,7 @@ impl HostRuns {
             let may = |s: RunStatus| s.is_archivable() && !s.needs_me();
             match archive_run(&dir, reason, may, now) {
                 Ok(Ok(_)) => {
+                    self.drop_ready_reviews(&dir);
                     eprintln!("jesse-bridge: hostrun {}: archived ({reason})", r.run_id);
                     out.push((r.run_id.clone(), reason.to_string()))
                 }
@@ -3009,6 +3362,627 @@ impl HostRuns {
             }
         }
         out
+    }
+
+    // ---- REVIEWS -----------------------------------------------------------------------
+
+    /// A reviewed run's implementing round reported: the round is recorded as finished, with no
+    /// report written and nothing sent, and the run goes `reviewing` with its one review.
+    async fn begin_start_review(&self, dir: &Path, exit: &ExitInfo) -> Result<(), String> {
+        let at = exit.ended_at.clone();
+        let (code, signal) = (exit.code, exit.signal);
+        let now = rfc(now_ms());
+        let rec = update_run(dir, |r| {
+            if r.reviews.iter().any(|v| v.origin == review::ORIGIN_START) {
+                return;
+            }
+            r.status = RunStatus::Reviewing;
+            r.finished_at = Some(at.clone());
+            r.stalled_since = None;
+            r.pgid = None;
+            r.restart_resumed = false;
+            r.limit_pushed = false;
+            r.resume_at = None;
+            if let Some(cur) = r.round_mut() {
+                cur.finished_at = Some(at.clone());
+                cur.outcome = Some(RunStatus::Reported);
+                cur.exit_code = code;
+                cur.signal = signal;
+                // Nothing is sent for this round, ever: its push is the answering round's.
+                cur.notified = true;
+            }
+            let n = r.reviews.len() as u32 + 1;
+            r.reviews.push(Review {
+                n,
+                reviewer: r.reviewer.clone().unwrap_or_default(),
+                reviewer_label: r.reviewer_label.clone().unwrap_or_default(),
+                origin: review::ORIGIN_START.into(),
+                status: ReviewStatus::Running,
+                focus: r.review_focus.clone(),
+                auto_reply: true,
+                requested_at: now.clone(),
+                ..Review::default()
+            });
+        })?;
+        eprintln!(
+            "jesse-bridge: hostrun {} round {} REVIEWING (reviewer {})",
+            rec.run_id,
+            rec.rounds.len(),
+            rec.reviewer.as_deref().unwrap_or("")
+        );
+        self.lift_limit(now_ms());
+        self.wake();
+        Ok(())
+    }
+
+    /// Give every `reviewing` run a review task, unless this process already runs one for it.
+    pub fn start_reviews(self: &Arc<Self>) {
+        for (_, r) in self.runs() {
+            if r.status != RunStatus::Reviewing {
+                continue;
+            }
+            if !lock(&self.reviewing).insert(r.run_id.clone()) {
+                continue;
+            }
+            let this = self.clone();
+            let id = r.run_id.clone();
+            tokio::spawn(async move {
+                this.drive_review(&id).await;
+                lock(&this.reviewing).remove(&id);
+                this.wake();
+            });
+        }
+    }
+
+    /// Wait (at most about ten seconds) until no review task runs in this process.
+    pub async fn reviews_settled(&self) {
+        for _ in 0..2000 {
+            if lock(&self.reviewing).is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// One review, start to hand off: run the reviewer (unless its note is already written),
+    /// record the findings, then hand them off, or for a review that waits, put the run back.
+    async fn drive_review(self: &Arc<Self>, run_id: &str) {
+        let dir = self.settings.run_dir(run_id);
+        let Ok(rec) = read_run(&dir) else {
+            return;
+        };
+        if rec.status != RunStatus::Reviewing {
+            return;
+        }
+        let Some(v) = rec
+            .reviews
+            .iter()
+            .rfind(|v| matches!(v.status, ReviewStatus::Running | ReviewStatus::Ready))
+            .cloned()
+        else {
+            // Reviewing with no open review cannot be left so: the run goes back to reported.
+            let _ = update_run(&dir, |r| {
+                if r.status == RunStatus::Reviewing {
+                    r.status = RunStatus::Reported;
+                }
+            });
+            return;
+        };
+        if v.status == ReviewStatus::Running {
+            let result = self.perform_review(&dir, &rec, &v).await;
+            let now = rfc(now_ms());
+            let mut applied = false;
+            let res = result.clone();
+            let _ = update_run(&dir, |r| {
+                if r.status != RunStatus::Reviewing {
+                    return;
+                }
+                let Some(x) = r.reviews.iter_mut().find(|x| x.n == v.n) else {
+                    return;
+                };
+                if x.status != ReviewStatus::Running {
+                    return;
+                }
+                x.finished_at = Some(now.clone());
+                match &res {
+                    Ok(out) => {
+                        x.status = ReviewStatus::Ready;
+                        x.head = Some(out.head.clone());
+                        x.base = Some(out.base.clone());
+                        x.findings = out.findings.clone();
+                        x.summary = Some(out.summary.clone());
+                        x.path = Some(out.path.clone());
+                    }
+                    Err(e) => {
+                        x.status = ReviewStatus::Failed;
+                        x.error = Some(review::one_line(e));
+                    }
+                }
+                applied = true;
+            });
+            if !applied {
+                // Cancelled while the reviewer worked: what it found goes nowhere.
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: no longer reviewing; the review is dropped"
+                );
+                if let Ok(out) = &result {
+                    archive_note(&self.notes_root, &out.path);
+                }
+                return;
+            }
+            match &result {
+                Ok(out) => eprintln!(
+                    "jesse-bridge: hostrun {run_id} REVIEW {} by {}: {} finding(s) at {}",
+                    v.n,
+                    v.reviewer,
+                    out.findings.len(),
+                    out.path
+                ),
+                Err(e) => eprintln!("jesse-bridge: hostrun {run_id} REVIEW {} FAILED: {e}", v.n),
+            }
+        }
+        let Ok(rec) = read_run(&dir) else {
+            return;
+        };
+        let Some(v) = rec.reviews.iter().find(|x| x.n == v.n).cloned() else {
+            return;
+        };
+        let start = v.origin == review::ORIGIN_START;
+        if v.auto_reply || start {
+            // A reviewed run is always handed off, the failed review included: it must not
+            // strand the run.
+            if v.status == ReviewStatus::Ready || start {
+                let this = self.clone();
+                let id = run_id.to_string();
+                let n = v.n;
+                let handed = tokio::task::spawn_blocking(move || this.hand_off(&id, n))
+                    .await
+                    .unwrap_or_else(|e| Err(Refusal::Internal(e.to_string())));
+                match handed {
+                    Ok(_) => {
+                        let effects = self.pump_blocking().await;
+                        self.send_effects(effects).await;
+                        return;
+                    }
+                    Err(e) => eprintln!(
+                        "jesse-bridge: hostrun {run_id}: the review's hand off failed: {}",
+                        e.message()
+                    ),
+                }
+            }
+        }
+        // A review that waits (or that failed, or whose hand off could not be queued): the run
+        // goes back to where it was, and Jeremy is told once.
+        let prior = v.prior_status.unwrap_or(RunStatus::Reported);
+        let _ = update_run(&dir, |r| {
+            if r.status == RunStatus::Reviewing {
+                r.status = prior;
+            }
+        });
+        if let Some(n) = self.sink.get().and_then(|s| s.notifier.clone()) {
+            let (title, body) = if v.status == ReviewStatus::Ready {
+                (
+                    format!("Run {run_id} reviewed"),
+                    format!(
+                        "{} finding(s) from {}; devjob_review_reply hands them off",
+                        v.count(),
+                        v.reviewer_label
+                    ),
+                )
+            } else {
+                (
+                    format!("Run {run_id} review failed"),
+                    v.error
+                        .clone()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(180)
+                        .collect(),
+                )
+            };
+            n.notify(title, body, run_id.to_string()).await;
+        }
+    }
+
+    /// The reviewer's part: its range and diff, its own detached worktree at the head, the
+    /// answer (retried once when the schema refuses it), the worktree checked untouched and
+    /// removed, and the note written. Touches nothing of the run but its directory's
+    /// `review-<n>*` files and the Inbox note.
+    async fn perform_review(
+        &self,
+        dir: &Path,
+        rec: &RunRecord,
+        v: &Review,
+    ) -> Result<ReviewDone, String> {
+        let reviewer = self
+            .reviewer
+            .get()
+            .cloned()
+            .ok_or_else(|| "this bridge has no reviewer attached".to_string())?;
+        let info = reviewer.check(&v.reviewer)?;
+        let sink = self
+            .sink
+            .get()
+            .cloned()
+            .ok_or_else(|| "nothing is attached to write the note".to_string())?;
+        let worktree = dir.join(WORKTREE_DIR);
+        if !worktree.exists() {
+            return Err("the run's worktree was removed, so there is nothing to read".into());
+        }
+        let n = v.n;
+        let review_wt = dir.join(format!("{}{n}", review::REVIEW_WORKTREE_PREFIX));
+        let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+        let base_sha = rec.base_sha.clone();
+        let default_branch = rec.default_branch.clone();
+        let (wt, rwt) = (worktree.clone(), review_wt.clone());
+        let (base, head, diff) = tokio::task::spawn_blocking(move || {
+            let main_ref = if is_local_repo(&repo) {
+                git::LOCAL_DEFAULT_BRANCH.to_string()
+            } else {
+                let bare = git::bare_path(&root, &repo);
+                let fetched =
+                    git::lock_repo(&root, &repo).and_then(|_lock| git::fetch_default(&bare));
+                format!(
+                    "origin/{}",
+                    fetched.unwrap_or_else(|_| default_branch.unwrap_or_else(|| "main".into()))
+                )
+            };
+            let (base, head) = review::review_range(&wt, &main_ref, base_sha.as_deref())?;
+            let diff = review::diff(&wt, &base, &head)?;
+            git::add_detached_worktree(&root, &repo, &rwt, &head)?;
+            Ok::<_, String>((base, head, diff))
+        })
+        .await
+        .map_err(|e| format!("the review task failed: {e}"))??;
+        let section = std::fs::read_to_string(dir.join(SECTION_MD))
+            .or_else(|_| std::fs::read_to_string(dir.join(PROMPT_MD)))
+            .unwrap_or_default();
+        let prompt = review::reviewer_prompt(&section, v.focus.as_deref(), &base, &head, &diff);
+        let timeout = Duration::from_secs(self.settings.review_timeout_minutes.saturating_mul(60));
+        let ask = |prompt: String| {
+            reviewer.review(ReviewCall {
+                reviewer: info.id.clone(),
+                prompt,
+                cwd: review_wt.clone(),
+                timeout,
+            })
+        };
+        let answered: Result<review::ReviewOutput, String> = async {
+            let first = ask(prompt.clone()).await?;
+            let _ = write_atomic(&dir.join(review::answer_file(n, 1)), first.as_bytes());
+            match review::parse_review(&first) {
+                Ok(out) => Ok(out),
+                Err(e1) => {
+                    eprintln!("jesse-bridge: hostrun {} review {n}: the answer failed the schema ({e1}); retrying once", rec.run_id);
+                    let second = ask(review::retry_prompt(&prompt, &first, &e1)).await?;
+                    let _ = write_atomic(&dir.join(review::answer_file(n, 2)), second.as_bytes());
+                    review::parse_review(&second).map_err(|e2| {
+                        format!(
+                            "the reviewer's answer failed the schema twice ({e2}); both answers are in the run directory ({} and {})",
+                            review::answer_file(n, 1),
+                            review::answer_file(n, 2)
+                        )
+                    })
+                }
+            }
+        }
+        .await;
+        // The reviewer's worktree must be exactly as it was given: a change there is a write
+        // the posture should have made impossible, and voids the review.
+        let (root, repo, rwt, h) = (
+            self.settings.root.clone(),
+            rec.repo.clone(),
+            review_wt.clone(),
+            head.clone(),
+        );
+        let untouched = tokio::task::spawn_blocking(move || {
+            let clean = review::worktree_untouched(&rwt, &h);
+            git::remove_detached_worktree(&root, &repo, &rwt);
+            clean
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = untouched {
+            eprintln!(
+                "jesse-bridge: WARNING: hostrun {} review {n}: the reviewer's worktree changed: {e}",
+                rec.run_id
+            );
+            return Err(format!(
+                "the reviewer's worktree changed ({e}); the review is void"
+            ));
+        }
+        let out = answered?;
+        let rel = v.path.clone().unwrap_or_else(|| {
+            review::note_rel_path(
+                &chrono::Local::now().format("%Y-%m-%d").to_string(),
+                &rec.run_id,
+                n,
+            )
+        });
+        let noted = Review {
+            reviewer: info.id.clone(),
+            reviewer_label: info.label.clone(),
+            head: Some(head.clone()),
+            base: Some(base.clone()),
+            findings: out.findings.clone(),
+            summary: Some(out.summary.clone()),
+            ..v.clone()
+        };
+        let text = review::render_note(&rec.run_id, &rec.repo, &rec.branch, &noted);
+        write_report(&self.notes_root, &sink.broker, &rec.run_id, &rel, &text).await?;
+        Ok(ReviewDone {
+            head,
+            base,
+            findings: out.findings,
+            summary: out.summary,
+            path: rel,
+        })
+    }
+
+    /// What the hand off says for review `v` of `rec`.
+    fn handoff_text(rec: &RunRecord, v: &Review) -> String {
+        let finish = (v.origin == review::ORIGIN_START).then(|| {
+            if is_local_repo(&rec.repo) {
+                review::HANDOFF_FINISH_LOCAL
+            } else {
+                review::HANDOFF_FINISH
+            }
+        });
+        if v.status == ReviewStatus::Failed {
+            review::unreviewed_reply(
+                v.error.as_deref().unwrap_or("the review could not run"),
+                finish,
+            )
+        } else {
+            review::handoff_reply(&v.findings, finish)
+        }
+    }
+
+    /// Queue review `n`'s hand off: the run's next round, in its own worktree and session,
+    /// exactly as a reply would, with [`HostRuns::handoff_text`] as the message.
+    fn hand_off(&self, run_id: &str, n: u32) -> Result<RunRecord, Refusal> {
+        let _gate = lock(&self.gate);
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        let v = rec
+            .reviews
+            .iter()
+            .find(|x| x.n == n)
+            .ok_or_else(|| Refusal::NotFound(format!("{run_id} has no review {n}")))?;
+        if v.answer_round.is_some() {
+            return Err(Refusal::State(format!(
+                "{run_id}'s review {n} was already handed off"
+            )));
+        }
+        let text = Self::handoff_text(&rec, v);
+        self.queue_round_with(run_id, &text, Some(AUTO_REVIEW), |r, round| {
+            if let Some(x) = r.reviews.iter_mut().find(|x| x.n == n) {
+                x.answer_round = Some(round);
+                if x.status == ReviewStatus::Ready {
+                    x.status = ReviewStatus::HandedOff;
+                }
+            }
+        })
+    }
+
+    /// `devjob_review`: a review of a finished run, asked for after the fact. Refuses a run
+    /// that is queued, running, paused or already being reviewed, one with a review still
+    /// waiting for its hand off, one with no commits beyond its base, and a reviewer the
+    /// registry does not know or marks unhealthy. The run goes `reviewing`; the watcher runs it.
+    pub fn request_review(
+        &self,
+        run_id: &str,
+        reviewer: &str,
+        focus: Option<&str>,
+        auto_reply: bool,
+    ) -> Result<RunRecord, Refusal> {
+        let focus = review::checked_focus(focus).map_err(Refusal::Invalid)?;
+        let _gate = lock(&self.gate);
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("{run_id:?} is not a Studio run")))?;
+        match rec.status {
+            RunStatus::Queued | RunStatus::Running | RunStatus::Paused => {
+                return Err(Refusal::State(format!(
+                    "{run_id} is still {}; a review reads a finished round",
+                    rec.status.label()
+                )))
+            }
+            RunStatus::Reviewing => {
+                return Err(Refusal::State(format!(
+                    "{run_id} is already being reviewed; one review at a time"
+                )))
+            }
+            _ => {}
+        }
+        if let Some(w) = rec.reviews.iter().find(|v| v.status == ReviewStatus::Ready) {
+            return Err(Refusal::State(format!(
+                "{run_id}'s review {} is waiting for its hand off (devjob_review_reply); one \
+                 review at a time",
+                w.n
+            )));
+        }
+        let info = self.check_reviewer(reviewer).map_err(Refusal::Invalid)?;
+        let dir = self.settings.run_dir(run_id);
+        let worktree = dir.join(WORKTREE_DIR);
+        if !worktree.exists() {
+            return Err(Refusal::State(format!(
+                "{run_id}'s worktree was removed, so there is nothing to review"
+            )));
+        }
+        // The commits beyond its base, from the clone's refs as they are: no fetch here.
+        let main_ref = if is_local_repo(&rec.repo) {
+            git::LOCAL_DEFAULT_BRANCH.to_string()
+        } else {
+            format!("origin/{}", rec.default_branch.as_deref().unwrap_or("main"))
+        };
+        review::review_range(&worktree, &main_ref, rec.base_sha.as_deref())
+            .map_err(|e| Refusal::State(format!("{run_id}: {e}")))?;
+        let now = rfc(now_ms());
+        let updated = update_run(&dir, |r| {
+            let n = r.reviews.len() as u32 + 1;
+            r.reviews.push(Review {
+                n,
+                reviewer: info.id.clone(),
+                reviewer_label: info.label.clone(),
+                origin: review::ORIGIN_REQUEST.into(),
+                status: ReviewStatus::Running,
+                focus: focus.clone(),
+                auto_reply,
+                requested_at: now.clone(),
+                prior_status: Some(r.status),
+                ..Review::default()
+            });
+            r.status = RunStatus::Reviewing;
+        })
+        .map_err(Refusal::Internal)?;
+        eprintln!(
+            "jesse-bridge: hostrun {run_id} REVIEW REQUESTED (reviewer {}, auto_reply {auto_reply})",
+            info.id
+        );
+        Ok(updated)
+    }
+
+    /// [`HostRuns::request_review`], then the review task at once.
+    pub async fn request_review_and_start(
+        self: &Arc<Self>,
+        run_id: &str,
+        reviewer: &str,
+        focus: Option<String>,
+        auto_reply: bool,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let (id, who) = (run_id.to_string(), reviewer.to_string());
+        let rec = tokio::task::spawn_blocking(move || {
+            this.request_review(&id, &who, focus.as_deref(), auto_reply)
+        })
+        .await
+        .map_err(|e| Refusal::Internal(format!("the review task failed: {e}")))??;
+        self.start_reviews();
+        Ok(rec)
+    }
+
+    /// `devjob_review_reply`: hand off the review that is waiting (`auto_reply` false), with
+    /// the same fixed reply an automatic hand off sends.
+    pub fn review_reply(&self, run_id: &str) -> Result<RunRecord, Refusal> {
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("{run_id:?} is not a Studio run")))?;
+        if rec.status.is_moving() {
+            return Err(Refusal::State(format!(
+                "{run_id} is {}; the hand off waits until it has stopped",
+                rec.status.label()
+            )));
+        }
+        let Some(v) = rec
+            .reviews
+            .iter()
+            .rfind(|v| v.status == ReviewStatus::Ready)
+        else {
+            return Err(Refusal::State(format!(
+                "{run_id} has no review waiting for its hand off"
+            )));
+        };
+        self.hand_off(run_id, v.n)
+    }
+
+    /// [`HostRuns::review_reply`], then start what the queue allows.
+    pub async fn review_reply_and_pump(
+        self: &Arc<Self>,
+        run_id: &str,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        tokio::task::spawn_blocking(move || this.review_reply(&id))
+            .await
+            .map_err(|e| Refusal::Internal(format!("the hand off task failed: {e}")))??;
+        let effects = self.pump_blocking().await;
+        self.send_effects(effects).await;
+        self.wake();
+        self.get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))
+    }
+
+    /// The run was closed or archived: a review never handed off is dropped, and every note
+    /// whose answering round never reported moves to `Inbox/archive/` with it.
+    fn drop_ready_reviews(&self, dir: &Path) {
+        let now = rfc(now_ms());
+        let mut paths = Vec::new();
+        let _ = update_run(dir, |r| {
+            for v in r.reviews.iter_mut() {
+                if v.status == ReviewStatus::Ready {
+                    v.status = ReviewStatus::Dropped;
+                    v.finished_at.get_or_insert_with(|| now.clone());
+                }
+                if v.answered_at.is_none() {
+                    if let Some(p) = &v.path {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+        });
+        for p in paths {
+            archive_note(&self.notes_root, &p);
+        }
+    }
+
+    /// The leak check of an answering round: its new commit messages, the added lines of its
+    /// diff (both from the head that was reviewed to the worktree's head), and the title and
+    /// body of the run's pull requests, for [`review::leak_terms`]. Never blocks anything.
+    async fn review_leaks(
+        &self,
+        dir: &Path,
+        rec: &RunRecord,
+        v: &Review,
+        report: &str,
+    ) -> Vec<String> {
+        let Some(from) = v.head.clone() else {
+            return Vec::new();
+        };
+        let terms = review::leak_terms(v);
+        let worktree = dir.join(WORKTREE_DIR);
+        let forge = self.forge.clone();
+        let url = pull_request_url(report);
+        let (repo, branch) = (rec.repo.clone(), rec.branch.clone());
+        tokio::task::spawn_blocking(move || {
+            let mut places: Vec<(String, String)> = Vec::new();
+            if worktree.exists() {
+                for (id, msg) in review::commit_messages(&worktree, &from, "HEAD") {
+                    places.push((format!("commit {id} message"), msg));
+                }
+                if let Ok(d) = review::diff(&worktree, &from, "HEAD") {
+                    let mut by_file: BTreeMap<String, String> = BTreeMap::new();
+                    for (file, line) in review::added_lines(&d) {
+                        let t = by_file.entry(file).or_default();
+                        t.push_str(&line);
+                        t.push('\n');
+                    }
+                    for (file, text) in by_file {
+                        places.push((format!("{file} (added lines)"), text));
+                    }
+                }
+            }
+            if !is_local_repo(&repo) {
+                if let Some(gh) = forge.github() {
+                    let mut pulls = gh.pulls_for_branch(&repo, &branch).unwrap_or_default();
+                    if let Some(u) = url.as_deref() {
+                        if !pulls.iter().any(|p| p.url == u) {
+                            if let Some(p) = gh.pull(u) {
+                                pulls.push(p);
+                            }
+                        }
+                    }
+                    for p in pulls {
+                        places.push((format!("pull request {} title", p.url), p.title.clone()));
+                        places.push((format!("pull request {} body", p.url), p.body.clone()));
+                    }
+                }
+            }
+            review::leak_hits(&terms, &places)
+        })
+        .await
+        .unwrap_or_default()
     }
 
     // ---- THE WATCHER -------------------------------------------------------------------
@@ -3157,6 +4131,25 @@ impl HostRuns {
         }
         let mut report = round_report(&dir, &round);
         let mut status = round_status(&round, &exit, &report);
+        // THE ANSWERING ROUND of a review that was handed off: a failed review's report leads
+        // with `UNREVIEWED:`, an answered one's with any `REVIEW LEAK:` the check found.
+        let answering = rec.reviews.iter().rposition(|v| v.answers(round.n));
+        let mut leaks = Vec::new();
+        if let (Some(i), None) = (answering, round.report_path.as_ref()) {
+            let v = &rec.reviews[i];
+            if v.status == ReviewStatus::Failed {
+                report = review::ensure_unreviewed(
+                    &report,
+                    v.error.as_deref().unwrap_or("the review could not run"),
+                );
+            } else {
+                leaks = self.review_leaks(&dir, &rec, v, &report).await;
+                if let Some(line) = review::leak_line(&leaks) {
+                    eprintln!("jesse-bridge: hostrun {run_id} round {}: {line}", round.n);
+                    report = format!("{line}\n\n{report}");
+                }
+            }
+        }
         // NO AI ATTRIBUTION, the backstop: what the round pushed is read back, and a hit makes
         // the run `needs_you` with the `ATTRIBUTION:` line first, so the Inbox report and the
         // push both lead with it.
@@ -3166,6 +4159,23 @@ impl HostRuns {
             report = format!("{line}\n\n{report}");
             status = RunStatus::NeedsYou;
         }
+        // A REVIEWED run's implementing round: nothing is posted and nobody is told. The run
+        // goes `reviewing`, once, and the watcher runs the review and hands it off.
+        if status == RunStatus::Reported
+            && round.report_path.is_none()
+            && rec.reviewer.is_some()
+            && !rec.reviews.iter().any(|v| v.origin == review::ORIGIN_START)
+        {
+            return self.begin_start_review(&dir, &exit).await;
+        }
+        // The answering round's note moves to `Inbox/archive/` as its report is written, and
+        // the report links it where it now is.
+        let note_now = answering.and_then(|i| {
+            rec.reviews[i]
+                .path
+                .as_deref()
+                .map(|p| archive_note(&self.notes_root, p).unwrap_or_else(|| p.to_string()))
+        });
         let rel = match round
             .report_path
             .clone()
@@ -3184,7 +4194,14 @@ impl HostRuns {
                 } else {
                     None
                 };
-                let text = render_inbox_with(&rec, round.n, status, &report, local_main.as_deref());
+                let mut text =
+                    render_inbox_with(&rec, round.n, status, &report, local_main.as_deref());
+                if let Some(note) = &note_now {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&format!("\n{}\n", review::note_link(note)));
+                }
                 write_report(&self.notes_root, &sink.broker, run_id, &rel, &text).await?;
                 eprintln!(
                     "jesse-bridge: hostrun REPORT {run_id} round {} {} at {rel}",
@@ -3225,6 +4242,15 @@ impl HostRuns {
                 cur.outcome = Some(status);
                 cur.exit_code = exit.code;
                 cur.signal = exit.signal;
+            }
+            if let Some(v) = answering.and_then(|i| r.reviews.get_mut(i)) {
+                if v.status == ReviewStatus::HandedOff {
+                    v.status = ReviewStatus::Answered;
+                }
+                v.answered_at = Some(at.clone());
+                if !leaks.is_empty() {
+                    v.leaks = leaks.clone();
+                }
             }
         })?;
         if matches!(status, RunStatus::Reported | RunStatus::NeedsYou) {
@@ -3395,6 +4421,8 @@ impl HostRuns {
                 eprintln!("jesse-bridge: hostrun {id}: report not written yet: {e}");
             }
         }
+        // Every run waiting on its reviewer gets its review task (again, after a restart).
+        self.start_reviews();
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
         let this = self.clone();
@@ -3731,7 +4759,7 @@ impl HostRuns {
     /// first by creation; only the archived ones, newest archived first; or all of them.
     /// `counts` covers the whole store in the one scan, whatever the mode: the running,
     /// queued, needs_you and paused tallies as before, and the app's four filters, `needs_me`
-    /// (needs_you, interrupted, failed), `moving` (queued, running, paused), `finished`
+    /// (needs_you, interrupted, failed), `moving` (queued, running, paused, reviewing), `finished`
     /// (everything else not archived) and `archived`.
     pub fn list_json_mode(&self, mode: ArchivedMode) -> Value {
         let all: Vec<RunRecord> = self.runs().into_iter().map(|(_, r)| r).collect();
@@ -3917,7 +4945,40 @@ pub fn run_json_located(r: &RunRecord, notes_root: &Path) -> Value {
         .filter_map(|x| x.report_path.as_deref())
         .map(|rel| locate_report(notes_root, rel))
         .collect::<Vec<_>>());
+    if !r.reviews.is_empty() {
+        v["reviews"] = reviews_json(r, Some(notes_root));
+    }
     v
+}
+
+/// The run's reviews as the routes and tools serve them: each one's number, reviewer, origin,
+/// status, the head it read and the base, its note's path (where the note is now, when the notes
+/// directory is known), its finding count, why it failed, the round that answers it and any
+/// leaks. The findings themselves are in the note. Served only for a run that has a review.
+pub fn reviews_json(r: &RunRecord, notes_root: Option<&Path>) -> Value {
+    json!(r
+        .reviews
+        .iter()
+        .map(|v| json!({
+            "n": v.n,
+            "reviewer": v.reviewer,
+            "reviewer_label": v.reviewer_label,
+            "origin": v.origin,
+            "status": v.status,
+            "head": v.head,
+            "base": v.base,
+            "path": v.path.as_deref().map(|p| match notes_root {
+                Some(n) => locate_report(n, p),
+                None => p.to_string(),
+            }),
+            "findings": v.findings.len(),
+            "error": v.error,
+            "answer_round": v.answer_round,
+            "requested_at": v.requested_at,
+            "finished_at": v.finished_at,
+            "leaks": v.leaks,
+        }))
+        .collect::<Vec<_>>())
 }
 
 /// One run for the routes and the tools: `run.json`, `host`, and its report paths.
@@ -3933,6 +4994,10 @@ pub fn run_json(r: &RunRecord) -> Value {
                 .filter_map(|x| x.report_path.clone())
                 .collect::<Vec<_>>()),
         );
+        // Only once there is one: a run never reviewed serves exactly what it did before.
+        if !r.reviews.is_empty() {
+            o.insert("reviews".into(), reviews_json(r, None));
+        }
     }
     v
 }
@@ -3989,13 +5054,7 @@ pub fn annotate_strands(
         };
         let active = runs
             .iter()
-            .filter(|r| {
-                r.strand.as_deref() == Some(strand.slug.as_str())
-                    && matches!(
-                        r.status,
-                        RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused
-                    )
-            })
+            .filter(|r| r.strand.as_deref() == Some(strand.slug.as_str()) && r.status.is_active())
             .count();
         obj.insert("runs_active".into(), json!(active as u32));
         let needs_you = runs
@@ -4121,6 +5180,10 @@ pub struct StartBody {
     pub repo: Option<String>,
     #[serde(default)]
     pub again: bool,
+    /// A registry id: the run is reviewed before it finishes ([`review`]).
+    pub reviewer: Option<String>,
+    /// What the reviewer should look at most closely, at most 4 KiB.
+    pub review_focus: Option<String>,
 }
 
 impl StartBody {
@@ -4149,6 +5212,15 @@ impl StartBody {
 #[serde(deny_unknown_fields)]
 pub struct ReplyBody {
     pub text: String,
+}
+
+/// `POST /jesse/runs/:run_id/review`: `{ reviewer, focus?, auto_reply? }`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewBody {
+    pub reviewer: String,
+    pub focus: Option<String>,
+    pub auto_reply: Option<bool>,
 }
 
 /// `POST /jesse/runs/:run_id/close`: an optional `{ "reason": "..." }`.
@@ -4202,12 +5274,15 @@ pub async fn jesse_runs_start(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let again = body.again;
+    let (reviewer, review_focus) = (body.reviewer.clone(), body.review_focus.clone());
     let kind = body.kind().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let started = svc
         .start(StartRequest {
             kind,
             origin: "app".into(),
             again,
+            reviewer,
+            review_focus,
         })
         .await
         .map_err(refusal)?;
@@ -4256,6 +5331,27 @@ pub async fn jesse_run_reply(
     let svc = guard(&st, &headers)?;
     let r = svc
         .reply_and_pump(&run_id, &body.text)
+        .await
+        .map_err(refusal)?;
+    Ok(Json(svc.served_one(&r)).into_response())
+}
+
+/// `POST /jesse/runs/:run_id/review` with `{ reviewer, focus?, auto_reply? }`: a review of a
+/// finished run by any registry model, read only ([`HostRuns::request_review`]).
+pub async fn jesse_run_review(
+    State(st): State<AppState>,
+    UrlPath(run_id): UrlPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<ReviewBody>,
+) -> Result<Response, ApiError> {
+    let svc = guard(&st, &headers)?;
+    let r = svc
+        .request_review_and_start(
+            &run_id,
+            &body.reviewer,
+            body.focus,
+            body.auto_reply.unwrap_or(true),
+        )
         .await
         .map_err(refusal)?;
     Ok(Json(svc.served_one(&r)).into_response())

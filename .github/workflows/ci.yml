@@ -264,8 +264,8 @@ jobs:
     env:
       JESSE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
       # THE WALL CLOCK BUDGET for the `Test` step below (test execution only; the build is its
-      # own step). Measured at 62 s on this runner (PR #354), plus 50 percent; see docs/testing.md
-      # before raising it.
+      # own step). Measured at 48 to 62 s over four runs (PR #354), the slowest plus 50 percent;
+      # see docs/testing.md before raising it.
       TEST_BUDGET_SECS: 93
     steps:
       - uses: actions/checkout@v7
@@ -345,9 +345,9 @@ jobs:
       run:
         working-directory: bridge
     env:
-      # THE WALL CLOCK BUDGET for `Test (default features)`: measured at 18 s (PR #354), plus 50
-      # percent; see `bridge-test` and docs/testing.md.
-      TEST_BUDGET_SECS: 27
+      # THE WALL CLOCK BUDGET for `Test (default features)`: measured at 13 to 27 s over four runs
+      # (PR #354), the slowest plus 50 percent; see `bridge-test` and docs/testing.md.
+      TEST_BUDGET_SECS: 41
     steps:
       - uses: actions/checkout@v7
 

@@ -48,7 +48,8 @@ behavior or API changes, and nothing to restart.
   minute; it now compares everything after the per turn clock line byte for byte.
 - **Kept fast.** A 5 s slow mark and a 10 s limit with an allowlist
   (`bridge/.config/slow-tests.txt`), a wall clock budget on each test step (93 s for the
-  feature tests, 27 s for the default feature `--lib` tests: measured plus 50 percent), and two new
+  feature tests, 41 s for the default feature `--lib` tests: the slowest of four CI runs plus 50
+  percent), and two new
   `scripts/ci-guards.sh` checks: no new top level `bridge/tests/*.rs`, and no new real sleep of
   a second or more in test code. See `docs/testing.md`.
 

@@ -110,12 +110,13 @@ test it saw over the limit, so a stale line is easy to spot.
 
 The test execution steps in `ci.yml` time themselves and fail with a "Test wall clock budget
 exceeded" error when they run over their budget. The budgets are the `TEST_BUDGET_SECS` values in
-`ci.yml`, set at the measured time plus 50 percent:
+`ci.yml`, set at the slowest of four measured CI runs plus 50 percent (runner speed varies by
+about a factor of two between runs):
 
 | CI step | Measured | Budget |
 |---|---|---|
-| `bridge-test` / Test (`cargo nextest run --features containment-probe`) | 62 s | 93 s |
-| `bridge-lint` / Test (default features) (`cargo nextest run --lib`) | 18 s | 27 s |
+| `bridge-test` / Test (`cargo nextest run --features containment-probe`) | 48 to 62 s | 93 s |
+| `bridge-lint` / Test (default features) (`cargo nextest run --lib`) | 13 to 27 s | 41 s |
 
 The build is its own step and is not in the budget.
 

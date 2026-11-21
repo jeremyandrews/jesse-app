@@ -67,7 +67,11 @@ every child is spawned exactly as before.**
 - **Containment:** ten new probes (`egress-closed-tier`, `egress-open-tier`, `model-token-scope`,
   `model-credential-absent`, `egress-private-address`, `egress-send-unknown-host`,
   `egress-long-query`, `egress-canary`, `egress-fingerprint`, `egress-opaque`), run when the
-  proxies are on.
+  proxies are on. `model-credential-absent` counts only variable-shaped (no lowercase) names on
+  the child's `SK-SHAPED:` line: on 2026-11-21 a Claude Code write turn whose `env` was refused
+  wrote `SK-SHAPED: unknown (env refused — not executed)`, and its words were read as three
+  variable names and failed the hard gate on a turn that leaked nothing. Claude Code record
+  re-recorded (bridge 0.211.0, Claude Code 2.1.330, gate pass).
 
 ## [App 1.0 (223)] - 2026-11-19
 

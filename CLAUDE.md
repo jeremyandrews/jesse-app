@@ -42,3 +42,12 @@ only on the **`Jesse` (iOS) scheme's** LaunchAction. The **`Jesse Mac` scheme do
 it**, so the Mac app speaks its replies aloud on every launch.
 
 If you build or run the Mac app, quit it when you are done. Do not leave it running.
+
+## Tests stay fast
+
+The bridge's Linux CI has a budget, and it is enforced: a test step that runs past its
+`TEST_BUDGET_SECS` in `ci.yml` fails the job, any test over 10 s that is not on
+`bridge/.config/slow-tests.txt` fails it, and `scripts/ci-guards.sh` refuses a new top level
+`bridge/tests/*.rs` and a new real sleep of a second or more in test code. A new integration
+test is a module under `bridge/tests/it/`; a test of timer logic runs on tokio's paused clock.
+Read `docs/testing.md` before adding a slow test, a sleep, or a test file.

@@ -54,7 +54,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: agent
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
 
       # `--locked` for the same reason it is on the bridge's release build: the lock must be
       # the one that ships, not one CI quietly regenerated. See that step's comment.
@@ -111,7 +111,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: eval
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
 
       # `--locked`, as on the other two builds — see the bridge's release step.
       - name: Build
@@ -176,12 +176,20 @@ jobs:
       # One cache per job (`shared-key`), so the release profile is never evicted by the test
       # or lint profile. Saved only by runs on main; a pull request restores main's and never
       # writes its own, so a branch cannot crowd main's entries out of the repository's quota.
+      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
+      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
+      # index changes. So the first cargo command changed the index under itself and every later
+      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
+      # before any build, leaves `git status` nothing to write.
+      - name: Refresh the git index
+        run: git update-index -q --refresh || true
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: bridge
           shared-key: bridge-release
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
 
       # The SERVING binary, built exactly as a deploy builds it: without
       # `containment-probe`. The probe prompts, the battery runner and its loopback
@@ -270,12 +278,20 @@ jobs:
           cargo clippy --version
 
       # Its own cache: see `bridge-build`.
+      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
+      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
+      # index changes. So the first cargo command changed the index under itself and every later
+      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
+      # before any build, leaves `git status` nothing to write.
+      - name: Refresh the git index
+        run: git update-index -q --refresh || true
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: bridge
           shared-key: bridge-test
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
 
       # Prebuilt binary. nextest runs every test in its own process, all of them at once, so
       # the suite takes as long as its slowest tests rather than the sum of its test binaries.
@@ -342,12 +358,20 @@ jobs:
           cargo clippy --version
 
       # Its own cache: see `bridge-build`.
+      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
+      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
+      # index changes. So the first cargo command changed the index under itself and every later
+      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
+      # before any build, leaves `git status` nothing to write.
+      - name: Refresh the git index
+        run: git update-index -q --refresh || true
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: bridge
           shared-key: bridge-lint
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -443,12 +467,20 @@ jobs:
           cargo clippy --version
 
       # Its own cache: see `bridge-build`.
+      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
+      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
+      # index changes. So the first cargo command changed the index under itself and every later
+      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
+      # before any build, leaves `git status` nothing to write.
+      - name: Refresh the git index
+        run: git update-index -q --refresh || true
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: bridge
           shared-key: bridge-coverage
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
 
       # Prebuilt binaries (no from-source compile): the coverage tool and the runner it drives.
       - name: Install cargo-llvm-cov and cargo-nextest

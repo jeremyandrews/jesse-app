@@ -3,7 +3,7 @@
 //! Every file under `tests/it/` is a module of this one target, so a test build links the
 //! library into one integration binary rather than one per file. Each module was a top level
 //! `tests/<name>.rs` until the suite was merged; its tests keep their names, with the module
-//! as a prefix (`integration::chat_no_auth_is_401`).
+//! as a prefix (`integration::a_bridge_with_no_profile_reports_home`).
 //!
 //! A NEW TEST GOES IN A MODULE HERE, never in a new `tests/<name>.rs`:
 //! `scripts/ci-guards.sh` fails on a top level test file that is not one of the exceptions

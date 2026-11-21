@@ -56,7 +56,7 @@ Two environment notes for running locally:
   environment for every child it starts). A new file that genuinely needs its own process is
   added to that list in both places, with its reason.
 
-Test names carry their module: `integration::chat_no_auth_is_401`. Filter with it:
+Test names carry their module: `integration::a_bridge_with_no_profile_reports_home`. Filter with it:
 `cargo nextest run --features containment-probe -E 'test(/^scheduler::/)'`.
 
 ## Timers: the paused clock is the default

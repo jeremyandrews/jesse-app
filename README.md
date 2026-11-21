@@ -564,6 +564,9 @@ These are the things most likely to bite during setup, roughly in order:
 
 - **Bridge:** `cd bridge && cargo build --release` (and `cargo test`, `cargo clippy
   -- -D warnings`, `cargo fmt --all --check`). A clean release build is the gate.
+- **Bridge tests:** `cd bridge && cargo nextest run --features containment-probe` is what CI
+  runs (plain `cargo test` works too). Where a new test goes, the paused clock rule, the slow
+  test allowlist and the CI time budget are in [`docs/testing.md`](docs/testing.md).
 - **App:** run `scripts/local-ci-macos.sh` — see below.
 - See `CHANGELOG.md` for the per-version record of what changed in each component.
 

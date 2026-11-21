@@ -14,6 +14,33 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.212.0] - 2026-11-21
+
+**A Studio run's `extra/` folder (the further repositories and outputs it made) now survives until
+`keep_days` after the run finished, whatever happened to its branch.** Root cause: the cleanup
+treated a merged branch as the end of a run's need for `extra/`, which holds work that is not in
+the branch. On 2026-11-20 run GO330 finished at 21:30:11Z and its 1 GiB `extra/` build was gone
+at 21:35:52Z, before the follow up run could publish it. Takes effect on the next bridge restart.
+
+- **Two tiers.** `target/` and the recorded DerivedData folders (rebuildable build output) keep
+  today's rule: removed once the pull request is merged or closed, the branch is gone, or a local
+  branch is in `main`, or `keep_days` after the run finished. `extra/` is removed only `keep_days`
+  after the run finished, never because of the branch.
+- **A warning first.** On the first cleanup pass within 24 hours of `keep_days`, a finished run
+  whose `extra/` holds anything gets one push, `<run_id>: extra/ is removed in about a day`, and
+  `run.json` records `cleanup.extra_warned` (RFC 3339). `extra/` goes only on a later pass past
+  `keep_days`. A reply that finishes the run again moves `finished_at`, and an older warning no
+  longer counts.
+- **The disk cap.** The space pass removes build output of every finished run first, then
+  worktrees, then `extra/` only of runs past `keep_days` and warned. If it is still over its limit
+  it logs one line naming the runs whose `extra/` it kept and why, and stops there.
+- **The agent is told.** The served prompt's sentence about `extra/` gains: everything under it is
+  deleted `keep_days` days after the run finishes (the configured number), so anything a later run
+  or a person needs must be pushed to its remote or written outside the run directory before the
+  run ends.
+- Unchanged: a live run (queued, running, paused, reviewing, needs you) never loses `extra/`; run
+  directories and `run.json` are never removed; no new configuration key.
+
 ## [bridge 0.211.0] - 2026-11-20
 
 **A Studio run can be reviewed by a second model before it finishes, and the session that did the

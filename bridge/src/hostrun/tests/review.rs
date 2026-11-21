@@ -194,6 +194,7 @@ fn a_reviewed_run_is_served_one_more_sentence_and_nothing_else() {
         branch: "gd5-x",
         default_branch: "main",
         run_dir: dir,
+        keep_days: 7,
         pr_title_tag: true,
         reviewed,
     };

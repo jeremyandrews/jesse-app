@@ -3088,7 +3088,13 @@ each claim and reject what does not hold. **Nothing about a review reaches GitHu
 reply forbids it in commit messages, the pull request and the code, and the bridge reads the
 answering round's commit messages, pull request title and body and added lines for the
 reviewer's name and the finding ids and puts a `REVIEW LEAK:` line on the Inbox report if it
-finds one. The review note stays in the vault.
+finds one. The review note stays in the vault. **Since 0.213.0 a run is reviewed by default**
+(`[hostrun] default_reviewers`, `["codex-write"]` unless configured) and may name up to three
+reviewers: each runs separately at the same posture, in its own detached worktree, and the
+leak check reads for every reviewer's name and every finding id. More reviewers change neither
+the posture nor the loop: one review cycle and one answering round per run, however many
+reviewed. A default reviewer that is down never blocks a run (it goes on unreviewed and says so
+on its report's first line); a reviewer named explicitly that is down is refused at the start.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or

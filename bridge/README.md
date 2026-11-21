@@ -1051,16 +1051,32 @@ and reports stay where they are.
   `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts,
   so an Undo is not taken back by the next pass.
 
-**A second model reviews a run (0.211.0, `src/hostrun/review.rs`).** A Studio run can be checked
-by any model in the registry before it finishes, and the session that did the work judges what
-that model said.
+**A second model reviews a run (0.211.0, `src/hostrun/review.rs`; on by default since 0.213.0).**
+Every Studio run is checked by a model in the registry before it finishes, unless it says not
+to, and the session that did the work judges what that model said.
 
-- **Starting a reviewed run.** `devjob_start` with `host: "studio"` and `reviewer: "<model id>"`
-  (optionally `review_focus`, at most 4 KiB), `POST /jesse/runs` with the same two keys, or a
-  draft whose front matter says `devjob-reviewer: <model id>`. The reviewer is checked before
-  anything is created: a model the registry does not know, one not configured, one marked
-  unhealthy, or one whose harness cannot give it a read only posture is refused, naming why. On
-  the cluster (`host` not `studio`) both keys are refused.
+- **Who reviews.** Resolved when the run is created, in this order: `none` (the string, or
+  `["none"]`) means no review; an explicit id or list, from the start's `reviewer` or else the
+  draft's `devjob-reviewer:`, is used exactly, in its order; otherwise `[hostrun]
+  default_reviewers` applies, which defaults in code to `["codex-write"]` (no config edit needed;
+  `default_reviewers = []` turns the default off for the whole bridge). At most 3 reviewers a
+  run; a repeated one, `none` beside an id, and both `reviewer` and `reviewers` at once are
+  refused.
+- **Starting a run.** `devjob_start` with `host: "studio"` and optionally `reviewer` (one model
+  id, a list of up to three, or `"none"`; `reviewers` is the list spelling) and `review_focus` (at
+  most 4 KiB), `POST /jesse/runs` with the same keys, or a draft whose front matter says
+  `devjob-reviewer: <id>`, `devjob-reviewer: [<id>, <id>]` (or a block list, one `- <id>` a
+  line) or `devjob-reviewer: none`. A reviewer named explicitly is checked before anything is
+  created: a model the registry does not know, one not configured, one marked unhealthy, or one
+  whose harness cannot give it a read only posture is refused, naming why. **A default reviewer
+  that cannot review does not refuse the run**: the run goes on without it (unreviewed, as an
+  ordinary run, when it was the only one) and its final report's first line is `UNREVIEWED:
+  default reviewer <id> unavailable: <reason>` (or, when another reviewer did review, `PARTLY
+  REVIEWED: <id>: default reviewer unavailable: <reason>`). The run records `reviewers`,
+  `reviewers_source` (`explicit`, `default` or `none`) and any `reviewers_skipped`.
+- **The cluster** has no review path: a cluster `devjob_start` never gets the default (no
+  refusal, no review), `reviewer: "none"` changes nothing there, and a reviewer by name (and
+  `review_focus`) is refused as before.
 - **The rounds.** The served prompt gains one sentence (GitHub: open the pull request as a draft,
   do not merge it, do not mark it ready; local: commit on the branch, do not merge into `main`
   yet). The implementing round's report is kept in the run directory but not written to the
@@ -1069,14 +1085,26 @@ that model said.
   finding, accept, reject or partial, fix only what holds with a regression test, rerun the
   verification, push, then finish (mark ready, and merge only if the original prompt said to;
   local: merge into `main`). That answering round's report is the one Inbox report and the one
-  push, with a link to the review note. Exactly one review per reviewed run: later rounds are not
-  reviewed again.
+  push, with a link to the review note. Exactly one review cycle per reviewed run: later rounds are
+  not reviewed again.
+- **Several reviewers, one cycle.** With more than one reviewer every review runs at once, each in
+  its own detached read only worktree at the same head (`review-<n>`), each with the same prompt,
+  schema, retry and timeout, and each writes its own note. Their reviews are tagged `A`, `B`, `C`
+  and every finding id is shown with its tag (`A.F1`, `B.F1`) in the notes, the hand off and the
+  verdict table, so ids are unique across the hand off. Once every review has answered or failed
+  the run gets **one** hand off carrying every finding, one block per reviewer (`## Block A:
+  Codex (codex-write)`; the reviewers are named in the hand off only), and exactly one answering
+  round, never one per reviewer. If every review failed the run is handed off unreviewed as
+  below; if some failed, the rest are handed off and the final report's first line is `PARTLY
+  REVIEWED: <id>: <reason>` (each failed one, joined with `; `).
 - **When the review cannot run** (the reviewer down, a timeout, an answer that fails the schema
   twice, a reviewer that changed its worktree), the run is handed off all the same with a reply
   saying the check could not run and why, and the report's first line is `UNREVIEWED: <reason>`
   (the bridge puts it there if the session did not).
 - **After the fact.** `devjob_review { run_id, reviewer, focus?, auto_reply? }` or `POST
-  /jesse/runs/:id/review` (paired device token) reviews a finished Studio run's commits. Refused
+  /jesse/runs/:id/review` (paired device token) reviews a finished Studio run's commits;
+  `reviewer` is one id or a list of up to three (`reviewers` on the tool), which run as one cycle
+  with one hand off. Refused
   with the reason for a run that is not a Studio run, one queued or running, one with no commits
   beyond its base, an unknown or unhealthy reviewer, and while another review of that run is
   running or waiting. `auto_reply` (default true) hands off at once; false writes the note,
@@ -1097,10 +1125,15 @@ that model said.
   closed or archived with the review never handed off. It is not a round report: a run's
   `report archived` close and archive look at its round reports only.
 - **The leak check.** After the answering round the bridge reads the round's commit messages, the
-  pull request's title and body and the diff's added lines for the reviewer's id and label, the
-  finding ids and the words `reviewer`, `code review` and `review finding`. A hit puts a
+  pull request's title and body and the diff's added lines for every reviewer's id and label,
+  every finding id (as given, `F1`, and as shown, `A.F1`) and the words `reviewer`, `code
+  review` and `review finding`. A hit puts a
   `REVIEW LEAK: …` line at the top of that Inbox report; it blocks nothing.
-- **In the JSON.** A reviewed run carries `reviewer`, `reviewer_label`, `review_focus`, status
+- **In the JSON.** Every run carries `reviewers` (the ids, in order; `[]` when none) and
+  `reviewers_source` (`explicit`, `default` or `none`; a record from before 0.213.0 serves what it
+  must have been). A reviewed run carries `reviewer` (the first reviewer's id) and
+  `reviewer_label` (every label joined with ` + `, `Codex + GLM 5`), as strings exactly as
+  before, `review_focus`, status
   `reviewing` while its review runs (counted as `moving`), and `reviews[]`: `n`, `reviewer`,
   `reviewer_label`, `origin` (`start` or `request`), `status` (`running`, `ready`, `handed_off`,
   `answered`, `failed`, `dropped`), `head`, `base`, `path` (where the note is now), `findings`

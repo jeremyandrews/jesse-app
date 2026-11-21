@@ -215,8 +215,11 @@ pub struct DevJobArgs {
     /// `host: "studio"`: a draft by its path, run as a free run `s-<file stem>`.
     pub draft: Option<String>,
     pub again: Option<bool>,
-    /// `host: "studio"`: a registry model that reviews the run before it finishes.
-    pub reviewer: Option<String>,
+    /// `host: "studio"`: who reviews the run before it finishes: a registry id, a list of at
+    /// most three, or `"none"`. Absent: the draft's, else `[hostrun] default_reviewers`.
+    pub reviewer: Option<crate::hostrun::review::ReviewerArg>,
+    /// `host: "studio"`: `reviewer`'s list spelling; refused beside it.
+    pub reviewers: Option<Vec<String>>,
     /// `host: "studio"`, with `reviewer`: what the reviewer should look at most closely.
     pub review_focus: Option<String>,
 }
@@ -230,8 +233,9 @@ pub enum StartPlan {
     Studio {
         kind: crate::hostrun::StartKind,
         again: bool,
-        /// A reviewed run's reviewer (a registry id), checked when the run is created.
-        reviewer: Option<String>,
+        /// Who reviews the run (ids, or `none`), checked when the run is created; `None` is the
+        /// draft's, else the bridge's default.
+        reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
     },
 }
@@ -257,7 +261,17 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                     "strand, item_id, draft and again apply only with host \"studio\"".into(),
                 );
             }
-            if args.reviewer.is_some() || args.review_focus.is_some() {
+            // The cluster has no review path: `[hostrun] default_reviewers` does not apply to
+            // it, `none` is accepted and changes nothing, and a reviewer by name is refused.
+            let reviewer = crate::hostrun::review::merge_spellings(
+                args.reviewer.clone(),
+                args.reviewers.clone(),
+            )?;
+            let off = matches!(
+                crate::hostrun::review::choose(reviewer.as_ref()),
+                Ok(crate::hostrun::review::ReviewerChoice::Off)
+            );
+            if (reviewer.is_some() && !off) || args.review_focus.is_some() {
                 return Err(
                     "reviewer and review_focus apply only with host \"studio\": the cluster's \
                      runs are not reviewed"
@@ -289,12 +303,12 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 }
             }
             let again = args.again.unwrap_or(false);
-            let reviewer = args
-                .reviewer
-                .as_deref()
-                .map(str::trim)
-                .filter(|r| !r.is_empty())
-                .map(str::to_string);
+            let reviewer = crate::hostrun::review::merge_spellings(
+                args.reviewer.clone(),
+                args.reviewers.clone(),
+            )?;
+            // Its shape now; whether the registry knows each id when the run is created.
+            crate::hostrun::review::choose(reviewer.as_ref())?;
             let review_focus = args.review_focus.clone();
             let repo = match args.repo.as_deref().map(str::trim) {
                 None => None,
@@ -2366,12 +2380,17 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              loose draft local/scratch, and a free prompt local/<branch_slug>. The cluster \
              refuses local/<name>. It returns a run_id; the report lands in \
              Inbox/<date>-run-<run_id>.md. A second start of an item that is still queued, \
-             running, paused or needs Jeremy is refused unless again is true. On the Studio, \
-             reviewer (a model id from the model picker: a Codex, Fireworks, local or Claude \
-             model) makes it a reviewed run: when the run reports, that model reads its diff \
-             read only, the run's own session checks each finding and fixes what holds, and only \
-             then is the pull request marked ready (and merged if the prompt said so) and Jeremy \
-             told. A draft may name one as devjob-reviewer:."
+             running, paused or needs Jeremy is refused unless again is true. On the Studio \
+             every run is a reviewed run unless it says otherwise: when the run reports, a second \
+             model reads its diff read only, the run's own session checks each finding and fixes \
+             what holds, and only then is the pull request marked ready (and merged if the prompt \
+             said so) and Jeremy told. With no reviewer named the bridge's default reviewers \
+             (Codex) review it, and a default reviewer that is down does not stop the run: it \
+             goes on unreviewed and its report says so. reviewer names the reviewer instead (a \
+             model id from the model picker: a Codex, Fireworks, local or Claude model), or a \
+             list of up to three that review at once and are answered in one round, or \"none\" \
+             for no review. A draft may say the same as devjob-reviewer:. The cluster's runs \
+             are never reviewed."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
             props.insert(
@@ -2408,12 +2427,17 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             props.insert(
                 "reviewer".into(),
                 json!({ "type": "string",
-                        "description": "host studio: a model id, exactly as the model picker names it, that reviews the run read only before it finishes; an unknown or unhealthy one is refused" }),
+                        "description": "host studio: who reviews the run read only before it finishes: a model id exactly as the model picker names it, or \"none\" for no review (several: reviewers). Absent: the draft's devjob-reviewer:, else the bridge's default reviewers. A named one that is unknown or unhealthy is refused" }),
+            );
+            props.insert(
+                "reviewers".into(),
+                json!({ "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3,
+                        "description": "host studio: up to three model ids, no repeats, that review at once and are answered in one round; [\"none\"] is no review. Pass reviewer or reviewers, not both" }),
             );
             props.insert(
                 "review_focus".into(),
                 json!({ "type": "string",
-                        "description": "host studio, with reviewer: what the reviewer should look at most closely, at most 4 KiB" }),
+                        "description": "host studio: what the reviewers should look at most closely, at most 4 KiB; refused when nothing reviews the run" }),
             );
         }
         start["inputSchema"]["required"] = json!([]);
@@ -2467,18 +2491,22 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             model picker names: Codex, a Fireworks model, a local model, another Claude) reads \
             the run's diff from its merge base with main to its head, read only, in a worktree \
             of its own, and the bridge writes its findings to \
-            Inbox/<date>-run-<run_id>-review-<n>.md. With auto_reply (the default) the findings \
-            then go to the run's own session as its next round, which checks each one, fixes \
-            only what holds and reports a verdict table. Refused for a run that is queued, \
-            running, paused or already being reviewed, one with no commits beyond its base, and \
-            a model that is unknown or unhealthy.",
+            Inbox/<date>-run-<run_id>-review-<n>.md. reviewer may be a list of up to three: \
+            they review at once, each writes its own note, and their findings are handed off \
+            together. With auto_reply (the default) the findings then go to the run's own \
+            session as its next round, one round however many reviewed, which checks each one, \
+            fixes only what holds and reports a verdict table. Refused for a run that is \
+            queued, running, paused or already being reviewed, one with no commits beyond its \
+            base, and a model that is unknown or unhealthy.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["run_id", "reviewer"],
+            "required": ["run_id"],
             "properties": {
                 "run_id": { "type": "string" },
-                "reviewer": { "type": "string", "description": "a model id, exactly as the model picker names it" },
+                "reviewer": { "type": "string", "description": "a model id, exactly as the model picker names it (several: reviewers)" },
+                "reviewers": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3,
+                               "description": "up to three model ids, no repeats, reviewed at once and handed off together; pass reviewer or reviewers, not both" },
                 "focus": { "type": "string", "description": "what to look at most closely, at most 4 KiB" },
                 "auto_reply": { "type": "boolean", "description": "hand the findings to the run's session at once; default true" },
             },
@@ -2544,7 +2572,9 @@ struct CloseArgs {
 #[serde(deny_unknown_fields)]
 struct ReviewArgs {
     run_id: String,
-    reviewer: String,
+    /// One id, or (also accepted here) a list.
+    reviewer: Option<crate::hostrun::review::ReviewerArg>,
+    reviewers: Option<Vec<String>>,
     focus: Option<String>,
     auto_reply: Option<bool>,
 }
@@ -2575,6 +2605,8 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "resume_at": r.resume_at,
         "closed_reason": r.closed_reason,
         "reviewer": r.reviewer,
+        "reviewers": r.reviewer_ids(),
+        "reviewers_source": r.source_of_reviewers(),
         "reviews": crate::hostrun::reviews_json(r, None),
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
@@ -2587,7 +2619,7 @@ impl DevJobs {
         &self,
         kind: crate::hostrun::StartKind,
         again: bool,
-        reviewer: Option<String>,
+        reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
     ) -> Value {
         let Some(svc) = self.studio.get() else {
@@ -2758,10 +2790,20 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
+                    let who = match crate::hostrun::review::merge_spellings(
+                        args.reviewer,
+                        args.reviewers,
+                    ) {
+                        Ok(Some(w)) => w,
+                        Ok(None) => {
+                            return Ok(error_result("reviewer is missing: name a model id"))
+                        }
+                        Err(e) => return Ok(error_result(&e)),
+                    };
                     match svc
                         .request_review_and_start(
                             args.run_id.trim(),
-                            &args.reviewer,
+                            who,
                             args.focus,
                             args.auto_reply.unwrap_or(true),
                         )

@@ -35,6 +35,8 @@
   "report_paths": [],
   "restart_resumed": false,
   "resume_at": "2026-11-11T23:38:59.000Z",
+  "reviewers": [],
+  "reviewers_source": "default",
   "rounds": [
     {
       "auto": null,

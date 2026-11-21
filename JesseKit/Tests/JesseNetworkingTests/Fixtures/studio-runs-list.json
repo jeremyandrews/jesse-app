@@ -60,6 +60,8 @@
       "report_paths": [],
       "restart_resumed": false,
       "resume_at": null,
+      "reviewers": [],
+      "reviewers_source": "default",
       "rounds": [
         {
           "auto": null,
@@ -125,6 +127,8 @@
       "report_paths": [],
       "restart_resumed": false,
       "resume_at": "2026-11-12T01:19:42.000Z",
+      "reviewers": [],
+      "reviewers_source": "default",
       "rounds": [
         {
           "auto": null,
@@ -192,6 +196,8 @@
       ],
       "restart_resumed": false,
       "resume_at": null,
+      "reviewers": [],
+      "reviewers_source": "default",
       "rounds": [
         {
           "auto": null,
@@ -259,6 +265,8 @@
       ],
       "restart_resumed": false,
       "resume_at": null,
+      "reviewers": [],
+      "reviewers_source": "default",
       "rounds": [
         {
           "auto": null,

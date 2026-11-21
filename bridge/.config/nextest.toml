@@ -1,0 +1,29 @@
+# cargo-nextest configuration for the bridge. See docs/testing.md.
+#
+# No `retries`, in any profile, on purpose: a test that fails once is a defect to root cause,
+# not something to rerun until it passes.
+
+[test-groups]
+# The HEIC transcode stages through `jesse-vision-*` directories in the SYSTEM temp dir, which
+# every test process shares, and `heic_transcode_leaves_no_temp_dir_behind` asserts that no new
+# one survives its call. Every test that transcodes a HEIC runs one at a time, so no other
+# process creates one while it counts. (Under plain `cargo test` the lib's two take
+# `HEIC_TEMP_LOCK` instead; nextest runs each test in its own process, where that lock cannot
+# reach.)
+heic-temp-dir = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/heic_transcode/) | test(/vision_transcodes_a_heic_photo/) | test(/the_vision_path_is_identical_on_both_harnesses/)'
+test-group = 'heic-temp-dir'
+
+# The profile CI runs (`--profile ci`). It inherits the default profile's overrides above.
+[profile.ci]
+fail-fast = false
+# Any test over 5 s is reported SLOW in the log. The job fails on a test over 10 s that is not
+# on `bridge/.config/slow-tests.txt` (checked from the JUnit report by `scripts/ci-guards.sh
+# --slow-tests`).
+slow-timeout = { period = "5s" }
+
+[profile.ci.junit]
+# target/nextest/ci/junit.xml
+path = "junit.xml"

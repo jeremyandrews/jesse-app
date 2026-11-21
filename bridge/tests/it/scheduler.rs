@@ -7,7 +7,7 @@
 //! filters, DST, the catch-up window) is unit-tested in `src/schedule.rs`; what is proved
 //! here is the RUNTIME: ordering, serialization, single flight, persistence, and that a
 //! scheduled turn really does land in the job store like any other.
-mod common;
+use crate::common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{Local, TimeZone};

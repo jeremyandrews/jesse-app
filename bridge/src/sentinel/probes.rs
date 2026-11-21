@@ -1129,7 +1129,8 @@ mod tests {
         assert_eq!(u["error"], json!("timed out"));
     }
 
-    #[tokio::test]
+    // Paused clock: the hung probe's hour and the 20 ms ceiling are both virtual time.
+    #[tokio::test(start_paused = true)]
     async fn timed_degrades_a_hung_probe_to_unknown() {
         let hung = async {
             tokio::time::sleep(Duration::from_secs(3600)).await;

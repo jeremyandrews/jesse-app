@@ -24,7 +24,7 @@
 //! because it costs a live credential and real tokens. If codex-cli changes where it keeps
 //! rollouts, THAT test fails and these keep passing — which is why it exists and why a green
 //! CI run is not on its own a statement about a new CLI version.
-mod common;
+use crate::common;
 use common::*;
 use jesse_bridge::*;
 use std::path::{Path, PathBuf};

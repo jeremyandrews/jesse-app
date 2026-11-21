@@ -1,0 +1,4 @@
+# Tests allowed to run over 10 s in CI (the slow test check: `scripts/ci-guards.sh --slow-tests`).
+# One per line: `<binary id> <test name> | <measured CI time> | <reason>`, the name as nextest
+# prints it. A test earns a line only when its time is real work or the point of the test; a test
+# that waits for a timer moves to tokio's paused clock instead. See docs/testing.md.

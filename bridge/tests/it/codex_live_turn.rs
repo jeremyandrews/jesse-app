@@ -13,7 +13,7 @@
 //! `bridge/src/harness/mod.rs` describes the events THIS binary actually emits. Every event
 //! shape in that contract was read off a live stream, and a fixture asserting the same
 //! shapes would only prove the fixture was copied correctly.
-mod common;
+use crate::common;
 use common::*;
 use jesse_bridge::*;
 use std::sync::Arc;

@@ -10,6 +10,50 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/bridge/src"
 
+# --- `ci-guards.sh --slow-tests <junit.xml>`: THE SLOW TEST CHECK, run by CI after a nextest
+#     run instead of the source guards below. Fails when any test ran over SLOW_TEST_LIMIT
+#     seconds (default 10) and is not on bridge/.config/slow-tests.txt, whose lines read
+#     `<binary id> <test name> | <measured time> | <reason>`, as nextest prints a test.
+#     See docs/testing.md for how a test earns a line there.
+if [ "${1:-}" = "--slow-tests" ]; then
+  junit="${2:?usage: ci-guards.sh --slow-tests <junit.xml>}"
+  exec python3 -I - "$junit" "$ROOT/bridge/.config/slow-tests.txt" "${SLOW_TEST_LIMIT:-10}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+junit, allow_path, limit = sys.argv[1], sys.argv[2], float(sys.argv[3])
+allowed = {}
+for raw in open(allow_path, encoding="utf-8"):
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) != 3 or not all(parts):
+        sys.exit(f"slow-tests.txt: a line needs `name | time | reason`: {line!r}")
+    allowed[parts[0]] = parts[1]
+
+slow, over = [], []
+for case in ET.parse(junit).iter("testcase"):
+    name = f"{case.get('classname')} {case.get('name')}"
+    took = float(case.get("time") or 0)
+    if took > limit:
+        (slow if name in allowed else over).append((took, name))
+
+for took, name in sorted(slow, reverse=True):
+    print(f"slow but allowlisted ({allowed[name]} recorded): {took:6.1f}s  {name}")
+if over:
+    print(f"SLOW TEST CHECK FAILED: these tests ran over {limit:g}s and are not on "
+          "bridge/.config/slow-tests.txt:")
+    for took, name in sorted(over, reverse=True):
+        print(f"  {took:6.1f}s  {name}")
+    print("Make the test fast (a paused clock for timer logic, an event instead of a sleep, "
+          "a shared fixture), or, if its time is the point, add a line with the measured time "
+          "and the reason. See docs/testing.md.")
+    sys.exit(1)
+print(f"slow test check: no test over {limit:g}s outside the allowlist.")
+PY
+fi
+
 fail=0
 flag() {
   # $1 = human description, remaining args = matching lines
@@ -434,6 +478,62 @@ if [ -d "$SPEECH" ]; then
   fi
 else
   flag "bridge/src/speech is missing, so the audio egress guard has nothing to check" "$SPEECH"
+fi
+
+# 8) (QT1) TESTS STAY FAST. Two source checks; the timing checks are CI steps (see
+#    docs/testing.md).
+#
+#    a) The integration tests are ONE binary, `bridge/tests/it/main.rs`. A new top level
+#       `bridge/tests/*.rs` would be another binary linked against the whole crate on every
+#       test build. Only the files that need a process of their own may live there, and
+#       `tests/it/main.rs` says why each one does.
+TOP_LEVEL_TEST_EXCEPTIONS="gateway.rs gateway_fds.rs hostrun_env_file.rs"
+for f in "$ROOT"/bridge/tests/*.rs; do
+  [ -e "$f" ] || continue
+  case " $TOP_LEVEL_TEST_EXCEPTIONS " in
+    *" $(basename "$f") "*) ;;
+    *) flag "a new top level test file; add it as a module under bridge/tests/it/ (declare it in tests/it/main.rs) instead. See docs/testing.md" \
+         "${f#"$ROOT"/}" ;;
+  esac
+done
+
+#    b) No new real sleep of a second or more in test code. A test that waits for a timer
+#       (a tick, a backoff, a debounce) runs on tokio's paused clock and `advance`s it; a test
+#       that waits for a process or a server waits for the event (the line, the file, the
+#       message). Test code is every file under bridge/tests/, every `tests.rs` or `tests/`
+#       module under bridge/src/, and the rest of any other src file from its first
+#       `#[cfg(test)]` on. A literal duration is checked; a named constant is not.
+#       The allowlist below names each existing sleep (file, the line's text) and why it stays.
+SLEEP_ALLOWLIST="$(cat <<'ALLOW'
+bridge/src/sentinel/probes.rs|tokio::time::sleep(Duration::from_secs(3600)).await;|the hung probe: a future that never finishes, on the paused clock (virtual time)
+bridge/tests/it/devjob_live.rs|tokio::time::sleep(Duration::from_secs(15)).await;|devjob-live feature, live cluster: polls a real Job that takes minutes
+bridge/tests/it/devjob_live.rs|tokio::time::sleep(Duration::from_secs(2)).await;|devjob-live feature, live cluster: polls for the cluster to delete leftover Jobs
+bridge/tests/it/hostrun_live.rs|tokio::time::sleep(Duration::from_secs(1)).await;|#[ignore]d live test: polls launchd, which has no event to wait on
+bridge/tests/it/hostrun_live.rs|tokio::time::sleep(Duration::from_secs(5)).await;|#[ignore]d live test: lets a real launchd job start before cancelling it
+bridge/tests/it/hostrun_live.rs|tokio::time::sleep(Duration::from_secs(27)).await;|#[ignore]d live test: outlasts the real cancel grace a launchd job is given
+bridge/tests/it/hostrun_review_live.rs|tokio::time::sleep(Duration::from_secs(5)).await;|#[ignore]d live test: polls a real reviewer turn
+ALLOW
+)"
+SLEEP_RE='sleep\((std::time::|tokio::time::)?Duration::from_(secs(_f32|_f64)?\([1-9]|millis\([1-9][0-9_]{3,}\))'
+sleep_hits=""
+while IFS= read -r f; do
+  rel="${f#"$ROOT"/}"
+  case "$rel" in
+    bridge/tests/*|*/tests.rs|*/tests/*) body="$(grep -nE "$SLEEP_RE" "$f" || true)" ;;
+    *) body="$(RE="$SLEEP_RE" awk '/#\[cfg\(test\)\]/ { t = 1 } t && $0 ~ ENVIRON["RE"] { print NR ":" $0 }' "$f")" ;;
+  esac
+  [ -n "$body" ] || continue
+  while IFS= read -r hit; do
+    text="$(printf '%s' "${hit#*:}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    case "$text" in //*) continue ;; esac
+    if ! printf '%s\n' "$SLEEP_ALLOWLIST" | grep -qF "$rel|$text|"; then
+      sleep_hits="$sleep_hits$rel:$hit"$'\n'
+    fi
+  done <<< "$body"
+done < <(find "$ROOT/bridge/src" "$ROOT/bridge/tests" -name '*.rs' -type f | sort)
+if [ -n "$sleep_hits" ]; then
+  flag "a real sleep of a second or more in test code; use tokio's paused clock (start_paused = true, tokio::time::advance) or wait for the event. See docs/testing.md" \
+    "$(printf '%s' "$sleep_hits" | sed '/^$/d; 2,$s/^/  /')"
 fi
 
 # 7) (Versioning) Mandatory version bumps. A change to a component's sources must

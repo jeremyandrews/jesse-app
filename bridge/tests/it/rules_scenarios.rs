@@ -34,7 +34,7 @@
 //! after a compaction. `the_compaction_pointer_rides_the_prompt_without_duplicating_the_core`
 //! asserts the pointer; nothing here asserts that a compacted model obeys it.
 
-mod common;
+use crate::common;
 use common::*;
 use jesse_bridge::rules;
 use jesse_bridge::*;
@@ -1368,12 +1368,12 @@ fn the_default_reference_renders_both_documents_byte_for_byte() {
     let w = World::new("golden");
     assert_eq!(
         w.read("CLAUDE.md"),
-        include_str!("fixtures/rules/golden/CLAUDE.md"),
+        include_str!("../fixtures/rules/golden/CLAUDE.md"),
         "CLAUDE.md no longer renders the bytes the previous release published"
     );
     assert_eq!(
         w.read("AGENTS.md"),
-        include_str!("fixtures/rules/golden/AGENTS.md"),
+        include_str!("../fixtures/rules/golden/AGENTS.md"),
         "AGENTS.md no longer renders the bytes the previous release published"
     );
 }

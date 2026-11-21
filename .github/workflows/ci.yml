@@ -176,13 +176,20 @@ jobs:
       # One cache per job (`shared-key`), so the release profile is never evicted by the test
       # or lint profile. Saved only by runs on main; a pull request restores main's and never
       # writes its own, so a branch cannot crowd main's entries out of the repository's quota.
-      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
-      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
-      # index changes. So the first cargo command changed the index under itself and every later
-      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
-      # before any build, leaves `git status` nothing to write.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
       - name: Refresh the git index
-        run: git update-index -q --refresh || true
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -279,13 +286,20 @@ jobs:
           cargo clippy --version
 
       # Its own cache: see `bridge-build`.
-      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
-      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
-      # index changes. So the first cargo command changed the index under itself and every later
-      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
-      # before any build, leaves `git status` nothing to write.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
       - name: Refresh the git index
-        run: git update-index -q --refresh || true
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -360,13 +374,20 @@ jobs:
           cargo clippy --version
 
       # Its own cache: see `bridge-build`.
-      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
-      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
-      # index changes. So the first cargo command changed the index under itself and every later
-      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
-      # before any build, leaves `git status` nothing to write.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
       - name: Refresh the git index
-        run: git update-index -q --refresh || true
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -469,13 +490,20 @@ jobs:
           cargo clippy --version
 
       # Its own cache: see `bridge-build`.
-      # `build.rs` stamps the commit into the binary and asks `git status` whether the tree is
-      # dirty, which REWRITES a freshly checked out index; it also tells cargo to rerun when the
-      # index changes. So the first cargo command changed the index under itself and every later
-      # one rebuilt the whole crate (100 s of the first `Test` step). Refreshing the index once,
-      # before any build, leaves `git status` nothing to write.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
       - name: Refresh the git index
-        run: git update-index -q --refresh || true
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

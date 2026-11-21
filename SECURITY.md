@@ -3095,6 +3095,7 @@ leak check reads for every reviewer's name and every finding id. More reviewers 
 the posture nor the loop: one review cycle and one answering round per run, however many
 reviewed. A default reviewer that is down never blocks a run (it goes on unreviewed and says so
 on its report's first line); a reviewer named explicitly that is down is refused at the start.
+Every reviewer of a cycle reads the same base and head, read once before any of them starts.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or

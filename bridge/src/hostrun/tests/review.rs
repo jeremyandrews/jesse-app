@@ -331,9 +331,14 @@ fn the_hand_off_reply_is_exactly_this() {
         ensure_unreviewed("Done.\n", "it timed out."),
         "UNREVIEWED: it timed out\n\nDone.\n"
     );
+    // One the session wrote is replaced by the recorded reason, whatever it said.
     assert_eq!(
-        ensure_unreviewed("UNREVIEWED: down\n\nDone.\n", "x"),
-        "UNREVIEWED: down\n\nDone.\n"
+        ensure_unreviewed("UNREVIEWED: down\n\nDone.\n", "it timed out"),
+        "UNREVIEWED: it timed out\n\nDone.\n"
+    );
+    assert_eq!(
+        ensure_unreviewed("UNREVIEWED:\nDone.\n", "it timed out"),
+        "UNREVIEWED: it timed out\n\nDone.\n"
     );
 }
 

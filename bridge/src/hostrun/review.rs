@@ -748,16 +748,42 @@ pub fn partly_reason(failed: &[String]) -> String {
         .join("; ")
 }
 
-/// `PARTLY REVIEWED: <id>: <reason>` as the report's first line, unless the session already
-/// wrote one.
+/// `PARTLY REVIEWED: <id>: <reason>` as the report's first line, exactly as recorded: one the
+/// session wrote is replaced.
 pub fn ensure_partly(report: &str, failed: &[String]) -> String {
-    if super::first_line(report).starts_with(PARTLY_REVIEWED_PREFIX) {
-        return report.to_string();
-    }
-    format!(
-        "{PARTLY_REVIEWED_PREFIX} {}\n\n{report}",
-        partly_reason(failed)
+    with_first_line(
+        report,
+        PARTLY_REVIEWED_PREFIX,
+        &format!("{PARTLY_REVIEWED_PREFIX} {}", partly_reason(failed)),
     )
+}
+
+/// `report` with `line` as its first line, exactly. A first line the session already wrote
+/// with `prefix` is replaced, so what it says is the bridge's record, not the session's.
+pub fn with_first_line(report: &str, prefix: &str, line: &str) -> String {
+    let body = report.trim_start_matches('\u{feff}').trim_start();
+    let rest = if super::first_line(body).starts_with(prefix) {
+        body.split_once('\n')
+            .map(|(_, r)| r)
+            .unwrap_or("")
+            .trim_start_matches(['\n', '\r'])
+    } else {
+        body
+    };
+    format!("{line}\n\n{rest}")
+}
+
+/// `report` with `line` second, right after its first line: how a warning joins a report whose
+/// first line is a status that must stay first.
+pub fn with_second_line(report: &str, line: &str) -> String {
+    let body = report.trim_start_matches('\u{feff}').trim_start();
+    match body.split_once('\n') {
+        Some((first, rest)) => format!(
+            "{first}\n\n{line}\n\n{}",
+            rest.trim_start_matches(['\n', '\r'])
+        ),
+        None => format!("{body}\n\n{line}\n"),
+    }
 }
 
 /// The reply a reviewed run gets when its review could not run, exactly: [`UNREVIEWED_TEXT`]
@@ -779,12 +805,14 @@ pub fn one_line(reason: &str) -> String {
     t.trim_end_matches('.').to_string()
 }
 
-/// `UNREVIEWED: <reason>` as the report's first line, unless the session already wrote one.
+/// `UNREVIEWED: <reason>` as the report's first line, exactly as recorded: one the session wrote
+/// is replaced.
 pub fn ensure_unreviewed(report: &str, reason: &str) -> String {
-    if super::first_line(report).starts_with(UNREVIEWED_PREFIX) {
-        return report.to_string();
-    }
-    format!("{UNREVIEWED_PREFIX} {}\n\n{report}", one_line(reason))
+    with_first_line(
+        report,
+        UNREVIEWED_PREFIX,
+        &format!("{UNREVIEWED_PREFIX} {}", one_line(reason)),
+    )
 }
 
 // ---- THE NOTE --------------------------------------------------------------------------------

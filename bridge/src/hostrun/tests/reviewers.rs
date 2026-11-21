@@ -143,6 +143,25 @@ fn a_draft_names_one_reviewer_a_list_or_none() {
         read("devjob-reviewer:\n- none\n").unwrap(),
         Some(vec!["none"].into())
     );
+    // Blank lines and comments in a block list are skipped, never the end of it.
+    assert_eq!(
+        read("devjob-reviewer:\n  # switched off for now\n  - none\n").unwrap(),
+        Some(vec!["none"].into()),
+        "a comment above `- none` still switches the review off"
+    );
+    assert_eq!(
+        read("devjob-reviewer:\n  - codex-write\n\n  - glm  # second\ndevjob-host: studio\n")
+            .unwrap(),
+        Some(vec!["codex-write", "glm"].into())
+    );
+    assert_eq!(
+        read("devjob-reviewer: none # no review\n").unwrap(),
+        Some("none".into())
+    );
+    assert_eq!(
+        read("devjob-reviewer: [codex-write, glm] # both\n").unwrap(),
+        Some(vec!["codex-write", "glm"].into())
+    );
     assert_eq!(
         read("devjob-reviewer: [a, b, c, d]\n").unwrap_err(),
         "d.md: devjob-reviewer names 4 models; the most is 3"
@@ -478,7 +497,7 @@ async fn a_default_reviewer_that_is_down_starts_the_run_unreviewed_and_its_repor
     assert_eq!(served["reviewers"], json!([]));
     assert_eq!(served["reviewers_source"], "default");
 
-    // Two defaults, one down: the other reviews, and the final report is PARTLY REVIEWED.
+    // Two defaults, one down: the run is unreviewed, not reviewed by the other one.
     let reviewer = FakeReviewer::answering(vec![Ok(TWO_FINDINGS.into())]);
     let s2 = Scratch::new();
     vault_fixture(&s2);
@@ -486,39 +505,25 @@ async fn a_default_reviewer_that_is_down_starts_the_run_unreviewed_and_its_repor
     let r = default_rig(&s2, reviewer.clone(), &["codex-write", "nobody"]);
     r.svc.start(item("GD5")).await.unwrap();
     let rec = r.svc.get("GD5").unwrap();
-    assert_eq!(rec.reviewers, ["codex-write"]);
+    assert!(rec.reviewers.is_empty() && rec.reviewer.is_none());
+    assert_eq!(rec.reviewers_skipped.len(), 1);
+    let prompt = std::fs::read_to_string(r.svc.settings.run_dir("GD5").join(PROMPT_MD)).unwrap();
+    assert!(!prompt.contains(REVIEWED_RUN_SENTENCE));
     commit(&r, "GD5", "src/calc.rs", "a\n", "Add calc");
-    finish_round(&r, "GD5", 0, Some("Implemented.\n"), "");
+    finish_round(&r, "GD5", 0, Some("Merged.\n"), "");
     settle(&r).await;
     let rec = r.svc.get("GD5").unwrap();
-    let failed = [
-        "nobody: default reviewer unavailable: reviewer \"nobody\" is not a model this bridge knows"
-            .to_string(),
-    ];
-    assert_eq!(
-        rec.round().unwrap().text.as_deref(),
-        Some(
-            handoff_reply_cycle(
-                &[Block {
-                    tag: None,
-                    label: "Codex",
-                    id: "codex-write",
-                    findings: findings()
-                }],
-                &failed,
-                Some(HANDOFF_FINISH)
-            )
-            .as_str()
-        )
-    );
-    finish_round(&r, "GD5", 0, Some("Done.\n"), "");
-    settle(&r).await;
-    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Reported);
+    assert_eq!(rec.rounds.len(), 1, "one implementing round, no hand off");
+    assert!(rec.reviews.is_empty());
+    assert!(lock(&reviewer.calls).is_empty(), "no reviewer was asked");
     assert!(
-        report_body(&s2, &rec, 1)
-            .starts_with(&format!("PARTLY REVIEWED: {}\n\nDone.\n", failed[0])),
+        report_body(&s2, &rec, 0).starts_with(
+            "UNREVIEWED: default reviewer nobody unavailable: reviewer \"nobody\" is not a \
+             model this bridge knows\n\nMerged.\n"
+        ),
         "{}",
-        report_body(&s2, &rec, 1)
+        report_body(&s2, &rec, 0)
     );
 }
 
@@ -962,4 +967,74 @@ fn the_cluster_ignores_the_default_and_refuses_a_named_reviewer() {
             "{e}"
         );
     }
+}
+
+#[test]
+fn the_partly_reviewed_line_is_always_the_recorded_one() {
+    let failed = ["glm: it timed out".to_string()];
+    assert_eq!(
+        ensure_partly("Done.\n", &failed),
+        "PARTLY REVIEWED: glm: it timed out\n\nDone.\n"
+    );
+    for wrote in [
+        "PARTLY REVIEWED:\n\nDone.\n",
+        "PARTLY REVIEWED: something else\nDone.\n",
+    ] {
+        assert_eq!(
+            ensure_partly(wrote, &failed),
+            "PARTLY REVIEWED: glm: it timed out\n\nDone.\n",
+            "{wrote:?}"
+        );
+    }
+    assert_eq!(
+        with_second_line("PARTLY REVIEWED: x\n\nDone.\n", "REVIEW LEAK: y"),
+        "PARTLY REVIEWED: x\n\nREVIEW LEAK: y\n\nDone.\n"
+    );
+}
+
+#[tokio::test]
+async fn a_leak_of_the_failed_reviewer_in_a_partly_reviewed_run_keeps_the_status_first() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let reviewer = FakeReviewer::per_reviewer(
+        vec![
+            ("codex-write", vec![Ok(TWO_FINDINGS.into())]),
+            (
+                "glm",
+                vec![Err("the reviewer failed (504): timed out".into())],
+            ),
+        ],
+        None,
+    );
+    let r = review_rig(&s, reviewer);
+    r.svc
+        .start(with_reviewer(
+            item("GD5"),
+            vec!["codex-write", "glm"].into(),
+        ))
+        .await
+        .unwrap();
+    commit(&r, "GD5", "src/calc.rs", "a\n", "Add calc");
+    finish_round(&r, "GD5", 0, Some("Implemented.\n"), "");
+    settle(&r).await;
+    let head = commit(
+        &r,
+        "GD5",
+        "src/calc.rs",
+        "b\n",
+        "Retry what glm could not check",
+    );
+    finish_round(&r, "GD5", 0, Some("Done.\n"), "");
+    settle(&r).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Reported, "a leak blocks nothing");
+    let leak = format!("REVIEW LEAK: commit {} message: glm", &head[..7]);
+    let body = report_body(&s, &rec, 1);
+    assert!(
+        body.starts_with(&format!(
+            "PARTLY REVIEWED: glm: the reviewer failed (504): timed out\n\n{leak}\n\nDone.\n"
+        )),
+        "{body}"
+    );
 }

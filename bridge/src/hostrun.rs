@@ -1453,7 +1453,7 @@ fn front_matter_reviewer(src: &str) -> Option<review::ReviewerArg> {
     })?;
     let value = body[at]
         .split_once(':')
-        .map(|(_, v)| v.trim())
+        .map(|(_, v)| strip_comment(v))
         .unwrap_or("");
     if let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
         let items: Vec<String> = inner
@@ -1467,17 +1467,37 @@ fn front_matter_reviewer(src: &str) -> Option<review::ReviewerArg> {
         let v = unquote(value);
         return (!v.is_empty()).then_some(review::ReviewerArg::One(v));
     }
-    let items: Vec<String> = body[at + 1..]
-        .iter()
-        .map_while(|l| {
-            l.trim_start()
-                .strip_prefix('-')
-                .filter(|_| l.starts_with([' ', '\t', '-']))
-        })
-        .map(unquote)
-        .filter(|s| !s.is_empty())
-        .collect();
+    // A block list: one `- id` a line, blank lines and comments between them skipped, ending at
+    // the next key. A key with nothing under it is no setting at all.
+    let mut items: Vec<String> = Vec::new();
+    for l in &body[at + 1..] {
+        let t = strip_comment(l);
+        if t.is_empty() {
+            continue;
+        }
+        match t.strip_prefix('-') {
+            Some(item) if l.starts_with([' ', '\t', '-']) => {
+                let v = unquote(item);
+                if !v.is_empty() {
+                    items.push(v);
+                }
+            }
+            _ => break,
+        }
+    }
     (!items.is_empty()).then_some(review::ReviewerArg::Many(items))
+}
+
+/// A front matter value without its YAML comment (` # …`, or a line that is only one), trimmed.
+fn strip_comment(v: &str) -> &str {
+    let t = v.trim();
+    if t.starts_with('#') {
+        return "";
+    }
+    match t.find(" #").or_else(|| t.find("\t#")) {
+        Some(i) => t[..i].trim(),
+        None => t,
+    }
 }
 
 /// Whether a draft's front matter sends it to the Studio.
@@ -2296,6 +2316,14 @@ struct Picked {
     source: &'static str,
 }
 
+/// The base, head and diff one review cycle reads ([`HostRuns::cycle_range`]).
+#[derive(Debug, Clone)]
+struct ReviewRange {
+    base: String,
+    head: String,
+    diff: String,
+}
+
 /// What a finished reviewer gave: the range it read, its findings and the note.
 #[derive(Debug, Clone)]
 struct ReviewDone {
@@ -2496,8 +2524,8 @@ impl HostRuns {
 
     /// Who reviews a new run, in order: the start's `reviewer`, else the draft's
     /// `devjob-reviewer:`, else `[hostrun] default_reviewers`. `none` is no review. An id the
-    /// start or the draft named is checked and refused when it cannot review; a default one
-    /// that cannot is skipped, with why, and the run goes on without it.
+    /// start or the draft named is checked and refused when it cannot review; when any default
+    /// one cannot, the run goes on unreviewed, recording which and why.
     fn resolve_reviewers(
         &self,
         start: Option<&review::ReviewerArg>,
@@ -2539,6 +2567,11 @@ impl HostRuns {
                             reason,
                         }),
                     }
+                }
+                // A default that cannot review leaves the run unreviewed, not reviewed by the
+                // rest of the list: the run goes on as an ordinary one and says why.
+                if !picked.skipped.is_empty() {
+                    picked.infos.clear();
                 }
             }
         }
@@ -3719,20 +3752,40 @@ impl HostRuns {
             .cloned()
             .collect();
         if !running.is_empty() {
-            // Every reviewer at once: one task each, all awaited before anything is recorded.
-            let tasks: Vec<_> = running
-                .iter()
-                .map(|v| {
-                    let (this, dir, rec, v) = (self.clone(), dir.clone(), rec.clone(), v.clone());
-                    tokio::spawn(async move { this.perform_review(&dir, &rec, &v).await })
-                })
-                .collect();
+            // One range for the whole cycle, read before any reviewer starts, so every reviewer
+            // reads the same base and head whatever moves meanwhile. Then every reviewer at
+            // once: one task each, all awaited before anything is recorded.
             let mut results: Vec<(u32, Result<ReviewDone, String>)> = Vec::new();
-            for (v, t) in running.iter().zip(tasks) {
-                let res = t
-                    .await
-                    .unwrap_or_else(|e| Err(format!("the review task failed: {e}")));
-                results.push((v.n, res));
+            match self.cycle_range(&dir, &rec).await {
+                Err(e) => {
+                    for v in &running {
+                        results.push((v.n, Err(e.clone())));
+                    }
+                }
+                Ok(range) => {
+                    let range = Arc::new(range);
+                    let tasks: Vec<_> = running
+                        .iter()
+                        .map(|v| {
+                            let (this, dir, rec, v, range) = (
+                                self.clone(),
+                                dir.clone(),
+                                rec.clone(),
+                                v.clone(),
+                                range.clone(),
+                            );
+                            tokio::spawn(
+                                async move { this.perform_review(&dir, &rec, &v, range).await },
+                            )
+                        })
+                        .collect();
+                    for (v, t) in running.iter().zip(tasks) {
+                        let res = t
+                            .await
+                            .unwrap_or_else(|e| Err(format!("the review task failed: {e}")));
+                        results.push((v.n, res));
+                    }
+                }
             }
             let now = rfc(now_ms());
             let mut applied = false;
@@ -3870,8 +3923,38 @@ impl HostRuns {
         }
     }
 
-    /// The reviewer's part: its range and diff, its own detached worktree at the head, the
-    /// answer (retried once when the schema refuses it), the worktree checked untouched and
+    /// The range a review cycle reads, once for every reviewer in it: the default branch
+    /// fetched, the merge base and head of the run's worktree, and the diff between them.
+    async fn cycle_range(&self, dir: &Path, rec: &RunRecord) -> Result<ReviewRange, String> {
+        let worktree = dir.join(WORKTREE_DIR);
+        if !worktree.exists() {
+            return Err("the run's worktree was removed, so there is nothing to read".into());
+        }
+        let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+        let base_sha = rec.base_sha.clone();
+        let default_branch = rec.default_branch.clone();
+        tokio::task::spawn_blocking(move || {
+            let main_ref = if is_local_repo(&repo) {
+                git::LOCAL_DEFAULT_BRANCH.to_string()
+            } else {
+                let bare = git::bare_path(&root, &repo);
+                let fetched =
+                    git::lock_repo(&root, &repo).and_then(|_lock| git::fetch_default(&bare));
+                format!(
+                    "origin/{}",
+                    fetched.unwrap_or_else(|_| default_branch.unwrap_or_else(|| "main".into()))
+                )
+            };
+            let (base, head) = review::review_range(&worktree, &main_ref, base_sha.as_deref())?;
+            let diff = review::diff(&worktree, &base, &head)?;
+            Ok::<_, String>(ReviewRange { base, head, diff })
+        })
+        .await
+        .map_err(|e| format!("the review task failed: {e}"))?
+    }
+
+    /// The reviewer's part, on the cycle's one `range`: its own detached worktree at the head,
+    /// the answer (retried once when the schema refuses it), the worktree checked untouched and
     /// removed, and the note written. Touches nothing of the run but its directory's
     /// `review-<n>*` files and the Inbox note.
     async fn perform_review(
@@ -3879,6 +3962,7 @@ impl HostRuns {
         dir: &Path,
         rec: &RunRecord,
         v: &Review,
+        range: Arc<ReviewRange>,
     ) -> Result<ReviewDone, String> {
         let reviewer = self
             .reviewer
@@ -3891,35 +3975,14 @@ impl HostRuns {
             .get()
             .cloned()
             .ok_or_else(|| "nothing is attached to write the note".to_string())?;
-        let worktree = dir.join(WORKTREE_DIR);
-        if !worktree.exists() {
-            return Err("the run's worktree was removed, so there is nothing to read".into());
-        }
         let n = v.n;
         let review_wt = dir.join(format!("{}{n}", review::REVIEW_WORKTREE_PREFIX));
         let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
-        let base_sha = rec.base_sha.clone();
-        let default_branch = rec.default_branch.clone();
-        let (wt, rwt) = (worktree.clone(), review_wt.clone());
-        let (base, head, diff) = tokio::task::spawn_blocking(move || {
-            let main_ref = if is_local_repo(&repo) {
-                git::LOCAL_DEFAULT_BRANCH.to_string()
-            } else {
-                let bare = git::bare_path(&root, &repo);
-                let fetched =
-                    git::lock_repo(&root, &repo).and_then(|_lock| git::fetch_default(&bare));
-                format!(
-                    "origin/{}",
-                    fetched.unwrap_or_else(|_| default_branch.unwrap_or_else(|| "main".into()))
-                )
-            };
-            let (base, head) = review::review_range(&wt, &main_ref, base_sha.as_deref())?;
-            let diff = review::diff(&wt, &base, &head)?;
-            git::add_detached_worktree(&root, &repo, &rwt, &head)?;
-            Ok::<_, String>((base, head, diff))
-        })
-        .await
-        .map_err(|e| format!("the review task failed: {e}"))??;
+        let (base, head, diff) = (range.base.clone(), range.head.clone(), range.diff.clone());
+        let (rwt, h) = (review_wt.clone(), head.clone());
+        tokio::task::spawn_blocking(move || git::add_detached_worktree(&root, &repo, &rwt, &h))
+            .await
+            .map_err(|e| format!("the review task failed: {e}"))??;
         let section = std::fs::read_to_string(dir.join(SECTION_MD))
             .or_else(|_| std::fs::read_to_string(dir.join(PROMPT_MD)))
             .unwrap_or_default();
@@ -4305,18 +4368,18 @@ impl HostRuns {
     /// The leak check of an answering round: its new commit messages, the added lines of its
     /// diff (both from the head that was reviewed to the worktree's head), and the title and
     /// body of the run's pull requests, for [`review::leak_terms_all`] of every review of the
-    /// cycle that ran. Never blocks anything.
+    /// cycle, the ones that failed included (the hand off named them). Never blocks anything.
     async fn review_leaks(
         &self,
         dir: &Path,
         rec: &RunRecord,
-        ran: &[Review],
+        members: &[Review],
         report: &str,
     ) -> Vec<String> {
-        let Some(from) = ran.iter().find_map(|v| v.head.clone()) else {
+        let Some(from) = members.iter().find_map(|v| v.head.clone()) else {
             return Vec::new();
         };
-        let terms = review::leak_terms_all(ran);
+        let terms = review::leak_terms_all(members);
         let worktree = dir.join(WORKTREE_DIR);
         let forge = self.forge.clone();
         let url = pull_request_url(report);
@@ -4533,10 +4596,15 @@ impl HostRuns {
                 if !failed.is_empty() {
                     report = review::ensure_partly(&report, &failed);
                 }
-                leaks = self.review_leaks(&dir, &rec, &ran, &report).await;
+                leaks = self.review_leaks(&dir, &rec, &members, &report).await;
                 if let Some(line) = review::leak_line(&leaks) {
                     eprintln!("jesse-bridge: hostrun {run_id} round {}: {line}", round.n);
-                    report = format!("{line}\n\n{report}");
+                    // `PARTLY REVIEWED:` stays the first line; the leak follows it.
+                    report = if failed.is_empty() {
+                        format!("{line}\n\n{report}")
+                    } else {
+                        review::with_second_line(&report, &line)
+                    };
                 }
             }
         }

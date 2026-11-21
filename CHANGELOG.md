@@ -31,16 +31,20 @@ effect on the next bridge restart, with no config edit.
   repeats are refused.
 - **Named versus default.** A reviewer named explicitly that is unknown or unhealthy is refused
   before anything runs, as before. A default one does not refuse the run: the run goes on
-  without it, and its final report's first line is `UNREVIEWED: default reviewer <id>
-  unavailable: <reason>`. The run records `reviewers`, `reviewers_source` (`explicit`, `default`
+  unreviewed (even if other defaults could review), and its final report's first line is
+  `UNREVIEWED: default reviewer <id> unavailable: <reason>`. The run records `reviewers`, `reviewers_source` (`explicit`, `default`
   or `none`) and `reviewers_skipped`.
-- **Several reviewers, one cycle.** Every review runs at once, each in its own detached read only
-  worktree at the same head with the existing prompt, schema, retry and timeout, and each writes
+- **Several reviewers, one cycle.** The cycle's base, head and diff are read once; then every
+  review runs at once on them, each in its own detached read only worktree at that head with the existing prompt, schema, retry and timeout, and each writes
   its own note. Once all have finished or failed, one hand off carries every finding, one block
   per reviewer, ids prefixed with the reviewer's tag (`A.F1`, `B.F1`); exactly one answering
   round per run. Every review failed: the existing `UNREVIEWED:` path. Some failed: the rest are
-  handed off and the final report's first line is `PARTLY REVIEWED: <id>: <reason>`. The leak
-  check reads for every reviewer's id and label and every finding id.
+  handed off and the final report's first line is `PARTLY REVIEWED: <id>: <reason>`, with any
+  `REVIEW LEAK:` line after it. The bridge writes the `UNREVIEWED:` and `PARTLY REVIEWED:` lines
+  from its own record, replacing one the session wrote. The leak check reads for every
+  reviewer's id and label (failed ones too) and every finding id.
+- **Drafts.** A block list under `devjob-reviewer:` may hold blank lines and `#` comments; a
+  trailing comment on the value is ignored.
 - **Run JSON.** `reviewer` and `reviewer_label` stay strings (the first reviewer's id; every label
   joined with ` + `), so App 1.0 (224) decodes and shows them unchanged. Every run gains
   `reviewers` (ids) and `reviewers_source`. A new app wire fixture,

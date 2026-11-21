@@ -1069,10 +1069,10 @@ to, and the session that did the work judges what that model said.
   line) or `devjob-reviewer: none`. A reviewer named explicitly is checked before anything is
   created: a model the registry does not know, one not configured, one marked unhealthy, or one
   whose harness cannot give it a read only posture is refused, naming why. **A default reviewer
-  that cannot review does not refuse the run**: the run goes on without it (unreviewed, as an
-  ordinary run, when it was the only one) and its final report's first line is `UNREVIEWED:
-  default reviewer <id> unavailable: <reason>` (or, when another reviewer did review, `PARTLY
-  REVIEWED: <id>: default reviewer unavailable: <reason>`). The run records `reviewers`,
+  that cannot review does not refuse the run**: the run goes on unreviewed, as an ordinary run
+  (even when other default reviewers could have reviewed), and its finished report's first line
+  is `UNREVIEWED: default reviewer <id> unavailable: <reason>` (each such one, joined with
+  `; `). The run records `reviewers`,
   `reviewers_source` (`explicit`, `default` or `none`) and any `reviewers_skipped`.
 - **The cluster** has no review path: a cluster `devjob_start` never gets the default (no
   refusal, no review), `reviewer: "none"` changes nothing there, and a reviewer by name (and
@@ -1087,8 +1087,9 @@ to, and the session that did the work judges what that model said.
   local: merge into `main`). That answering round's report is the one Inbox report and the one
   push, with a link to the review note. Exactly one review cycle per reviewed run: later rounds are
   not reviewed again.
-- **Several reviewers, one cycle.** With more than one reviewer every review runs at once, each in
-  its own detached read only worktree at the same head (`review-<n>`), each with the same prompt,
+- **Several reviewers, one cycle.** With more than one reviewer the cycle's range (base, head and
+  diff) is read once, then every review runs at once on it, each in its own detached read only
+  worktree at that head (`review-<n>`), each with the same prompt,
   schema, retry and timeout, and each writes its own note. Their reviews are tagged `A`, `B`, `C`
   and every finding id is shown with its tag (`A.F1`, `B.F1`) in the notes, the hand off and the
   verdict table, so ids are unique across the hand off. Once every review has answered or failed
@@ -1100,7 +1101,8 @@ to, and the session that did the work judges what that model said.
 - **When the review cannot run** (the reviewer down, a timeout, an answer that fails the schema
   twice, a reviewer that changed its worktree), the run is handed off all the same with a reply
   saying the check could not run and why, and the report's first line is `UNREVIEWED: <reason>`
-  (the bridge puts it there if the session did not).
+  (the bridge writes that line from its own record, replacing one the session wrote). The same
+  holds for `PARTLY REVIEWED:`, and a `REVIEW LEAK:` line goes right after it, never above it.
 - **After the fact.** `devjob_review { run_id, reviewer, focus?, auto_reply? }` or `POST
   /jesse/runs/:id/review` (paired device token) reviews a finished Studio run's commits;
   `reviewer` is one id or a list of up to three (`reviewers` on the tool), which run as one cycle
@@ -1125,7 +1127,8 @@ to, and the session that did the work judges what that model said.
   closed or archived with the review never handed off. It is not a round report: a run's
   `report archived` close and archive look at its round reports only.
 - **The leak check.** After the answering round the bridge reads the round's commit messages, the
-  pull request's title and body and the diff's added lines for every reviewer's id and label,
+  pull request's title and body and the diff's added lines for every reviewer's id and label
+  (the ones whose review failed too),
   every finding id (as given, `F1`, and as shown, `A.F1`) and the words `reviewer`, `code
   review` and `review finding`. A hit puts a
   `REVIEW LEAK: …` line at the top of that Inbox report; it blocks nothing.

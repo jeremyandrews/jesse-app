@@ -16,9 +16,9 @@ CI both run it). See the "Versioning" section of `bridge/README.md`.
 
 ## [bridge 0.213.1] - 2026-11-21
 
-**Linux CI gates a pull request in a fraction of the time, with the same tests and the same
-assertions, and a CI enforced budget keeps it fast.** Tests and CI only: no bridge behavior or
-API changes, and nothing to restart.
+**Linux CI gates a pull request in about 3 to 5 minutes instead of 25, with the same tests and
+the same assertions, and a CI enforced budget keeps it fast.** Tests and CI only: no bridge
+behavior or API changes, and nothing to restart.
 
 - **Four bridge jobs at once.** The one `bridge` job ran its release build, both test builds,
   both clippy runs and coverage one after another. They are now `bridge-build` (release build
@@ -40,13 +40,15 @@ API changes, and nothing to restart.
 - **Fewer waits.** `writelock`'s `a_subagents_write_refreshes_the_same_conversations_baseline`
   was refused by the 30 s lock wait timing out, not by the compare-and-swap it is named for; the
   parent's edit now completes first, so the refusal is the compare-and-swap, at once. Three
-  timer-only tests run on tokio's paused clock (`test-util`, a dev-dependency feature).
+  timer-only tests run on tokio's paused clock (`test-util`, a dev-dependency feature). The
+  live dev-job tests are a nextest test group of one, as `SERIAL` made them in one process.
 - **Two flakes, root caused.** `heic_transcode_leaves_no_temp_dir_behind` counts staging dirs in
   the shared temp dir, so every HEIC transcode test is a nextest test group of one.
   `a_turn_that_omits_the_location_fields_is_unchanged` failed when its two turns straddled a
   minute; it now compares everything after the per turn clock line byte for byte.
 - **Kept fast.** A 5 s slow mark and a 10 s limit with an allowlist
-  (`bridge/.config/slow-tests.txt`), a wall clock budget on each test step, and two new
+  (`bridge/.config/slow-tests.txt`), a wall clock budget on each test step (93 s for the
+  feature tests, 27 s for the default feature `--lib` tests: measured plus 50 percent), and two new
   `scripts/ci-guards.sh` checks: no new top level `bridge/tests/*.rs`, and no new real sleep of
   a second or more in test code. See `docs/testing.md`.
 

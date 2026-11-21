@@ -54,7 +54,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: agent
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `--locked` for the same reason it is on the bridge's release build: the lock must be
       # the one that ships, not one CI quietly regenerated. See that step's comment.
@@ -111,7 +111,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: eval
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `--locked`, as on the other two builds — see the bridge's release step.
       - name: Build
@@ -189,7 +189,7 @@ jobs:
         with:
           workspaces: bridge
           shared-key: bridge-release
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The SERVING binary, built exactly as a deploy builds it: without
       # `containment-probe`. The probe prompts, the battery runner and its loopback
@@ -264,8 +264,9 @@ jobs:
     env:
       JESSE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
       # THE WALL CLOCK BUDGET for the `Test` step below (test execution only; the build is its
-      # own step). Set at the measured time plus 50 percent; see docs/testing.md before raising it.
-      TEST_BUDGET_SECS: 600
+      # own step). Measured at 62 s on this runner (PR #354), plus 50 percent; see docs/testing.md
+      # before raising it.
+      TEST_BUDGET_SECS: 93
     steps:
       - uses: actions/checkout@v7
 
@@ -291,7 +292,7 @@ jobs:
         with:
           workspaces: bridge
           shared-key: bridge-test
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Prebuilt binary. nextest runs every test in its own process, all of them at once, so
       # the suite takes as long as its slowest tests rather than the sum of its test binaries.
@@ -344,8 +345,9 @@ jobs:
       run:
         working-directory: bridge
     env:
-      # THE WALL CLOCK BUDGET for `Test (default features)`; see `bridge-test`.
-      TEST_BUDGET_SECS: 600
+      # THE WALL CLOCK BUDGET for `Test (default features)`: measured at 18 s (PR #354), plus 50
+      # percent; see `bridge-test` and docs/testing.md.
+      TEST_BUDGET_SECS: 27
     steps:
       - uses: actions/checkout@v7
 
@@ -371,7 +373,7 @@ jobs:
         with:
           workspaces: bridge
           shared-key: bridge-lint
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -480,7 +482,7 @@ jobs:
         with:
           workspaces: bridge
           shared-key: bridge-coverage
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.number == 354 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Prebuilt binaries (no from-source compile): the coverage tool and the runner it drives.
       - name: Install cargo-llvm-cov and cargo-nextest

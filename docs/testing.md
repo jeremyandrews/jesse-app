@@ -114,8 +114,8 @@ exceeded" error when they run over their budget. The budgets are the `TEST_BUDGE
 
 | CI step | Measured | Budget |
 |---|---|---|
-| `bridge-test` / Test (`cargo nextest run --features containment-probe`) | __TEST_MEASURED__ | __TEST_BUDGET__ s |
-| `bridge-lint` / Test (default features) (`cargo nextest run --lib`) | __LIB_MEASURED__ | __LIB_BUDGET__ s |
+| `bridge-test` / Test (`cargo nextest run --features containment-probe`) | 62 s | 93 s |
+| `bridge-lint` / Test (default features) (`cargo nextest run --lib`) | 18 s | 27 s |
 
 The build is its own step and is not in the budget.
 
@@ -138,6 +138,12 @@ still can:
   transcode stages through `jesse-vision-*` directories in the system temp dir, and
   `vision::tests::heic_transcode_leaves_no_temp_dir_behind` asserts that none survive. Every test
   that transcodes a HEIC is in the group, so no other process creates one while it counts.
+
+* **The `devjob-live` test group** (one at a time): the live dev-job tests drive one real
+  cluster namespace and each reports every finished Job in it, so two at once would see each
+  other's. In one process they take `SERIAL`.
+* `HEIC_TEMP_LOCK` (`src/vision.rs`) is the in-process form of the `heic-temp-dir` group, for
+  plain `cargo test`.
 
 A new test that needs one of these takes the lock or joins the group; prefer removing the shared
 resource (a temporary directory of its own, an ephemeral port) to either.

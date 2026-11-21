@@ -11,10 +11,17 @@
 # `HEIC_TEMP_LOCK` instead; nextest runs each test in its own process, where that lock cannot
 # reach.)
 heic-temp-dir = { max-threads = 1 }
+# The live dev-job tests (`devjob-live` feature, run by hand) drive ONE real cluster namespace
+# and assert on the Jobs in it. In one process they take `SERIAL`; here, one process at a time.
+devjob-live = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(/heic_transcode/) | test(/vision_transcodes_a_heic_photo/) | test(/the_vision_path_is_identical_on_both_harnesses/)'
 test-group = 'heic-temp-dir'
+
+[[profile.default.overrides]]
+filter = 'test(/^devjob_live::/)'
+test-group = 'devjob-live'
 
 # The profile CI runs (`--profile ci`). It inherits the default profile's overrides above.
 [profile.ci]

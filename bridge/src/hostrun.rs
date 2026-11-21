@@ -719,6 +719,10 @@ pub struct Cleanup {
     pub worktree_removed: Option<String>,
     /// The push before a paused run's worktree goes.
     pub worktree_warned: Option<String>,
+    /// The push before a finished run's `extra/` goes, a day before `keep_days` is up. Left out
+    /// of the JSON until set, so the app's wire fixtures do not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_warned: Option<String>,
     pub stream_gzipped: Option<String>,
     /// The branch was seen on origin once, so its absence later means it was deleted.
     #[serde(default)]
@@ -986,6 +990,24 @@ fn ms_opt(s: &Option<String>) -> Option<u64> {
     s.as_deref().and_then(ms_of)
 }
 
+/// The `extra/` warning was recorded for this finish (a reply that finishes the run again
+/// moves `finished_at` past an older warning, which then no longer counts).
+fn extra_warned_since(rec: &RunRecord, fin: u64) -> bool {
+    ms_opt(&rec.cleanup.extra_warned).is_some_and(|w| w >= fin)
+}
+
+fn dir_has_entries(p: &Path) -> bool {
+    std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_some())
+}
+
+fn mark_artifacts_removed(dir: &Path, now: u64) {
+    let at = rfc(now);
+    let _ = update_run(dir, |r| {
+        r.cleanup.artifacts_removed = Some(at.clone());
+        r.cleanup.kept = false;
+    });
+}
+
 // ---- THE RUN DIRECTORY ---------------------------------------------------------------
 
 /// Read `run.json`.
@@ -1167,6 +1189,8 @@ pub struct RunPlace<'a> {
     pub branch: &'a str,
     pub default_branch: &'a str,
     pub run_dir: &'a Path,
+    /// `keep_days`: how long after the run finishes its `extra/` is kept.
+    pub keep_days: u64,
     /// Ask for `[<run_id>]` at the start of the pull request title.
     pub pr_title_tag: bool,
     /// A reviewed run: [`review::REVIEWED_RUN_SENTENCE`] (or its local form) follows the rules.
@@ -1183,11 +1207,12 @@ pub fn place_paragraph(p: &RunPlace) -> String {
              host, user or directory to work in, this worktree replaces it: do not change \
              machines, do not stop because the host differs, and do not work in any other \
              checkout of this repository. If the work needs another repository, clone it under \
-             {}/{EXTRA_DIR}/ and work there.",
+             {}/{EXTRA_DIR}/ and work there. {}",
             p.repo,
             p.branch,
             p.default_branch,
-            p.run_dir.display()
+            p.run_dir.display(),
+            extra_sentence(p)
         );
     }
     format!(
@@ -1195,10 +1220,26 @@ pub fn place_paragraph(p: &RunPlace) -> String {
          {}, cut from origin/{}. Wherever the prompt above names another machine, host, user or \
          directory to work in, this worktree replaces it: do not change machines, do not stop \
          because the host differs, and do not work in any other checkout of this repository. If \
-         the work needs another repository, clone it under {}/{EXTRA_DIR}/ and work there.",
+         the work needs another repository, clone it under {}/{EXTRA_DIR}/ and work there. {}",
         p.repo,
         p.branch,
         p.default_branch,
+        p.run_dir.display(),
+        extra_sentence(p)
+    )
+}
+
+/// The sentence after the `extra/` instruction: that folder is temporary.
+fn extra_sentence(p: &RunPlace) -> String {
+    let days = if p.keep_days == 1 {
+        "1 day".to_string()
+    } else {
+        format!("{} days", p.keep_days)
+    };
+    format!(
+        "Everything under {}/{EXTRA_DIR}/ is deleted {days} after the run finishes, so anything \
+         a later run or a person needs must be pushed to its remote or written outside the run \
+         directory before the run ends.",
         p.run_dir.display()
     )
 }
@@ -2787,6 +2828,7 @@ impl HostRuns {
                         branch: &rec.branch,
                         default_branch: &default_branch,
                         run_dir: dir,
+                        keep_days: self.settings.keep_days,
                         pr_title_tag: self.settings.pr_title_tag(&rec.repo),
                         reviewed: rec.reviewer.is_some(),
                     },
@@ -4470,26 +4512,11 @@ impl HostRuns {
 
     // ---- CLEANUP ---------------------------------------------------------------------
 
-    /// Remove a run's build artifacts: `target/`, the DerivedData folders it recorded and, once
-    /// the run is no longer live, `extra/` (the further repositories it cloned).
-    fn remove_artifacts(&self, dir: &Path, rec: &RunRecord, now: u64) -> u64 {
-        let mut freed = 0;
-        let mut tiers = vec![TARGET_DIR];
-        if !rec.status.is_live() {
-            tiers.push(EXTRA_DIR);
-        }
-        for tier in tiers {
-            let p = dir.join(tier);
-            if p.exists() {
-                freed += sys::tree_bytes(&p);
-                if let Err(e) = sys::remove_tree(&p) {
-                    eprintln!(
-                        "jesse-bridge: hostrun {}: could not remove {tier}/: {e}",
-                        rec.run_id
-                    );
-                }
-            }
-        }
+    /// Remove a run's build output: `target/` and the DerivedData folders it recorded. Both are
+    /// rebuildable, so they go as soon as the run is done with. `extra/` is not build output:
+    /// see [`Self::remove_extra`].
+    fn remove_build_output(&self, dir: &Path, rec: &RunRecord, now: u64) -> u64 {
+        let mut freed = self.remove_tier(dir, rec, TARGET_DIR);
         for d in &rec.derived_data {
             let p = PathBuf::from(d);
             // Only a folder directly under the DerivedData root, which the run recorded.
@@ -4504,21 +4531,58 @@ impl HostRuns {
                 );
             }
         }
-        let at = rfc(now);
-        let _ = update_run(dir, |r| {
-            r.cleanup.artifacts_removed = Some(at.clone());
-            r.cleanup.kept = false;
-        });
+        mark_artifacts_removed(dir, now);
         freed
     }
 
-    fn has_artifacts(&self, dir: &Path, rec: &RunRecord) -> bool {
+    /// Remove a run's `extra/` (the further repositories and outputs it made). Only for a run
+    /// that is not live, `keep_days` after it finished, and (when the folder holds anything)
+    /// after [`Cleanup::extra_warned`] was recorded on an earlier pass.
+    fn remove_extra(&self, dir: &Path, rec: &RunRecord, now: u64) -> u64 {
+        if rec.status.is_live() {
+            return 0;
+        }
+        let freed = self.remove_tier(dir, rec, EXTRA_DIR);
+        eprintln!("jesse-bridge: hostrun {}: extra/ removed", rec.run_id);
+        mark_artifacts_removed(dir, now);
+        freed
+    }
+
+    fn remove_tier(&self, dir: &Path, rec: &RunRecord, tier: &str) -> u64 {
+        let p = dir.join(tier);
+        if !p.exists() {
+            return 0;
+        }
+        let freed = sys::tree_bytes(&p);
+        if let Err(e) = sys::remove_tree(&p) {
+            eprintln!(
+                "jesse-bridge: hostrun {}: could not remove {tier}/: {e}",
+                rec.run_id
+            );
+        }
+        freed
+    }
+
+    fn has_build_output(&self, dir: &Path, rec: &RunRecord) -> bool {
         dir.join(TARGET_DIR).exists()
-            || (!rec.status.is_live() && dir.join(EXTRA_DIR).exists())
             || rec.derived_data.iter().any(|d| {
                 Path::new(d).parent() == Some(self.settings.derived_data_root.as_path())
                     && Path::new(d).exists()
             })
+    }
+
+    /// Whether a finished run's `extra/` may be removed now, and if not, why.
+    fn extra_due(&self, rec: &RunRecord, now: u64) -> Result<(), &'static str> {
+        let Some(fin) = ms_opt(&rec.finished_at) else {
+            return Err("no finish time");
+        };
+        if now.saturating_sub(fin) < self.settings.keep_days * DAY_MS {
+            return Err("within keep_days of finishing");
+        }
+        if !extra_warned_since(rec, fin) {
+            return Err("not warned yet");
+        }
+        Ok(())
     }
 
     /// Remove a run's worktree and its local branch.
@@ -4580,7 +4644,8 @@ impl HostRuns {
         }
     }
 
-    /// The hourly cleanup. Build artifacts go early, worktrees later, run directories never.
+    /// The hourly cleanup. Build output goes early, worktrees later, `extra/` only `keep_days`
+    /// after the run finished (a day after a warning push), run directories never.
     pub fn cleanup(&self, now: u64) -> Vec<Effect> {
         let mut effects = Vec::new();
         lock(&self.house).last_cleanup_ms = Some(now);
@@ -4595,11 +4660,32 @@ impl HostRuns {
             let age = now.saturating_sub(fin);
             let past_keep = age >= self.settings.keep_days * DAY_MS;
             let wt = dir.join(WORKTREE_DIR);
-            let artifacts = self.has_artifacts(&dir, &rec);
+            let artifacts = self.has_build_output(&dir, &rec);
             let terminal = rec.status.is_terminal();
             let gone = terminal && (artifacts || wt.exists()) && self.merged_or_gone(&dir, &rec);
             if artifacts && (gone || past_keep) {
-                self.remove_artifacts(&dir, &rec, now);
+                self.remove_build_output(&dir, &rec, now);
+            }
+            // extra/ holds work that is not in the branch: only keep_days counts, never a merge.
+            let extra = dir.join(EXTRA_DIR);
+            if !rec.status.is_live() && extra.exists() {
+                if !dir_has_entries(&extra) {
+                    if past_keep {
+                        self.remove_extra(&dir, &rec, now);
+                    }
+                } else if extra_warned_since(&rec, fin) {
+                    if past_keep {
+                        self.remove_extra(&dir, &rec, now);
+                    }
+                } else if age.saturating_add(DAY_MS) >= self.settings.keep_days * DAY_MS {
+                    let at = rfc(now);
+                    let _ = update_run(&dir, |r| r.cleanup.extra_warned = Some(at.clone()));
+                    effects.push(Effect::Push {
+                        title: "Run extra/ removed".into(),
+                        body: format!("{}: extra/ is removed in about a day", rec.run_id),
+                        run_id: rec.run_id.clone(),
+                    });
+                }
             }
             if wt.exists() {
                 if terminal && (gone || past_keep) {
@@ -4645,9 +4731,10 @@ impl HostRuns {
     }
 
     /// When the runs together exceed `max_total_gb`, or free space is under `min_free_gb`, remove
-    /// build artifacts of finished runs oldest first, then worktrees of reported, failed and
-    /// cancelled runs oldest first, until both hold. Never a running or queued run, nor a paused
-    /// run's worktree.
+    /// build output of finished runs oldest first, then worktrees of reported, failed and
+    /// cancelled runs oldest first, then `extra/` of runs the cleanup would remove it from now
+    /// (past `keep_days`, warned), until both hold. Never a running or queued run, nor a paused
+    /// run's worktree, nor `extra/` of a run within `keep_days` of finishing.
     pub fn space_pass(&self, now: u64) {
         let _gate = lock(&self.gate);
         self.space_pass_locked(now);
@@ -4676,8 +4763,8 @@ impl HostRuns {
                 if !over(total) {
                     break;
                 }
-                if self.has_artifacts(dir, rec) {
-                    let f = self.remove_artifacts(dir, rec, now);
+                if self.has_build_output(dir, rec) {
+                    let f = self.remove_build_output(dir, rec, now);
                     total = total.saturating_sub(f);
                     freed += f;
                 }
@@ -4691,6 +4778,32 @@ impl HostRuns {
                     total = total.saturating_sub(f);
                     freed += f;
                 }
+            }
+            // extra/ last, and only where the cleanup itself would remove it now.
+            let mut kept: Vec<String> = Vec::new();
+            for (dir, rec) in &finished {
+                if !over(total) {
+                    break;
+                }
+                if rec.status.is_live() || !dir.join(EXTRA_DIR).exists() {
+                    continue;
+                }
+                match self.extra_due(rec, now) {
+                    Ok(()) => {
+                        let f = self.remove_extra(dir, rec, now);
+                        total = total.saturating_sub(f);
+                        freed += f;
+                    }
+                    Err(why) => kept.push(format!("{} ({why})", rec.run_id)),
+                }
+            }
+            if over(total) && !kept.is_empty() {
+                eprintln!(
+                    "jesse-bridge: hostrun SPACE PASS still over the limit; kept extra/ of {}: \
+                     extra/ goes only keep_days ({}) after a run finishes, after a warning",
+                    kept.join(", "),
+                    self.settings.keep_days
+                );
             }
             eprintln!(
                 "jesse-bridge: hostrun SPACE PASS freed {} (runs now hold {})",

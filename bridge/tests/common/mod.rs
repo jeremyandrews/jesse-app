@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 // The one way a test writes a script it will spawn, shared with the crate's unit tests.
 #[path = "../../src/testutil/executable.rs"]
-mod executable;
+pub mod executable;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 pub use executable::write_executable;

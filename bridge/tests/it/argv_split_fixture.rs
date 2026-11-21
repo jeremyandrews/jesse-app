@@ -256,7 +256,7 @@
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.
-mod common;
+use crate::common;
 
 use jesse_bridge::*;
 use serde_json::{json, Value};

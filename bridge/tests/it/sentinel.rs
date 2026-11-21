@@ -34,10 +34,9 @@ use jesse_bridge::sentinel::{
 };
 use serde_json::{json, Value};
 
-// The one way a test writes a script it will spawn (the ETXTBSY race is described there).
-#[path = "../src/testutil/executable.rs"]
-mod executable;
-use executable::write_executable;
+// The one way a test writes a script it will spawn (the ETXTBSY race is described in
+// `src/testutil/executable.rs`, which `tests/common` loads once for the whole binary).
+use crate::common::executable::write_executable;
 
 const BRIDGE_TOKEN: &str = "bridge-token-aaaaaaaaaaaaaaaa";
 const SENTINEL_TOKEN: &str = "sentinel-token-bbbbbbbbbbbbbb";

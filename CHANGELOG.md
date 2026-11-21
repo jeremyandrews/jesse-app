@@ -14,6 +14,45 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.213.1] - 2026-11-21
+
+**Linux CI gates a pull request in about 3 to 5 minutes instead of 25, with the same tests and
+the same assertions, and a CI enforced budget keeps it fast.** Tests and CI only: no bridge
+behavior or API changes, and nothing to restart.
+
+- **Four bridge jobs at once.** The one `bridge` job ran its release build, both test builds,
+  both clippy runs and coverage one after another. They are now `bridge-build` (release build
+  `--locked`, `cargo audit`, gitleaks, the source guards), `bridge-test` (the
+  `containment-probe` tests with Postgres), `bridge-lint` (the default feature `--lib` tests,
+  both clippy runs, `cargo fmt`) and `bridge-coverage`. Same commands, flags and 1.100.0
+  toolchain.
+- **Coverage is off the gate.** Report only as before, it runs on pushes to `main` and on a
+  manual dispatch of `ci.yml`, under `cargo llvm-cov nextest` without `--test-threads=1`.
+- **A cache that hits.** `Swatinem/rust-cache@v2` in every Rust job, one key per job, saved only
+  by runs on `main`.
+- **cargo-nextest.** Every `cargo test` step is `cargo nextest run` with the same features, plus
+  `cargo test --doc` where doc tests ran. `tests/hostrun_env_file.rs` (no harness) now answers
+  `--list`, so nextest can run it.
+- **One integration binary.** The files under `bridge/tests/` are modules of
+  `bridge/tests/it/main.rs`; test names gain the module as a prefix
+  (`integration::a_turn_that_omits_the_location_fields_is_unchanged`). `gateway.rs`,
+  `gateway_fds.rs` and `hostrun_env_file.rs` stay their own binaries, each for a stated reason.
+- **Fewer waits.** `writelock`'s `a_subagents_write_refreshes_the_same_conversations_baseline`
+  was refused by the 30 s lock wait timing out, not by the compare-and-swap it is named for; the
+  parent's edit now completes first, so the refusal is the compare-and-swap, at once. Three
+  timer-only tests run on tokio's paused clock (`test-util`, a dev-dependency feature). The
+  live dev-job tests are a nextest test group of one, as `SERIAL` made them in one process.
+- **Two flakes, root caused.** `heic_transcode_leaves_no_temp_dir_behind` counts staging dirs in
+  the shared temp dir, so every HEIC transcode test is a nextest test group of one.
+  `a_turn_that_omits_the_location_fields_is_unchanged` failed when its two turns straddled a
+  minute; it now compares everything after the per turn clock line byte for byte.
+- **Kept fast.** A 5 s slow mark and a 10 s limit with an allowlist
+  (`bridge/.config/slow-tests.txt`), a wall clock budget on each test step (93 s for the
+  feature tests, 41 s for the default feature `--lib` tests: the slowest of four CI runs plus 50
+  percent), and two new
+  `scripts/ci-guards.sh` checks: no new top level `bridge/tests/*.rs`, and no new real sleep of
+  a second or more in test code. See `docs/testing.md`.
+
 ## [bridge 0.213.0] - 2026-11-21
 
 **A Studio run is reviewed by a second model unless it says not to: Codex reviews by default, a

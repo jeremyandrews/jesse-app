@@ -12,7 +12,7 @@
 //! provider works, not that the driver is neutral. The double returns a fixed string, which
 //! is the only way to assert that the string comes back unchanged.
 
-mod common;
+use crate::common;
 
 use jesse_bridge::*;
 use std::future::Future;

@@ -2,7 +2,7 @@
 //! `tower::ServiceExt::oneshot`, no socket bound. These drive the same
 //! `app()` the running server uses.
 #![allow(clippy::collapsible_if)]
-mod common;
+use crate::common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::*;
@@ -2705,6 +2705,21 @@ async fn a_turn_that_omits_the_location_fields_is_unchanged() {
         r#"{"mode":"ask","text":"what is on Today.md?","location_context":"","location_context_requested":false,"location_context_unavailable":false}"#,
     )
     .await;
+    // The first line is the clock (`Current date/time: ... 13:06 CET`), stamped per turn to the
+    // minute, so two turns that straddle a minute boundary differ there and nowhere else: under
+    // a fully parallel run the two captures can be seconds apart. Everything after it, which is
+    // everything the location channel can touch, is still compared byte for byte.
+    let split = |p: &str| -> (String, String) {
+        let (clock, rest) = p
+            .split_once('\n')
+            .expect("a prompt with more than one line");
+        assert!(
+            clock.starts_with("Current date/time: "),
+            "the prompt opens with its clock line: {clock}"
+        );
+        (clock.to_string(), rest.to_string())
+    };
+    let ((_, old), (_, new)) = (split(&old), split(&new));
     assert_eq!(old, new, "an omitted channel is byte-for-byte an empty one");
 }
 
@@ -7827,7 +7842,7 @@ async fn a_session_already_owned_is_never_reassigned_to_another_conversation() {
 // the same file the parser's unit tests use, so the endpoint and the parser
 // are asserted against one grammar.
 
-const FIX_TODAY_MD: &str = include_str!("fixtures/today/full.md");
+const FIX_TODAY_MD: &str = include_str!("../fixtures/today/full.md");
 
 /// A vault containing the day file, and an AppState pointed at it.
 fn today_state() -> (AppState, std::path::PathBuf) {

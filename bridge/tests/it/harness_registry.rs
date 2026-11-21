@@ -5,7 +5,7 @@
 //! unowned-transcript scan, skipped by the GC sweep, and skipped by the resume existence
 //! check — while its conversations still live in the registry, still list, still resolve a
 //! resume, and hydrate to an EMPTY history with a `200` rather than an error.
-mod common;
+use crate::common;
 use axum::http::StatusCode;
 use common::*;
 use jesse_bridge::*;

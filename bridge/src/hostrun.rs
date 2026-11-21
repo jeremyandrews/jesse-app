@@ -4669,11 +4669,8 @@ impl HostRuns {
             // extra/ holds work that is not in the branch: only keep_days counts, never a merge.
             let extra = dir.join(EXTRA_DIR);
             if !rec.status.is_live() && extra.exists() {
-                if !dir_has_entries(&extra) {
-                    if past_keep {
-                        self.remove_extra(&dir, &rec, now);
-                    }
-                } else if extra_warned_since(&rec, fin) {
+                // An empty extra/ needs no warning.
+                if !dir_has_entries(&extra) || extra_warned_since(&rec, fin) {
                     if past_keep {
                         self.remove_extra(&dir, &rec, now);
                     }

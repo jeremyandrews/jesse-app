@@ -14,6 +14,45 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.213.0] - 2026-11-21
+
+**A Studio run is reviewed by a second model unless it says not to: Codex reviews by default, a
+run can name a different reviewer or up to three, and a run can switch the review off.** Takes
+effect on the next bridge restart, with no config edit.
+
+- **A default.** `[hostrun] default_reviewers`, a list of registry ids, defaults in code to
+  `["codex-write"]`. `default_reviewers = []` turns the default off for the whole bridge.
+- **Per run.** `reviewer` on `devjob_start`, `POST /jesse/runs`, `devjob_review` and `POST
+  /jesse/runs/:id/review` takes a string or a list of strings; `reviewers` is the list spelling
+  on the two starts and on `devjob_review` (both at once is refused). The tool schemas advertise
+  `reviewer` as a string and `reviewers` as the list, so no harness meets a `oneOf`. `devjob-reviewer:` front matter takes one id, a
+  YAML list (flow or block) or `none`. In order: `none` (or `["none"]`) means no review, an
+  explicit id or list is used exactly, otherwise the default applies. At most 3 reviewers;
+  repeats are refused.
+- **Named versus default.** A reviewer named explicitly that is unknown or unhealthy is refused
+  before anything runs, as before. A default one does not refuse the run: the run goes on
+  unreviewed (even if other defaults could review), and its final report's first line is
+  `UNREVIEWED: default reviewer <id> unavailable: <reason>`. The run records `reviewers`, `reviewers_source` (`explicit`, `default`
+  or `none`) and `reviewers_skipped`.
+- **Several reviewers, one cycle.** The cycle's base, head and diff are read once; then every
+  review runs at once on them, each in its own detached read only worktree at that head with the existing prompt, schema, retry and timeout, and each writes
+  its own note. Once all have finished or failed, one hand off carries every finding, one block
+  per reviewer, ids prefixed with the reviewer's tag (`A.F1`, `B.F1`); exactly one answering
+  round per run. Every review failed: the existing `UNREVIEWED:` path. Some failed: the rest are
+  handed off and the final report's first line is `PARTLY REVIEWED: <id>: <reason>`, with any
+  `REVIEW LEAK:` line after it. The bridge writes the `UNREVIEWED:` and `PARTLY REVIEWED:` lines
+  from its own record, replacing one the session wrote. The leak check reads for every
+  reviewer's id and label (failed ones too) and every finding id.
+- **Drafts.** A block list under `devjob-reviewer:` may hold blank lines and `#` comments; a
+  trailing comment on the value is ignored.
+- **Run JSON.** `reviewer` and `reviewer_label` stay strings (the first reviewer's id; every label
+  joined with ` + `), so App 1.0 (224) decodes and shows them unchanged. Every run gains
+  `reviewers` (ids) and `reviewers_source`. A new app wire fixture,
+  `studio-run-two-reviews-served.json`, pins a run with two `reviews[]` entries, and a JesseKit
+  test decodes it.
+- **The cluster** still has no review path: a cluster `devjob_start` ignores `default_reviewers`,
+  `reviewer: "none"` changes nothing there, and a reviewer by name is refused as before.
+
 ## [bridge 0.212.0] - 2026-11-21
 
 **A Studio run's `extra/` folder (the further repositories and outputs it made) now survives until

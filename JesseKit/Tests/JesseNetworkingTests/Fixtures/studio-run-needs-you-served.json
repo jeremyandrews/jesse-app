@@ -39,6 +39,8 @@
   ],
   "restart_resumed": false,
   "resume_at": null,
+  "reviewers": [],
+  "reviewers_source": "default",
   "rounds": [
     {
       "auto": null,

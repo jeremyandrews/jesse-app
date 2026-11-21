@@ -227,6 +227,10 @@ pub struct HostRunToml {
     /// How long one reviewer answer may take, in minutes. Default
     /// [`review::DEFAULT_REVIEW_TIMEOUT_MINUTES`].
     pub review_timeout_minutes: Option<u64>,
+    /// Who reviews a Studio run that names no reviewer and does not say `none`: registry ids,
+    /// at most [`review::MAX_REVIEWERS`]. Default [`review::DEFAULT_REVIEWERS`]; `[]` turns the
+    /// default off for the whole bridge.
+    pub default_reviewers: Option<Vec<String>>,
 }
 
 /// Where the running [`HostRuns`] lives once `main` has built it.
@@ -277,6 +281,8 @@ pub struct HostRunSettings {
     pub local_checkout_root: PathBuf,
     /// How long one reviewer answer may take, in minutes.
     pub review_timeout_minutes: u64,
+    /// Who reviews a run that names no reviewer ([`HostRunToml::default_reviewers`]).
+    pub default_reviewers: Vec<String>,
     pub service: HostRunSlot,
     /// `<state_dir>/attribution`: the bridge's git hooks and Claude Code settings, which every
     /// round's agent is pointed at ([`crate::attribution`]). `None` without a state dir.
@@ -370,6 +376,12 @@ impl HostRunSettings {
             review_timeout_minutes: t
                 .review_timeout_minutes
                 .unwrap_or(review::DEFAULT_REVIEW_TIMEOUT_MINUTES),
+            default_reviewers: t.default_reviewers.unwrap_or_else(|| {
+                review::DEFAULT_REVIEWERS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            }),
             service: HostRunSlot::default(),
             attribution_dir: None,
         }
@@ -530,6 +542,19 @@ impl HostRunSettings {
         }
         if self.review_timeout_minutes == 0 {
             out.push("[hostrun] review_timeout_minutes must be at least 1".into());
+        }
+        // `[]` is allowed (no default review); `["none"]` would be the same thing said
+        // ambiguously, and is refused with the rest.
+        if !self.default_reviewers.is_empty() {
+            let arg = review::ReviewerArg::Many(self.default_reviewers.clone());
+            match review::choose(Some(&arg)) {
+                Ok(review::ReviewerChoice::Ids(_)) => {}
+                Ok(_) => out.push(
+                    "[hostrun] default_reviewers: write [] for no default review, not \"none\""
+                        .into(),
+                ),
+                Err(e) => out.push(format!("[hostrun] default_reviewers: {e}")),
+            }
         }
         let lcr = &self.local_checkout_root;
         if !lcr.is_absolute() {
@@ -809,13 +834,28 @@ pub struct RunRecord {
     /// [`ARCHIVED_REPORT_ARCHIVED`] or [`ARCHIVED_AGED`]. Set exactly with `archived_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_reason: Option<String>,
-    /// A REVIEWED run's reviewer: a registry id, from the start's `reviewer` or the draft's
-    /// `devjob-reviewer:`. Its implementing round is reviewed once before Jeremy hears of it.
+    /// A REVIEWED run's first reviewer: a registry id, from the start's `reviewer`, the
+    /// draft's `devjob-reviewer:` or `[hostrun] default_reviewers`. Its implementing round is
+    /// reviewed once before Jeremy hears of it. Every reviewer is in `reviewers`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
-    /// The reviewer's label when the run was started.
+    /// Every reviewer's label when the run was started, joined with ` + ` (`Codex + GLM 5`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_label: Option<String>,
+    /// Every reviewer, in order (since 0.213.0; before it, `reviewer` alone).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewers: Vec<String>,
+    /// Each reviewer's own label, beside `reviewers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_labels: Vec<String>,
+    /// Where the reviewers came from: [`review::SOURCE_EXPLICIT`] (the start or the draft),
+    /// [`review::SOURCE_DEFAULT`] or [`review::SOURCE_NONE`]. Absent before 0.213.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewers_source: Option<String>,
+    /// Default reviewers that could not review when the run was started, and why: the run went
+    /// on without them, and its final report's first line says so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewers_skipped: Vec<review::Skipped>,
     /// What the start asked the reviewer to look at most closely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_focus: Option<String>,
@@ -825,6 +865,36 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// Every reviewer of a reviewed run, in order: `reviewers`, or a 0.211.0 record's one
+    /// `reviewer`. Empty for a run that is not reviewed.
+    pub fn reviewer_ids(&self) -> Vec<String> {
+        if self.reviewers.is_empty() {
+            self.reviewer.clone().into_iter().collect()
+        } else {
+            self.reviewers.clone()
+        }
+    }
+
+    /// The label of the `i`th reviewer: `reviewer_labels`, or a 0.211.0 record's one label.
+    fn reviewer_label_of(&self, i: usize) -> String {
+        match self.reviewer_labels.get(i) {
+            Some(l) => l.clone(),
+            None if self.reviewer_labels.is_empty() && i == 0 => {
+                self.reviewer_label.clone().unwrap_or_default()
+            }
+            None => String::new(),
+        }
+    }
+
+    /// [`RunRecord::reviewers_source`], or for a record before 0.213.0 what it must have been.
+    pub fn source_of_reviewers(&self) -> &str {
+        match self.reviewers_source.as_deref() {
+            Some(s) => s,
+            None if self.reviewer.is_some() => review::SOURCE_EXPLICIT,
+            None => review::SOURCE_NONE,
+        }
+    }
+
     pub fn round(&self) -> Option<&Round> {
         self.rounds.last()
     }
@@ -1331,8 +1401,8 @@ pub struct StudioItem {
     pub prompt_path: String,
     pub repo: String,
     pub model: Option<String>,
-    /// The draft's `devjob-reviewer:`, when it names one.
-    pub reviewer: Option<String>,
+    /// The draft's `devjob-reviewer:`, when it has one: an id, a list, or `none`.
+    pub reviewer: Option<review::ReviewerArg>,
     /// The `## PROMPT` section, byte for byte.
     pub section: String,
 }
@@ -1340,13 +1410,93 @@ pub struct StudioItem {
 /// The front matter key that makes a draft's run a reviewed one.
 pub const REVIEWER_KEY: &str = "devjob-reviewer";
 
-/// A draft's `devjob-reviewer:`, checked to be the shape of a registry id. Whether the registry
-/// knows it is asked when the run is started.
-pub fn draft_reviewer(path: &str, src: &str) -> Result<Option<String>, String> {
-    match fm(src, REVIEWER_KEY) {
-        None => Ok(None),
-        Some(r) if review::valid_reviewer_id(&r) => Ok(Some(r)),
-        Some(r) => Err(format!("{path}: {REVIEWER_KEY} {r:?} is not a model id")),
+/// A draft's `devjob-reviewer:`: one id (`devjob-reviewer: codex-write`), a YAML list (flow,
+/// `[codex-write, glm]`, or block, one `- id` per line under the key), or `none`. Checked for
+/// shape ([`review::choose`]); whether the registry knows each id is asked when the run is
+/// started.
+pub fn draft_reviewer(path: &str, src: &str) -> Result<Option<review::ReviewerArg>, String> {
+    let Some(arg) = front_matter_reviewer(src) else {
+        return Ok(None);
+    };
+    match review::choose(Some(&arg)) {
+        Ok(_) => Ok(Some(arg)),
+        Err(e) => Err(format!(
+            "{path}: {REVIEWER_KEY} {}",
+            e.strip_prefix("reviewer ").unwrap_or(&e)
+        )),
+    }
+}
+
+/// One YAML scalar with one pair of surrounding quotes removed, trimmed.
+fn unquote(v: &str) -> String {
+    let v = v.trim();
+    ['"', '\'']
+        .iter()
+        .find_map(|q| v.strip_prefix(*q).and_then(|r| r.strip_suffix(*q)))
+        .unwrap_or(v)
+        .trim()
+        .to_string()
+}
+
+/// [`REVIEWER_KEY`] in a draft's front matter, as written: a scalar, a flow list or a block
+/// list. `None` when the key is absent or empty.
+fn front_matter_reviewer(src: &str) -> Option<review::ReviewerArg> {
+    let lines: Vec<&str> = src.lines().collect();
+    if lines.first().map(|l| l.trim()) != Some("---") {
+        return None;
+    }
+    let end = lines.iter().skip(1).position(|l| l.trim() == "---")? + 1;
+    let body = &lines[1..end];
+    let at = body.iter().position(|l| {
+        l.split_once(':')
+            .is_some_and(|(k, _)| k.trim() == REVIEWER_KEY && !l.starts_with([' ', '\t']))
+    })?;
+    let value = body[at]
+        .split_once(':')
+        .map(|(_, v)| strip_comment(v))
+        .unwrap_or("");
+    if let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        let items: Vec<String> = inner
+            .split(',')
+            .map(unquote)
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Some(review::ReviewerArg::Many(items));
+    }
+    if !value.is_empty() {
+        let v = unquote(value);
+        return (!v.is_empty()).then_some(review::ReviewerArg::One(v));
+    }
+    // A block list: one `- id` a line, blank lines and comments between them skipped, ending at
+    // the next key. A key with nothing under it is no setting at all.
+    let mut items: Vec<String> = Vec::new();
+    for l in &body[at + 1..] {
+        let t = strip_comment(l);
+        if t.is_empty() {
+            continue;
+        }
+        match t.strip_prefix('-') {
+            Some(item) if l.starts_with([' ', '\t', '-']) => {
+                let v = unquote(item);
+                if !v.is_empty() {
+                    items.push(v);
+                }
+            }
+            _ => break,
+        }
+    }
+    (!items.is_empty()).then_some(review::ReviewerArg::Many(items))
+}
+
+/// A front matter value without its YAML comment (` # …`, or a line that is only one), trimmed.
+fn strip_comment(v: &str) -> &str {
+    let t = v.trim();
+    if t.starts_with('#') {
+        return "";
+    }
+    match t.find(" #").or_else(|| t.find("\t#")) {
+        Some(i) => t[..i].trim(),
+        None => t,
     }
 }
 
@@ -1545,8 +1695,8 @@ pub struct StudioDraft {
     pub prompt_path: String,
     pub repo: String,
     pub model: Option<String>,
-    /// The draft's `devjob-reviewer:`, when it names one.
-    pub reviewer: Option<String>,
+    /// The draft's `devjob-reviewer:`, when it has one: an id, a list, or `none`.
+    pub reviewer: Option<review::ReviewerArg>,
     pub section: String,
     /// The file's stem as a branch slug: the run is `s-<slug>`.
     pub slug: String,
@@ -2158,6 +2308,22 @@ pub fn archive_note(notes_root: &Path, rel: &str) -> Option<String> {
     }
 }
 
+/// Who reviews a new run ([`HostRuns::resolve_reviewers`]).
+struct Picked {
+    infos: Vec<ReviewerInfo>,
+    /// Default reviewers that cannot review now.
+    skipped: Vec<review::Skipped>,
+    source: &'static str,
+}
+
+/// The base, head and diff one review cycle reads ([`HostRuns::cycle_range`]).
+#[derive(Debug, Clone)]
+struct ReviewRange {
+    base: String,
+    head: String,
+    diff: String,
+}
+
 /// What a finished reviewer gave: the range it read, its findings and the note.
 #[derive(Debug, Clone)]
 struct ReviewDone {
@@ -2199,9 +2365,9 @@ pub struct StartRequest {
     pub kind: StartKind,
     pub origin: String,
     pub again: bool,
-    /// A registry id: the run is a reviewed one ([`review`]). Wins over the draft's
-    /// `devjob-reviewer:`.
-    pub reviewer: Option<String>,
+    /// Who reviews the run ([`review`]): a registry id, a list of them, or `none`. Wins over
+    /// the draft's `devjob-reviewer:`; with neither, `[hostrun] default_reviewers` applies.
+    pub reviewer: Option<review::ReviewerArg>,
     /// What the reviewer should look at most closely; needs a reviewer.
     pub review_focus: Option<String>,
 }
@@ -2356,6 +2522,62 @@ impl HostRuns {
         let _ = self.reviewer.set(reviewer);
     }
 
+    /// Who reviews a new run, in order: the start's `reviewer`, else the draft's
+    /// `devjob-reviewer:`, else `[hostrun] default_reviewers`. `none` is no review. An id the
+    /// start or the draft named is checked and refused when it cannot review; when any default
+    /// one cannot, the run goes on unreviewed, recording which and why.
+    fn resolve_reviewers(
+        &self,
+        start: Option<&review::ReviewerArg>,
+        draft: Option<&review::ReviewerArg>,
+    ) -> Result<Picked, Refusal> {
+        let mut choice = review::choose(start).map_err(Refusal::Invalid)?;
+        if choice == review::ReviewerChoice::Unset {
+            choice = review::choose(draft).map_err(Refusal::Invalid)?;
+        }
+        let mut picked = Picked {
+            infos: Vec::new(),
+            skipped: Vec::new(),
+            source: review::SOURCE_DEFAULT,
+        };
+        match choice {
+            review::ReviewerChoice::Off => picked.source = review::SOURCE_NONE,
+            review::ReviewerChoice::Ids(ids) => {
+                picked.source = review::SOURCE_EXPLICIT;
+                for id in ids {
+                    let info = self.check_reviewer(&id).map_err(Refusal::Invalid)?;
+                    if picked.infos.iter().any(|x| x.id == info.id) {
+                        return Err(Refusal::Invalid(format!(
+                            "reviewer {:?} is named twice",
+                            info.id
+                        )));
+                    }
+                    picked.infos.push(info);
+                }
+            }
+            review::ReviewerChoice::Unset => {
+                for id in &self.settings.default_reviewers {
+                    match self.check_reviewer(id) {
+                        Ok(info) if !picked.infos.iter().any(|x| x.id == info.id) => {
+                            picked.infos.push(info)
+                        }
+                        Ok(_) => {}
+                        Err(reason) => picked.skipped.push(review::Skipped {
+                            reviewer: id.clone(),
+                            reason,
+                        }),
+                    }
+                }
+                // A default that cannot review leaves the run unreviewed, not reviewed by the
+                // rest of the list: the run goes on as an ordinary one and says why.
+                if !picked.skipped.is_empty() {
+                    picked.infos.clear();
+                }
+            }
+        }
+        Ok(picked)
+    }
+
     /// [`Reviewer::check`], or the refusal when no reviewer is attached.
     fn check_reviewer(&self, id: &str) -> Result<ReviewerInfo, String> {
         if !review::valid_reviewer_id(id.trim()) {
@@ -2492,27 +2714,16 @@ impl HostRuns {
                     )
                 }
             };
-        // A REVIEWED run: the reviewer is checked now, before anything is created, so an
-        // unknown or unhealthy id is refused rather than discovered after the implementing
-        // round. The start's own `reviewer` wins over the draft's.
+        // A REVIEWED run: the reviewers are resolved and checked now, before anything is
+        // created ([`HostRuns::resolve_reviewers`]).
         let focus = review::checked_focus(req.review_focus.as_deref())
             .map_err(|e| Refusal::Invalid(format!("review_{e}")))?;
-        let reviewer = match req
-            .reviewer
-            .as_deref()
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(str::to_string)
-            .or(draft_reviewer)
-        {
-            Some(id) => Some(self.check_reviewer(&id).map_err(Refusal::Invalid)?),
-            None if focus.is_some() => {
-                return Err(Refusal::Invalid(
-                    "review_focus needs a reviewer: pass reviewer too".into(),
-                ))
-            }
-            None => None,
-        };
+        let picked = self.resolve_reviewers(req.reviewer.as_ref(), draft_reviewer.as_ref())?;
+        if picked.infos.is_empty() && picked.skipped.is_empty() && focus.is_some() {
+            return Err(Refusal::Invalid(
+                "review_focus needs a reviewer: pass reviewer too".into(),
+            ));
+        }
         // The repository's env file must be readable now; the runner reads it again at each
         // round. Its contents are dropped here: only the path is recorded.
         let env_file = self.settings.env_file(&repo).map(Path::to_path_buf);
@@ -2561,8 +2772,19 @@ impl HostRuns {
                 ..Cleanup::default()
             },
             env_file: env_file.map(|p| p.to_string_lossy().into_owned()),
-            reviewer: reviewer.as_ref().map(|r| r.id.clone()),
-            reviewer_label: reviewer.as_ref().map(|r| r.label.clone()),
+            reviewer: picked.infos.first().map(|r| r.id.clone()),
+            reviewer_label: (!picked.infos.is_empty()).then(|| {
+                picked
+                    .infos
+                    .iter()
+                    .map(|r| r.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            }),
+            reviewers: picked.infos.iter().map(|r| r.id.clone()).collect(),
+            reviewer_labels: picked.infos.iter().map(|r| r.label.clone()).collect(),
+            reviewers_source: Some(picked.source.to_string()),
+            reviewers_skipped: picked.skipped.clone(),
             review_focus: focus,
             ..RunRecord::default()
         };
@@ -2581,11 +2803,14 @@ impl HostRuns {
             step.as_ref()
                 .map(|(s, i)| format!(" strand={s} item={i}"))
                 .unwrap_or_default(),
-            rec.reviewer
-                .as_deref()
-                .map(|r| format!(" reviewer={r}"))
-                .unwrap_or_default()
+            match rec.reviewers.as_slice() {
+                [] => String::new(),
+                ids => format!(" reviewers={} ({})", ids.join(","), picked.source),
+            }
         );
+        for sk in &rec.reviewers_skipped {
+            eprintln!("jesse-bridge: hostrun {run_id}: {}", sk.line());
+        }
         // A further run of the item settles the earlier ones still waiting on Jeremy, cut off
         // or failed: the question they asked is now the new run's. Queued, running and paused
         // runs go on.
@@ -2830,7 +3055,7 @@ impl HostRuns {
                         run_dir: dir,
                         keep_days: self.settings.keep_days,
                         pr_title_tag: self.settings.pr_title_tag(&rec.repo),
-                        reviewed: rec.reviewer.is_some(),
+                        reviewed: !rec.reviewer_ids().is_empty(),
                     },
                 );
                 write_atomic(&dir.join(PROMPT_MD), served.as_bytes())
@@ -3409,7 +3634,8 @@ impl HostRuns {
     // ---- REVIEWS -----------------------------------------------------------------------
 
     /// A reviewed run's implementing round reported: the round is recorded as finished, with no
-    /// report written and nothing sent, and the run goes `reviewing` with its one review.
+    /// report written and nothing sent, and the run goes `reviewing` with its one review cycle:
+    /// one review per reviewer, tagged `A`, `B`, … when there are several.
     async fn begin_start_review(&self, dir: &Path, exit: &ExitInfo) -> Result<(), String> {
         let at = exit.ended_at.clone();
         let (code, signal) = (exit.code, exit.signal);
@@ -3433,24 +3659,31 @@ impl HostRuns {
                 // Nothing is sent for this round, ever: its push is the answering round's.
                 cur.notified = true;
             }
-            let n = r.reviews.len() as u32 + 1;
-            r.reviews.push(Review {
-                n,
-                reviewer: r.reviewer.clone().unwrap_or_default(),
-                reviewer_label: r.reviewer_label.clone().unwrap_or_default(),
-                origin: review::ORIGIN_START.into(),
-                status: ReviewStatus::Running,
-                focus: r.review_focus.clone(),
-                auto_reply: true,
-                requested_at: now.clone(),
-                ..Review::default()
-            });
+            let ids = r.reviewer_ids();
+            let first = r.reviews.len() as u32 + 1;
+            let many = ids.len() > 1;
+            for (i, id) in ids.iter().enumerate() {
+                let label = r.reviewer_label_of(i);
+                r.reviews.push(Review {
+                    n: first + i as u32,
+                    reviewer: id.clone(),
+                    reviewer_label: label,
+                    origin: review::ORIGIN_START.into(),
+                    status: ReviewStatus::Running,
+                    focus: r.review_focus.clone(),
+                    auto_reply: true,
+                    requested_at: now.clone(),
+                    cycle: many.then_some(first),
+                    tag: many.then(|| review::tag_for(i)),
+                    ..Review::default()
+                });
+            }
         })?;
         eprintln!(
-            "jesse-bridge: hostrun {} round {} REVIEWING (reviewer {})",
+            "jesse-bridge: hostrun {} round {} REVIEWING (reviewers {})",
             rec.run_id,
             rec.rounds.len(),
-            rec.reviewer.as_deref().unwrap_or("")
+            rec.reviewer_ids().join(", ")
         );
         self.lift_limit(now_ms());
         self.wake();
@@ -3486,8 +3719,10 @@ impl HostRuns {
         }
     }
 
-    /// One review, start to hand off: run the reviewer (unless its note is already written),
-    /// record the findings, then hand them off, or for a review that waits, put the run back.
+    /// One review cycle, start to hand off: every reviewer of the cycle whose note is not yet
+    /// written runs at once, each in its own worktree; once all have answered or failed, their
+    /// findings are recorded and handed off together, in one round, or for a review that waits,
+    /// the run is put back.
     async fn drive_review(self: &Arc<Self>, run_id: &str) {
         let dir = self.settings.run_dir(run_id);
         let Ok(rec) = read_run(&dir) else {
@@ -3496,11 +3731,11 @@ impl HostRuns {
         if rec.status != RunStatus::Reviewing {
             return;
         }
-        let Some(v) = rec
+        let Some(cycle) = rec
             .reviews
             .iter()
             .rfind(|v| matches!(v.status, ReviewStatus::Running | ReviewStatus::Ready))
-            .cloned()
+            .map(Review::cycle_of)
         else {
             // Reviewing with no open review cannot be left so: the run goes back to reported.
             let _ = update_run(&dir, |r| {
@@ -3510,74 +3745,126 @@ impl HostRuns {
             });
             return;
         };
-        if v.status == ReviewStatus::Running {
-            let result = self.perform_review(&dir, &rec, &v).await;
+        let running: Vec<Review> = rec
+            .reviews
+            .iter()
+            .filter(|v| v.cycle_of() == cycle && v.status == ReviewStatus::Running)
+            .cloned()
+            .collect();
+        if !running.is_empty() {
+            // One range for the whole cycle, read before any reviewer starts, so every reviewer
+            // reads the same base and head whatever moves meanwhile. Then every reviewer at
+            // once: one task each, all awaited before anything is recorded.
+            let mut results: Vec<(u32, Result<ReviewDone, String>)> = Vec::new();
+            match self.cycle_range(&dir, &rec).await {
+                Err(e) => {
+                    for v in &running {
+                        results.push((v.n, Err(e.clone())));
+                    }
+                }
+                Ok(range) => {
+                    let range = Arc::new(range);
+                    let tasks: Vec<_> = running
+                        .iter()
+                        .map(|v| {
+                            let (this, dir, rec, v, range) = (
+                                self.clone(),
+                                dir.clone(),
+                                rec.clone(),
+                                v.clone(),
+                                range.clone(),
+                            );
+                            tokio::spawn(
+                                async move { this.perform_review(&dir, &rec, &v, range).await },
+                            )
+                        })
+                        .collect();
+                    for (v, t) in running.iter().zip(tasks) {
+                        let res = t
+                            .await
+                            .unwrap_or_else(|e| Err(format!("the review task failed: {e}")));
+                        results.push((v.n, res));
+                    }
+                }
+            }
             let now = rfc(now_ms());
             let mut applied = false;
-            let res = result.clone();
             let _ = update_run(&dir, |r| {
                 if r.status != RunStatus::Reviewing {
                     return;
                 }
-                let Some(x) = r.reviews.iter_mut().find(|x| x.n == v.n) else {
-                    return;
-                };
-                if x.status != ReviewStatus::Running {
-                    return;
-                }
-                x.finished_at = Some(now.clone());
-                match &res {
-                    Ok(out) => {
-                        x.status = ReviewStatus::Ready;
-                        x.head = Some(out.head.clone());
-                        x.base = Some(out.base.clone());
-                        x.findings = out.findings.clone();
-                        x.summary = Some(out.summary.clone());
-                        x.path = Some(out.path.clone());
+                for (n, res) in &results {
+                    let Some(x) = r.reviews.iter_mut().find(|x| x.n == *n) else {
+                        continue;
+                    };
+                    if x.status != ReviewStatus::Running {
+                        continue;
                     }
-                    Err(e) => {
-                        x.status = ReviewStatus::Failed;
-                        x.error = Some(review::one_line(e));
+                    x.finished_at = Some(now.clone());
+                    match res {
+                        Ok(out) => {
+                            x.status = ReviewStatus::Ready;
+                            x.head = Some(out.head.clone());
+                            x.base = Some(out.base.clone());
+                            x.findings = out.findings.clone();
+                            x.summary = Some(out.summary.clone());
+                            x.path = Some(out.path.clone());
+                        }
+                        Err(e) => {
+                            x.status = ReviewStatus::Failed;
+                            x.error = Some(review::one_line(e));
+                        }
                     }
+                    applied = true;
                 }
-                applied = true;
             });
             if !applied {
-                // Cancelled while the reviewer worked: what it found goes nowhere.
+                // Cancelled while the reviewers worked: what they found goes nowhere.
                 eprintln!(
                     "jesse-bridge: hostrun {run_id}: no longer reviewing; the review is dropped"
                 );
-                if let Ok(out) = &result {
-                    archive_note(&self.notes_root, &out.path);
+                for (_, res) in &results {
+                    if let Ok(out) = res {
+                        archive_note(&self.notes_root, &out.path);
+                    }
                 }
                 return;
             }
-            match &result {
-                Ok(out) => eprintln!(
-                    "jesse-bridge: hostrun {run_id} REVIEW {} by {}: {} finding(s) at {}",
-                    v.n,
-                    v.reviewer,
-                    out.findings.len(),
-                    out.path
-                ),
-                Err(e) => eprintln!("jesse-bridge: hostrun {run_id} REVIEW {} FAILED: {e}", v.n),
+            for ((n, res), v) in results.iter().zip(&running) {
+                match res {
+                    Ok(out) => eprintln!(
+                        "jesse-bridge: hostrun {run_id} REVIEW {n} by {}: {} finding(s) at {}",
+                        v.reviewer,
+                        out.findings.len(),
+                        out.path
+                    ),
+                    Err(e) => {
+                        eprintln!("jesse-bridge: hostrun {run_id} REVIEW {n} FAILED: {e}")
+                    }
+                }
             }
         }
         let Ok(rec) = read_run(&dir) else {
             return;
         };
-        let Some(v) = rec.reviews.iter().find(|x| x.n == v.n).cloned() else {
+        let members: Vec<Review> = rec
+            .reviews
+            .iter()
+            .filter(|x| x.cycle_of() == cycle)
+            .cloned()
+            .collect();
+        let Some(lead) = members.first().cloned() else {
             return;
         };
-        let start = v.origin == review::ORIGIN_START;
-        if v.auto_reply || start {
-            // A reviewed run is always handed off, the failed review included: it must not
+        let start = lead.origin == review::ORIGIN_START;
+        let any_ready = members.iter().any(|x| x.status == ReviewStatus::Ready);
+        if lead.auto_reply || start {
+            // A reviewed run is always handed off, every review failed included: it must not
             // strand the run.
-            if v.status == ReviewStatus::Ready || start {
+            if any_ready || start {
                 let this = self.clone();
                 let id = run_id.to_string();
-                let n = v.n;
-                let handed = tokio::task::spawn_blocking(move || this.hand_off(&id, n))
+                let handed = tokio::task::spawn_blocking(move || this.hand_off(&id, cycle))
                     .await
                     .unwrap_or_else(|e| Err(Refusal::Internal(e.to_string())));
                 match handed {
@@ -3595,28 +3882,38 @@ impl HostRuns {
         }
         // A review that waits (or that failed, or whose hand off could not be queued): the run
         // goes back to where it was, and Jeremy is told once.
-        let prior = v.prior_status.unwrap_or(RunStatus::Reported);
+        let prior = lead.prior_status.unwrap_or(RunStatus::Reported);
         let _ = update_run(&dir, |r| {
             if r.status == RunStatus::Reviewing {
                 r.status = prior;
             }
         });
         if let Some(n) = self.sink.get().and_then(|s| s.notifier.clone()) {
-            let (title, body) = if v.status == ReviewStatus::Ready {
+            let ready: Vec<&Review> = members
+                .iter()
+                .filter(|x| x.status == ReviewStatus::Ready)
+                .collect();
+            let (title, body) = if !ready.is_empty() {
                 (
                     format!("Run {run_id} reviewed"),
                     format!(
                         "{} finding(s) from {}; devjob_review_reply hands them off",
-                        v.count(),
-                        v.reviewer_label
+                        ready.iter().map(|x| x.count()).sum::<usize>(),
+                        ready
+                            .iter()
+                            .map(|x| x.reviewer_label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" + ")
                     ),
                 )
             } else {
                 (
                     format!("Run {run_id} review failed"),
-                    v.error
-                        .clone()
-                        .unwrap_or_default()
+                    members
+                        .iter()
+                        .filter_map(|x| x.error.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ")
                         .chars()
                         .take(180)
                         .collect(),
@@ -3626,8 +3923,38 @@ impl HostRuns {
         }
     }
 
-    /// The reviewer's part: its range and diff, its own detached worktree at the head, the
-    /// answer (retried once when the schema refuses it), the worktree checked untouched and
+    /// The range a review cycle reads, once for every reviewer in it: the default branch
+    /// fetched, the merge base and head of the run's worktree, and the diff between them.
+    async fn cycle_range(&self, dir: &Path, rec: &RunRecord) -> Result<ReviewRange, String> {
+        let worktree = dir.join(WORKTREE_DIR);
+        if !worktree.exists() {
+            return Err("the run's worktree was removed, so there is nothing to read".into());
+        }
+        let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+        let base_sha = rec.base_sha.clone();
+        let default_branch = rec.default_branch.clone();
+        tokio::task::spawn_blocking(move || {
+            let main_ref = if is_local_repo(&repo) {
+                git::LOCAL_DEFAULT_BRANCH.to_string()
+            } else {
+                let bare = git::bare_path(&root, &repo);
+                let fetched =
+                    git::lock_repo(&root, &repo).and_then(|_lock| git::fetch_default(&bare));
+                format!(
+                    "origin/{}",
+                    fetched.unwrap_or_else(|_| default_branch.unwrap_or_else(|| "main".into()))
+                )
+            };
+            let (base, head) = review::review_range(&worktree, &main_ref, base_sha.as_deref())?;
+            let diff = review::diff(&worktree, &base, &head)?;
+            Ok::<_, String>(ReviewRange { base, head, diff })
+        })
+        .await
+        .map_err(|e| format!("the review task failed: {e}"))?
+    }
+
+    /// The reviewer's part, on the cycle's one `range`: its own detached worktree at the head,
+    /// the answer (retried once when the schema refuses it), the worktree checked untouched and
     /// removed, and the note written. Touches nothing of the run but its directory's
     /// `review-<n>*` files and the Inbox note.
     async fn perform_review(
@@ -3635,6 +3962,7 @@ impl HostRuns {
         dir: &Path,
         rec: &RunRecord,
         v: &Review,
+        range: Arc<ReviewRange>,
     ) -> Result<ReviewDone, String> {
         let reviewer = self
             .reviewer
@@ -3647,35 +3975,14 @@ impl HostRuns {
             .get()
             .cloned()
             .ok_or_else(|| "nothing is attached to write the note".to_string())?;
-        let worktree = dir.join(WORKTREE_DIR);
-        if !worktree.exists() {
-            return Err("the run's worktree was removed, so there is nothing to read".into());
-        }
         let n = v.n;
         let review_wt = dir.join(format!("{}{n}", review::REVIEW_WORKTREE_PREFIX));
         let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
-        let base_sha = rec.base_sha.clone();
-        let default_branch = rec.default_branch.clone();
-        let (wt, rwt) = (worktree.clone(), review_wt.clone());
-        let (base, head, diff) = tokio::task::spawn_blocking(move || {
-            let main_ref = if is_local_repo(&repo) {
-                git::LOCAL_DEFAULT_BRANCH.to_string()
-            } else {
-                let bare = git::bare_path(&root, &repo);
-                let fetched =
-                    git::lock_repo(&root, &repo).and_then(|_lock| git::fetch_default(&bare));
-                format!(
-                    "origin/{}",
-                    fetched.unwrap_or_else(|_| default_branch.unwrap_or_else(|| "main".into()))
-                )
-            };
-            let (base, head) = review::review_range(&wt, &main_ref, base_sha.as_deref())?;
-            let diff = review::diff(&wt, &base, &head)?;
-            git::add_detached_worktree(&root, &repo, &rwt, &head)?;
-            Ok::<_, String>((base, head, diff))
-        })
-        .await
-        .map_err(|e| format!("the review task failed: {e}"))??;
+        let (base, head, diff) = (range.base.clone(), range.head.clone(), range.diff.clone());
+        let (rwt, h) = (review_wt.clone(), head.clone());
+        tokio::task::spawn_blocking(move || git::add_detached_worktree(&root, &repo, &rwt, &h))
+            .await
+            .map_err(|e| format!("the review task failed: {e}"))??;
         let section = std::fs::read_to_string(dir.join(SECTION_MD))
             .or_else(|_| std::fs::read_to_string(dir.join(PROMPT_MD)))
             .unwrap_or_default();
@@ -3761,45 +4068,107 @@ impl HostRuns {
         })
     }
 
-    /// What the hand off says for review `v` of `rec`.
-    fn handoff_text(rec: &RunRecord, v: &Review) -> String {
-        let finish = (v.origin == review::ORIGIN_START).then(|| {
-            if is_local_repo(&rec.repo) {
-                review::HANDOFF_FINISH_LOCAL
-            } else {
-                review::HANDOFF_FINISH
-            }
-        });
-        if v.status == ReviewStatus::Failed {
-            review::unreviewed_reply(
-                v.error.as_deref().unwrap_or("the review could not run"),
-                finish,
-            )
-        } else {
-            review::handoff_reply(&v.findings, finish)
+    /// The reviews of a cycle that could not run, and the default reviewers a reviewed run's
+    /// own cycle went without: `<id>: <reason>` each.
+    fn cycle_failures(rec: &RunRecord, members: &[Review]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if members
+            .first()
+            .is_some_and(|v| v.origin == review::ORIGIN_START)
+        {
+            out.extend(rec.reviewers_skipped.iter().map(|sk| {
+                format!(
+                    "{}: default reviewer unavailable: {}",
+                    sk.reviewer,
+                    review::one_line(&sk.reason)
+                )
+            }));
+        }
+        out.extend(
+            members
+                .iter()
+                .filter(|v| v.status == ReviewStatus::Failed)
+                .map(|v| {
+                    format!(
+                        "{}: {}",
+                        v.reviewer,
+                        v.error.as_deref().unwrap_or("the review could not run")
+                    )
+                }),
+        );
+        out
+    }
+
+    /// Why a cycle none of whose reviews ran was handed off unreviewed: a lone review's own
+    /// error, as 0.211.0 put it, else `<id>: <reason>` for each, joined with `; `.
+    fn unreviewed_reason(rec: &RunRecord, members: &[Review]) -> String {
+        match members {
+            [one] if rec.reviewers_skipped.is_empty() || one.origin != review::ORIGIN_START => one
+                .error
+                .clone()
+                .unwrap_or_else(|| "the review could not run".into()),
+            _ => review::partly_reason(&Self::cycle_failures(rec, members)),
         }
     }
 
-    /// Queue review `n`'s hand off: the run's next round, in its own worktree and session,
-    /// exactly as a reply would, with [`HostRuns::handoff_text`] as the message.
-    fn hand_off(&self, run_id: &str, n: u32) -> Result<RunRecord, Refusal> {
+    /// What the hand off says for the review cycle `members` of `rec`: every finding of every
+    /// review that ran, one block per reviewer when there are several, and what could not run;
+    /// or, when none ran, the unreviewed reply.
+    fn handoff_text(rec: &RunRecord, members: &[Review]) -> String {
+        let finish = members
+            .first()
+            .is_some_and(|v| v.origin == review::ORIGIN_START)
+            .then(|| {
+                if is_local_repo(&rec.repo) {
+                    review::HANDOFF_FINISH_LOCAL
+                } else {
+                    review::HANDOFF_FINISH
+                }
+            });
+        let ran: Vec<&Review> = members
+            .iter()
+            .filter(|v| v.status != ReviewStatus::Failed)
+            .collect();
+        if ran.is_empty() {
+            return review::unreviewed_reply(&Self::unreviewed_reason(rec, members), finish);
+        }
+        let blocks: Vec<review::Block> = ran
+            .iter()
+            .map(|v| review::Block {
+                tag: v.tag.as_deref(),
+                label: v.name(),
+                id: &v.reviewer,
+                findings: v.shown_findings(),
+            })
+            .collect();
+        review::handoff_reply_cycle(&blocks, &Self::cycle_failures(rec, members), finish)
+    }
+
+    /// Queue the hand off of review cycle `cycle`: the run's next round, in its own worktree
+    /// and session, exactly as a reply would, with [`HostRuns::handoff_text`] as the message.
+    /// One round for the whole cycle, however many reviewed.
+    fn hand_off(&self, run_id: &str, cycle: u32) -> Result<RunRecord, Refusal> {
         let _gate = lock(&self.gate);
         let rec = self
             .get(run_id)
             .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
-        let v = rec
+        let members: Vec<Review> = rec
             .reviews
             .iter()
-            .find(|x| x.n == n)
-            .ok_or_else(|| Refusal::NotFound(format!("{run_id} has no review {n}")))?;
-        if v.answer_round.is_some() {
+            .filter(|x| x.cycle_of() == cycle)
+            .cloned()
+            .collect();
+        if members.is_empty() {
+            return Err(Refusal::NotFound(format!("{run_id} has no review {cycle}")));
+        }
+        if members.iter().any(|v| v.answer_round.is_some()) {
             return Err(Refusal::State(format!(
-                "{run_id}'s review {n} was already handed off"
+                "{run_id}'s review {cycle} was already handed off"
             )));
         }
-        let text = Self::handoff_text(&rec, v);
+        let text = Self::handoff_text(&rec, &members);
         self.queue_round_with(run_id, &text, Some(AUTO_REVIEW), |r, round| {
-            if let Some(x) = r.reviews.iter_mut().find(|x| x.n == n) {
+            for x in r.reviews.iter_mut().filter(|x| x.cycle_of() == cycle) {
                 x.answer_round = Some(round);
                 if x.status == ReviewStatus::Ready {
                     x.status = ReviewStatus::HandedOff;
@@ -3808,17 +4177,28 @@ impl HostRuns {
         })
     }
 
-    /// `devjob_review`: a review of a finished run, asked for after the fact. Refuses a run
-    /// that is queued, running, paused or already being reviewed, one with a review still
-    /// waiting for its hand off, one with no commits beyond its base, and a reviewer the
-    /// registry does not know or marks unhealthy. The run goes `reviewing`; the watcher runs it.
+    /// `devjob_review`: a review of a finished run, asked for after the fact, by one reviewer
+    /// or several at once (one cycle, one hand off). Refuses a run that is queued, running,
+    /// paused or already being reviewed, one with a review still waiting for its hand off, one
+    /// with no commits beyond its base, `none`, more than [`review::MAX_REVIEWERS`] or a
+    /// repeated one, and any reviewer the registry does not know or marks unhealthy. The run
+    /// goes `reviewing`; the watcher runs it.
     pub fn request_review(
         &self,
         run_id: &str,
-        reviewer: &str,
+        reviewer: impl Into<review::ReviewerArg>,
         focus: Option<&str>,
         auto_reply: bool,
     ) -> Result<RunRecord, Refusal> {
+        let arg: review::ReviewerArg = reviewer.into();
+        let ids = match review::choose(Some(&arg)).map_err(Refusal::Invalid)? {
+            review::ReviewerChoice::Ids(ids) => ids,
+            review::ReviewerChoice::Unset | review::ReviewerChoice::Off => {
+                return Err(Refusal::Invalid(
+                    "a review needs a reviewer: name a model id".into(),
+                ))
+            }
+        };
         let focus = review::checked_focus(focus).map_err(Refusal::Invalid)?;
         let _gate = lock(&self.gate);
         let rec = self
@@ -3845,7 +4225,17 @@ impl HostRuns {
                 w.n
             )));
         }
-        let info = self.check_reviewer(reviewer).map_err(Refusal::Invalid)?;
+        let mut infos: Vec<ReviewerInfo> = Vec::new();
+        for id in &ids {
+            let info = self.check_reviewer(id).map_err(Refusal::Invalid)?;
+            if infos.iter().any(|x| x.id == info.id) {
+                return Err(Refusal::Invalid(format!(
+                    "reviewer {:?} is named twice",
+                    info.id
+                )));
+            }
+            infos.push(info);
+        }
         let dir = self.settings.run_dir(run_id);
         let worktree = dir.join(WORKTREE_DIR);
         if !worktree.exists() {
@@ -3862,26 +4252,32 @@ impl HostRuns {
         review::review_range(&worktree, &main_ref, rec.base_sha.as_deref())
             .map_err(|e| Refusal::State(format!("{run_id}: {e}")))?;
         let now = rfc(now_ms());
+        let many = infos.len() > 1;
         let updated = update_run(&dir, |r| {
-            let n = r.reviews.len() as u32 + 1;
-            r.reviews.push(Review {
-                n,
-                reviewer: info.id.clone(),
-                reviewer_label: info.label.clone(),
-                origin: review::ORIGIN_REQUEST.into(),
-                status: ReviewStatus::Running,
-                focus: focus.clone(),
-                auto_reply,
-                requested_at: now.clone(),
-                prior_status: Some(r.status),
-                ..Review::default()
-            });
+            let first = r.reviews.len() as u32 + 1;
+            let prior = r.status;
+            for (i, info) in infos.iter().enumerate() {
+                r.reviews.push(Review {
+                    n: first + i as u32,
+                    reviewer: info.id.clone(),
+                    reviewer_label: info.label.clone(),
+                    origin: review::ORIGIN_REQUEST.into(),
+                    status: ReviewStatus::Running,
+                    focus: focus.clone(),
+                    auto_reply,
+                    requested_at: now.clone(),
+                    prior_status: Some(prior),
+                    cycle: many.then_some(first),
+                    tag: many.then(|| review::tag_for(i)),
+                    ..Review::default()
+                });
+            }
             r.status = RunStatus::Reviewing;
         })
         .map_err(Refusal::Internal)?;
         eprintln!(
-            "jesse-bridge: hostrun {run_id} REVIEW REQUESTED (reviewer {}, auto_reply {auto_reply})",
-            info.id
+            "jesse-bridge: hostrun {run_id} REVIEW REQUESTED (reviewers {}, auto_reply {auto_reply})",
+            infos.iter().map(|i| i.id.as_str()).collect::<Vec<_>>().join(", ")
         );
         Ok(updated)
     }
@@ -3890,14 +4286,14 @@ impl HostRuns {
     pub async fn request_review_and_start(
         self: &Arc<Self>,
         run_id: &str,
-        reviewer: &str,
+        reviewer: impl Into<review::ReviewerArg>,
         focus: Option<String>,
         auto_reply: bool,
     ) -> Result<RunRecord, Refusal> {
         let this = self.clone();
-        let (id, who) = (run_id.to_string(), reviewer.to_string());
+        let (id, who) = (run_id.to_string(), reviewer.into());
         let rec = tokio::task::spawn_blocking(move || {
-            this.request_review(&id, &who, focus.as_deref(), auto_reply)
+            this.request_review(&id, who, focus.as_deref(), auto_reply)
         })
         .await
         .map_err(|e| Refusal::Internal(format!("the review task failed: {e}")))??;
@@ -3926,7 +4322,7 @@ impl HostRuns {
                 "{run_id} has no review waiting for its hand off"
             )));
         };
-        self.hand_off(run_id, v.n)
+        self.hand_off(run_id, v.cycle_of())
     }
 
     /// [`HostRuns::review_reply`], then start what the queue allows.
@@ -3971,18 +4367,19 @@ impl HostRuns {
 
     /// The leak check of an answering round: its new commit messages, the added lines of its
     /// diff (both from the head that was reviewed to the worktree's head), and the title and
-    /// body of the run's pull requests, for [`review::leak_terms`]. Never blocks anything.
+    /// body of the run's pull requests, for [`review::leak_terms_all`] of every review of the
+    /// cycle, the ones that failed included (the hand off named them). Never blocks anything.
     async fn review_leaks(
         &self,
         dir: &Path,
         rec: &RunRecord,
-        v: &Review,
+        members: &[Review],
         report: &str,
     ) -> Vec<String> {
-        let Some(from) = v.head.clone() else {
+        let Some(from) = members.iter().find_map(|v| v.head.clone()) else {
             return Vec::new();
         };
-        let terms = review::leak_terms(v);
+        let terms = review::leak_terms_all(members);
         let worktree = dir.join(WORKTREE_DIR);
         let forge = self.forge.clone();
         let url = pull_request_url(report);
@@ -4173,24 +4570,59 @@ impl HostRuns {
         }
         let mut report = round_report(&dir, &round);
         let mut status = round_status(&round, &exit, &report);
-        // THE ANSWERING ROUND of a review that was handed off: a failed review's report leads
-        // with `UNREVIEWED:`, an answered one's with any `REVIEW LEAK:` the check found.
-        let answering = rec.reviews.iter().rposition(|v| v.answers(round.n));
+        // THE ANSWERING ROUND of a review cycle that was handed off: when no review of it ran
+        // the report leads with `UNREVIEWED:`, when only some did with `PARTLY REVIEWED:`, and
+        // with any `REVIEW LEAK:` the check found over every review that ran.
+        let answering: Vec<usize> = rec
+            .reviews
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.answers(round.n))
+            .map(|(i, _)| i)
+            .collect();
         let mut leaks = Vec::new();
-        if let (Some(i), None) = (answering, round.report_path.as_ref()) {
-            let v = &rec.reviews[i];
-            if v.status == ReviewStatus::Failed {
-                report = review::ensure_unreviewed(
-                    &report,
-                    v.error.as_deref().unwrap_or("the review could not run"),
-                );
+        if !answering.is_empty() && round.report_path.is_none() {
+            let members: Vec<Review> = answering.iter().map(|&i| rec.reviews[i].clone()).collect();
+            let ran: Vec<Review> = members
+                .iter()
+                .filter(|v| v.status != ReviewStatus::Failed)
+                .cloned()
+                .collect();
+            if ran.is_empty() {
+                report =
+                    review::ensure_unreviewed(&report, &Self::unreviewed_reason(&rec, &members));
             } else {
-                leaks = self.review_leaks(&dir, &rec, v, &report).await;
+                let failed = Self::cycle_failures(&rec, &members);
+                if !failed.is_empty() {
+                    report = review::ensure_partly(&report, &failed);
+                }
+                leaks = self.review_leaks(&dir, &rec, &members, &report).await;
                 if let Some(line) = review::leak_line(&leaks) {
                     eprintln!("jesse-bridge: hostrun {run_id} round {}: {line}", round.n);
-                    report = format!("{line}\n\n{report}");
+                    // `PARTLY REVIEWED:` stays the first line; the leak follows it.
+                    report = if failed.is_empty() {
+                        format!("{line}\n\n{report}")
+                    } else {
+                        review::with_second_line(&report, &line)
+                    };
                 }
             }
+        }
+        // A run whose default reviewers could none of them review at the start ran as an
+        // ordinary run: its finished reports say so first.
+        if answering.is_empty()
+            && round.report_path.is_none()
+            && rec.reviewer_ids().is_empty()
+            && !rec.reviewers_skipped.is_empty()
+            && status == RunStatus::Reported
+        {
+            let why = rec
+                .reviewers_skipped
+                .iter()
+                .map(review::Skipped::line)
+                .collect::<Vec<_>>()
+                .join("; ");
+            report = review::ensure_unreviewed(&report, &why);
         }
         // NO AI ATTRIBUTION, the backstop: what the round pushed is read back, and a hit makes
         // the run `needs_you` with the `ATTRIBUTION:` line first, so the Inbox report and the
@@ -4205,19 +4637,18 @@ impl HostRuns {
         // goes `reviewing`, once, and the watcher runs the review and hands it off.
         if status == RunStatus::Reported
             && round.report_path.is_none()
-            && rec.reviewer.is_some()
+            && !rec.reviewer_ids().is_empty()
             && !rec.reviews.iter().any(|v| v.origin == review::ORIGIN_START)
         {
             return self.begin_start_review(&dir, &exit).await;
         }
         // The answering round's note moves to `Inbox/archive/` as its report is written, and
         // the report links it where it now is.
-        let note_now = answering.and_then(|i| {
-            rec.reviews[i]
-                .path
-                .as_deref()
-                .map(|p| archive_note(&self.notes_root, p).unwrap_or_else(|| p.to_string()))
-        });
+        let notes_now: Vec<String> = answering
+            .iter()
+            .filter_map(|&i| rec.reviews[i].path.as_deref())
+            .map(|p| archive_note(&self.notes_root, p).unwrap_or_else(|| p.to_string()))
+            .collect();
         let rel = match round
             .report_path
             .clone()
@@ -4238,11 +4669,14 @@ impl HostRuns {
                 };
                 let mut text =
                     render_inbox_with(&rec, round.n, status, &report, local_main.as_deref());
-                if let Some(note) = &note_now {
+                if !notes_now.is_empty() {
                     if !text.ends_with('\n') {
                         text.push('\n');
                     }
-                    text.push_str(&format!("\n{}\n", review::note_link(note)));
+                    text.push('\n');
+                    for note in &notes_now {
+                        text.push_str(&format!("{}\n", review::note_link(note)));
+                    }
                 }
                 write_report(&self.notes_root, &sink.broker, run_id, &rel, &text).await?;
                 eprintln!(
@@ -4285,13 +4719,15 @@ impl HostRuns {
                 cur.exit_code = exit.code;
                 cur.signal = exit.signal;
             }
-            if let Some(v) = answering.and_then(|i| r.reviews.get_mut(i)) {
-                if v.status == ReviewStatus::HandedOff {
-                    v.status = ReviewStatus::Answered;
-                }
-                v.answered_at = Some(at.clone());
-                if !leaks.is_empty() {
-                    v.leaks = leaks.clone();
+            for &i in &answering {
+                if let Some(v) = r.reviews.get_mut(i) {
+                    if v.status == ReviewStatus::HandedOff {
+                        v.status = ReviewStatus::Answered;
+                    }
+                    v.answered_at = Some(at.clone());
+                    if !leaks.is_empty() && v.status != ReviewStatus::Failed {
+                        v.leaks = leaks.clone();
+                    }
                 }
             }
         })?;
@@ -5104,7 +5540,10 @@ pub fn run_json(r: &RunRecord) -> Value {
                 .filter_map(|x| x.report_path.clone())
                 .collect::<Vec<_>>()),
         );
-        // Only once there is one: a run never reviewed serves exactly what it did before.
+        // Who reviews it and why: every run says, a 0.211.0 record as it must have been.
+        o.insert("reviewers".into(), json!(r.reviewer_ids()));
+        o.insert("reviewers_source".into(), json!(r.source_of_reviewers()));
+        // Only once there is one: a run never reviewed serves no `reviews`.
         if !r.reviews.is_empty() {
             o.insert("reviews".into(), reviews_json(r, None));
         }
@@ -5290,8 +5729,11 @@ pub struct StartBody {
     pub repo: Option<String>,
     #[serde(default)]
     pub again: bool,
-    /// A registry id: the run is reviewed before it finishes ([`review`]).
-    pub reviewer: Option<String>,
+    /// Who reviews the run before it finishes ([`review`]): a registry id, a list of at most
+    /// three, or `none`. Absent: the draft's, else `[hostrun] default_reviewers`.
+    pub reviewer: Option<review::ReviewerArg>,
+    /// `reviewer`'s list spelling; refused beside it.
+    pub reviewers: Option<Vec<String>>,
     /// What the reviewer should look at most closely, at most 4 KiB.
     pub review_focus: Option<String>,
 }
@@ -5324,11 +5766,12 @@ pub struct ReplyBody {
     pub text: String,
 }
 
-/// `POST /jesse/runs/:run_id/review`: `{ reviewer, focus?, auto_reply? }`.
+/// `POST /jesse/runs/:run_id/review`: `{ reviewer, focus?, auto_reply? }`; `reviewer` is one
+/// id or a list of at most three.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewBody {
-    pub reviewer: String,
+    pub reviewer: review::ReviewerArg,
     pub focus: Option<String>,
     pub auto_reply: Option<bool>,
 }
@@ -5384,7 +5827,9 @@ pub async fn jesse_runs_start(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let again = body.again;
-    let (reviewer, review_focus) = (body.reviewer.clone(), body.review_focus.clone());
+    let reviewer = review::merge_spellings(body.reviewer.clone(), body.reviewers.clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let review_focus = body.review_focus.clone();
     let kind = body.kind().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let started = svc
         .start(StartRequest {
@@ -5458,7 +5903,7 @@ pub async fn jesse_run_review(
     let r = svc
         .request_review_and_start(
             &run_id,
-            &body.reviewer,
+            body.reviewer,
             body.focus,
             body.auto_reply.unwrap_or(true),
         )

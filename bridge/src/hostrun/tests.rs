@@ -226,6 +226,8 @@ fn settings(s: &Scratch) -> HostRunSettings {
     st.derived_data_root = s.derived();
     st.remote_base = format!("{}/", s.base.join("remote").to_string_lossy());
     st.label_prefix = sys::DEFAULT_LABEL_PREFIX.to_string();
+    // No default review: the tests that want one say so (`tests/review.rs`).
+    st.default_reviewers = Vec::new();
     st
 }
 
@@ -2594,7 +2596,6 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     let log = log_json("GD5", r.svc.log_lines("GD5", LOG_DEFAULT).unwrap());
     assert!(!log["lines"].as_array().unwrap().is_empty());
 
-    let base = s.base.to_string_lossy().into_owned();
     // The list as the app polls it, before anything is archived.
     let list = r.svc.list_json();
     // Then the reported run archived by hand: `?archived=all` carries `archived_at` and
@@ -2631,32 +2632,39 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
         ("strands-annotated.json", annotated),
         ("strands-before-runs.json", plain),
     ];
+    for (name, v) in files {
+        pin_app_fixture(&s, name, &v);
+    }
+}
+
+/// One app wire fixture: rewritten under `JESSE_RUN_FIXTURE_WRITE=1`, otherwise its key paths
+/// must be exactly `v`'s.
+fn pin_app_fixture(s: &Scratch, name: &str, v: &Value) {
+    let base = s.base.to_string_lossy().into_owned();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../JesseKit/Tests/JesseNetworkingTests/Fixtures");
-    for (name, v) in files {
-        // The scratch folder's path is this machine's and this run's; the app never reads it.
-        let text = serde_json::to_string_pretty(&v)
-            .unwrap()
-            .replace(&base, "/scratch")
-            + "\n";
-        let path = dir.join(name);
-        if std::env::var("JESSE_RUN_FIXTURE_WRITE").is_ok() {
-            std::fs::write(&path, text).unwrap();
-            continue;
-        }
-        let committed: Value = serde_json::from_str(
-            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
-        )
-        .unwrap();
-        let (mut want, mut have) = (Default::default(), Default::default());
-        key_paths(&committed, "", &mut want);
-        key_paths(&v, "", &mut have);
-        assert_eq!(
-            want, have,
-            "{name}: the serializer's keys moved; regenerate with JESSE_RUN_FIXTURE_WRITE=1 and \
-             check the app's decoding"
-        );
+    // The scratch folder's path is this machine's and this run's; the app never reads it.
+    let text = serde_json::to_string_pretty(v)
+        .unwrap()
+        .replace(&base, "/scratch")
+        + "\n";
+    let path = dir.join(name);
+    if std::env::var("JESSE_RUN_FIXTURE_WRITE").is_ok() {
+        std::fs::write(&path, text).unwrap();
+        return;
     }
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .unwrap();
+    let (mut want, mut have) = (Default::default(), Default::default());
+    key_paths(&committed, "", &mut want);
+    key_paths(v, "", &mut have);
+    assert_eq!(
+        want, have,
+        "{name}: the serializer's keys moved; regenerate with JESSE_RUN_FIXTURE_WRITE=1 and \
+         check the app's decoding"
+    );
 }
 
 // ---- SETTLED RUNS CLOSE THEMSELVES (0.200.0) ---------------------------------------------
@@ -3931,4 +3939,5 @@ async fn a_blind_continue_to_a_question_is_refused() {
 
 mod archive;
 mod review;
+mod reviewers;
 mod settle_failed;

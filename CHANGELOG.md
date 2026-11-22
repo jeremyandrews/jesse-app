@@ -14,6 +14,26 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [App 1.0 (225)] - 2026-11-22
+
+**`UnreadBadgeRenderUITests.testATabSwitchCostsTheConversationListABoundedNumberOfBodyEvaluations`
+passes on a reused simulator again, so `scripts/local-ci-macos.sh` passes in full.** The root
+cause: the 1,000 conversation scale store is seeded once per simulator install and dated from
+the clock at the moment it was seeded, so from the third day on its newest conversations,
+the probe row among them, were filed into a collapsed month folder. The store was up; the row
+the test waits for was hidden behind "November 2026", and the test waited out its 900 s. The
+hosted runner seeds on a fresh simulator every run, so it never saw it. Test seam only: nothing
+a user sees changes.
+
+- **The fix.** `ScaleSeedUITestSeam` re-dates a reused store at launch when its probe
+  conversation is not from today: every date the seed derived from its clock (the
+  conversations', their turns', the failed sends') moves forward by the same amount, so the
+  store is the one a seed at this launch would have written. The stub's millisecond clocks
+  are fixed and unaffected, so a pull still changes nothing. `NavigationCostUITests` shares
+  the store and the fix.
+- **Unchanged.** The test, its wait and its bound (3 list body evaluations per Chats, Today,
+  Chats round trip).
+
 ## [bridge 0.213.1] - 2026-11-21
 
 **Linux CI gates a pull request in about 3 to 5 minutes instead of 25, with the same tests and

@@ -14,6 +14,15 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.213.2] - 2026-11-22
+
+**`url` 2.5.8 to 2.5.9, for RUSTSEC-2026-0592 (a stack overflow in `Url::origin()` on nested
+`blob:` URLs), so `cargo audit` passes again.** The advisory was published 2026-11-20 and failed
+the audit step of the `bridge` and `agent` CI jobs on every run after it. Lockfile only, in
+`Cargo.lock` and `bridge/Cargo.lock`: `cargo update -p url --precise 2.5.9`, which also moves
+`form_urlencoded` 1.2.2 to 1.2.3, the minimum `url` 2.5.9 requires. No source change and nothing
+to restart for behavior, though the next build picks it up.
+
 ## [App 1.0 (225)] - 2026-11-22
 
 **`UnreadBadgeRenderUITests.testATabSwitchCostsTheConversationListABoundedNumberOfBodyEvaluations`

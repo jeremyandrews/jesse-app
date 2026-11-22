@@ -23,6 +23,29 @@ the audit step of the `bridge` and `agent` CI jobs on every run after it. Lockfi
 `form_urlencoded` 1.2.2 to 1.2.3, the minimum `url` 2.5.9 requires. No source change and nothing
 to restart for behavior, though the next build picks it up.
 
+## [App 1.0 (226)] - 2026-11-22
+
+**An on device answer whose numbers are not in any note it cites is a "not found" now, not a
+sourced looking reply.** On 2026-11-22, with the bridge unreachable, a question about the
+quantities of nuts and seeds in a loaf was answered "Walnuts: 30g; seed mix: 24g. These
+quantities are from the seeded honey hazelnut loaf recipe.", citing a clam pasta note and a
+hot sauce note. The bread recipe it named was in a note it did not cite, and "24g" was in
+neither note it did. The cause: `VaultAnswerer.validate` grounds an answer when any one
+significant word of it is in a cited note, and "honey" (hot sauce) was enough. The numbers
+were the answer, and nothing checked them.
+
+- **The fix.** Beside `isGrounded`, every numeric token in the answer must be in at least one
+  cited note, or the answer abstains. A token is a run of digits with an optional decimal part
+  and the unit letters attached to it or one space after it (`30g`, `30 g`, `1.5 tbsp`,
+  `2,040 kcal`), compared with case, diacritics and that space folded out, so `30 G` in a
+  note is the `30g` of an answer. A bare number matches the same number anywhere in the
+  cited notes. Years, times and dates are numbers too. A stop word after a number (`2024
+  the`) and an ordinal ending (`27th`) are not its unit, and a unit of three or more letters
+  matches its longer spelling (`8 Oct`, `8 October`).
+- **Unchanged.** `isGrounded`'s rule, the lookup gate, the retriever, the time limit and the
+  model instructions. A number written as a word (`two`) is not a numeric token, and an
+  answer with no digits is unaffected.
+
 ## [App 1.0 (225)] - 2026-11-22
 
 **`UnreadBadgeRenderUITests.testATabSwitchCostsTheConversationListABoundedNumberOfBodyEvaluations`

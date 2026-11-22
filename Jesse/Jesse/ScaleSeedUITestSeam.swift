@@ -14,7 +14,8 @@ import JesseVault
 /// `JESSE_UITEST_SCALE=<conversations>` arms it. The store is then opened at its own file,
 /// one per scale (`pf1-scale-1000.store`), so the 1,000 conversation store and the 5
 /// conversation control are each seeded ONCE per simulator install and reused by every
-/// later launch, and neither one ever touches the ordinary store. What it seeds, for a
+/// later launch (re-dated to the day of the launch, see `redateIfStale`), and neither one
+/// ever touches the ordinary store. What it seeds, for a
 /// count above 5:
 ///
 ///  * that many conversations, newest first, lengths drawn from 1 to 400 turns (median
@@ -76,12 +77,59 @@ enum ScaleSeedUITestSeam {
         guard let scale else { return }
         seedVaultIfNeeded()
         let held = (try? context.fetchCount(FetchDescriptor<JesseThread>())) ?? 0
-        guard held == 0 else { return }
+        guard held == 0 else {
+            redateIfStale(context: context)
+            return
+        }
         seed(count: scale, context: context)
         #endif
     }
 
     #if DEBUG
+
+    // MARK: - Keeping a reused store current
+
+    /// Move a reused store's dates forward so its newest conversation is `now` again,
+    /// exactly as if it had been seeded at this launch.
+    ///
+    /// The seed dates everything from the clock at the moment it ran, and the store is
+    /// kept for the life of the simulator install. The list files anything 3 or more
+    /// days old into a collapsed month folder (`threadSection`), so three days after the
+    /// seed the probe conversation, and every other loose row, folded away under
+    /// "November 2026" and the UI tests waiting for the probe row waited forever. A
+    /// throwaway CI simulator seeds fresh every run and never saw it; a reused local one
+    /// did, from the third day on.
+    ///
+    /// Only when the probe is not from today, so the launches of one test run pay for
+    /// this once. Every date the seed derives from its clock moves by the same amount:
+    /// the conversations' own, their turns', and the failed sends'. Nothing the stub
+    /// mirrors is a `Date` (its clocks are fixed millisecond stamps), so a pull still
+    /// changes nothing.
+    private static func redateIfStale(context: ModelContext, now: Date = Date()) {
+        let probeId: String? = conversationId(0)
+        var probeQuery = FetchDescriptor<JesseThread>(
+            predicate: #Predicate { $0.conversationId == probeId })
+        probeQuery.fetchLimit = 1
+        guard let probe = try? context.fetch(probeQuery).first,
+              !Calendar.current.isDate(probe.updatedAt, inSameDayAs: now) else { return }
+        let shift = now.timeIntervalSince(probe.updatedAt)
+
+        for turn in (try? context.fetch(FetchDescriptor<Turn>())) ?? [] {
+            turn.createdAt += shift
+        }
+        for item in (try? context.fetch(FetchDescriptor<OutboxItem>())) ?? [] {
+            item.createdAt += shift
+        }
+        for thread in (try? context.fetch(FetchDescriptor<JesseThread>())) ?? [] {
+            thread.createdAt += shift
+            thread.registeredAt = thread.registeredAt.map { $0 + shift }
+            thread.favoritedAt = thread.favoritedAt.map { $0 + shift }
+            thread.archivedAt = thread.archivedAt.map { $0 + shift }
+            // Last, as in the seed, so nothing above moves it.
+            thread.updatedAt += shift
+        }
+        try? context.save()
+    }
 
     // MARK: - Conversations
 

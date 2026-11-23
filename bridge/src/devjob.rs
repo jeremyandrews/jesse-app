@@ -1382,6 +1382,10 @@ pub struct JobView {
     pub run_id: Option<String>,
     /// A cloud run a person cancelled ([`cloud::ANN_CANCELLED`]).
     pub cancelled: bool,
+    /// The strand note and line a strand entry started it from ([`LABEL_STRAND`],
+    /// [`LABEL_STRAND_ID`]); `None` for a draft or a free prompt.
+    pub strand: Option<String>,
+    pub strand_id: Option<String>,
 }
 
 fn time_ms(t: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Time) -> u64 {
@@ -1439,6 +1443,8 @@ impl JobView {
             }),
             run_id: labels.get(cloud::LABEL_RUN_ID).cloned(),
             cancelled: ann.get(cloud::ANN_CANCELLED).map(String::as_str) == Some("true"),
+            strand: labels.get(LABEL_STRAND).cloned(),
+            strand_id: labels.get(LABEL_STRAND_ID).cloned(),
         }
     }
 
@@ -1449,6 +1455,40 @@ impl JobView {
 
     pub fn is_queued(&self) -> bool {
         self.finished.is_none() && self.suspended
+    }
+}
+
+/// What `devjob_list` lists: the running and queued runs, oldest first, and the last
+/// [`LIST_FINISHED`] finished ones, newest first.
+pub struct ListedViews<'a> {
+    pub running: Vec<&'a JobView>,
+    pub queued: Vec<&'a JobView>,
+    pub finished: Vec<&'a JobView>,
+}
+
+impl<'a> ListedViews<'a> {
+    pub fn of(views: &'a [JobView]) -> ListedViews<'a> {
+        let mut running = Vec::new();
+        let mut queued = Vec::new();
+        let mut finished: Vec<&JobView> = Vec::new();
+        for v in views {
+            if v.is_queued() {
+                queued.push(v);
+            } else if v.is_active() {
+                running.push(v);
+            } else {
+                finished.push(v);
+            }
+        }
+        queued.sort_by_key(|v| v.created_ms);
+        running.sort_by_key(|v| v.created_ms);
+        finished.sort_by_key(|v| std::cmp::Reverse(v.finished_ms.unwrap_or(v.created_ms)));
+        finished.truncate(LIST_FINISHED);
+        ListedViews {
+            running,
+            queued,
+            finished,
+        }
     }
 }
 
@@ -2361,25 +2401,36 @@ impl DevJobs {
         }
     }
 
+    /// Every run `devjob_list` lists ([`ListedViews::of`]), as views. What the app's Runs list
+    /// shows of the cloud (`GET /jesse/runs`), so the two keep the same window.
+    pub async fn listed(&self) -> Result<Vec<JobView>, String> {
+        let views: Vec<JobView> = self.views().await?.into_iter().map(|(_, v)| v).collect();
+        let l = ListedViews::of(&views);
+        Ok(l.running
+            .into_iter()
+            .chain(l.queued)
+            .chain(l.finished)
+            .cloned()
+            .collect())
+    }
+
+    /// The last [`REPORT_LOG_LINES`] of a running Job's log, as the watcher last kept them.
+    pub fn kept_tail(&self, job: &str) -> Option<Vec<String>> {
+        self.tails
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(job)
+            .cloned()
+    }
+
     /// Running, queued and the last [`LIST_FINISHED`] finished runs.
     pub async fn list(&self) -> Result<Value, String> {
         let views: Vec<JobView> = self.views().await?.into_iter().map(|(_, v)| v).collect();
-        let mut running = Vec::new();
-        let mut queued = Vec::new();
-        let mut finished: Vec<&JobView> = Vec::new();
-        for v in &views {
-            if v.is_queued() {
-                queued.push(v);
-            } else if v.is_active() {
-                running.push(v);
-            } else {
-                finished.push(v);
-            }
-        }
-        queued.sort_by_key(|v| v.created_ms);
-        running.sort_by_key(|v| v.created_ms);
-        finished.sort_by_key(|v| std::cmp::Reverse(v.finished_ms.unwrap_or(v.created_ms)));
-        finished.truncate(LIST_FINISHED);
+        let ListedViews {
+            running,
+            queued,
+            finished,
+        } = ListedViews::of(&views);
         let cloud_host = self.rt.is_some();
         let brief = |v: &JobView| {
             let mut b = json!({

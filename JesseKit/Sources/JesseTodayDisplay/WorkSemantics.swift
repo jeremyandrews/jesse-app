@@ -442,7 +442,7 @@ public enum WorkSemantics {
     // MARK: A run's words
 
     /// What a run is called: the bridge's title, else its Drafts line's text, else a plain
-    /// placeholder. Never the run id.
+    /// placeholder. Never the run id, but for a cloud run with no line to name it.
     public static func title(_ run: StudioRun) -> String {
         if let t = run.title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
             return t
@@ -450,6 +450,8 @@ public enum WorkSemantics {
         if let t = run.itemText?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
             return t
         }
+        // A cloud run started from a draft or a free prompt has no line to name it: its id does.
+        if run.isCloud { return run.runID }
         return "Untitled run"
     }
 

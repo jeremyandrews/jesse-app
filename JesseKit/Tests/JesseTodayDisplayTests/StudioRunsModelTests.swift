@@ -390,13 +390,22 @@ final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
         return try startResult.get()
     }
     func getRun(id: String) async throws -> StudioRun {
-        guard let r = list.runs.first(where: { $0.runID == id }) else {
+        try await getRun(id: id, cloud: false)
+    }
+    func runLog(id: String, tail: Int?) async throws -> StudioRunLog {
+        StudioRunLog(runID: id, lines: ["one", "two"])
+    }
+    /// Every detail and log read, `cloud:<id>` for one asked with `?host=cloud`.
+    var reads: [String] = []
+    func getRun(id: String, cloud: Bool) async throws -> StudioRun {
+        reads.append(cloud ? "cloud:\(id)" : id)
+        guard let r = list.runs.first(where: { $0.runID == id && $0.isCloud == cloud }) else {
             throw StudioRunError.refused(status: 404, message: "no run \"\(id)\"")
         }
         return r
     }
-    func runLog(id: String, tail: Int?) async throws -> StudioRunLog {
-        StudioRunLog(runID: id, lines: ["one", "two"])
+    func runLog(id: String, tail: Int?, cloud: Bool) async throws -> StudioRunLog {
+        StudioRunLog(runID: id, lines: cloud ? ["cloud one"] : ["one", "two"])
     }
     func replyToRun(id: String, text: String) async throws -> StudioRun {
         replies.append((id, text))
@@ -416,5 +425,152 @@ final class FakeRuns: StudioRunsProviding, @unchecked Sendable {
         marks += 1
         lastLookValue = "2026-11-09T17:00:00.000Z"
         return WorkLastLook(lastLook: lastLookValue)
+    }
+}
+
+/// Cloud runs on the Runs list (bridge 0.216.0): their own colour and word, read only, apart
+/// from the Studio's runs, and nothing at all from a bridge that does not serve them.
+@MainActor
+final class StudioRunsCloudModelTests: XCTestCase {
+
+    private func studio(_ id: String, _ status: StudioRunStatus,
+                        created: String = "2026-11-23T16:00:00.000Z") -> StudioRun {
+        StudioRun(runID: id, strand: "jesse-app", repo: "jeremyandrews/jesse-app",
+                  status: status, createdAt: created, host: "studio")
+    }
+
+    private func cloud(_ id: String, _ status: StudioRunStatus,
+                       created: String = "2026-11-23T17:08:27.000Z") -> StudioRun {
+        StudioRun(runID: id, repo: "jeremyandrews/trovato", branch: "jesse/\(id.lowercased())",
+                  status: status, createdAt: created, host: "cloud")
+    }
+
+    private func model(_ list: StudioRunList) -> (StudioRunsModel, FakeRuns) {
+        let fake = FakeRuns()
+        fake.list = list
+        return (StudioRunsModel(makeClient: { fake }), fake)
+    }
+
+    func testACloudRowTakesTheCloudStyleAndAStudioRowKeepsItsOwn() {
+        let statuses: [StudioRunStatus] = [.queued, .running, .reported, .failed, .cancelled]
+        for status in statuses {
+            XCTAssertEqual(StudioRunSemantics.statusTint(cloud("C", status)), .cloud, "\(status)")
+            XCTAssertEqual(StudioRunSemantics.rowTint(cloud("C", status)), .cloud)
+            XCTAssertEqual(StudioRunSemantics.statusTint(studio("S", status)),
+                           StudioRunSemantics.tint(status), "\(status)")
+            XCTAssertNil(StudioRunSemantics.rowTint(studio("S", status)))
+        }
+        // Apart from every colour a status is drawn in.
+        let statusTints = Set([StudioRunStatus.queued, .running, .needsYou, .reported, .failed,
+                               .cancelled, .interrupted, .paused, .closed, .reviewing,
+                               .unknown("x")].map(StudioRunSemantics.tint))
+        XCTAssertFalse(statusTints.contains(.cloud))
+        XCTAssertEqual(StudioRunSemantics.cloudLabel, "Cloud")
+        XCTAssertEqual(StudioRunSemantics.cloudSymbol, "cloud")
+    }
+
+    func testACloudRowOffersNoAction() {
+        for status in [StudioRunStatus.reported, .failed, .cancelled] {
+            let run = cloud("C", status)
+            XCTAssertFalse(StudioRunSemantics.canArchive(run), "\(status)")
+            XCTAssertFalse(StudioRunSemantics.canUnarchive(run))
+            XCTAssertEqual(StudioRunSemantics.replyDisabledReason(run, now: Date()),
+                           "A cloud run on kc1. Cloud runs are managed through Jesse.")
+        }
+        XCTAssertTrue(StudioRunSemantics.canArchive(studio("S", .reported)))
+    }
+
+    /// Cloud rows join the list by its rule, a Studio run of the same id stays its own row, and
+    /// nothing outside the Runs list (Work, Drafts, the badge) sees them.
+    func testCloudRowsJoinTheRunsListOnlyInItsOrder() async {
+        let list = StudioRunList(
+            runs: [studio("B160", .running, created: "2026-11-23T17:30:00.000Z"),
+                   studio("A9b", .queued),
+                   studio("DJ6", .closed, created: "2026-11-23T15:00:00.000Z"),
+                   cloud("DJ6", .running, created: "2026-11-23T17:10:27.000Z"),
+                   cloud("BG4-2", .running),
+                   cloud("s-dj2", .reported, created: "2026-11-23T16:53:27.000Z")],
+            counts: StudioRunCounts(running: 1, queued: 1, needsMe: 0, moving: 2, finished: 1,
+                                    archived: 0,
+                                    cloud: StudioRunCloudCounts(running: 2, needsMe: 0, moving: 2,
+                                                                finished: 1)),
+            cloudAvailable: true)
+        let (m, _) = model(list)
+        await m.load()
+        XCTAssertEqual(m.runs.map(\.id), ["B160", "A9b", "DJ6"], "the Studio's runs alone")
+        XCTAssertEqual(m.cloudRuns.map(\.id), ["cloud:DJ6", "cloud:BG4-2", "cloud:s-dj2"])
+        XCTAssertNil(m.cloudUnavailable)
+        // Live first, then newest first, whichever host.
+        XCTAssertEqual(m.runs(filter: .all, strand: nil).map(\.id),
+                       ["B160", "cloud:DJ6", "cloud:BG4-2", "A9b", "cloud:s-dj2", "DJ6"])
+        XCTAssertEqual(m.runs(filter: .moving, strand: nil).map(\.id),
+                       ["B160", "cloud:DJ6", "cloud:BG4-2", "A9b"])
+        // The segment counts add the cloud's to the Studio's.
+        XCTAssertEqual(m.count(filter: .moving, strand: nil), 4)
+        XCTAssertEqual(m.count(filter: .finished, strand: nil), 2)
+        XCTAssertEqual(m.count(filter: .all, strand: nil), 6)
+        // Archive all finished takes the Studio's finished runs and leaves the cloud's.
+        XCTAssertEqual(m.archivableFinished(strand: nil).map(\.id), ["DJ6"])
+    }
+
+    func testACloudRunsDetailIsReadWithHostCloudAndOffersNothing() async {
+        let list = StudioRunList(runs: [studio("DJ6", .closed), cloud("DJ6", .running)],
+                                 cloudAvailable: true)
+        let (m, fake) = model(list)
+        await m.load()
+        let cloudDetail = m.detailModel(for: StudioRunRoute(m.cloudRuns[0]))
+        let studioDetail = m.detailModel(for: StudioRunRoute(m.runs[0]))
+        XCTAssertFalse(cloudDetail === studioDetail, "one detail model per host")
+        XCTAssertTrue(cloudDetail.isCloud)
+        await cloudDetail.refresh()
+        XCTAssertEqual(fake.reads, ["cloud:DJ6"])
+        XCTAssertEqual(cloudDetail.run?.status, .running)
+        XCTAssertEqual(cloudDetail.lines, ["cloud one"])
+        XCTAssertFalse(cloudDetail.canCancel)
+        XCTAssertFalse(cloudDetail.showsComposer)
+        XCTAssertFalse(cloudDetail.isComposerEnabled)
+        XCTAssertFalse(cloudDetail.showsResume)
+        XCTAssertFalse(cloudDetail.canArchive)
+        XCTAssertFalse(cloudDetail.canUnarchive)
+        XCTAssertEqual(cloudDetail.replyDisabledReason,
+                       "A cloud run on kc1. Cloud runs are managed through Jesse.")
+        // The Studio's record of the same id is read as before.
+        await studioDetail.refresh()
+        XCTAssertEqual(fake.reads, ["cloud:DJ6", "DJ6"])
+        XCTAssertEqual(studioDetail.run?.status, .closed)
+    }
+
+    func testWhenTheCloudIsOutOfReachTheListSaysSoQuietly() async {
+        let list = StudioRunList(runs: [studio("B160", .running)], cloudAvailable: false,
+                                 cloudUnavailable: "kc1 did not answer within 3 s")
+        let (m, _) = model(list)
+        await m.load()
+        XCTAssertEqual(m.cloudUnavailable, "kc1 did not answer within 3 s")
+        XCTAssertNil(m.loadError, "never an error state")
+        XCTAssertEqual(m.runs(filter: .all, strand: nil).map(\.id), ["B160"])
+        XCTAssertEqual(StudioRunSemantics.cloudUnavailableLine,
+                       "Cloud runs are unavailable right now.")
+    }
+
+    /// A bridge without cloud rows: the Studio's runs exactly as before, and no cloud line.
+    func testAnOlderBridgeShowsTheStudioRunsAsBefore() async {
+        let list = StudioRunList(runs: [StudioRun(runID: "GD5", status: .needsYou,
+                                                  createdAt: "2026-11-09T10:00:00.000Z")],
+                                 counts: StudioRunCounts(needsMe: 1, moving: 0, finished: 0))
+        let (m, _) = model(list)
+        await m.load()
+        XCTAssertNil(m.cloudUnavailable)
+        XCTAssertTrue(m.cloudRuns.isEmpty)
+        XCTAssertEqual(m.runs(filter: .all, strand: nil).map(\.id), ["GD5"])
+        XCTAssertEqual(m.count(filter: .all, strand: nil), 1)
+        XCTAssertEqual(m.count(filter: .needsMe, strand: nil), 1)
+    }
+}
+
+extension StudioRunsCloudModelTests {
+    func testACloudRunWithNoLineIsCalledByItsID() {
+        XCTAssertEqual(WorkSemantics.title(StudioRun(runID: "BG4-2", host: "cloud")), "BG4-2")
+        XCTAssertEqual(WorkSemantics.title(StudioRun(runID: "BG4-2", host: "cloud", title: "Blogs by host")), "Blogs by host")
+        XCTAssertEqual(WorkSemantics.title(StudioRun(runID: "GD5")), "Untitled run")
     }
 }

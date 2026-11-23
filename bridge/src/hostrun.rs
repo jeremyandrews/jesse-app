@@ -41,6 +41,7 @@
 //! outside `root` except the DerivedData folders a run recorded as its own, and never a run
 //! directory.
 
+pub mod cloud;
 pub mod git;
 pub mod review;
 pub mod runner;
@@ -5910,9 +5911,40 @@ pub struct ListQuery {
 #[derive(Deserialize)]
 pub struct LogQuery {
     pub tail: Option<usize>,
+    /// `cloud` for a cloud run ([`cloud`]).
+    pub host: Option<String>,
 }
 
-/// `GET /jesse/runs`.
+/// `?host=` on a per run route: `cloud` names a cloud run ([`cloud`]).
+#[derive(Deserialize, Default)]
+pub struct HostQuery {
+    pub host: Option<String>,
+}
+
+/// The cloud host's server, when this bridge has one.
+fn cloud_of(st: &AppState) -> Option<Arc<crate::devjob::DevJobs>> {
+    cloud::cloud_server(st.cfg.devjob.service())
+}
+
+/// Refuse a per run action on a cloud run ([`cloud::refuse_cloud`]).
+async fn refuse_cloud(
+    st: &AppState,
+    svc: &HostRuns,
+    run_id: &str,
+    q: &HostQuery,
+) -> Result<(), ApiError> {
+    let studio_has = svc.get(run_id).is_some();
+    cloud::refuse_cloud(
+        run_id,
+        q.host.as_deref(),
+        studio_has,
+        cloud::cloud_has(cloud_of(st), run_id),
+    )
+    .await
+}
+
+/// `GET /jesse/runs`: the Studio's runs and, beside them, the cloud's ([`cloud`]). The cloud is
+/// asked while the Studio's store is scanned, and for at most [`cloud::CLOUD_LIST_TIMEOUT`].
 pub async fn jesse_runs(
     State(st): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -5921,9 +5953,18 @@ pub async fn jesse_runs(
     let svc = guard(&st, &headers)?;
     let mode =
         ArchivedMode::parse(q.archived.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let v = tokio::task::spawn_blocking(move || svc.list_json_mode(mode))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let studio = svc.clone();
+    let (v, cloud) = tokio::join!(
+        tokio::task::spawn_blocking(move || studio.list_json_mode(mode)),
+        cloud::list_cloud(cloud_of(&st)),
+    );
+    let mut v = v.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let v = tokio::task::spawn_blocking(move || {
+        svc.add_cloud(&mut v, mode, &cloud);
+        v
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(v).into_response())
 }
 
@@ -5952,20 +5993,37 @@ pub async fn jesse_runs_start(
     Ok(Json(started_json(&started)).into_response())
 }
 
-/// `GET /jesse/runs/:run_id`.
+/// `GET /jesse/runs/:run_id[?host=cloud]`: a Studio run, else (or with `host=cloud`, only) a
+/// cloud run by its run id or Job name.
 pub async fn jesse_run(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
-    match svc.get(&run_id) {
-        Some(r) => Ok(Json(svc.served_one(&r)).into_response()),
+    if !cloud::asked_cloud(q.host.as_deref())? {
+        if let Some(r) = svc.get(&run_id) {
+            return Ok(Json(svc.served_one(&r)).into_response());
+        }
+    }
+    match cloud::cloud_detail(cloud_of(&st), &run_id).await {
+        Some((v, run)) => {
+            let title = tokio::task::spawn_blocking(move || {
+                let t = svc.cloud_title(&mut StrandNotes::default(), &v);
+                (v, t)
+            })
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let (v, title) = title;
+            Ok(Json(cloud::cloud_detail_json(&v, &run, title)).into_response())
+        }
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
 
-/// `GET /jesse/runs/:run_id/log?tail=N`.
+/// `GET /jesse/runs/:run_id/log?tail=N[&host=cloud]`: a Studio run's readable log, else (or
+/// with `host=cloud`, only) the last lines of a cloud run's.
 pub async fn jesse_run_log(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
@@ -5974,12 +6032,22 @@ pub async fn jesse_run_log(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let tail = q.tail.unwrap_or(LOG_DEFAULT);
-    let id = run_id.clone();
-    let lines = tokio::task::spawn_blocking(move || svc.log_lines(&id, tail))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    match lines {
-        Some(l) => Ok(Json(log_json(&run_id, l)).into_response()),
+    if !cloud::asked_cloud(q.host.as_deref())? {
+        let id = run_id.clone();
+        let lines = tokio::task::spawn_blocking(move || svc.log_lines(&id, tail))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(l) = lines {
+            return Ok(Json(log_json(&run_id, l)).into_response());
+        }
+    }
+    let server = cloud_of(&st);
+    match cloud::cloud_detail(server.clone(), &run_id).await {
+        Some((v, run)) => {
+            let kept = server.and_then(|c| c.kept_tail(&v.name));
+            let lines = cloud::cloud_log_lines(kept, &run, tail.clamp(1, LOG_MAX));
+            Ok(Json(log_json(&run_id, lines)).into_response())
+        }
         None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
     }
 }
@@ -5988,10 +6056,12 @@ pub async fn jesse_run_log(
 pub async fn jesse_run_reply(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
     Json(body): Json<ReplyBody>,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc
         .reply_and_pump(&run_id, &body.text)
         .await
@@ -6004,10 +6074,12 @@ pub async fn jesse_run_reply(
 pub async fn jesse_run_review(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
     Json(body): Json<ReviewBody>,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc
         .request_review_and_start(
             &run_id,
@@ -6024,9 +6096,11 @@ pub async fn jesse_run_review(
 pub async fn jesse_run_cancel(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc.cancel_and_wake(&run_id).await.map_err(refusal)?;
     Ok(Json(svc.served_one(&r)).into_response())
 }
@@ -6035,10 +6109,12 @@ pub async fn jesse_run_cancel(
 pub async fn jesse_run_close(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let body = CloseBody::parse(&body).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let r = svc
         .close_blocking(&run_id, body.reason)
@@ -6052,9 +6128,11 @@ pub async fn jesse_run_close(
 pub async fn jesse_run_archive(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc.archive_blocking(&run_id, true).await.map_err(refusal)?;
     Ok(Json(svc.served_one(&r)).into_response())
 }
@@ -6063,9 +6141,11 @@ pub async fn jesse_run_archive(
 pub async fn jesse_run_unarchive(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc
         .archive_blocking(&run_id, false)
         .await

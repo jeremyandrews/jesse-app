@@ -14,6 +14,76 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.216.0] - 2026-11-23
+
+**`GET /jesse/runs` lists the cloud's dev jobs beside the Studio's runs, read only.** Cloud
+runs (`host: "cloud"`, Jobs in `jesse-dev` on kc1) were visible only through `devjob_list`. The
+Runs list now carries them too, in the run JSON shape, so the app can show what is running and
+queued in the cloud. New module `src/hostrun/cloud.rs`.
+
+- **The rows.** The cloud's queued, running and last 20 finished Jobs, `devjob_list`'s window
+  (`DevJobs::listed`, sharing `ListedViews` with `devjob_list`), each with `host: "cloud"`,
+  `run_id`, `job_name`, `repo`, `branch` (`jesse/<slug>`), `slug`, `agent`, `model`, `status`,
+  `created_at` and `queued_at` (the Job's creation), `started_at`, `finished_at`, `outcome`,
+  `pull_request`, `report_paths`, `error` (a failed Job's condition), `strand`, `item_id` and
+  `title` (the strand line's, for a Job a strand entry started; `JobView` now reads the
+  `jesse.dev/strand` and `jesse.dev/strand-id` labels). What the cloud lacks is null, never made
+  up: no rounds, no reviewer. Sorted with the Studio's rows by the list's rule (newest created,
+  then id); none under `?archived=only`.
+- **The status words.** Suspended: `queued`. Released and not finished (scheduling, running, or
+  being cancelled): `running`. Finished and cancelled: `cancelled`. Outcome `pull request
+  opened` or `no changes`: `reported`. Outcome `failed`: `failed`. Finished, not yet reported:
+  `failed` if the Job failed, `running` if it completed (its report is being written). An
+  outcome this build does not know: `reported` on a completed Job, else `failed`.
+- **Counts.** `counts.cloud` (`running`, `queued`, `needs_me`, `moving`, `finished`) holds the
+  cloud's tallies; every Studio count is unchanged.
+- **Unavailable.** `cloud_available` is true when the cloud was listed. When the bridge has no
+  `[devjob.cloud]`, or kc1 fails or does not answer within 3 s, it is false and
+  `cloud_unavailable` says why; the Studio's runs are served as before. The cloud is asked while
+  the Studio's store is scanned, so it never slows the Studio list past that bound.
+- **One cloud run.** `GET /jesse/runs/:id` and `/log` answer for a cloud run, by run id or Job
+  name, within 6 s: the row plus `waiting_for`, `last_line` and `elapsed_secs`, and the log
+  tail the watcher keeps (else the tail `devjob_status` reads). `?host=cloud` asks only the
+  cloud; without it the Studio is asked first, as before.
+- **No action.** `reply`, `review`, `cancel`, `close`, `archive` and `unarchive` answer 409 "<id>
+  is a cloud run: cloud runs are managed through Jesse, not from the Runs page" for
+  `?host=cloud`, even when a Studio run has the same id (a queued Studio run the cloud took keeps
+  its id), and for an id only the cloud knows. A Studio run's action never asks the cloud.
+- **Tests.** `hostrun::cloud::tests` (12: every phase and outcome to a status, the row's shape,
+  the merge and its order, counts, the archived list, titles, not configured, a failed and a
+  timed out listing on the paused clock, refused actions, the log tail) and three app wire
+  fixtures written by `the_app_wire_fixtures_match_what_the_run_routes_serialize`
+  (`studio-runs-list-cloud.json`, `studio-runs-list-cloud-unavailable.json`,
+  `cloud-run-detail.json`).
+
+## [App 1.0 (227)] - 2026-11-23
+
+**The Runs page shows the cloud's dev jobs in the same list as the Studio's runs, in teal.**
+Needs bridge 0.216.0; with an older bridge the page is exactly as before.
+
+- **The rows.** Each cloud run is a row in the one list, ordered with the Studio's by the list's
+  rule (live first, then newest), with a teal bar along its leading edge, its status in teal, a
+  `Cloud` badge with the `cloud` symbol, and its repository. Teal (the system colour, adapting
+  to light and dark mode) is used by no status. A cloud run with no strand line is called by its
+  id. The segment counts add the bridge's `counts.cloud` to the Studio's.
+- **Read only.** A cloud row has no swipe or context action, `Archive all finished` leaves it
+  out, and its detail (titled `Cloud run`, read with `?host=cloud`) shows its status, log tail
+  and details (job, agent, outcome, pull request) with no Cancel, reply, Resume or Archive; one
+  line says cloud runs are managed through Jesse.
+- **Unavailable.** When the bridge says the cloud's runs are not listed, one quiet line above
+  the list says "Cloud runs are unavailable right now."; no error state.
+- **Apart from the Studio.** `StudioRunsModel.runs` stays the Studio's alone, so the Work view,
+  a strand's Drafts and the board's badge are unchanged; cloud runs are in `cloudRuns`. A cloud
+  row's identity is `cloud:<id>`, so a Studio run and a cloud run of the same id are two rows
+  with two detail screens.
+- **Tests.** `StudioRunsWireTests` (cloud list, unavailable list, a bridge without cloud rows, a
+  run with and without `host`, the cloud detail, `host=cloud`), `StudioRunsCloudModelTests` (the
+  cloud style, no actions, the merged order and counts, the cloud detail, the unavailable line,
+  an older bridge, the id title), and `StudioRunsListEveryRunUITests` gains
+  `testCloudRowsShowInTheirOwnColourAndOfferNothing` against a loopback stub serving the
+  2026-11-23 18:20 CET snapshot, plus `PD1_CLOUD_RUNS` on the live bridge walk. Screenshots in
+  `docs/screenshots/dj7/`.
+
 ## [bridge 0.215.0] - 2026-11-23
 
 **`jesse-housedb-mcp`: the house's history, read only, as the same server `healthdb` is.** Two

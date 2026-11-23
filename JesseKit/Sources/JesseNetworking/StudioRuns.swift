@@ -376,8 +376,23 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
     public var reviewFocus: String?
     /// Every review of the run, oldest first. Empty for a run never reviewed.
     public var reviews: [StudioRunReview]
+    /// A cloud run's outcome as its report says it (`pull request opened`, `no changes`,
+    /// `failed`). Nil for a Studio run, and before a cloud run reports.
+    public var outcome: String?
+    /// A cloud run's agent (`claude`, `codex`). Nil for a Studio run.
+    public var agent: String?
+    /// A cloud run's Job on kc1. Nil for a Studio run.
+    public var jobName: String?
+    /// The pull request a cloud run's report named.
+    public var pullRequest: String?
 
-    public var id: String { runID }
+    /// `host: "cloud"`: a dev job on kc1, served beside the Studio's runs (bridge 0.216.0).
+    /// Read only here: its actions are Jesse's.
+    public var isCloud: Bool { host == "cloud" }
+
+    /// Unique in a list that holds both hosts: a queued Studio run the cloud took keeps its id,
+    /// so the Studio's closed record and the cloud's run can both be listed.
+    public var id: String { isCloud ? "cloud:\(runID)" : runID }
 
     public init(runID: String, strand: String? = nil, itemID: String? = nil,
                 promptPath: String? = nil, itemText: String? = nil, repo: String = "",
@@ -390,7 +405,9 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
                 title: String? = nil, lastLine: String? = nil, reportLine: String? = nil,
                 archivedAt: String? = nil, archivedReason: String? = nil,
                 reviewer: String? = nil, reviewerLabel: String? = nil,
-                reviewFocus: String? = nil, reviews: [StudioRunReview] = []) {
+                reviewFocus: String? = nil, reviews: [StudioRunReview] = [],
+                outcome: String? = nil, agent: String? = nil, jobName: String? = nil,
+                pullRequest: String? = nil) {
         self.runID = runID
         self.strand = strand
         self.itemID = itemID
@@ -422,11 +439,17 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         self.reviewerLabel = reviewerLabel
         self.reviewFocus = reviewFocus
         self.reviews = reviews
+        self.outcome = outcome
+        self.agent = agent
+        self.jobName = jobName
+        self.pullRequest = pullRequest
     }
 
     private enum CodingKeys: String, CodingKey {
         case strand, repo, branch, origin, status, rounds, model, error, host, title
-        case reviewer, reviews
+        case reviewer, reviews, outcome, agent
+        case jobName = "job_name"
+        case pullRequest = "pull_request"
         case reviewerLabel = "reviewer_label"
         case reviewFocus = "review_focus"
         case runID = "run_id"
@@ -481,6 +504,10 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         reviewerLabel = try c.decodeIfPresent(String.self, forKey: .reviewerLabel)
         reviewFocus = try c.decodeIfPresent(String.self, forKey: .reviewFocus)
         reviews = try c.decodeIfPresent([StudioRunReview].self, forKey: .reviews) ?? []
+        outcome = try c.decodeIfPresent(String.self, forKey: .outcome)
+        agent = try c.decodeIfPresent(String.self, forKey: .agent)
+        jobName = try c.decodeIfPresent(String.self, forKey: .jobName)
+        pullRequest = try c.decodeIfPresent(String.self, forKey: .pullRequest)
     }
 
     public static func decode(from data: Data) throws -> StudioRun {
@@ -532,10 +559,13 @@ public struct StudioRunCounts: Decodable, Equatable, Sendable {
     public var moving: Int?
     public var finished: Int?
     public var archived: Int?
+    /// The cloud's own tallies, apart from the Studio's (bridge 0.216.0). Nil from an older
+    /// bridge, and when the cloud could not be listed.
+    public var cloud: StudioRunCloudCounts?
 
     public init(running: Int = 0, queued: Int = 0, needsYou: Int = 0, paused: Int = 0,
                 needsMe: Int? = nil, moving: Int? = nil, finished: Int? = nil,
-                archived: Int? = nil) {
+                archived: Int? = nil, cloud: StudioRunCloudCounts? = nil) {
         self.running = running
         self.queued = queued
         self.needsYou = needsYou
@@ -544,10 +574,11 @@ public struct StudioRunCounts: Decodable, Equatable, Sendable {
         self.moving = moving
         self.finished = finished
         self.archived = archived
+        self.cloud = cloud
     }
 
     private enum CodingKeys: String, CodingKey {
-        case running, queued, paused, moving, finished, archived
+        case running, queued, paused, moving, finished, archived, cloud
         case needsYou = "needs_you"
         case needsMe = "needs_me"
     }
@@ -562,6 +593,39 @@ public struct StudioRunCounts: Decodable, Equatable, Sendable {
         moving = try c.decodeIfPresent(Int.self, forKey: .moving)
         finished = try c.decodeIfPresent(Int.self, forKey: .finished)
         archived = try c.decodeIfPresent(Int.self, forKey: .archived)
+        cloud = try? c.decodeIfPresent(StudioRunCloudCounts.self, forKey: .cloud)
+    }
+}
+
+/// `counts.cloud`: the cloud's runs by the app's filters, counted by the bridge.
+public struct StudioRunCloudCounts: Decodable, Equatable, Sendable {
+    public var running: Int
+    public var queued: Int
+    public var needsMe: Int
+    public var moving: Int
+    public var finished: Int
+
+    public init(running: Int = 0, queued: Int = 0, needsMe: Int = 0, moving: Int = 0,
+                finished: Int = 0) {
+        self.running = running
+        self.queued = queued
+        self.needsMe = needsMe
+        self.moving = moving
+        self.finished = finished
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case running, queued, moving, finished
+        case needsMe = "needs_me"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        running = try c.decodeIfPresent(Int.self, forKey: .running) ?? 0
+        queued = try c.decodeIfPresent(Int.self, forKey: .queued) ?? 0
+        needsMe = try c.decodeIfPresent(Int.self, forKey: .needsMe) ?? 0
+        moving = try c.decodeIfPresent(Int.self, forKey: .moving) ?? 0
+        finished = try c.decodeIfPresent(Int.self, forKey: .finished) ?? 0
     }
 }
 
@@ -580,20 +644,35 @@ public enum StudioRunArchivedMode: String, Equatable, Sendable {
 /// `GET /jesse/runs`. `disk` and `orphans` are housekeeping for the Studio's owner at a
 /// terminal and are not decoded.
 public struct StudioRunList: Decodable, Equatable, Sendable {
+    /// The Studio's runs and, from bridge 0.216.0, the cloud's (`host: "cloud"`).
     public var runs: [StudioRun]
     public var counts: StudioRunCounts
+    /// Whether the cloud's runs were listed: false when the bridge has no cloud host or kc1
+    /// did not answer, nil from a bridge that predates cloud rows.
+    public var cloudAvailable: Bool?
+    /// Why the cloud's runs are not listed, when `cloudAvailable` is false.
+    public var cloudUnavailable: String?
 
-    public init(runs: [StudioRun] = [], counts: StudioRunCounts = StudioRunCounts()) {
+    public init(runs: [StudioRun] = [], counts: StudioRunCounts = StudioRunCounts(),
+                cloudAvailable: Bool? = nil, cloudUnavailable: String? = nil) {
         self.runs = runs
         self.counts = counts
+        self.cloudAvailable = cloudAvailable
+        self.cloudUnavailable = cloudUnavailable
     }
 
-    private enum CodingKeys: String, CodingKey { case runs, counts }
+    private enum CodingKeys: String, CodingKey {
+        case runs, counts
+        case cloudAvailable = "cloud_available"
+        case cloudUnavailable = "cloud_unavailable"
+    }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         runs = try c.decodeIfPresent([StudioRun].self, forKey: .runs) ?? []
         counts = try c.decodeIfPresent(StudioRunCounts.self, forKey: .counts) ?? StudioRunCounts()
+        cloudAvailable = try? c.decodeIfPresent(Bool.self, forKey: .cloudAvailable)
+        cloudUnavailable = try? c.decodeIfPresent(String.self, forKey: .cloudUnavailable)
     }
 
     public static func decode(from data: Data) throws -> StudioRunList {
@@ -717,12 +796,25 @@ public protocol StudioRunsProviding: Sendable {
     func lastLook() async throws -> WorkLastLook
     /// `POST /jesse/work/last-look`: the last look becomes now.
     func markLastLook() async throws -> WorkLastLook
+    /// `GET /jesse/runs/:id`, `?host=cloud` for a cloud run.
+    func getRun(id: String, cloud: Bool) async throws -> StudioRun
+    /// `GET /jesse/runs/:id/log`, `&host=cloud` for a cloud run.
+    func runLog(id: String, tail: Int?, cloud: Bool) async throws -> StudioRunLog
 }
 
 extension StudioRunsProviding {
     /// The list as the app shows it: every run not archived.
     public func listRuns() async throws -> StudioRunList {
         try await listRuns(archived: .hide)
+    }
+
+    /// A provider that does not tell the hosts apart asks for the run by its id.
+    public func getRun(id: String, cloud: Bool) async throws -> StudioRun {
+        try await getRun(id: id)
+    }
+
+    public func runLog(id: String, tail: Int?, cloud: Bool) async throws -> StudioRunLog {
+        try await runLog(id: id, tail: tail)
     }
 }
 
@@ -752,15 +844,30 @@ extension JesseBridgeClient: StudioRunsProviding {
     }
 
     public func getRun(id: String) async throws -> StudioRun {
-        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))", method: "GET")
+        try await getRun(id: id, cloud: false)
+    }
+
+    public func getRun(id: String, cloud: Bool) async throws -> StudioRun {
+        let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))", method: "GET",
+                                     query: Self.hostQuery(cloud: cloud))
         return try runDecode { try StudioRun.decode(from: data) }
     }
 
     public func runLog(id: String, tail: Int? = nil) async throws -> StudioRunLog {
-        let query = tail.map { [URLQueryItem(name: "tail", value: String($0))] } ?? []
+        try await runLog(id: id, tail: tail, cloud: false)
+    }
+
+    public func runLog(id: String, tail: Int?, cloud: Bool) async throws -> StudioRunLog {
+        let query = (tail.map { [URLQueryItem(name: "tail", value: String($0))] } ?? [])
+            + Self.hostQuery(cloud: cloud)
         let data = try await runCall("/jesse/runs/\(Self.runPathEscaped(id))/log", method: "GET",
                                      query: query)
         return try runDecode { try StudioRunLog.decode(from: data) }
+    }
+
+    /// `host=cloud` for a cloud run; nothing for a Studio run, as before.
+    static func hostQuery(cloud: Bool) -> [URLQueryItem] {
+        cloud ? [URLQueryItem(name: "host", value: "cloud")] : []
     }
 
     public func replyToRun(id: String, text: String) async throws -> StudioRun {

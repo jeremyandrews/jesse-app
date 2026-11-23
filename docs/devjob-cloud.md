@@ -105,6 +105,25 @@ run id or Job name, `devjob_list` (under `cloud`), and `devjob_cancel` (a queued
 a running one is stopped through `activeDeadlineSeconds` and reported). There is no reply: a
 cloud run has no session to continue, so a report that needs Jeremy is answered by a new run.
 
+## On the app's Runs page
+
+`GET /jesse/runs` (0.216.0) lists the cloud's queued, running and last 20 finished runs beside
+the Studio's, with `host: "cloud"`, `counts.cloud`, and `cloud_available` (false, with
+`cloud_unavailable`, when there is no cloud host or kc1 does not answer within 3 s). A cloud run
+is read only there: its detail and log answer (`?host=cloud`; 503 when kc1 fails or does not answer
+in 6 s, 404 only when it answers without the run), and every action is refused with "cloud runs
+are managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
+
+| The Job | Status |
+| --- | --- |
+| Suspended, waiting for a slot | `queued` |
+| Released, not finished (scheduling, running, being cancelled) | `running` |
+| Finished, cancelled | `cancelled` |
+| Finished, outcome `pull request opened` or `no changes` | `reported` |
+| Finished, outcome `failed` | `failed` |
+| Finished, not yet reported | `failed` if the Job failed; `running` if it completed |
+| Finished, an outcome this build does not know | `reported` if the Job completed, else `failed` |
+
 ## Failure modes
 
 | What | What happens |

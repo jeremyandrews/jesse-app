@@ -3161,7 +3161,7 @@ the posture nor the loop: one review cycle and one answering round per run, howe
 reviewed. A default reviewer that is down never blocks a run (it goes on unreviewed and says so
 on its report's first line); a reviewer named explicitly that is down is refused at the start.
 Every reviewer of a cycle reads the same base and head, read once before any of them starts.
-**Since 0.216.0, `devjob_priority` joins them**, classed and granted exactly as `devjob_cancel`
+**Since 0.217.0, `devjob_priority` joins them**, classed and granted exactly as `devjob_cancel`
 (write turns only, on every harness that renders the server); the battery's stand-in lists nine
 tools, and only the write rows' grants move, by this one tool. It changes which queued Studio run
 takes the next free slot and nothing else: it never stops, pauses or overtakes a running run and

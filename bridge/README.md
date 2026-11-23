@@ -991,7 +991,7 @@ enabled = true
 **Which repository.** The draft's `devjob-repo`, else the caller's `repo`, else the strand's one
 `repos:` entry. A strand listing several repositories needs `repo`.
 
-**Priority (0.216.0).** A queued run carries one of four levels: `low`, `normal` (the default),
+**Priority (0.217.0).** A queued run carries one of four levels: `low`, `normal` (the default),
 `high` or `urgent`, stored by name in `run.json` as `priority` (written only when not `normal`,
 so a record from an older bridge, with no field, reads as `normal` and nothing is migrated).
 
@@ -1008,7 +1008,7 @@ so a record from an older bridge, with no field, reads as `normal` and nothing i
 - **The order.** The queue pass sorts queued runs by: the watcher's own resumed rounds first (a
   run the usage limit or a restart stopped gets its slot back first), then priority, highest
   first, then the order of the wait (`queued_at`, else `created_at`), then the run id. With every
-  run `normal` this is exactly the order before 0.216.0. A free cloud slot taking a
+  run `normal` this is exactly the order before 0.217.0. A free cloud slot taking a
   `devjob-host: any` run (`docs/devjob-cloud.md`) takes them in the same order.
 - **Never preempts.** Priority only decides which eligible queued run takes a free slot. It never
   stops, pauses or overtakes a running run, and never bypasses `max_concurrent`, a repository's

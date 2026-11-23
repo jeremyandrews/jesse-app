@@ -866,7 +866,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
     // that can push a branch and open a pull request, so it is a write; `devjob_reply` and
     // `devjob_cancel` steer a Studio run, so they are writes beside it (0.197.0), and so is
     // `devjob_close` (0.200.0), `devjob_review` and `devjob_review_reply` (0.211.0), and
-    // `devjob_priority` (0.216.0); the other two only read.
+    // `devjob_priority` (0.217.0); the other two only read.
     McpServerRow {
         transport: Transport::InProcess,
         ..writes(

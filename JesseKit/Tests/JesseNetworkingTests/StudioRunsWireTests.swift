@@ -330,6 +330,90 @@ final class StudioRunsWireTests: XCTestCase {
         XCTAssertEqual(StudioRunError.refused(status: 400, message: "  \n").errorDescription,
                        "The bridge answered 400 with no reason.")
     }
+
+    // MARK: - Cloud runs (bridge 0.216.0)
+
+    /// The list with the cloud's runs beside the Studio's: `host` on every run, the cloud's
+    /// own tallies, and the flag saying they were listed.
+    func testACloudListDecodesHostOnEveryRunAndTheCloudsOwnCounts() throws {
+        let list = try StudioRunList.decode(from: fixture("studio-runs-list-cloud"))
+        XCTAssertEqual(list.runs.map(\.runID),
+                       ["GD12", "GD10", "GD5", "DJ6", "BG4-2", "s-dj2-cloud-live-proof"])
+        XCTAssertEqual(list.runs.map(\.host), ["studio", "studio", "studio", "cloud", "cloud",
+                                               "cloud"])
+        XCTAssertEqual(list.runs.map(\.isCloud), [false, false, false, true, true, true])
+        XCTAssertEqual(list.cloudAvailable, true)
+        XCTAssertNil(list.cloudUnavailable)
+        XCTAssertEqual(list.counts.cloud, StudioRunCloudCounts(running: 2, queued: 0, needsMe: 0,
+                                                               moving: 2, finished: 1))
+        // The Studio's own tallies keep their meaning.
+        XCTAssertEqual(list.counts.needsMe, 1)
+        XCTAssertEqual(list.counts.moving, 2)
+        let bg = list.runs[4]
+        XCTAssertEqual(bg.status, .running)
+        XCTAssertEqual(bg.repo, "jeremyandrews/trovato")
+        XCTAssertEqual(bg.branch, "jesse/bg4-2-one-install-hosts-many-blogs-by-host-nam")
+        XCTAssertEqual(bg.createdAt, "2026-11-23T17:08:27.000Z")
+        XCTAssertEqual(bg.startedAt, "2026-11-23T17:08:28.000Z")
+        XCTAssertEqual(bg.agent, "claude")
+        XCTAssertEqual(bg.jobName, "devjob-bg4-2")
+        XCTAssertTrue(bg.rounds.isEmpty)
+        let proof = list.runs[5]
+        XCTAssertEqual(proof.status, .reported)
+        XCTAssertEqual(proof.outcome, "pull request opened")
+        XCTAssertEqual(proof.latestReportPath, "Inbox/2026-11-23-run-s-dj2-cloud-live-proof.md")
+        // Two hosts, one id space: a cloud run's identity is its own.
+        XCTAssertEqual(list.runs[3].id, "cloud:DJ6")
+        XCTAssertEqual(list.runs[0].id, "GD12")
+    }
+
+    func testAListWhoseCloudIsOutOfReachSaysWhyAndKeepsTheStudiosRuns() throws {
+        let list = try StudioRunList.decode(from: fixture("studio-runs-list-cloud-unavailable"))
+        XCTAssertEqual(list.cloudAvailable, false)
+        XCTAssertEqual(list.cloudUnavailable, "kc1 did not answer within 3 s")
+        XCTAssertEqual(list.runs.map(\.runID), ["GD12", "GD10", "GD5"])
+        XCTAssertFalse(list.runs.contains(where: \.isCloud))
+        XCTAssertNil(list.counts.cloud)
+    }
+
+    /// A bridge before cloud rows: no flag, no cloud counts, and every run a Studio run.
+    func testAListFromABridgeWithoutCloudRowsDecodesAsBefore() throws {
+        let list = try StudioRunList.decode(from: fixture("studio-runs-list"))
+        XCTAssertNil(list.cloudAvailable)
+        XCTAssertNil(list.cloudUnavailable)
+        XCTAssertNil(list.counts.cloud)
+        XCTAssertFalse(list.runs.contains(where: \.isCloud))
+        XCTAssertEqual(list.runs.map(\.id), list.runs.map(\.runID))
+    }
+
+    /// A run with no `host` at all (a bridge before 0.188.0 served none) is a Studio run.
+    func testARunWithoutHostIsAStudioRun() throws {
+        let run = try StudioRun.decode(from: Data(#"{"run_id":"GD5","status":"reported"}"#.utf8))
+        XCTAssertNil(run.host)
+        XCTAssertFalse(run.isCloud)
+        XCTAssertEqual(run.id, "GD5")
+        let cloud = try StudioRun.decode(from: Data(
+            #"{"run_id":"GD5","host":"cloud","status":"running"}"#.utf8))
+        XCTAssertTrue(cloud.isCloud)
+        XCTAssertEqual(cloud.id, "cloud:GD5")
+    }
+
+    func testACloudRunsDetailDecodesItsStatusAndLastLine() throws {
+        let run = try StudioRun.decode(from: fixture("cloud-run-detail"))
+        XCTAssertEqual(run.runID, "DJ6")
+        XCTAssertTrue(run.isCloud)
+        XCTAssertEqual(run.status, .running)
+        XCTAssertEqual(run.repo, "jeremyandrews/jesse-app")
+        XCTAssertEqual(run.lastLine, "Running cargo test")
+        XCTAssertNil(run.outcome)
+        XCTAssertTrue(run.reportPaths.isEmpty)
+    }
+
+    func testACloudRunIsAskedForWithHostCloudAndAStudioRunAsBefore() {
+        XCTAssertEqual(JesseBridgeClient.hostQuery(cloud: true),
+                       [URLQueryItem(name: "host", value: "cloud")])
+        XCTAssertEqual(JesseBridgeClient.hostQuery(cloud: false), [])
+    }
 }
 
 private extension ISO8601DateFormatter {

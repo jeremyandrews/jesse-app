@@ -6007,19 +6007,15 @@ pub async fn jesse_run(
             return Ok(Json(svc.served_one(&r)).into_response());
         }
     }
-    match cloud::cloud_detail(cloud_of(&st), &run_id).await {
-        Some((v, run)) => {
-            let title = tokio::task::spawn_blocking(move || {
-                let t = svc.cloud_title(&mut StrandNotes::default(), &v);
-                (v, t)
-            })
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let (v, title) = title;
-            Ok(Json(cloud::cloud_detail_json(&v, &run, title)).into_response())
-        }
-        None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
-    }
+    let (v, run) =
+        cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(cloud_of(&st), &run_id).await)?;
+    let (v, title) = tokio::task::spawn_blocking(move || {
+        let t = svc.cloud_title(&mut StrandNotes::default(), &v);
+        (v, t)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(cloud::cloud_detail_json(&v, &run, title)).into_response())
 }
 
 /// `GET /jesse/runs/:run_id/log?tail=N[&host=cloud]`: a Studio run's readable log, else (or
@@ -6042,14 +6038,11 @@ pub async fn jesse_run_log(
         }
     }
     let server = cloud_of(&st);
-    match cloud::cloud_detail(server.clone(), &run_id).await {
-        Some((v, run)) => {
-            let kept = server.and_then(|c| c.kept_tail(&v.name));
-            let lines = cloud::cloud_log_lines(kept, &run, tail.clamp(1, LOG_MAX));
-            Ok(Json(log_json(&run_id, lines)).into_response())
-        }
-        None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
-    }
+    let (v, run) =
+        cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(server.clone(), &run_id).await)?;
+    let kept = server.and_then(|c| c.kept_tail(&v.name));
+    let lines = cloud::cloud_log_lines(kept, &run, tail.clamp(1, LOG_MAX));
+    Ok(Json(log_json(&run_id, lines)).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/reply` with `{ text }`.

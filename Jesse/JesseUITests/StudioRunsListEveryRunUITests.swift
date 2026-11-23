@@ -138,9 +138,8 @@ final class StudioRunsListEveryRunUITests: XCTestCase {
         let studioRow = row(app, "B160")
         XCTAssertTrue(studioRow.exists)
         XCTAssertFalse(studioRow.label.contains("Cloud"), "B160's row: \(studioRow.label)")
-        sleep(1)
+        settled(bg, "BG4-2's row")
         shot("dj7-runs-\(look)", dir: dir)
-        sleep(1)
 
         let dj6 = row(app, "DJ6")
         XCTAssertTrue(dj6.waitForExistence(timeout: 10))
@@ -155,8 +154,16 @@ final class StudioRunsListEveryRunUITests: XCTestCase {
         XCTAssertFalse(app.textFields["Reply"].exists)
         XCTAssertTrue(stub.requestPaths.contains { $0.contains("/jesse/runs/DJ6?host=cloud") },
                       "served: \(stub.requestPaths)")
-        sleep(1)
+        settled(app.navigationBars["Cloud run"], "the cloud run's detail")
         shot("dj7-cloud-run-detail-\(look)", dir: dir)
+    }
+
+    /// Waits until `element` can be tapped, which XCUITest reports only once the screen has
+    /// stopped animating, so a screenshot does not catch a push or a list mid transition.
+    private func settled(_ element: XCUIElement, _ what: String) {
+        let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"),
+                                                 object: element)
+        XCTAssertEqual(XCTWaiter().wait(for: [hittable], timeout: 10), .completed, "\(what) settles")
     }
 }
 

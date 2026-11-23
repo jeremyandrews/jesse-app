@@ -305,7 +305,7 @@ async fn a_cloud_that_does_not_answer_in_time_is_unavailable() {
 async fn a_bridge_with_no_cloud_host_lists_none() {
     assert_eq!(list_cloud(None).await, CloudRuns::Off);
     assert!(!cloud_has(None, "DJ6").await);
-    assert!(cloud_detail(None, "DJ6").await.is_none());
+    assert!(matches!(cloud_detail(None, "DJ6").await, Ok(None)));
 }
 
 // ---- the refused actions -----------------------------------------------------------------------
@@ -379,12 +379,31 @@ pub(crate) fn status_run(log_tail: Vec<String>) -> DevJobRun {
 }
 
 #[test]
-fn a_cloud_runs_log_is_the_kept_tail_else_the_status_tail() {
-    let run = status_run(vec!["a".into(), "b".into()]);
-    let kept: Vec<String> = (1..=5).map(|i| format!("line {i}")).collect();
+fn a_cloud_runs_log_is_the_kept_tail_continued_by_the_tail_read_now() {
+    let lines = |r: std::ops::RangeInclusive<u32>| -> Vec<String> {
+        r.map(|i| format!("line {i}")).collect()
+    };
+    // The watcher kept lines 1 to 5 while the pod ran; read now, after the pod exited, the
+    // tail is lines 4 to 7. The last two lines are only in the tail read now.
+    let finished = status_run(lines(4..=7));
     assert_eq!(
-        cloud_log_lines(Some(kept), &run, 2),
-        vec!["line 4".to_string(), "line 5".to_string()]
+        cloud_log_lines(Some(lines(1..=5)), &finished, 200),
+        lines(1..=7)
+    );
+    assert_eq!(
+        cloud_log_lines(Some(lines(1..=5)), &finished, 3),
+        lines(5..=7)
+    );
+    // A kept tail with nothing in common with the newer read is too old to join.
+    let run = status_run(vec!["a".into(), "b".into()]);
+    assert_eq!(
+        cloud_log_lines(Some(lines(1..=5)), &run, 200),
+        vec!["a", "b"]
+    );
+    // The pod is gone and nothing was read now: the kept tail is all there is.
+    assert_eq!(
+        cloud_log_lines(Some(lines(1..=5)), &status_run(vec![]), 200),
+        lines(1..=5)
     );
     assert_eq!(cloud_log_lines(None, &run, 200), vec!["a", "b"]);
     assert_eq!(cloud_log_lines(Some(vec![]), &run, 200), vec!["a", "b"]);
@@ -413,4 +432,42 @@ pub(crate) fn snapshot_views() -> Vec<JobView> {
     proof.finished_ms = Some(T0 - 17_000);
     proof.report_path = Some("Inbox/2026-11-23-run-s-dj2-cloud-live-proof.md".into());
     vec![bg, dj6, proof]
+}
+
+// ---- a cloud run the cloud could not look up ---------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_cloud_lookup_that_does_not_answer_is_unavailable_not_missing() {
+    let started = tokio::time::Instant::now();
+    let found: Result<Option<()>, String> =
+        bounded_lookup(std::future::pending(), CLOUD_DETAIL_TIMEOUT).await;
+    assert_eq!(found, Err("kc1 did not answer within 6 s".to_string()));
+    assert_eq!(started.elapsed(), CLOUD_DETAIL_TIMEOUT);
+    let e = cloud_lookup_answer("DJ6", found).unwrap_err();
+    assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        e.1,
+        "cloud runs are unavailable, so \"DJ6\" could not be looked up: kc1 did not answer within 6 s"
+    );
+}
+
+#[tokio::test]
+async fn a_cloud_lookup_that_fails_is_unavailable_and_one_that_finds_nothing_is_missing() {
+    let failed: Result<Option<()>, String> = bounded_lookup(
+        async { Err("could not read the Job devjob-dj6: connection refused".to_string()) },
+        CLOUD_DETAIL_TIMEOUT,
+    )
+    .await;
+    let e = cloud_lookup_answer("DJ6", failed).unwrap_err();
+    assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(e.1.ends_with("connection refused"), "{}", e.1);
+
+    let none: Result<Option<()>, String> =
+        bounded_lookup(async { Ok(None) }, CLOUD_DETAIL_TIMEOUT).await;
+    let e = cloud_lookup_answer("ZZ9", none).unwrap_err();
+    assert_eq!(e.0, StatusCode::NOT_FOUND);
+    assert_eq!(e.1, "no run \"ZZ9\"");
+
+    let found = bounded_lookup(async { Ok(Some(7)) }, CLOUD_DETAIL_TIMEOUT).await;
+    assert_eq!(cloud_lookup_answer("DJ6", found), Ok(7));
 }

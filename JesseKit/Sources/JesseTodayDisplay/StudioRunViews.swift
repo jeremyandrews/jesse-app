@@ -766,8 +766,9 @@ public struct StudioRunDetailView: View {
         } else {
             field("Round", "\(run.round)")
         }
-        if let started = StudioRunSemantics.clock(run.startedAt ?? run.createdAt, now: now) {
-            field("Started", started)
+        if let began = StudioRunSemantics.beganField(run),
+           let stamp = StudioRunSemantics.clock(began.stamp, now: now) {
+            field(began.label, stamp)
         }
         if let updated = StudioRunSemantics.clock(run.updatedAt, now: now) {
             let age = StudioRunSemantics.age(run.updatedAt, now: now).map { " (\($0))" } ?? ""

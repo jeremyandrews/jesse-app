@@ -89,6 +89,19 @@ public enum StudioRunSemantics {
         run.isCloud ? .cloud : nil
     }
 
+    /// The Details row that says when a run began: `Started` and its start. A cloud run that
+    /// has not started (the bridge serves no `started_at`) shows `Queued` and when it was
+    /// queued instead, never its queue time as a start. A Studio run keeps its own rule: its
+    /// creation stands in for a start it does not have yet.
+    public static func beganField(_ run: StudioRun) -> StudioRunTimeField? {
+        if let started = run.startedAt, !started.isEmpty {
+            return StudioRunTimeField(label: "Started", stamp: started)
+        }
+        let created = run.isCloud ? (run.queuedAt ?? run.createdAt) : run.createdAt
+        guard !created.isEmpty else { return nil }
+        return StudioRunTimeField(label: run.isCloud ? "Queued" : "Started", stamp: created)
+    }
+
     /// The one quiet line the list shows when the bridge says the cloud's runs are not listed.
     public static let cloudUnavailableLine = "Cloud runs are unavailable right now."
 
@@ -313,6 +326,12 @@ public enum StudioRunSemantics {
     public static func badge(for strand: Strand) -> StudioRunBadge? {
         badge(active: strand.runsActive, needsYou: strand.runsNeedsYou)
     }
+}
+
+/// One timed row of a run's Details: what the time is, and the RFC 3339 stamp.
+public struct StudioRunTimeField: Equatable, Sendable {
+    public let label: String
+    public let stamp: String
 }
 
 /// A strand row's run badge.

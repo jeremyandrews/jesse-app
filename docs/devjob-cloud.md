@@ -109,8 +109,9 @@ cloud run has no session to continue, so a report that needs Jeremy is answered 
 `GET /jesse/runs` (0.216.0) lists the cloud's queued, running and last 20 finished runs beside
 the Studio's, with `host: "cloud"`, `counts.cloud`, and `cloud_available` (false, with
 `cloud_unavailable`, when there is no cloud host or kc1 does not answer within 3 s). A cloud run
-is read only there: its detail and log answer (`?host=cloud`), and every action is refused with
-"cloud runs are managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
+is read only there: its detail and log answer (`?host=cloud`; 503 when kc1 fails or does not answer
+in 6 s, 404 only when it answers without the run), and every action is refused with "cloud runs
+are managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
 
 | The Job | Status |
 | --- | --- |

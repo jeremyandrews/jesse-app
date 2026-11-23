@@ -213,17 +213,44 @@ pub async fn list_cloud(cloud: Option<std::sync::Arc<DevJobs>>) -> CloudRuns {
 pub async fn cloud_detail(
     cloud: Option<std::sync::Arc<DevJobs>>,
     key: &str,
-) -> Option<(JobView, DevJobRun)> {
-    let c = cloud?;
-    let look = async {
-        let v = c.find_cloud_job(key).await.ok()??;
-        let run = c.run(&v.name).await.ok()??;
-        Some((v, run))
+) -> Result<Option<(JobView, DevJobRun)>, String> {
+    let Some(c) = cloud else {
+        return Ok(None);
     };
-    tokio::time::timeout(CLOUD_DETAIL_TIMEOUT, look)
+    let look = async {
+        let Some(v) = c.find_cloud_job(key).await? else {
+            return Ok(None);
+        };
+        Ok(c.run(&v.name).await?.map(|run| (v, run)))
+    };
+    bounded_lookup(look, CLOUD_DETAIL_TIMEOUT).await
+}
+
+/// `fut`, bounded by `limit`. A lookup that fails or does not answer is an error, never "no such
+/// run": the cloud could not say.
+pub async fn bounded_lookup<F, T>(fut: F, limit: Duration) -> Result<Option<T>, String>
+where
+    F: Future<Output = Result<Option<T>, String>>,
+{
+    tokio::time::timeout(limit, fut)
         .await
-        .ok()
-        .flatten()
+        .unwrap_or_else(|_| Err(format!("kc1 did not answer within {} s", limit.as_secs())))
+}
+
+/// What a per run read answers when the Studio does not have the run: the cloud's run, 404 when
+/// the cloud says it has none, and 503 when the cloud could not be asked.
+pub fn cloud_lookup_answer<T>(
+    run_id: &str,
+    found: Result<Option<T>, String>,
+) -> Result<T, ApiError> {
+    match found {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
+        Err(e) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("cloud runs are unavailable, so {run_id:?} could not be looked up: {e}"),
+        )),
+    }
 }
 
 /// Whether the cloud has a run named `key`, within [`CLOUD_LIST_TIMEOUT`]. No answer is no.
@@ -240,11 +267,26 @@ pub async fn cloud_has(cloud: Option<std::sync::Arc<DevJobs>>, key: &str) -> boo
 /// The log lines a cloud run's detail shows: what the watcher keeps of a running Job's log,
 /// else the tail `devjob_status` read; at most `tail`.
 pub fn cloud_log_lines(kept: Option<Vec<String>>, run: &DevJobRun, tail: usize) -> Vec<String> {
-    let lines = kept
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| run.log_tail.clone());
+    let kept = kept.unwrap_or_default();
+    let lines = if run.log_tail.is_empty() {
+        kept
+    } else {
+        continue_with(kept, &run.log_tail)
+    };
     let skip = lines.len().saturating_sub(tail.max(1));
     lines.into_iter().skip(skip).collect()
+}
+
+/// The kept tail continued by `fresh`, the tail read just now: the watcher stops refreshing a
+/// Job's tail when its pod stops running, so the lines a pod wrote last are only in `fresh`.
+/// Where the end of `kept` is the start of `fresh` the two join there; with no overlap `kept`
+/// is too old to join, and `fresh` stands alone.
+fn continue_with(kept: Vec<String>, fresh: &[String]) -> Vec<String> {
+    let from = kept.len().saturating_sub(fresh.len());
+    match (from..kept.len()).find(|&i| fresh.starts_with(&kept[i..])) {
+        Some(i) => kept[..i].iter().chain(fresh).cloned().collect(),
+        None => fresh.to_vec(),
+    }
 }
 
 /// One cloud run as `GET /jesse/runs/:id` serves it: [`cloud_run_json`] plus why a queued or

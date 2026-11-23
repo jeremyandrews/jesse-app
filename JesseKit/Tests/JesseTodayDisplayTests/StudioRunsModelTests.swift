@@ -573,4 +573,21 @@ extension StudioRunsCloudModelTests {
         XCTAssertEqual(WorkSemantics.title(StudioRun(runID: "BG4-2", host: "cloud", title: "Blogs by host")), "Blogs by host")
         XCTAssertEqual(WorkSemantics.title(StudioRun(runID: "GD5")), "Untitled run")
     }
+
+    func testAQueuedCloudRunSaysWhenItWasQueuedNotThatItStarted() {
+        let queued = StudioRun(runID: "BG4-2", status: .queued, createdAt: "2026-11-23T17:00:00Z",
+                               queuedAt: "2026-11-23T17:05:00Z", host: "cloud")
+        XCTAssertEqual(StudioRunSemantics.beganField(queued),
+                       StudioRunTimeField(label: "Queued", stamp: "2026-11-23T17:05:00Z"))
+        var running = queued
+        running.startedAt = "2026-11-23T17:20:00Z"
+        XCTAssertEqual(StudioRunSemantics.beganField(running),
+                       StudioRunTimeField(label: "Started", stamp: "2026-11-23T17:20:00Z"))
+        let studio = StudioRun(runID: "GD5", status: .queued, createdAt: "2026-11-23T17:00:00Z",
+                               queuedAt: "2026-11-23T17:05:00Z")
+        XCTAssertEqual(StudioRunSemantics.beganField(studio),
+                       StudioRunTimeField(label: "Started", stamp: "2026-11-23T17:00:00Z"),
+                       "a Studio run's Details are unchanged")
+        XCTAssertNil(StudioRunSemantics.beganField(StudioRun(runID: "X", host: "cloud")))
+    }
 }

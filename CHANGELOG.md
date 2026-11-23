@@ -42,16 +42,19 @@ queued in the cloud. New module `src/hostrun/cloud.rs`.
   `cloud_unavailable` says why; the Studio's runs are served as before. The cloud is asked while
   the Studio's store is scanned, so it never slows the Studio list past that bound.
 - **One cloud run.** `GET /jesse/runs/:id` and `/log` answer for a cloud run, by run id or Job
-  name, within 6 s: the row plus `waiting_for`, `last_line` and `elapsed_secs`, and the log
-  tail the watcher keeps (else the tail `devjob_status` reads). `?host=cloud` asks only the
-  cloud; without it the Studio is asked first, as before.
+  name, within 6 s: the row plus `waiting_for`, `last_line` and `elapsed_secs`, and the log: the
+  tail the watcher kept, continued by the tail read now (where the two overlap), so a running
+  Job's log is current. A cloud that fails or does not answer in time is 503 "cloud runs are
+  unavailable", not 404: the run may well exist. `?host=cloud` asks only the cloud; without it
+  the Studio is asked first, as before.
 - **No action.** `reply`, `review`, `cancel`, `close`, `archive` and `unarchive` answer 409 "<id>
   is a cloud run: cloud runs are managed through Jesse, not from the Runs page" for
   `?host=cloud`, even when a Studio run has the same id (a queued Studio run the cloud took keeps
   its id), and for an id only the cloud knows. A Studio run's action never asks the cloud.
-- **Tests.** `hostrun::cloud::tests` (12: every phase and outcome to a status, the row's shape,
+- **Tests.** `hostrun::cloud::tests` (14: every phase and outcome to a status, the row's shape,
   the merge and its order, counts, the archived list, titles, not configured, a failed and a
-  timed out listing on the paused clock, refused actions, the log tail) and three app wire
+  timed out listing on the paused clock, a failed and a timed out lookup as 503 beside a missing
+  run as 404, refused actions, the log continued across the kept and current tails) and three app wire
   fixtures written by `the_app_wire_fixtures_match_what_the_run_routes_serialize`
   (`studio-runs-list-cloud.json`, `studio-runs-list-cloud-unavailable.json`,
   `cloud-run-detail.json`).
@@ -68,7 +71,8 @@ Needs bridge 0.216.0; with an older bridge the page is exactly as before.
   id. The segment counts add the bridge's `counts.cloud` to the Studio's.
 - **Read only.** A cloud row has no swipe or context action, `Archive all finished` leaves it
   out, and its detail (titled `Cloud run`, read with `?host=cloud`) shows its status, log tail
-  and details (job, agent, outcome, pull request) with no Cancel, reply, Resume or Archive; one
+  and details (job, agent, outcome, pull request; `Queued` and its time, not `Started`, until the
+  Job starts) with no Cancel, reply, Resume or Archive; one
   line says cloud runs are managed through Jesse.
 - **Unavailable.** When the bridge says the cloud's runs are not listed, one quiet line above
   the list says "Cloud runs are unavailable right now."; no error state.
@@ -79,7 +83,7 @@ Needs bridge 0.216.0; with an older bridge the page is exactly as before.
 - **Tests.** `StudioRunsWireTests` (cloud list, unavailable list, a bridge without cloud rows, a
   run with and without `host`, the cloud detail, `host=cloud`), `StudioRunsCloudModelTests` (the
   cloud style, no actions, the merged order and counts, the cloud detail, the unavailable line,
-  an older bridge, the id title), and `StudioRunsListEveryRunUITests` gains
+  an older bridge, the id title, the queued time), and `StudioRunsListEveryRunUITests` gains
   `testCloudRowsShowInTheirOwnColourAndOfferNothing` against a loopback stub serving the
   2026-11-23 18:20 CET snapshot, plus `PD1_CLOUD_RUNS` on the live bridge walk. Screenshots in
   `docs/screenshots/dj7/`.

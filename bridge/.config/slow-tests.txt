@@ -4,4 +4,5 @@
 # that waits for a timer moves to tokio's paused clock instead. See docs/testing.md.
 
 jesse-bridge::it healthdb_mcp_pg::a_long_statement_times_out_at_fifteen_seconds | 15.4s | the read only role's real 15 s Postgres statement_timeout firing on a server side pg_sleep is the point of the test
+jesse-bridge::it housedb_mcp_pg::a_long_statement_times_out_at_fifteen_seconds | 15.4s | the same real 15 s Postgres statement_timeout on the house server (same code as healthdb, another configuration); the timeout firing is the point of the test
 jesse-bridge::it integration::a_turn_killed_at_the_run_limit_returns_how_far_it_got | 12.1s | a real child process killed at a real 12 s run limit (the one test where the limit must fire); the limit measures std::time::Instant, so no paused clock

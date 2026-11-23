@@ -121,6 +121,7 @@ mod healthquery;
 /// Addressed through the module (`crate::hostrun::…`).
 pub mod hostrun;
 mod house;
+mod housequery;
 mod inbound;
 mod jobstore;
 mod levelgate;
@@ -262,6 +263,7 @@ pub use health::*;
 pub use healthdb::*;
 pub use healthquery::*;
 pub use house::*;
+pub use housequery::*;
 pub use inbound::*;
 pub use jobstore::*;
 pub use levelgate::*;

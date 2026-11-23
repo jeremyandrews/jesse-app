@@ -1779,6 +1779,42 @@ A turn that registers it is told, in one line, to query the archive for health q
 the attached block and to quote the numbers. The binary is in `deploy-bins.toml`. The tests
 are in `src/healthquery.rs` and `tests/healthdb_mcp_pg.rs`.
 
+## The house history (`[housedb]`, `jesse-housedb-mcp`, 0.215.0)
+
+The same read-only server over a second database: Home Assistant's recorder on the home
+cluster (database `homeassistant` on `househistorydb.pozza:5432`, role `house_ro`), with the
+daily rollups the cluster's hourly job keeps in `analytics`. Two tools, `housedb_schema` and
+`housedb_query`. **One implementation, two configurations**: `src/healthquery.rs` holds every
+guard, limit and the stdio transport (`serve_ro_db_stdio`), and each server is one
+`RoDbServer` value (`HEALTHDB` there, `HOUSEDB` in `src/housequery.rs`) naming its tools,
+descriptions, environment variables, ledger, guide and schema layout. `healthdb`'s tool names,
+descriptions, replies and stderr lines are unchanged, pinned by
+`the_healthdb_tool_list_is_unchanged_by_the_shared_server`.
+
+`housedb_schema` lists the `analytics.house_*` views first (`house_daily_energy`,
+`house_daily_air`, `house_daily_plant`, `house_alarm_changes`, `house_alarm_sensors`,
+`house_frozen_sensors`, `house_unavailable`), then the rest of `analytics`
+(`house_entity`), then the recorder tables in `public`, leaving out the `_house_*` tables behind
+the daily views; its description and guide tell the turn to prefer the views. Read only in two
+places, as `healthdb` is: the role, and the bridge (one statement, `BEGIN READ ONLY`, 15 s
+`statement_timeout`, at most 500 rows, `ROLLBACK`, a fresh connection per call).
+
+Configured by `[housedb]` in `jesse.local.toml` (see `jesse.example.toml`): `ro_url_file` and
+`ca_file`, defaulting to `<state_dir>/housedb-ro-url` and `<state_dir>/housedb-ca.crt`. Same
+`0600` and owner checks as `[healthdb]`; a refused table stops the bridge at startup. The
+server is started with `JESSE_HOUSEDB_RO_URL_FILE`, `JESSE_HOUSEDB_CA_FILE` and
+`JESSE_HOUSEDB_MCP_LEDGER` (paths), and its calls land in `<state_dir>/housedb-mcp-calls.log`,
+tallied under `housedb.counters` on `GET /health` as `housedb_mcp_query_total` and
+`housedb_mcp_schema_total`. The binary is in `deploy-bins.toml`. Tests:
+`src/housequery.rs`, `tests/it/housedb_mcp_pg.rs` (an `INSERT` refused, the row cap, the timeout,
+the schema order) and `tests/it/rodb_mcp_stdio.rs` (both built binaries' names and tools).
+
+Registered on every main turn, chat and scheduled alike, on all three harnesses wherever
+`healthdb` is, and only when `[housedb]` is ready: the twenty-ninth server in
+`MAIN_CHILD_MCP_CONFIG` (main-set label `...+reminders+housedb`), both tools in
+`DEFAULT_ALLOWED_TOOLS`, the three path variables forwarded by name on Codex, and an `egress`
+grant on `direct`. A turn that loads it gets one prompt line pointing it at the `house_*` views.
+
 ## Recent-workouts context (`health_context`)
 
 **`POST /jesse` with an optional `"health_context"` field** — a compact,

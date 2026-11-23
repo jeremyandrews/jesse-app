@@ -2632,6 +2632,31 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
         ("strands-annotated.json", annotated),
         ("strands-before-runs.json", plain),
     ];
+    // The list with the cloud's runs beside the Studio's (0.216.0), and with the cloud out of
+    // reach; one cloud run's detail.
+    let snapshot = cloud::tests::snapshot_views();
+    let mut with_cloud = r.svc.list_json();
+    r.svc.add_cloud(
+        &mut with_cloud,
+        ArchivedMode::Hide,
+        &cloud::CloudRuns::Listed(snapshot.clone()),
+    );
+    let mut cloud_down = r.svc.list_json();
+    r.svc.add_cloud(
+        &mut cloud_down,
+        ArchivedMode::Hide,
+        &cloud::CloudRuns::Unavailable("kc1 did not answer within 3 s".into()),
+    );
+    let detail = cloud::cloud_detail_json(
+        &snapshot[1],
+        &cloud::tests::status_run(vec!["Running cargo test".into()]),
+        None,
+    );
+    let files = files.into_iter().chain([
+        ("studio-runs-list-cloud.json", with_cloud),
+        ("studio-runs-list-cloud-unavailable.json", cloud_down),
+        ("cloud-run-detail.json", detail),
+    ]);
     for (name, v) in files {
         pin_app_fixture(&s, name, &v);
     }

@@ -52,25 +52,55 @@ extension StudioRunTint {
         case .yellow: return .yellow
         case .purple: return .purple
         case .secondary: return .secondary
+        // The system teal adapts to light and dark mode and is apart from the blue of a
+        // running run, the green of a reported one and the purple of a paused one.
+        case .cloud: return .teal
         }
     }
 }
 
-/// A status as an icon and a word, in its colour.
+/// A status as an icon and a word, in its colour (a cloud run's in the cloud colour).
 public struct StudioRunStatusLabel: View {
     let status: StudioRunStatus
     var font: Font = .caption
+    var tint: StudioRunTint?
 
-    public init(status: StudioRunStatus, font: Font = .caption) {
+    public init(status: StudioRunStatus, font: Font = .caption, tint: StudioRunTint? = nil) {
         self.status = status
         self.font = font
+        self.tint = tint
+    }
+
+    /// A run's status, tinted as its host says ([`StudioRunSemantics.statusTint`]).
+    public init(run: StudioRun, font: Font = .caption) {
+        self.init(status: run.status, font: font, tint: StudioRunSemantics.statusTint(run))
     }
 
     public var body: some View {
         Label(StudioRunSemantics.label(status), systemImage: StudioRunSemantics.symbol(status))
             .font(font)
-            .foregroundStyle(StudioRunSemantics.tint(status).color)
+            .foregroundStyle((tint ?? StudioRunSemantics.tint(status)).color)
             .labelStyle(.titleAndIcon)
+    }
+}
+
+/// `Cloud`, with its symbol, in the cloud colour: what marks a cloud run's row and detail.
+public struct StudioRunCloudBadge: View {
+    var font: Font = .caption2
+
+    public init(font: Font = .caption2) {
+        self.font = font
+    }
+
+    public var body: some View {
+        Label(StudioRunSemantics.cloudLabel, systemImage: StudioRunSemantics.cloudSymbol)
+            .labelStyle(.titleAndIcon)
+            .font(font.weight(.semibold))
+            .foregroundStyle(StudioRunTint.cloud.color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(StudioRunTint.cloud.color.opacity(0.15), in: .capsule)
+            .accessibilityIdentifier("studio-run-cloud-badge")
     }
 }
 
@@ -121,7 +151,7 @@ public struct StudioRunsScreen: View {
                     }
                 }
                 .navigationDestination(for: StudioRunRoute.self) { route in
-                    StudioRunDetailView(model: model.detailModel(for: route.runID))
+                    StudioRunDetailView(model: model.detailModel(for: route))
                 }
         }
         .studioRunSheetFrame()
@@ -129,11 +159,19 @@ public struct StudioRunsScreen: View {
     }
 }
 
-/// A run pushed from the list.
+/// A run pushed from the list: a Studio run, or a cloud run (`isCloud`).
 public struct StudioRunRoute: Hashable, Identifiable, Sendable {
     public let runID: String
-    public var id: String { runID }
-    public init(runID: String) { self.runID = runID }
+    public let isCloud: Bool
+    /// The run's `StudioRun.id`: a cloud run's is apart from a Studio run of the same id.
+    public var id: String { isCloud ? "cloud:\(runID)" : runID }
+    public init(runID: String, isCloud: Bool = false) {
+        self.runID = runID
+        self.isCloud = isCloud
+    }
+    public init(_ run: StudioRun) {
+        self.init(runID: run.runID, isCloud: run.isCloud)
+    }
 }
 
 /// The rows under the filter bar: Needs me, Moving, Finished and All as segments with their
@@ -150,12 +188,21 @@ struct StudioRunsList: View {
 
     var body: some View {
         let runs = model.runs(filter: filter, strand: strand)
+        let archivable = model.archivableFinished(strand: strand).count
         let loaded = filter == .archived ? model.hasLoadedArchived : model.hasLoaded
         List {
             if let error = model.loadError {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.footnote)
                     .foregroundStyle(.red)
+            }
+            if filter != .archived, model.cloudUnavailable != nil {
+                // Quiet: the Studio's runs are all here; only the cloud's are missing.
+                Label(StudioRunSemantics.cloudUnavailableLine, systemImage: "icloud.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("studio-runs-cloud-unavailable")
             }
             if runs.isEmpty, loaded {
                 Text(filter.emptyLine)
@@ -164,7 +211,7 @@ struct StudioRunsList: View {
                 ProgressView().frame(maxWidth: .infinity)
             }
             ForEach(runs) { run in
-                NavigationLink(value: StudioRunRoute(runID: run.runID)) {
+                NavigationLink(value: StudioRunRoute(run)) {
                     StudioRunRow(run: run, now: model.currentDate)
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -222,13 +269,13 @@ struct StudioRunsList: View {
                     } label: {
                         Text("Archive all finished")
                     }
-                    .disabled(runs.isEmpty)
+                    .disabled(archivable == 0)
                 }
             }
         }
-        .confirmationDialog(Self.archiveAllQuestion(runs.count), isPresented: $confirmsArchiveAll,
+        .confirmationDialog(Self.archiveAllQuestion(archivable), isPresented: $confirmsArchiveAll,
                             titleVisibility: .visible) {
-            Button(Self.archiveAllButton(runs.count)) {
+            Button(Self.archiveAllButton(archivable)) {
                 Task { await model.archiveAllFinished(strand: strand) }
             }
             Button("Keep them", role: .cancel) {}
@@ -340,12 +387,28 @@ struct StudioRunUndoBanner: View {
 }
 
 /// One run: its title, then its id, its strand, its status, how old it is, and when a paused
-/// run resumes.
+/// run resumes. A cloud run carries a cloud coloured bar along its leading edge, its status in
+/// the cloud colour, `Cloud`, and its repository.
 struct StudioRunRow: View {
     let run: StudioRun
     let now: Date
 
     var body: some View {
+        // A Studio row is its content alone, as before; a cloud row makes room for its bar.
+        content
+            .padding(.leading, run.isCloud ? 12 : 0)
+            .overlay(alignment: .leading) {
+                if let accent = StudioRunSemantics.rowTint(run) {
+                    Capsule()
+                        .fill(accent.color)
+                        .frame(width: 4)
+                        .accessibilityHidden(true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 3) {
             if run.title != nil {
                 Text(WorkSemantics.title(run))
@@ -373,7 +436,8 @@ struct StudioRunRow: View {
                 }
             }
             HStack(spacing: 8) {
-                StudioRunStatusLabel(status: run.status)
+                StudioRunStatusLabel(run: run)
+                if run.isCloud { StudioRunCloudBadge() }
                 if let resume = StudioRunSemantics.resumeLine(run, now: now) {
                     Text(resume)
                         .font(.caption)
@@ -395,9 +459,14 @@ struct StudioRunRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+            if run.isCloud, !run.repo.isEmpty {
+                Text(run.repo)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(.vertical, 2)
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -536,7 +605,7 @@ public struct StudioRunDetailView: View {
                 ProgressView().frame(maxWidth: .infinity)
             }
         }
-        .navigationTitle("Run")
+        .navigationTitle(model.isCloud ? "Cloud run" : "Run")
         .refreshable { await model.refresh() }
         .task { await model.refresh() }
         // Every 5 seconds while the run can still change by itself; restarted when a reply
@@ -593,7 +662,8 @@ public struct StudioRunDetailView: View {
                     .font(.title3.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    StudioRunStatusLabel(status: run.status, font: .subheadline)
+                    StudioRunStatusLabel(run: run, font: .subheadline)
+                    if run.isCloud { StudioRunCloudBadge(font: .caption) }
                     if let resume = StudioRunSemantics.resumeLine(run, now: now) {
                         Text(resume).font(.subheadline).foregroundStyle(.secondary)
                     }
@@ -688,9 +758,17 @@ public struct StudioRunDetailView: View {
         if let host = run.host, !host.isEmpty { field("Host", host) }
         field("Repository", run.repo)
         field("Branch", run.branch, monospaced: true)
-        field("Round", "\(run.round)")
-        if let started = StudioRunSemantics.clock(run.startedAt ?? run.createdAt, now: now) {
-            field("Started", started)
+        if run.isCloud {
+            if let job = run.jobName { field("Job", job, monospaced: true) }
+            if let agent = run.agent { field("Agent", agent) }
+            if let outcome = run.outcome { field("Outcome", outcome) }
+            if let pr = run.pullRequest { field("Pull request", pr) }
+        } else {
+            field("Round", "\(run.round)")
+        }
+        if let began = StudioRunSemantics.beganField(run),
+           let stamp = StudioRunSemantics.clock(began.stamp, now: now) {
+            field(began.label, stamp)
         }
         if let updated = StudioRunSemantics.clock(run.updatedAt, now: now) {
             let age = StudioRunSemantics.age(run.updatedAt, now: now).map { " (\($0))" } ?? ""

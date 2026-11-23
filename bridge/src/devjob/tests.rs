@@ -514,6 +514,8 @@ fn view(name: &str, created: u64, suspended: bool, finished: Option<bool>) -> Jo
         failure_reason: None,
         run_id: None,
         cancelled: false,
+        strand: None,
+        strand_id: None,
     }
 }
 

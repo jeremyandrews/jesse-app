@@ -61,6 +61,24 @@ pub const DEFAULT_MERGE_DENY: [&str; 2] = ["tag1consulting/scolta*", "tag1consul
 pub const MERGE_WAIT_SECONDS: u64 = 2400;
 /// The entrypoint's rebase-and-wait attempts before a merge.
 pub const MERGE_ATTEMPTS: u64 = 3;
+/// The merge path's full wait, in minutes: [`MERGE_WAIT_SECONDS`] times [`MERGE_ATTEMPTS`].
+pub const MERGE_WAITS_MINUTES: u64 = MERGE_WAIT_SECONDS * MERGE_ATTEMPTS / 60;
+/// What the entrypoint needs after the agent exits (rebase onto `origin/main`, the test
+/// command, push, open the pull request) before the merge wait even starts. Not sized from the
+/// entrypoint's own code: it lives in `cloud/infrastructure/jesse-dev/` in `jeremyandrews/k3s`,
+/// a separate repository this worker has no access to; 30 minutes is a conservative estimate for
+/// that handful of steps on a 3 CPU worker.
+pub const FINISH_ALLOWANCE_SECS: u64 = 30 * 60;
+/// The default `[devjob.cloud] max_timeout_minutes`: the largest `timeout_minutes` a cloud
+/// start may be granted. Sized so the Job's own deadline ([`cloud_deadline_secs`]) plus
+/// [`BOOT_ALLOWANCE_MINUTES`] exactly fits [`DEFAULT_WORKER_LIFE_MINUTES`]: 480 - 15 - 120 - 30.
+pub const DEFAULT_MAX_TIMEOUT_MINUTES: u64 = 315;
+/// The default `[devjob.cloud] worker_life_minutes`: kc-burst's own hard cap on a worker's age
+/// (`max_ttl`, 8 hours as of 2026-11-23). [`CloudSettings::problems`] refuses more.
+pub const DEFAULT_WORKER_LIFE_MINUTES: u64 = 480;
+/// Time from `kc-burst up` to a worker being ready and idle, before any Job can resume onto it
+/// and start its own `activeDeadlineSeconds` clock. [`CloudSettings::problems`]'s margin.
+pub const BOOT_ALLOWANCE_MINUTES: u64 = 15;
 
 /// The node label `kc-burst up --label` puts on a dev job worker; the admission policy in
 /// `jesse-dev` requires pods to select it.
@@ -110,6 +128,10 @@ pub struct CloudToml {
     #[serde(default)]
     pub merge_deny: Vec<String>,
     pub ledger: Option<PathBuf>,
+    /// The largest `timeout_minutes` a cloud start may be granted.
+    pub max_timeout_minutes: Option<u64>,
+    /// How long a burst worker may live, kc-burst's own `max_ttl`.
+    pub worker_life_minutes: Option<u64>,
 }
 
 /// `[devjob.cloud]`, resolved.
@@ -130,6 +152,8 @@ pub struct CloudSettings {
     /// [`DEFAULT_MERGE_DENY`] and then the config's own.
     pub merge_deny: Vec<String>,
     pub ledger: PathBuf,
+    pub max_timeout_minutes: u64,
+    pub worker_life_minutes: u64,
 }
 
 impl Default for CloudSettings {
@@ -185,6 +209,12 @@ impl CloudSettings {
                 Some(p) => expand(&p, home),
                 None => Path::new(home).join(DEFAULT_LEDGER),
             },
+            max_timeout_minutes: t
+                .max_timeout_minutes
+                .unwrap_or(DEFAULT_MAX_TIMEOUT_MINUTES),
+            worker_life_minutes: t
+                .worker_life_minutes
+                .unwrap_or(DEFAULT_WORKER_LIFE_MINUTES),
         }
     }
 
@@ -254,6 +284,30 @@ impl CloudSettings {
                 ));
             }
         }
+        if self.max_timeout_minutes == 0 {
+            out.push("[devjob.cloud] max_timeout_minutes must be at least 1".into());
+        }
+        if self.worker_life_minutes > DEFAULT_WORKER_LIFE_MINUTES {
+            out.push(format!(
+                "[devjob.cloud] worker_life_minutes must be {DEFAULT_WORKER_LIFE_MINUTES} or \
+                 less: raise kc-burst's max_ttl first"
+            ));
+        }
+        let needed =
+            self.max_timeout_minutes + FINISH_ALLOWANCE_SECS / 60 + MERGE_WAITS_MINUTES
+                + BOOT_ALLOWANCE_MINUTES;
+        if needed > self.worker_life_minutes {
+            out.push(format!(
+                "[devjob.cloud] max_timeout_minutes ({}) + the finish allowance ({}) + the \
+                 merge waits ({MERGE_WAITS_MINUTES}) + a {BOOT_ALLOWANCE_MINUTES} minute boot \
+                 allowance = {needed} minutes, more than worker_life_minutes ({}); lower \
+                 max_timeout_minutes or raise worker_life_minutes (to at most \
+                 {DEFAULT_WORKER_LIFE_MINUTES}, kc-burst's max_ttl)",
+                self.max_timeout_minutes,
+                FINISH_ALLOWANCE_SECS / 60,
+                self.worker_life_minutes
+            ));
+        }
         out
     }
 
@@ -286,6 +340,24 @@ impl CloudSettings {
     pub fn merge_deny_env(&self) -> String {
         self.merge_deny.join(" ")
     }
+}
+
+/// The cloud Job's `activeDeadlineSeconds`: the agent's own timeout, [`FINISH_ALLOWANCE_SECS`]
+/// for what the entrypoint does after the agent exits (rebase onto `origin/main`, the test
+/// command, push, open the pull request), and the merge path's full wait. Unlike the home
+/// cluster's [`DevJobSpec::active_deadline_secs`] (twice the timeout, so Kubernetes never kills
+/// the pod before the entrypoint prints its report), a cloud worker cannot live past
+/// [`CloudSettings::worker_life_minutes`], so doubling the timeout would already not fit one.
+pub fn cloud_deadline_secs(spec: &DevJobSpec) -> u64 {
+    spec.agent_timeout_secs() + FINISH_ALLOWANCE_SECS + MERGE_WAIT_SECONDS * MERGE_ATTEMPTS
+}
+
+/// A cloud start's granted `timeout_minutes`: the default when none was asked, else the request
+/// capped at `max_timeout_minutes` — this host's own cap, not [`super::MAX_TIMEOUT_MINUTES`].
+pub fn cloud_capped_timeout_minutes(requested: Option<u64>, max_timeout_minutes: u64) -> u64 {
+    requested.map_or(super::DEFAULT_TIMEOUT_MINUTES, |m| {
+        m.min(max_timeout_minutes)
+    })
 }
 
 // ---- ROUTING ---------------------------------------------------------------------------
@@ -504,17 +576,37 @@ pub fn cloud_slot_free(views: &[super::JobView], max: usize) -> bool {
 }
 
 /// The queued cloud Jobs to resume now, oldest first: as many as [`super::to_resume`] allows
-/// under the cap, and no more than there are idle ready workers left once every released Job
-/// without a worker yet (`unplaced`) has taken one.
+/// under the cap, each matched to an idle ready worker whose [`remaining_life`] covers the
+/// Job's own `activeDeadlineSeconds` — because Kubernetes starts that clock on resume, a worker
+/// that cannot live that long would be reaped mid run. Every released Job without a worker yet
+/// (`unplaced`) takes one of `idle_ready` first, by count. A Job no idle worker's remaining life
+/// covers stays queued: `plan_burst` starts it a fresh worker, and the too-old idle one is
+/// stopped by the existing idle rule, same as ever.
 pub fn cloud_resumable(
     views: &[super::JobView],
     max: usize,
-    idle_ready_workers: usize,
+    idle_ready: &[PoolWorker],
     unplaced: usize,
+    worker_life_minutes: u64,
 ) -> Vec<String> {
-    let mut names = super::to_resume(views, max);
-    names.truncate(idle_ready_workers.saturating_sub(unplaced));
-    names
+    let mut lives: Vec<Duration> = idle_ready
+        .iter()
+        .skip(unplaced)
+        .map(|w| remaining_life(w, worker_life_minutes))
+        .collect();
+    let mut out = Vec::new();
+    for name in super::to_resume(views, max) {
+        let Some(view) = views.iter().find(|v| v.name == name) else {
+            continue;
+        };
+        let deadline = Duration::from_secs(view.active_deadline_secs.unwrap_or(0).max(0) as u64);
+        let Some(pos) = lives.iter().position(|life| *life >= deadline) else {
+            continue;
+        };
+        lives.remove(pos);
+        out.push(name);
+    }
+    out
 }
 
 // ---- BURST WORKERS -------------------------------------------------------------------------
@@ -533,6 +625,18 @@ pub struct PoolWorker {
     pub idle_for: Duration,
     /// Time to its expiry, when kc-burst knows it.
     pub expires_in: Option<Duration>,
+    /// How long since `kc-burst up` created it, when kc-burst knows it (`age_seconds`).
+    pub age: Option<Duration>,
+}
+
+/// A worker's life left to give a new Job: [`CloudSettings::worker_life_minutes`] minus its
+/// [`PoolWorker::age`]. When kc-burst did not report an age, the worker cannot be assumed to
+/// outlive what it has already been granted, so its current `expires` stands in.
+pub fn remaining_life(w: &PoolWorker, worker_life_minutes: u64) -> Duration {
+    match w.age {
+        Some(age) => Duration::from_secs(worker_life_minutes * 60).saturating_sub(age),
+        None => w.expires_in.unwrap_or(Duration::ZERO),
+    }
 }
 
 /// What one pass asks kc-burst for.
@@ -669,6 +773,8 @@ pub struct BurstWorker {
     pub run: String,
     /// Unix seconds.
     pub expires: Option<u64>,
+    /// Seconds since `kc-burst up` created it.
+    pub age_seconds: Option<u64>,
     pub cost_so_far_eur: f64,
 }
 
@@ -681,6 +787,7 @@ pub fn parse_status(out: &str) -> Vec<BurstWorker> {
             name: v["name"].as_str().unwrap_or_default().to_string(),
             run: v["run"].as_str().unwrap_or_default().to_string(),
             expires: v["expires"].as_u64(),
+            age_seconds: v["age_seconds"].as_u64(),
             cost_so_far_eur: v["cost_so_far_eur"].as_f64().unwrap_or(0.0),
         })
         .collect()
@@ -896,6 +1003,9 @@ pub struct CloudRun {
     pub run_id: String,
     pub merge: MergeDecision,
     pub strand: Option<StrandRef>,
+    /// Set when a requested `timeout_minutes` was reduced to [`CloudSettings::max_timeout_minutes`]
+    /// ([`super::timeout_reduced_note`]): what `devjob_start`'s reply tells the caller.
+    pub timeout_note: Option<String>,
 }
 
 /// The branch slug of a cloud run: the Studio's branch name for the same run, cut to the
@@ -1050,6 +1160,7 @@ impl DevJobs {
         };
         let branch = format!("jesse/{slug}");
         let prompt = cloud_prompt(&r.prompt, &run_id, &r.repo, &branch, &merge);
+        let requested_timeout = req.timeout_minutes;
         let mut spec = match req.kind {
             CloudKind::Free(spec) => spec,
             _ => DevJobSpec::validate(
@@ -1067,11 +1178,19 @@ impl DevJobs {
             )?,
         };
         spec.prompt = prompt;
+        // The cluster's cap ([`super::MAX_TIMEOUT_MINUTES`]), already applied above (`Free`
+        // directly, the other two kinds through `DevJobSpec::validate`), does not apply in the
+        // cloud: its own, usually higher, cap does.
+        spec.timeout_minutes =
+            cloud_capped_timeout_minutes(requested_timeout, rt.settings.max_timeout_minutes);
+        let timeout_note =
+            super::timeout_reduced_note(requested_timeout, spec.timeout_minutes, "the cloud");
         Ok(CloudRun {
             spec,
             run_id,
             merge,
             strand: r.strand,
+            timeout_note,
         })
     }
 
@@ -1100,6 +1219,7 @@ impl DevJobs {
             "branch": format!("jesse/{}", started.branch_slug),
             "merge": run.merge.annotation(),
             "timeout_minutes": started.timeout_minutes,
+            "timeout_note": run.timeout_note,
         }))
     }
 
@@ -1309,23 +1429,24 @@ impl DevJobs {
             .into_iter()
             .filter(|(_, v)| v.is_active() && !placed_jobs.contains(&v.name))
             .count();
-        // Expiries matter only for a busy worker (to extend it), so kc-burst (a provider API
-        // call) is asked only while one is.
-        let any_busy = list
-            .items
-            .iter()
-            .any(|n| n.metadata.name.as_ref().is_some_and(|x| busy.contains(x)));
-        let expiries: HashMap<String, Option<u64>> = if !any_busy {
-            HashMap::new()
-        } else {
-            match rt.burst.status().await {
-                Ok(ws) => ws.into_iter().map(|w| (w.name, w.expires)).collect(),
-                Err(e) => {
-                    eprintln!("jesse-bridge: devjob cloud: {e}");
-                    HashMap::new()
+        // Expiries matter for a busy worker (to extend it) and an age for an idle ready one (to
+        // place a Job onto it), so kc-burst (a provider API call) is asked only while there is a
+        // worker at all.
+        let (expiries, ages): (HashMap<String, Option<u64>>, HashMap<String, Option<u64>>) =
+            if list.items.is_empty() {
+                (HashMap::new(), HashMap::new())
+            } else {
+                match rt.burst.status().await {
+                    Ok(ws) => (
+                        ws.iter().map(|w| (w.name.clone(), w.expires)).collect(),
+                        ws.into_iter().map(|w| (w.name, w.age_seconds)).collect(),
+                    ),
+                    Err(e) => {
+                        eprintln!("jesse-bridge: devjob cloud: {e}");
+                        (HashMap::new(), HashMap::new())
+                    }
                 }
-            }
-        };
+            };
         let now = crate::system_time_to_ms(std::time::SystemTime::now()) / 1000;
         let seen: Vec<(String, bool)> = list
             .items
@@ -1361,6 +1482,11 @@ impl DevJobs {
                         .copied()
                         .flatten()
                         .map(|e| Duration::from_secs(e.saturating_sub(now))),
+                    age: ages
+                        .get(&name)
+                        .copied()
+                        .flatten()
+                        .map(Duration::from_secs),
                     ready: ready && !unschedulable,
                     name,
                     run,
@@ -1409,8 +1535,18 @@ impl DevJobs {
             Duration::from_secs(rt.settings.idle_minutes * 60),
         );
         self.carry_out(rt, &plan).await;
-        let idle_ready = workers.iter().filter(|w| w.ready && !w.busy).count();
-        for name in cloud_resumable(&views, rt.settings.max_concurrent, idle_ready, unplaced) {
+        let idle_ready: Vec<PoolWorker> = workers
+            .iter()
+            .filter(|w| w.ready && !w.busy)
+            .cloned()
+            .collect();
+        for name in cloud_resumable(
+            &views,
+            rt.settings.max_concurrent,
+            &idle_ready,
+            unplaced,
+            rt.settings.worker_life_minutes,
+        ) {
             let patch = json!({ "spec": { "suspend": false } });
             match self
                 .jobs()

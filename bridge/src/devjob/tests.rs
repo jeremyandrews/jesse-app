@@ -131,6 +131,24 @@ fn the_timeout_defaults_to_two_hours_and_is_capped_at_four() {
 }
 
 #[test]
+fn timeout_reduced_note_names_both_numbers_and_why() {
+    assert_eq!(timeout_reduced_note(None, 120, "the cluster"), None);
+    assert_eq!(
+        timeout_reduced_note(Some(100), 100, "the cluster"),
+        None,
+        "not reduced"
+    );
+    assert_eq!(
+        timeout_reduced_note(Some(480), 240, "the cluster"),
+        Some("timeout_minutes 480 was reduced to 240, the cluster's maximum".into())
+    );
+    assert_eq!(
+        timeout_reduced_note(Some(500), 315, "the cloud"),
+        Some("timeout_minutes 500 was reduced to 315, the cloud's maximum".into())
+    );
+}
+
+#[test]
 fn the_agent_is_one_of_three_and_defaults_from_the_config() {
     for (raw, want) in [
         ("claude", Agent::Claude),

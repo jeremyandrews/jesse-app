@@ -887,7 +887,7 @@ harnesses (and `direct`, through the gateway) get them on a write turn:
 
 | Tool | Class | Arguments | Returns |
 |---|---|---|---|
-| `devjob_start` | write | `repo` (`owner/name`), `prompt` (≤ 64 KiB), `branch_slug` (lowercase letters, digits, hyphens, ≤ 60), optional `agent` (`claude`, `codex`, `gemini`), `model` (the agent's own model id), `test_command` (≤ 1 KiB), `timeout_minutes` (default 120, capped at 240) | the job name and whether it is queued |
+| `devjob_start` | write | `repo` (`owner/name`), `prompt` (≤ 64 KiB), `branch_slug` (lowercase letters, digits, hyphens, ≤ 60), optional `agent` (`claude`, `codex`, `gemini`), `model` (the agent's own model id), `test_command` (≤ 1 KiB), `timeout_minutes` (default 120, capped at 240 on the cluster or the Studio; higher with `host: "cloud"`, `[devjob.cloud] max_timeout_minutes`) | the job name, whether it is queued, and `timeout_note` naming any reduction |
 | `devjob_status` | read | `job_name` | phase (`queued`, `pending`, `running`, `finished`), why it is waiting (queued behind the cap, or the scheduler's reason, e.g. a taint), elapsed, the last 40 log lines, the parsed report once finished |
 | `devjob_list` | read | none | running, queued, and the last 20 finished |
 
@@ -934,6 +934,17 @@ head is green, and never for a repository on the deny list. Only a draft that sa
 whichever of a Studio slot and a cloud slot frees first. The design, the failure modes and every
 key are in `docs/devjob-cloud.md`; `src/devjob/cloud.rs` is the code.
 
+**`timeout_minutes` has its own, usually higher, cap: `max_timeout_minutes` (default 315, not
+the cluster's 240).** The Job's own deadline is the agent timeout plus a 30 minute finish
+allowance (the entrypoint's rebase, test command, push and pull request after the agent exits)
+plus the merge path's full wait, not the cluster's twice-the-timeout rule — a worker cannot live
+past `worker_life_minutes` (default 480, kc-burst's `max_ttl`), so doubling would already not
+fit one. `CloudSettings::problems` refuses a config where that sum, plus a 15 minute boot
+allowance, would exceed `worker_life_minutes`. A queued Job is resumed only onto an idle ready
+worker whose remaining life (`worker_life_minutes` minus its age) covers its own deadline;
+otherwise it stays queued for a fresh worker. A reduced `timeout_minutes` is named in the reply's
+`timeout_note`, on both hosts.
+
 ```toml
 [devjob.cloud]
 enabled = true                                   # default false; needs [devjob] enabled
@@ -942,6 +953,8 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 # max_concurrent = 2
 # daily_cost_cap_eur = 5.0
 # idle_minutes = 10
+# max_timeout_minutes = 315                      # the cloud's timeout_minutes cap
+# worker_life_minutes = 480                      # kc-burst's max_ttl; raise that first to go higher
 # merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
 ```
 
@@ -3128,7 +3141,7 @@ agent = "claude"                     # claude | codex | gemini
 # model = "claude-sonnet-5-5"        # the DEV AGENT's model; see below
 branch_slug = "deps-{date}"          # the date tokens expand from the occurrence
 # test_command = "cargo test"
-# timeout = 120                      # minutes; default 120, capped at 240
+# timeout = 120                      # minutes; default 120, capped at 240 (the cluster's cap)
 prompt_file = "vault/prompts/scheduled/nightly-deps.md"   # read at fire time
 expect_output = ["Inbox/{date}-dev-job-*.md"]
 ```

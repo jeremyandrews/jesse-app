@@ -14,6 +14,32 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.216.0] - 2026-11-23
+
+**Cloud dev jobs may run up to the burst worker's life, not a fixed 240 minutes.** The cluster
+and Studio cap (`MAX_TIMEOUT_MINUTES`, 240) stays as it was; `host: "cloud"` now has its own,
+usually higher cap, `[devjob.cloud] max_timeout_minutes` (default 315). A reduced
+`timeout_minutes` is named in the `devjob_start` reply's `timeout_note`, on both hosts, instead
+of being silently clamped.
+
+- **The cloud Job's deadline fits one worker's whole life.** `build_cloud_job`'s
+  `activeDeadlineSeconds` was the home cluster's twice-the-timeout rule plus the merge path's
+  wait — at 240 minutes, a 10 hour deadline on a worker that cannot live past 8.
+  `cloud::cloud_deadline_secs` replaces it with the agent timeout plus a 30 minute finish
+  allowance (what the entrypoint does after the agent exits: rebase, test command, push, open
+  the pull request) plus the merge wait; the home cluster's `build_job` is unchanged.
+- **`[devjob.cloud] worker_life_minutes`** (default 480, kc-burst's `max_ttl`) names a worker's
+  hard life. `CloudSettings::problems` now refuses a `max_timeout_minutes` /
+  `worker_life_minutes` pair whose sum, with the finish allowance, the merge waits and a 15
+  minute boot allowance, would not fit (the shipped defaults land exactly on 480), and refuses
+  `worker_life_minutes` above 480 outright (kc-burst's cap must be raised first).
+- **A queued Job is resumed only onto a worker that will outlive it.** `cloud_resumable` now
+  matches each queued Job's own deadline against an idle ready worker's remaining life
+  (`worker_life_minutes` minus its age); a worker too old stays idle, drained by the existing
+  idle rule, while `plan_burst` starts the Job a fresh one. `parse_status` reads kc-burst's
+  `age_seconds`; with no age reported, a worker's current `expires` stands in rather than
+  assuming it has its whole life left.
+
 ## [bridge 0.215.0] - 2026-11-23
 
 **`jesse-housedb-mcp`: the house's history, read only, as the same server `healthdb` is.** Two

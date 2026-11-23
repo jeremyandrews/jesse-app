@@ -112,7 +112,10 @@ const POD_JOB_LABEL: &str = "batch.kubernetes.io/job-name";
 
 /// The default timeout of a run, in minutes: the template's `AGENT_TIMEOUT_SECONDS`.
 pub const DEFAULT_TIMEOUT_MINUTES: u64 = 120;
-/// The longest timeout a run may ask for, in minutes. Larger values are capped to this.
+/// The longest timeout a cluster or Studio run may ask for, in minutes: larger values are
+/// capped to this (silently in [`DevJobSpec::validate`]; [`timeout_reduced_note`] is what tells
+/// a `devjob_start` caller it happened). A cloud run's own, usually higher, cap is
+/// `[devjob.cloud] max_timeout_minutes` ([`cloud::CloudSettings::max_timeout_minutes`]).
 pub const MAX_TIMEOUT_MINUTES: u64 = 240;
 /// The largest prompt, in bytes.
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
@@ -719,6 +722,19 @@ impl DevJobSpec {
     }
 }
 
+/// What `devjob_start`'s reply adds when a requested `timeout_minutes` was reduced to a host's
+/// cap, naming both numbers and why. `None` when nothing was asked, or nothing was reduced
+/// (`requested` is at or under `granted`, which by construction is also true whenever `granted`
+/// is the cap itself: a reduction always lands exactly on it).
+pub fn timeout_reduced_note(requested: Option<u64>, granted: u64, host: &str) -> Option<String> {
+    match requested {
+        Some(r) if r > granted => Some(format!(
+            "timeout_minutes {r} was reduced to {granted}, {host}'s maximum"
+        )),
+        _ => None,
+    }
+}
+
 /// The spec minus the prompt, as the Job carries it in [`ANN_SPEC`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecAnnotation {
@@ -1240,8 +1256,11 @@ pub struct CloudJobExtras {
 /// field for field. Against [`build_job`]: the dev job pool's node selector and toleration, one
 /// job per `s-4vcpu-8gb-intel` worker (3 CPU / 6Gi), no cache claim (the workers are disposable,
 /// so the caches live on the run's 60Gi `emptyDir`), debug info and incremental builds off, and
-/// the merge path's variables. The deadline adds the merge path's longest wait. Always created
-/// suspended: it is released only onto an idle worker ([`cloud::cloud_resumable`]).
+/// the merge path's variables. The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout
+/// plus a finish allowance plus the merge path's longest wait, not the home cluster's twice the
+/// timeout — a cloud worker cannot live past [`cloud::CloudSettings::worker_life_minutes`], so
+/// doubling would already not fit. Always created suspended: it is released only onto an idle
+/// worker whose remaining life covers it ([`cloud::cloud_resumable`]).
 pub fn build_cloud_job(
     namespace: &str,
     job_name: &str,
@@ -1254,7 +1273,7 @@ pub fn build_cloud_job(
     let annotation = serde_json::to_string(&SpecAnnotation::from(spec)).expect("serialises");
     let mut labels = run_labels(&spec.branch_slug);
     labels[cloud::LABEL_RUN_ID] = json!(extras.run_id);
-    let deadline = spec.active_deadline_secs() + cloud::MERGE_WAIT_SECONDS * cloud::MERGE_ATTEMPTS;
+    let deadline = cloud::cloud_deadline_secs(spec);
     serde_json::from_value(json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -2749,7 +2768,11 @@ pub fn tool_descriptors() -> Vec<Value> {
                                      "description": "lowercase letters, digits and hyphens, at most 60" },
                     "test_command": { "type": "string", "description": "run after the agent, at most 1 KiB" },
                     "timeout_minutes": { "type": "integer", "minimum": 1,
-                                         "description": "the agent's time limit; default 120, capped at 240" },
+                                         "description": "the agent's time limit; default 120, \
+                                             capped at 240 on the cluster or the Studio, higher \
+                                             with host \"cloud\" ([devjob.cloud] \
+                                             max_timeout_minutes); a reduced value is named in \
+                                             the reply's timeout_note" },
                 },
             },
         }),
@@ -3096,7 +3119,8 @@ pub fn with_cloud(mut tools: Vec<Value>) -> Vec<Value> {
             "{d} With host \"cloud\" it runs on kc1, two at a time, on burst workers the \
              bridge starts and stops: pass strand and item_id or draft (the draft must say \
              devjob-host: cloud or any) or prompt, branch_slug and repo, as on the Studio, with \
-             agent, test_command and timeout_minutes as on the cluster. The agent has no GitHub \
+             agent and test_command as on the cluster and its own, usually higher, \
+             timeout_minutes cap ([devjob.cloud] max_timeout_minutes). The agent has no GitHub \
              credential; the job rebases onto origin/main, pushes, opens a pull request titled \
              [<run_id>] and, with merge true (or devjob-merge: true in the draft), merges it once \
              every CI run on its exact head is green; repositories on the deny list never \
@@ -3163,6 +3187,7 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
+                    let requested_timeout = args.timeout_minutes;
                     let spec = match plan_start(args, self.default_agent) {
                         Ok(StartPlan::Cluster(s)) => s,
                         Ok(StartPlan::Studio {
@@ -3187,7 +3212,15 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Err(e) => return Ok(error_result(&e)),
                     };
                     match self.start(&spec, "turn").await {
-                        Ok(s) => Ok(text_result(&json!(s), false)),
+                        Ok(s) => {
+                            let mut v = json!(s);
+                            v["timeout_note"] = json!(timeout_reduced_note(
+                                requested_timeout,
+                                s.timeout_minutes,
+                                "the cluster"
+                            ));
+                            Ok(text_result(&v, false))
+                        }
                         Err(e) => Ok(error_result(&e)),
                     }
                 }

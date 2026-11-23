@@ -58,6 +58,16 @@ fn worker(name: &str, busy: bool, idle_min: u64, expires_min: Option<u64>) -> Po
         busy,
         idle_for: Duration::from_secs(idle_min * 60),
         expires_in: expires_min.map(|m| Duration::from_secs(m * 60)),
+        age: None,
+    }
+}
+
+/// [`worker`] with an age kc-burst reported, so [`remaining_life`] uses it rather than
+/// `expires_in`.
+fn aged_worker(name: &str, age_min: u64) -> PoolWorker {
+    PoolWorker {
+        age: Some(Duration::from_secs(age_min * 60)),
+        ..worker(name, false, 0, None)
     }
 }
 
@@ -76,7 +86,18 @@ fn the_cloud_is_off_by_default_and_the_deny_list_is_always_seeded() {
         s.merge_deny,
         ["tag1consulting/scolta*", "tag1consulting/goose"]
     );
+    assert_eq!(s.max_timeout_minutes, 315);
+    assert_eq!(s.worker_life_minutes, 480);
     assert!(s.problems(false).is_empty(), "off asks for nothing");
+    // The defaults fit exactly: 315 + 30 (finish) + 120 (merge waits) + 15 (boot) = 480, so
+    // enabling the cloud with nothing else overridden never trips the fit refusal.
+    let mut enabled = s.clone();
+    enabled.enabled = true;
+    let p = enabled.problems(true).join("\n");
+    assert!(
+        !p.contains("more than worker_life_minutes"),
+        "the shipped defaults must fit: {p}"
+    );
     // A config's own list adds to the seed and never replaces it.
     let t: DevJobToml = toml::from_str(
         "enabled = true\n[cloud]\nenabled = true\nmerge_deny = [\"acme/secret\", \"tag1consulting/goose\"]\n",
@@ -105,7 +126,8 @@ fn the_cloud_refuses_to_boot_on_each_problem_by_name() {
     let t: DevJobToml = toml::from_str(
         "[cloud]\nenabled = true\nkubeconfig = \"/nonexistent/kc.yaml\"\nimage = \"ghcr.io/x:latest\"\n\
          kc_burst = \"/nonexistent/kc-burst\"\nmax_concurrent = 0\nburst_ttl_minutes = 600\n\
-         daily_cost_cap_eur = 0.0\nmerge_deny = [\"not a pattern\"]\n",
+         daily_cost_cap_eur = 0.0\nmerge_deny = [\"not a pattern\"]\nmax_timeout_minutes = 0\n\
+         worker_life_minutes = 600\n",
     )
     .unwrap();
     let s = CloudSettings::from_toml(t.cloud, "/home/u");
@@ -119,6 +141,8 @@ fn the_cloud_refuses_to_boot_on_each_problem_by_name() {
         "burst_ttl_minutes must be 30 to 480",
         "daily_cost_cap_eur must be above 0",
         "merge_deny \"not a pattern\"",
+        "max_timeout_minutes must be at least 1",
+        "worker_life_minutes must be 480 or less: raise kc-burst's max_ttl first",
     ] {
         assert!(p.contains(needle), "{needle} missing from:\n{p}");
     }
@@ -127,6 +151,35 @@ fn the_cloud_refuses_to_boot_on_each_problem_by_name() {
         .problems(true)
         .join("\n")
         .contains("needs [devjob] enabled"));
+}
+
+#[test]
+fn the_cloud_refuses_a_timeout_and_worker_life_combination_that_does_not_fit() {
+    // At the boundary: 315 + 30 + 120 + 15 = 480, exactly worker_life_minutes. Not refused.
+    let fits = CloudSettings {
+        enabled: true,
+        max_timeout_minutes: 315,
+        worker_life_minutes: 480,
+        ..CloudSettings::default()
+    };
+    assert!(!fits
+        .problems(true)
+        .join("\n")
+        .contains("more than worker_life_minutes"));
+    // One minute over the boundary: refused, naming the numbers.
+    let over = CloudSettings {
+        enabled: true,
+        max_timeout_minutes: 316,
+        worker_life_minutes: 480,
+        ..CloudSettings::default()
+    };
+    let p = over.problems(true).join("\n");
+    assert!(
+        p.contains("max_timeout_minutes (316) + the finish allowance (30) + the merge waits \
+                    (120) + a 15 minute boot allowance = 481 minutes, more than \
+                    worker_life_minutes (480)"),
+        "{p}"
+    );
 }
 
 #[test]
@@ -149,6 +202,16 @@ fn the_cloud_server_runs_with_kc1s_cluster_settings() {
     // The costs the ledger commits: a 4 hour up, a 1 hour extension.
     assert!((c.up_cost() - 0.0767 * 4.0).abs() < 1e-9);
     assert!((c.extend_cost() - 0.0767).abs() < 1e-9);
+}
+
+#[test]
+fn the_cloud_timeout_defaults_to_two_hours_and_is_capped_at_its_own_max_not_the_clusters() {
+    assert_eq!(cloud_capped_timeout_minutes(None, 315), 120);
+    assert_eq!(cloud_capped_timeout_minutes(Some(200), 315), 200);
+    // Over the cluster's 240 cap, but under the cloud's own 315: granted in full.
+    assert_eq!(cloud_capped_timeout_minutes(Some(300), 315), 300);
+    // Over the cloud's own cap too: capped there, not at the cluster's 240.
+    assert_eq!(cloud_capped_timeout_minutes(Some(10_000), 315), 315);
 }
 
 // ---- routing -----------------------------------------------------------------------------
@@ -439,8 +502,10 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
         .iter()
         .all(|v| v.get("persistentVolumeClaim").is_none()));
     assert_eq!(vols[1]["emptyDir"]["sizeLimit"], "60Gi");
-    // The deadline: twice the agent's two hours, plus three CI waits.
-    assert_eq!(v["spec"]["activeDeadlineSeconds"], 14400 + 3 * 2400);
+    // The deadline: the agent's two hours, plus the 30 minute finish allowance, plus three CI
+    // waits — not the cluster's doubled timeout.
+    assert_eq!(v["spec"]["activeDeadlineSeconds"], 7200 + 1800 + 3 * 2400);
+    assert_eq!(cloud_deadline_secs(&spec), 7200 + 1800 + 3 * 2400);
     let merging = build_cloud_job(
         "jesse-dev",
         "a",
@@ -537,18 +602,68 @@ fn a_cloud_slot_is_free_while_active_and_queued_are_under_the_cap() {
 #[test]
 fn a_queued_cloud_job_starts_only_onto_an_idle_ready_worker() {
     let views = vec![view("old", 1, true, None), view("new", 2, true, None)];
+    let life = 480;
+    let one = [worker("w1", false, 0, Some(999))];
+    let two = [worker("w1", false, 0, Some(999)), worker("w2", false, 0, Some(999))];
     // No worker: nothing starts, however free the slots.
-    assert!(cloud_resumable(&views, 2, 0, 0).is_empty());
+    assert!(cloud_resumable(&views, 2, &[], 0, life).is_empty());
     // One idle worker: the oldest only.
-    assert_eq!(cloud_resumable(&views, 2, 1, 0), ["old"]);
+    assert_eq!(cloud_resumable(&views, 2, &one, 0, life), ["old"]);
     // Two: both, oldest first.
-    assert_eq!(cloud_resumable(&views, 2, 2, 0), ["old", "new"]);
+    assert_eq!(cloud_resumable(&views, 2, &two, 0, life), ["old", "new"]);
     // A released Job still waiting for its pod to be placed takes one of them.
-    assert_eq!(cloud_resumable(&views, 2, 2, 1), ["old"]);
+    assert_eq!(cloud_resumable(&views, 2, &two, 1, life), ["old"]);
     // The cap still holds: one running, cap two, two idle workers: one more.
     let mut v = views.clone();
     v.push(view("busy", 0, false, None));
-    assert_eq!(cloud_resumable(&v, 2, 2, 0), ["old"]);
+    assert_eq!(cloud_resumable(&v, 2, &two, 0, life), ["old"]);
+}
+
+#[test]
+fn cloud_resumable_skips_a_worker_whose_remaining_life_is_short_of_the_jobs_deadline() {
+    let job = JobView {
+        active_deadline_secs: Some(3600),
+        ..view("gd5", 1, true, None)
+    };
+    let views = vec![job];
+    // 470 of 480 minutes already spent: 10 minutes left, short of the Job's 60 minute deadline.
+    let old = aged_worker("old", 470);
+    assert!(
+        cloud_resumable(&views, 2, &[old], 0, 480).is_empty(),
+        "stays queued: no idle worker outlives it"
+    );
+    // 10 minutes old: 470 left, plenty.
+    let young = aged_worker("young", 10);
+    assert_eq!(cloud_resumable(&views, 2, &[young], 0, 480), ["gd5"]);
+}
+
+#[test]
+fn an_idle_worker_with_no_known_age_is_sized_by_its_current_expiry() {
+    let job = JobView {
+        active_deadline_secs: Some(3600),
+        ..view("gd5", 1, true, None)
+    };
+    let views = vec![job];
+    // No age reported: 50 minutes left by kc-burst's own `expires`, short of the deadline.
+    let short = worker("w", false, 0, Some(50));
+    assert!(cloud_resumable(&views, 2, &[short], 0, 480).is_empty());
+    // 70 minutes left: covers it.
+    let enough = worker("w2", false, 0, Some(70));
+    assert_eq!(cloud_resumable(&views, 2, &[enough], 0, 480), ["gd5"]);
+}
+
+#[test]
+fn remaining_life_prefers_age_over_expires_and_falls_back_when_age_is_unknown() {
+    let w = aged_worker("a", 100);
+    assert_eq!(
+        remaining_life(&w, 480),
+        Duration::from_secs(380 * 60),
+        "480 - 100"
+    );
+    let no_age = worker("b", false, 0, Some(45));
+    assert_eq!(remaining_life(&no_age, 480), Duration::from_secs(45 * 60));
+    let unknown = worker("c", false, 0, None);
+    assert_eq!(remaining_life(&unknown, 480), Duration::ZERO);
 }
 
 // ---- burst workers -------------------------------------------------------------------------
@@ -626,6 +741,7 @@ async fn idle_time_runs_on_the_tokio_clock_and_resets_when_a_pod_lands() {
         busy: false,
         idle_for: idle,
         expires_in: None,
+        age: None,
     }];
     assert_eq!(plan_burst(&w, 0, 0, 2, IDLE).down, ["aaaaaa"]);
     // A worker that is gone is forgotten.
@@ -669,10 +785,14 @@ fn kc_bursts_json_lines_parse() {
             name: "kcb-abcdef-1".into(),
             run: "abcdef".into(),
             expires: Some(1795440000),
+            age_seconds: Some(300),
             cost_so_far_eur: 0.0064,
         }]
     );
     assert!(parse_status(r#"{"workers":0}"#).is_empty());
+    // No `age_seconds` at all: an older kc-burst, or a worker just up: unknown, not zero.
+    let no_age = r#"{"name":"kcb-abcdef-1","run":"abcdef","expires":1795440000,"cost_so_far_eur":0.0064}"#;
+    assert_eq!(parse_status(no_age)[0].age_seconds, None);
     let up =
         r#"{"name":"kcb-qwerty-1","run":"qwerty","public_ipv4":"1.2.3.4","node_status":"Ready"}"#;
     assert_eq!(parse_up(up).as_deref(), Some("qwerty"));

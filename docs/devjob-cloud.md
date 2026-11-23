@@ -10,7 +10,9 @@ is `bridge/src/devjob/cloud.rs`.
 `devjob_start` takes `host`: absent or `cluster` is the home cluster, unchanged byte for byte;
 `studio` is a Studio run, unchanged; `cloud` is a Job in `jesse-dev` on kc1. A cloud start takes
 the Studio's three shapes (`strand` + `item_id`, `draft`, or `prompt` + `branch_slug` with
-`repo`) plus the cluster's `agent`, `test_command` and `timeout_minutes`, and `merge`.
+`repo`) plus the cluster's `agent` and `test_command`, and `merge`. `timeout_minutes` is capped
+at `[devjob.cloud] max_timeout_minutes` (default 315), not the cluster's 240; a reduction is
+named in the reply's `timeout_note`.
 
 A draft is **cloud capable** only when its front matter says so, because Studio prompts use
 Studio only things (LAN addresses, the keychain, `kc-burst`, `local/<name>` repositories):
@@ -31,7 +33,12 @@ the cloud.
 created suspended when the slots are full or something is already waiting, as on the home
 cluster. A suspended Job is resumed only when a **ready dev job worker with no dev job pod**
 exists, not merely when a slot is free, because Kubernetes starts `activeDeadlineSeconds` on
-resume: a Job resumed onto no worker would spend its clock waiting for a droplet.
+resume: a Job resumed onto no worker would spend its clock waiting for a droplet. It is further
+resumed only onto a worker whose **remaining life covers its own deadline**
+(`worker_life_minutes` minus the worker's age, from kc-burst's `age_seconds`; with no age
+reported, the worker's current `expires` stands in): a worker too old for the Job stays idle
+(and is stopped by the idle rule below, in time) while `plan_burst` starts the Job a fresh one
+([`cloud_resumable`]).
 
 **Draining (`any`).** Each cloud pass, while a cloud slot is free (active plus queued cloud Jobs
 under `max_concurrent`) and the cost cap allows, the cloud takes the oldest queued Studio run that
@@ -62,6 +69,20 @@ Each cloud pass ([`plan_burst`]):
   `idle_minutes` (default 10) while there are more workers than wanted.
 - **Extend** (`kc-burst extend --run <run> --ttl 60m`) a busy worker within 30 minutes of its
   expiry, so a running Job is not reaped. kc-burst's own 8 hour cap still holds.
+
+**How long a run may take.** `[devjob.cloud] max_timeout_minutes` (default 315) caps
+`timeout_minutes` on this host — higher than the cluster's 240, because a cloud Job's own
+deadline (`activeDeadlineSeconds`) is sized to fit a single worker's whole life, not doubled the
+way the cluster's is. The deadline is the agent timeout, plus a 30 minute finish allowance (the
+entrypoint's own rebase, test command, push and pull request after the agent exits), plus the
+merge path's full wait (`MERGE_WAIT_SECONDS x MERGE_ATTEMPTS`, 120 minutes)
+([`cloud_deadline_secs`]). `worker_life_minutes` (default 480) is kc-burst's own `max_ttl`;
+`CloudSettings::problems` refuses a config where `max_timeout_minutes` plus the finish allowance
+plus the merge waits plus a 15 minute boot allowance (the time from `kc-burst up` to a worker
+being ready, before a Job can resume onto it) would exceed it, and refuses `worker_life_minutes`
+above 480 outright (kc-burst's `max_ttl` must be raised first). At the defaults these four add up
+to exactly 480: `315 + 30 + 120 + 15`. When a request is reduced, either host's reply names the
+requested and the granted value in `timeout_note`.
 
 **Daily cost cap.** `daily_cost_cap_eur` (default 5) is hard. Each `up` commits its whole TTL
 (`hourly_cost_eur` x TTL) and each `extend` one more hour against today's total in a ledger file
@@ -133,6 +154,8 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"
 # hourly_cost_eur = 0.0767
 # merge_deny = []            # added to the seed list, never replacing it
 # ledger = "~/.jesse-bridge/devjob-cloud-ledger.json"
+# max_timeout_minutes = 315  # this host's timeout_minutes cap; see "How long a run may take"
+# worker_life_minutes = 480  # kc-burst's max_ttl; raise that first to go higher, at most 480
 ```
 
 `[devjob.cloud]` needs `[devjob] enabled` (the server it is part of). A strand schedule entry (`kind = "devjob"`) still takes `devjob-host` `studio` or the cluster only: scheduling cloud runs is not part of this change.

@@ -842,7 +842,8 @@ pub struct ScheduleToml {
     pub branch_slug: Option<String>,
     /// `kind = "devjob"` only.
     pub test_command: Option<String>,
-    /// `kind = "devjob"` only: the agent's time limit in minutes (default 120, capped at 240).
+    /// `kind = "devjob"` only: the agent's time limit in minutes (default 120, capped at 240,
+    /// the cluster's cap — a scheduled entry never runs in the cloud).
     pub timeout: Option<u64>,
     /// `kind = "devjob"` only: a strand note's slug. The entry then runs the first eligible
     /// line of `Strands/<strand>.md` at each fire instead of a fixed `prompt_file`.

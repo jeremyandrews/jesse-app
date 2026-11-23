@@ -61,7 +61,9 @@ query daily house trends. Configured by a new `[housedb]` table; without it noth
   unchanged. `golden/capability-args.json` and the argv fixture are re-blessed for the new tools.
 - Tests: `tests/it/housedb_mcp_pg.rs` (an `INSERT` refused by the guard, by the role and by the
   read-only transaction; the 500-row cap; the 15 s timeout; the morning query; the schema
-  order), `tests/it/rodb_mcp_stdio.rs` (both built binaries' names and tool lists, and each
+  order; its scratch database and role both dropped, one statement each, since Postgres refuses
+  `DROP DATABASE` in the implicit transaction of a multi-statement request),
+  `tests/it/rodb_mcp_stdio.rs` (both built binaries' names and tool lists, and each
   refusing the other's variables), and unit tests for `[housedb]` and both servers' tool names.
 
 ## [bridge 0.214.0] - 2026-11-23

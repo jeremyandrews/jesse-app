@@ -95,16 +95,43 @@ impl Scratch {
         RoDbConfig::from_options(&HOUSEDB, self.admin.clone().database(&self.name))
     }
 
+    /// One statement per request: Postgres runs a multi-statement request as one implicit
+    /// transaction, where `DROP DATABASE` is refused, and the `DROP ROLE` after it never runs.
     async fn drop_all(self) {
-        if let Ok(mut conn) = PgConnection::connect_with(&self.admin).await {
-            let _ = sqlx::raw_sql(&format!(
-                "DROP DATABASE IF EXISTS {} WITH (FORCE); DROP ROLE IF EXISTS {}",
-                self.name, self.role
-            ))
-            .execute(&mut conn)
-            .await;
+        let mut conn = PgConnection::connect_with(&self.admin)
+            .await
+            .expect("connect");
+        for sql in [
+            format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name),
+            format!("DROP ROLE IF EXISTS {}", self.role),
+        ] {
+            sqlx::raw_sql(&sql).execute(&mut conn).await.expect(&sql);
         }
+        conn.close().await.ok();
     }
+}
+
+#[tokio::test]
+async fn the_scratch_database_and_role_are_gone_after_cleanup() {
+    let Some(s) = Scratch::new().await else {
+        return;
+    };
+    let (admin, name, role) = (s.admin.clone(), s.name.clone(), s.role.clone());
+    s.drop_all().await;
+
+    let mut conn = PgConnection::connect_with(&admin).await.expect("connect");
+    let (dbs,): (i64,) = sqlx::query_as("SELECT count(*) FROM pg_database WHERE datname = $1")
+        .bind(&name)
+        .fetch_one(&mut conn)
+        .await
+        .expect("pg_database");
+    let (roles,): (i64,) = sqlx::query_as("SELECT count(*) FROM pg_roles WHERE rolname = $1")
+        .bind(&role)
+        .fetch_one(&mut conn)
+        .await
+        .expect("pg_roles");
+    conn.close().await.ok();
+    assert_eq!((dbs, roles), (0, 0), "{name} or {role} was left behind");
 }
 
 async fn query(cfg: &RoDbConfig, sql: &str) -> ToolReply {

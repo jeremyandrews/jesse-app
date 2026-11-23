@@ -2979,6 +2979,29 @@ turn can already call directly, and **there is still no repository allowlist (Je
 merges, and every run lands as an Inbox report and a push. The bridge reads the strand note and
 the prompt; it never writes, renames or moves anything under `Strands/` or `Projects/drafts/`.
 
+### The cloud host (`[devjob.cloud]`, 0.214.0)
+
+`host: "cloud"` runs the same Job on kc1 (`docs/devjob-cloud.md`). What differs:
+
+- **Its own identity.** The bridge talks to kc1 as the ServiceAccount `jesse:devjob`
+  (`[devjob.cloud] kubeconfig`), which may create Jobs and ConfigMaps in `jesse-dev`, read their
+  pods, logs and events, and read nodes; nothing else. It is not `jesse:jesse`, the identity chat
+  turns' `kubernetes-cloud` server uses, because creating a pod in a namespace is reading its
+  Secrets, and `jesse-dev`'s Secret holds a GitHub token that can merge. `jesse:jesse` has no
+  write in `jesse-dev`.
+- **Where it runs.** kc1's admission policy keeps `jesse-dev` pods on burst workers labelled
+  `kc.pozza/pool=devjob`, as the tokenless `default` account; the namespace's NetworkPolicies
+  allow DNS and the public internet only.
+- **Merging.** The Job, not the agent, merges: the agent runs without `GH_TOKEN` or the git
+  credential store, and the entrypoint merges only with `AUTO_MERGE=true`, which the bridge sets
+  only when asked and the repository is on no deny pattern (the seed `tag1consulting/scolta*`
+  and `tag1consulting/goose` cannot be removed by config), and only once every CI run on the
+  exact head passed, with `--match-head-commit`. The agent and the entrypoint are one user, so
+  this stops an agent following a "merge it" sentence, not one that reads the entrypoint's
+  memory; the token's own reach is the wall.
+- **Cost.** The bridge runs the Studio's `kc-burst` with its own config and credentials, which it
+  never reads. Every `up` and `extend` is committed against a hard daily cap before it runs.
+
 ## Coding agents on the Studio (`hostrun`, 0.196.0; off by default)
 
 `[hostrun] enabled = true` lets a coding agent run on the Mac Studio itself, outside any chat turn

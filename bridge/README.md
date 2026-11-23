@@ -922,6 +922,29 @@ followed again, the queue is the set of suspended Jobs, and a finished Job witho
 is reported. The report names its Job, so a restart between writing it and annotating the Job
 does not write a second one.
 
+**The cloud host (`[devjob.cloud]`, 0.214.0).** `devjob_start` with `host: "cloud"` runs the
+same kind of Job on kc1, in namespace `jesse-dev`, two at a time, on DigitalOcean burst workers
+the bridge starts (`kc-burst up 1 --label kc.pozza/pool=devjob`) when a cloud run waits and stops
+once idle, under a hard daily cost cap. A cloud run is launched like a Studio run (strand and
+item, a draft, or a free prompt), is reported to `Inbox/<date>-run-<run_id>.md`, appears in
+`devjob_status`, `devjob_list` (under `cloud`) and `devjob_cancel`, and merges its pull request
+only when asked (`merge`, or `devjob-merge: true` in the draft), once every CI run on its exact
+head is green, and never for a repository on the deny list. Only a draft that says
+`devjob-host: cloud` or `any` may go; a queued Studio run whose draft says `any` starts on
+whichever of a Studio slot and a cloud slot frees first. The design, the failure modes and every
+key are in `docs/devjob-cloud.md`; `src/devjob/cloud.rs` is the code.
+
+```toml
+[devjob.cloud]
+enabled = true                                   # default false; needs [devjob] enabled
+kubeconfig = "~/.kube/kc1-devjob.yaml"           # the default: the jesse:devjob ServiceAccount
+image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # required, no default
+# max_concurrent = 2
+# daily_cost_cap_eur = 5.0
+# idle_minutes = 10
+# merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
+```
+
 **The containment battery** registers a stand-in `devjob` (the same three tools, every call
 refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the
 gateway-on record names the server without a probe ever creating a Job:

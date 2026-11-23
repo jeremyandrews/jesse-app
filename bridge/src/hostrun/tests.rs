@@ -3941,3 +3941,158 @@ mod archive;
 mod review;
 mod reviewers;
 mod settle_failed;
+
+// ---- the cloud's drain (`devjob-host: any`) -------------------------------------------
+
+fn loose(host: &str) -> String {
+    format!("---\ndevjob-repo: o/n\n{host}---\n# x\n\n## PROMPT\nFix it.\n")
+}
+
+fn by_draft(path: &str) -> StartRequest {
+    StartRequest {
+        kind: StartKind::Draft {
+            draft: path.into(),
+            repo: None,
+        },
+        origin: "turn".into(),
+        again: false,
+        reviewer: None,
+        review_focus: None,
+    }
+}
+
+#[tokio::test]
+async fn a_free_cloud_slot_takes_only_a_waiting_any_draft_and_can_give_it_back() {
+    let s = Scratch::new();
+    remote_fixture(&s);
+    let d = s.notes().join("Projects/drafts");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("any-a.md"), loose("devjob-host: any\n")).unwrap();
+    std::fs::write(d.join("cloud-b.md"), loose("devjob-host: cloud\n")).unwrap();
+    std::fs::write(d.join("studio-c.md"), loose("devjob-host: studio\n")).unwrap();
+    std::fs::write(d.join("none-d.md"), loose("")).unwrap();
+    let r = rig(&s);
+    // Nothing waits yet: nothing to take.
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+    // An `any` draft that gets a Studio slot at once is the Studio's: it never waited.
+    let first = r
+        .svc
+        .start(by_draft("Projects/drafts/any-a.md"))
+        .await
+        .unwrap();
+    assert_eq!(first.status, RunStatus::Running);
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+    // Behind it on the same repository, one of each declaration.
+    for f in ["none-d", "studio-c", "cloud-b"] {
+        let q = r
+            .svc
+            .start(by_draft(&format!("Projects/drafts/{f}.md")))
+            .await
+            .unwrap();
+        assert_eq!(q.status, RunStatus::Queued, "{f}");
+        assert_eq!(q.waiting_for.as_deref(), Some("repo o/n"), "{f}");
+    }
+    // None of them says `any`: a run with no declaration (or studio, or cloud) keeps waiting
+    // for the Studio, as before.
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+
+    // A second `any` run: the oldest waiting one is taken, closed as moved, exactly once.
+    std::fs::write(d.join("any-e.md"), loose("devjob-host: any\n")).unwrap();
+    let e = r
+        .svc
+        .start(by_draft("Projects/drafts/any-e.md"))
+        .await
+        .unwrap();
+    assert_eq!(e.status, RunStatus::Queued);
+    let took = r.svc.take_for_cloud(&s.notes()).unwrap();
+    assert_eq!(took.run_id, "s-any-e");
+    assert_eq!(took.status, RunStatus::Closed);
+    assert_eq!(took.closed_reason.as_deref(), Some(MOVED_TO_CLOUD));
+    assert_eq!(took.waiting_for, None);
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+    // Taken, it no longer counts for the Studio's queue: the pump never starts it.
+    finish_round(&r, "s-any-a", 0, Some("ok\n"), "");
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("s-any-e").unwrap().status, RunStatus::Closed);
+    assert_eq!(r.svc.get("s-none-d").unwrap().status, RunStatus::Running);
+
+    // The cloud could not make its Job: back in the queue, the reason recorded, and taken again
+    // by the next free slot.
+    r.svc.return_from_cloud("s-any-e", "kc1 refused the Job");
+    let back = r.svc.get("s-any-e").unwrap();
+    assert_eq!(back.status, RunStatus::Queued);
+    assert_eq!(back.closed_reason, None);
+    assert!(back
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("kc1 refused the Job"));
+    r.svc.pump(now_ms());
+    assert_eq!(
+        r.svc.get("s-any-e").unwrap().waiting_for.as_deref(),
+        Some("repo o/n")
+    );
+    let again = r.svc.take_for_cloud(&s.notes()).unwrap();
+    assert_eq!(again.run_id, "s-any-e");
+    r.svc.note_moved("s-any-e", "agent-s-any-e-abcde");
+    assert_eq!(
+        r.svc.get("s-any-e").unwrap().closed_reason.as_deref(),
+        Some("moved to the cloud as agent-s-any-e-abcde")
+    );
+    // A run already given away is not given back by a late failure report.
+    r.svc.return_from_cloud("s-none-d", "not ours");
+    assert_eq!(r.svc.get("s-none-d").unwrap().status, RunStatus::Running);
+    assert!(r.svc.run_ids().contains(&"s-any-e".to_string()));
+}
+
+#[test]
+fn only_a_waiting_never_started_draft_run_on_github_is_drainable() {
+    let base = RunRecord {
+        run_id: "X1".into(),
+        status: RunStatus::Queued,
+        waiting_for: Some("slot".into()),
+        prompt_path: Some("Projects/drafts/x.md".into()),
+        repo: "o/n".into(),
+        ..RunRecord::default()
+    };
+    assert!(drainable(&base));
+    for (why, r) in [
+        (
+            "running",
+            RunRecord {
+                status: RunStatus::Running,
+                ..base.clone()
+            },
+        ),
+        (
+            "not waiting",
+            RunRecord {
+                waiting_for: None,
+                ..base.clone()
+            },
+        ),
+        (
+            "started once",
+            RunRecord {
+                started_at: Some("2026-11-23T00:00:00Z".into()),
+                ..base.clone()
+            },
+        ),
+        (
+            "no draft",
+            RunRecord {
+                prompt_path: None,
+                ..base.clone()
+            },
+        ),
+        (
+            "local",
+            RunRecord {
+                repo: "local/scratch".into(),
+                ..base.clone()
+            },
+        ),
+    ] {
+        assert!(!drainable(&r), "{why}");
+    }
+}

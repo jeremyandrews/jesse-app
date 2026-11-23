@@ -512,6 +512,8 @@ fn view(name: &str, created: u64, suspended: bool, finished: Option<bool>) -> Jo
         config_map: None,
         active_deadline_secs: None,
         failure_reason: None,
+        run_id: None,
+        cancelled: false,
     }
 }
 
@@ -740,7 +742,7 @@ async fn a_report_already_written_for_a_job_is_found_and_not_written_twice() {
         &sink,
         "agent-read-readme-abcde",
         "2026-10-24",
-        "read-readme",
+        "dev-job-read-readme",
         &text,
     )
     .await
@@ -759,7 +761,7 @@ async fn a_report_already_written_for_a_job_is_found_and_not_written_twice() {
         &sink,
         "agent-read-readme-zzzzz",
         "2026-10-24",
-        "read-readme",
+        "dev-job-read-readme",
         &text,
     )
     .await

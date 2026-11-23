@@ -134,6 +134,9 @@ pub const TITLE_TAG_OWNER: &str = "jeremyandrews";
 pub const HOST_KEY: &str = "devjob-host";
 /// The `origin` of the agent turns this module sends.
 pub const STUDIO_RUN_ORIGIN: &str = "studio-run";
+/// `closed_reason` of a queued run a free cloud slot took (`devjob-host: any`), then ` as
+/// <job>` once its Job exists. See `docs/devjob-cloud.md`.
+pub const MOVED_TO_CLOUD: &str = "moved to the cloud";
 /// `closed_reason` when Jeremy closes a run and gives no reason.
 pub const CLOSED_BY_JEREMY: &str = "closed by Jeremy";
 /// `closed_reason` when the run's Drafts line is checked or sits under `### Done`.
@@ -2215,6 +2218,19 @@ fn close_run(
     Ok(Some(rec))
 }
 
+/// Whether a free cloud slot may take this run ([`HostRuns::take_for_cloud`]), its draft aside:
+/// queued and waiting, never started, one round, a draft, a GitHub repository.
+pub fn drainable(r: &RunRecord) -> bool {
+    r.status == RunStatus::Queued
+        && r.waiting_for.is_some()
+        && r.started_at.is_none()
+        && r.rounds.len() <= 1
+        && r.round()
+            .is_none_or(|x| x.started_at.is_none() && x.auto.is_none())
+        && r.prompt_path.is_some()
+        && !is_local_repo(&r.repo)
+}
+
 /// Archive the run in `dir` with `reason` if, read again under its lock, its status is one
 /// `may` accepts. An archived run keeps its first `archived_at` and reason. `Ok(Err(status))`
 /// when its status had moved to one `may` refuses.
@@ -3379,6 +3395,98 @@ impl HostRuns {
                 other.label()
             ))),
         }
+    }
+
+    /// Every run id on disk, in any state: a cloud run takes none of them.
+    pub fn run_ids(&self) -> Vec<String> {
+        self.runs().into_iter().map(|(_, r)| r.run_id).collect()
+    }
+
+    /// The oldest queued run a free cloud slot may take, already taken: one that is waiting
+    /// (`waiting_for` set), has never started, runs a draft that says `devjob-host: any`, and is
+    /// not on a local repository. It becomes `closed` ([`MOVED_TO_CLOUD`]) under the queue's
+    /// gate, so the pump cannot start it as well. `None` when nothing qualifies.
+    pub fn take_for_cloud(&self, notes_root: &Path) -> Option<RunRecord> {
+        let _gate = lock(&self.gate);
+        let mut queued: Vec<(PathBuf, RunRecord)> = self
+            .runs()
+            .into_iter()
+            .filter(|(_, r)| drainable(r))
+            .collect();
+        queued.sort_by(|a, b| {
+            let qa = a.1.queued_at.as_deref().unwrap_or(&a.1.created_at);
+            let qb = b.1.queued_at.as_deref().unwrap_or(&b.1.created_at);
+            qa.cmp(qb).then(a.1.run_id.cmp(&b.1.run_id))
+        });
+        for (dir, r) in queued {
+            let Some(path) = &r.prompt_path else { continue };
+            let Ok(src) = std::fs::read_to_string(notes_root.join(path)) else {
+                continue;
+            };
+            if !crate::devjob::cloud::DraftHost::of(&src).drains_to_cloud() {
+                continue;
+            }
+            let now = rfc(now_ms());
+            let mut took = false;
+            let rec = update_run(&dir, |x| {
+                if !drainable(x) {
+                    return;
+                }
+                x.status = RunStatus::Closed;
+                x.closed_reason = Some(MOVED_TO_CLOUD.to_string());
+                x.closed_at = Some(now.clone());
+                x.waiting_for = None;
+                x.finished_at = Some(now.clone());
+                if let Some(cur) = x.round_mut() {
+                    cur.outcome = Some(RunStatus::Closed);
+                    cur.finished_at = Some(now.clone());
+                    cur.notified = true;
+                }
+                took = true;
+            })
+            .ok()?;
+            if took {
+                eprintln!("jesse-bridge: hostrun {}: {MOVED_TO_CLOUD}", rec.run_id);
+                return Some(rec);
+            }
+        }
+        None
+    }
+
+    /// Name the Job a run [`HostRuns::take_for_cloud`] gave away became.
+    pub fn note_moved(&self, run_id: &str, job: &str) {
+        let _gate = lock(&self.gate);
+        let _ = update_run(&self.settings.run_dir(run_id), |x| {
+            if x.closed_reason.as_deref() == Some(MOVED_TO_CLOUD) {
+                x.closed_reason = Some(format!("{MOVED_TO_CLOUD} as {job}"));
+            }
+        });
+    }
+
+    /// Give a run back to the Studio's queue when the cloud could not make its Job: queued again
+    /// at its old place, with the reason in `error`.
+    pub fn return_from_cloud(&self, run_id: &str, why: &str) {
+        let _gate = lock(&self.gate);
+        let res = update_run(&self.settings.run_dir(run_id), |x| {
+            if x.status != RunStatus::Closed || x.closed_reason.as_deref() != Some(MOVED_TO_CLOUD) {
+                return;
+            }
+            x.status = RunStatus::Queued;
+            x.closed_reason = None;
+            x.closed_at = None;
+            x.finished_at = None;
+            x.error = Some(format!("the cloud could not take it: {why}"));
+            if let Some(cur) = x.round_mut() {
+                cur.outcome = None;
+                cur.finished_at = None;
+                cur.notified = false;
+            }
+        });
+        eprintln!("jesse-bridge: hostrun {run_id}: back in the Studio queue: {why}");
+        if let Err(e) = res {
+            eprintln!("jesse-bridge: hostrun {run_id}: {e}");
+        }
+        self.wake();
     }
 
     /// Cancel, then wake the watcher now and again once the grace has passed.

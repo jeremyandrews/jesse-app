@@ -14,6 +14,43 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.214.0] - 2026-11-23
+
+**Dev jobs get two cloud slots on kc1 beside the Studio's slot, and a cloud run merges its own
+pull request at green when asked.** On 2026-11-23 about 44 `jeremyandrews/trovato` Studio runs
+waited behind one running run (`waiting_for: repo`). `devjob_start` now takes `host: "cloud"`:
+a Job in namespace `jesse-dev` on kc1 (`cloud/infrastructure/jesse-dev/` in the k3s repository),
+two at a time, on `s-4vcpu-8gb-intel` burst workers the bridge starts with `kc-burst` when a
+cloud run waits, extends while one runs and stops after `idle_minutes`, under a hard
+`daily_cost_cap_eur` kept in a ledger file. The design is `docs/devjob-cloud.md`.
+
+- **Routing.** A cloud start is a strand item, a draft or a free prompt, as on the Studio, with
+  the cluster's `agent`, `test_command` and `timeout_minutes`. A draft goes only if it says
+  `devjob-host: cloud` or `any`; `local/<name>` never goes. The home `cluster` host is unchanged
+  (its Job, report name and tool listing are byte for byte what they were).
+- **Lifecycle.** Strand labels and keys, the report in `Inbox/<date>-run-<run_id>.md` (front
+  matter `host: cloud`, `run: <run_id>`), the agent's own `JESSE_RUN_REPORT` as its final
+  message, a push, `devjob_status` by run id or Job name, `devjob_list` under `cloud`, and
+  `devjob_cancel` (a queued Job is deleted, a running one stopped and reported).
+- **Merging.** With `merge: true` (or `devjob-merge: true` in the draft) and a repository on no
+  deny pattern (`[devjob.cloud] merge_deny`, always including `tag1consulting/scolta*` and
+  `tag1consulting/goose`), the Job sets `AUTO_MERGE=true`: after the agent (which runs with no
+  GitHub credential) exits, the entrypoint rebases onto a fresh `origin/main`, pushes, opens the
+  pull request, waits for every CI run whose `headSha` is the exact head to pass, and merges with
+  `--match-head-commit`. Never red, never pending, never `main`.
+- **Draining.** A queued Studio run whose draft says `devjob-host: any` is taken by a free cloud
+  slot (`closed`, `moved to the cloud as <job>`, same run id) unless a Studio slot frees first;
+  both decide under the Studio queue's gate. A draft with no declaration waits for the Studio as
+  before. Two runs on one repository may now run at once; each cuts its branch from a freshly
+  fetched `origin/main` and rebases before merging, which the cloud agent's text says.
+- **Tests.** `devjob/cloud/tests.rs` (routing, the deny list and merge decision, the cloud Job,
+  slot counting, the burst plan, idle time on tokio's paused clock, the ledger, kc-burst's JSON)
+  and two in `hostrun/tests.rs` (the `any` hand off and its refusals). No new test file, no sleep.
+
+Nothing to do until it is configured: `[devjob.cloud]` is off by default. To turn it on see
+`docs/devjob-cloud.md`, "Config" (the `jesse:devjob` token, the amd64 image digest and the Secret
+`jesse-dev-agent-keys` in `jesse-dev` on kc1 come first).
+
 ## [bridge 0.213.2] - 2026-11-22
 
 **`url` 2.5.8 to 2.5.9, for RUSTSEC-2026-0592 (a stack overflow in `Url::origin()` on nested

@@ -4167,3 +4167,13 @@ dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only
 workflows = "handing a waiting Studio run review (auto_reply false) to the run's session from chat"
 reason = "Queues a new round of a Studio run with the fixed hand off reply carrying its waiting review's findings; the run can push a branch."
 note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_reply (0.211.0), so it reaches exactly the turns devjob_start reaches: write turns only."
+
+[grant."mcp__devjob__devjob_priority"]
+kind = "mcp"
+server = "devjob"
+harnesses = ["claude-code"]
+placement = "core"
+dependency = "[hostrun] enabled (Studio runs on this Mac), read and written only by the bridge process; [devjob] enabled; [gateway] enabled"
+workflows = "raising or lowering a queued Studio run's priority from chat, so urgent work takes the next free slot"
+reason = "Changes which queued Studio run takes the next free slot; never stops, pauses or overtakes a running run and never bypasses a cap."
+note = "in_process: the server lists it only with [hostrun] on, and it is rendered into a child's config only with [gateway] enabled and [devjob] enabled. Classed write beside devjob_cancel (0.215.0), so it reaches exactly the turns devjob_start reaches: write turns only."

@@ -991,8 +991,8 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // Why it is a third instance and not a flag on `google` is under GOOGLE-PERSEIDO above and on
 // the row in `crate::mcpservers`. Never a wildcard.
 //
-// DEVJOB: ALL EIGHT, NAMED ONE BY ONE (0.186.0; reply and cancel 0.197.0; close 0.200.0;
-// review and review_reply 0.211.0).
+// DEVJOB: ALL NINE, NAMED ONE BY ONE (0.186.0; reply and cancel 0.197.0; close 0.200.0;
+// review and review_reply 0.211.0; priority 0.215.0).
 // `devjob_start` starts a
 // coding agent on the cluster or the Studio that can push a branch and open a pull request on
 // any repository the credential reaches; it is classed `write` in the row, so it reaches write
@@ -1002,9 +1002,11 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // the three only with `[hostrun]` on. `devjob_review` (a second model reviews a run, and its
 // findings become the run's next round) and `devjob_review_reply` (hand a waiting review off)
 // steer a Studio run the same way and are classed `write` beside `devjob_reply`, listed only
-// with `[hostrun]` on too. `devjob_status` and `devjob_list` only read. The server is
-// `in_process` and is rendered into a child's config only with the gateway on and `[devjob]
-// enabled`, so with either off these eight names grant nothing.
+// with `[hostrun]` on too. `devjob_priority` (change a queued run's priority, 0.215.0) steers
+// the queue the same way and is classed `write` beside them, listed only with `[hostrun]` on.
+// `devjob_status` and `devjob_list` only read. The server is `in_process` and is rendered into a
+// child's config only with the gateway on and `[devjob] enabled`, so with either off these nine
+// names grant nothing.
 // Never a wildcard.
 //
 // KUBERNETES-CLOUD: ALL TWENTY OF TWENTY ON THE CLOUD CLUSTER, AND THE CLUSTER IS THE FENCE
@@ -1256,7 +1258,8 @@ mcp__reminders__create_reminder,mcp__reminders__list_reminders,\
 mcp__reminders__cancel_reminder,mcp__reminders__snooze_reminder,\
 mcp__devjob__devjob_start,mcp__devjob__devjob_status,mcp__devjob__devjob_list,\
 mcp__devjob__devjob_reply,mcp__devjob__devjob_cancel,mcp__devjob__devjob_close,\
-mcp__devjob__devjob_review,mcp__devjob__devjob_review_reply";
+mcp__devjob__devjob_review,mcp__devjob__devjob_review_reply,\
+mcp__devjob__devjob_priority";
 
 // Defense-in-depth: tools that must never run from the bridge even if they slip
 // into the allowlist. Override with JESSE_DISALLOWED_TOOLS.

@@ -596,6 +596,102 @@ pub fn validate_hostrun(cfg: &Config) -> Vec<ConfigError> {
 
 // ---- THE RECORD ----------------------------------------------------------------------
 
+/// How soon a queued run wants a slot: four fixed levels, stored by name. The queue pass starts
+/// the highest eligible one first ([`queue_order`]); a priority never stops, pauses or overtakes
+/// a running run, and never bypasses a cap, the usage limit hold or the disk check.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Urgent,
+}
+
+/// The front matter key that sets a draft's run's priority.
+pub const PRIORITY_KEY: &str = "devjob-priority";
+
+impl Priority {
+    /// Every level, lowest first: the names a start, a draft and `devjob_priority` accept.
+    pub const NAMES: [&'static str; 4] = ["low", "normal", "high", "urgent"];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Priority::Low => "low",
+            Priority::Normal => "normal",
+            Priority::High => "high",
+            Priority::Urgent => "urgent",
+        }
+    }
+
+    /// A level by its name, case and surrounding space ignored. Anything else is refused,
+    /// never read as `normal`.
+    pub fn parse(s: &str) -> Result<Priority, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Priority::Low),
+            "normal" => Ok(Priority::Normal),
+            "high" => Ok(Priority::High),
+            "urgent" => Ok(Priority::Urgent),
+            _ => Err(format!(
+                "priority {:?} is not one of {}",
+                s.trim(),
+                Priority::NAMES.join(", ")
+            )),
+        }
+    }
+
+    pub fn is_normal(&self) -> bool {
+        *self == Priority::Normal
+    }
+}
+
+/// One change of a queued run's priority (`devjob_priority`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityChange {
+    /// When (RFC 3339).
+    pub at: String,
+    pub from: Priority,
+    pub to: Priority,
+}
+
+/// The order queued runs start in: the watcher's own resumed rounds first (a run the usage limit
+/// or a restart stopped gets its slot back before new work takes it), then priority, highest
+/// first, then the order of the wait (`queued_at`, else `created_at`), then the run id. With
+/// every run `normal` this is the order before priorities existed.
+pub fn queue_order(a: &RunRecord, b: &RunRecord) -> std::cmp::Ordering {
+    let resumed = |r: &RunRecord| r.round().is_some_and(|x| x.auto.is_some());
+    let qa = a.queued_at.as_deref().unwrap_or(&a.created_at);
+    let qb = b.queued_at.as_deref().unwrap_or(&b.created_at);
+    resumed(b)
+        .cmp(&resumed(a))
+        .then(b.priority.cmp(&a.priority))
+        .then(qa.cmp(qb))
+        .then(a.run_id.cmp(&b.run_id))
+}
+
+/// The queued runs among `runs` in the order the queue pass would start them ([`queue_order`]),
+/// each with its place, from 1, among its own repository's queued runs. Which of them starts
+/// next still depends on the caps: a run whose repository is full waits whatever its place.
+pub fn start_order(runs: &[RunRecord]) -> Vec<(&RunRecord, usize)> {
+    let mut queued: Vec<&RunRecord> = runs
+        .iter()
+        .filter(|r| r.status == RunStatus::Queued)
+        .collect();
+    queued.sort_by(|a, b| queue_order(a, b));
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    queued
+        .into_iter()
+        .map(|r| {
+            let n = seen.entry(r.repo.as_str()).or_default();
+            *n += 1;
+            (r, *n)
+        })
+        .collect()
+}
+
 /// How a run stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -865,6 +961,14 @@ pub struct RunRecord {
     /// Every review of the run, oldest first ([`review::Review`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<Review>,
+    /// How soon the run wants a slot while queued ([`Priority`]). Written only when not
+    /// `normal`, so a record from before 0.215.0 (no field) reads as `normal` and an all
+    /// `normal` record is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Priority::is_normal")]
+    pub priority: Priority,
+    /// Every change of `priority` while queued (`devjob_priority`), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority_changes: Vec<PriorityChange>,
 }
 
 impl RunRecord {
@@ -1406,6 +1510,8 @@ pub struct StudioItem {
     pub model: Option<String>,
     /// The draft's `devjob-reviewer:`, when it has one: an id, a list, or `none`.
     pub reviewer: Option<review::ReviewerArg>,
+    /// The draft's `devjob-priority:`, when it has one.
+    pub priority: Option<Priority>,
     /// The `## PROMPT` section, byte for byte.
     pub section: String,
 }
@@ -1427,6 +1533,23 @@ pub fn draft_reviewer(path: &str, src: &str) -> Result<Option<review::ReviewerAr
             "{path}: {REVIEWER_KEY} {}",
             e.strip_prefix("reviewer ").unwrap_or(&e)
         )),
+    }
+}
+
+/// A draft's `devjob-priority:` ([`PRIORITY_KEY`]): one of [`Priority::NAMES`]. `None` when the key
+/// is absent or empty; an unknown value is refused, never read as `normal`.
+pub fn draft_priority(path: &str, src: &str) -> Result<Option<Priority>, String> {
+    match fm(src, PRIORITY_KEY) {
+        None => Ok(None),
+        Some(v) => match strip_comment(&v) {
+            "" => Ok(None),
+            v => Priority::parse(v).map(Some).map_err(|e| {
+                format!(
+                    "{path}: {PRIORITY_KEY} {}",
+                    e.trim_start_matches("priority ")
+                )
+            }),
+        },
     }
 }
 
@@ -1654,6 +1777,7 @@ pub fn studio_item_of(
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
     let reviewer = draft_reviewer(&path, &src)?;
+    let priority = draft_priority(&path, &src)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -1665,6 +1789,7 @@ pub fn studio_item_of(
         repo,
         model,
         reviewer,
+        priority,
         section,
     })
 }
@@ -1700,6 +1825,8 @@ pub struct StudioDraft {
     pub model: Option<String>,
     /// The draft's `devjob-reviewer:`, when it has one: an id, a list, or `none`.
     pub reviewer: Option<review::ReviewerArg>,
+    /// The draft's `devjob-priority:`, when it has one.
+    pub priority: Option<Priority>,
     pub section: String,
     /// The file's stem as a branch slug: the run is `s-<slug>`.
     pub slug: String,
@@ -1778,6 +1905,7 @@ fn studio_draft_with(
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
     let reviewer = draft_reviewer(&path, &src)?;
+    let priority = draft_priority(&path, &src)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -1795,6 +1923,7 @@ fn studio_draft_with(
         repo,
         model,
         reviewer,
+        priority,
         section,
         slug,
     })
@@ -2386,6 +2515,9 @@ pub struct StartRequest {
     pub reviewer: Option<review::ReviewerArg>,
     /// What the reviewer should look at most closely; needs a reviewer.
     pub review_focus: Option<String>,
+    /// How soon the run wants a slot. Wins over the draft's `devjob-priority:`; with neither,
+    /// `normal`.
+    pub priority: Option<Priority>,
 }
 
 /// What a start answers.
@@ -2646,90 +2778,102 @@ impl HostRuns {
             .claude_path()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.settings.claude.clone());
-        let (base, repo, prompt_for, branch_text, model, step, prompt_path, draft_reviewer) =
-            match &req.kind {
-                StartKind::Item {
-                    strand,
-                    item_id,
+        let (
+            base,
+            repo,
+            prompt_for,
+            branch_text,
+            model,
+            step,
+            prompt_path,
+            draft_reviewer,
+            draft_priority,
+        ) = match &req.kind {
+            StartKind::Item {
+                strand,
+                item_id,
+                repo,
+                scheduled,
+            } => {
+                let opt_in = if *scheduled {
+                    OptIn::Schedule
+                } else {
+                    OptIn::RequestOrLocal {
+                        repo: repo.as_deref(),
+                    }
+                };
+                let item = studio_item(&self.notes_root, strand, item_id, opt_in)
+                    .map_err(Refusal::Invalid)?;
+                (
+                    item.item_id.clone(),
+                    item.repo.clone(),
+                    item.section.clone(),
+                    Some(item.item_text.clone()),
+                    item.model.clone(),
+                    Some((item.strand.clone(), item.item_id.clone())),
+                    Some(item.prompt_path.clone()),
+                    item.reviewer.clone(),
+                    item.priority,
+                )
+            }
+            StartKind::Draft { draft, repo } => {
+                let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
+                    .map_err(Refusal::Invalid)?;
+                (
+                    format!("s-{}", d.slug),
+                    d.repo,
+                    d.section,
+                    None,
+                    d.model,
+                    None,
+                    Some(d.prompt_path),
+                    d.reviewer,
+                    d.priority,
+                )
+            }
+            StartKind::Free {
+                repo,
+                prompt,
+                slug,
+                model,
+            } => {
+                // A free prompt that names no repository goes to `local/<branch_slug>`.
+                let repo = if repo.trim().is_empty() && valid_slug(slug) {
+                    local_repo(slug).unwrap_or_default()
+                } else {
+                    repo.clone()
+                };
+                if !valid_repo(&repo) {
+                    return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
+                }
+                if prompt.trim().is_empty() {
+                    return Err(Refusal::Invalid("prompt is empty".into()));
+                }
+                if prompt.len() > devjob::MAX_PROMPT_BYTES {
+                    return Err(Refusal::Invalid(format!(
+                        "prompt is {} bytes; the most is {}",
+                        prompt.len(),
+                        devjob::MAX_PROMPT_BYTES
+                    )));
+                }
+                if !valid_slug(slug) {
+                    return Err(Refusal::Invalid(format!(
+                        "branch_slug {slug:?} must be lowercase letters, digits and hyphens"
+                    )));
+                }
+                (
+                    format!("s-{slug}"),
                     repo,
-                    scheduled,
-                } => {
-                    let opt_in = if *scheduled {
-                        OptIn::Schedule
-                    } else {
-                        OptIn::RequestOrLocal {
-                            repo: repo.as_deref(),
-                        }
-                    };
-                    let item = studio_item(&self.notes_root, strand, item_id, opt_in)
-                        .map_err(Refusal::Invalid)?;
-                    (
-                        item.item_id.clone(),
-                        item.repo.clone(),
-                        item.section.clone(),
-                        Some(item.item_text.clone()),
-                        item.model.clone(),
-                        Some((item.strand.clone(), item.item_id.clone())),
-                        Some(item.prompt_path.clone()),
-                        item.reviewer.clone(),
-                    )
-                }
-                StartKind::Draft { draft, repo } => {
-                    let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
-                        .map_err(Refusal::Invalid)?;
-                    (
-                        format!("s-{}", d.slug),
-                        d.repo,
-                        d.section,
-                        None,
-                        d.model,
-                        None,
-                        Some(d.prompt_path),
-                        d.reviewer,
-                    )
-                }
-                StartKind::Free {
-                    repo,
-                    prompt,
-                    slug,
-                    model,
-                } => {
-                    // A free prompt that names no repository goes to `local/<branch_slug>`.
-                    let repo = if repo.trim().is_empty() && valid_slug(slug) {
-                        local_repo(slug).unwrap_or_default()
-                    } else {
-                        repo.clone()
-                    };
-                    if !valid_repo(&repo) {
-                        return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
-                    }
-                    if prompt.trim().is_empty() {
-                        return Err(Refusal::Invalid("prompt is empty".into()));
-                    }
-                    if prompt.len() > devjob::MAX_PROMPT_BYTES {
-                        return Err(Refusal::Invalid(format!(
-                            "prompt is {} bytes; the most is {}",
-                            prompt.len(),
-                            devjob::MAX_PROMPT_BYTES
-                        )));
-                    }
-                    if !valid_slug(slug) {
-                        return Err(Refusal::Invalid(format!(
-                            "branch_slug {slug:?} must be lowercase letters, digits and hyphens"
-                        )));
-                    }
-                    (
-                        format!("s-{slug}"),
-                        repo,
-                        prompt.clone(),
-                        None,
-                        model.clone(),
-                        None,
-                        None,
-                        None,
-                    )
-                }
-            };
+                    prompt.clone(),
+                    None,
+                    model.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+        };
         // A REVIEWED run: the reviewers are resolved and checked now, before anything is
         // created ([`HostRuns::resolve_reviewers`]).
         let focus = review::checked_focus(req.review_focus.as_deref())
@@ -2802,6 +2946,7 @@ impl HostRuns {
             reviewers_source: Some(picked.source.to_string()),
             reviewers_skipped: picked.skipped.clone(),
             review_focus: focus,
+            priority: req.priority.or(draft_priority).unwrap_or_default(),
             ..RunRecord::default()
         };
         // `prompt.md` is rendered when the first round starts, once the worktree names the
@@ -2929,8 +3074,9 @@ impl HostRuns {
         sys::free_bytes(&self.settings.root).is_none_or(|f| f >= self.settings.min_free_bytes)
     }
 
-    /// Start every queued run the caps and the disk allow, oldest first, skipping any still
-    /// blocked; record why each other one waits.
+    /// Start every queued run the caps and the disk allow, in [`queue_order`] (resumed rounds,
+    /// then priority, then oldest first), skipping any still blocked; record why each other one
+    /// waits.
     pub fn pump(&self, now: u64) -> Vec<Effect> {
         let _gate = lock(&self.gate);
         let mut effects = Vec::new();
@@ -2947,18 +3093,10 @@ impl HostRuns {
             .iter()
             .filter(|(_, r)| r.status == RunStatus::Queued)
             .collect();
-        // The watcher's own rounds (a run that was running when the usage limit or a restart
-        // stopped it) go first, so it gets its slot back before new work takes it; then the
-        // order of the wait.
-        let resumed = |r: &RunRecord| r.round().is_some_and(|x| x.auto.is_some());
-        queued.sort_by(|a, b| {
-            let qa = a.1.queued_at.as_deref().unwrap_or(&a.1.created_at);
-            let qb = b.1.queued_at.as_deref().unwrap_or(&b.1.created_at);
-            resumed(&b.1)
-                .cmp(&resumed(&a.1))
-                .then(qa.cmp(qb))
-                .then(a.1.run_id.cmp(&b.1.run_id))
-        });
+        // Resumed rounds, then priority, then the order of the wait ([`queue_order`]). Each run
+        // is still checked on its own below, so a high run in a full repository leaves the slot
+        // to a lower one in an idle repository.
+        queued.sort_by(|a, b| queue_order(&a.1, &b.1));
         // While any run is paused for the usage limit, nothing new starts: only the paused runs'
         // own rounds, which find out whether the limit has passed.
         let limit_hold = runs.iter().any(|(_, r)| r.status == RunStatus::Paused);
@@ -3402,7 +3540,7 @@ impl HostRuns {
         self.runs().into_iter().map(|(_, r)| r.run_id).collect()
     }
 
-    /// The oldest queued run a free cloud slot may take, already taken: one that is waiting
+    /// The first queued run in [`queue_order`] a free cloud slot may take, already taken: one that is waiting
     /// (`waiting_for` set), has never started, runs a draft that says `devjob-host: any`, and is
     /// not on a local repository. It becomes `closed` ([`MOVED_TO_CLOUD`]) under the queue's
     /// gate, so the pump cannot start it as well. `None` when nothing qualifies.
@@ -3413,11 +3551,7 @@ impl HostRuns {
             .into_iter()
             .filter(|(_, r)| drainable(r))
             .collect();
-        queued.sort_by(|a, b| {
-            let qa = a.1.queued_at.as_deref().unwrap_or(&a.1.created_at);
-            let qb = b.1.queued_at.as_deref().unwrap_or(&b.1.created_at);
-            qa.cmp(qb).then(a.1.run_id.cmp(&b.1.run_id))
-        });
+        queued.sort_by(|a, b| queue_order(&a.1, &b.1));
         for (dir, r) in queued {
             let Some(path) = &r.prompt_path else { continue };
             let Ok(src) = std::fs::read_to_string(notes_root.join(path)) else {
@@ -3563,6 +3697,71 @@ impl HostRuns {
         tokio::task::spawn_blocking(move || this.close(&id, reason.as_deref()))
             .await
             .map_err(|e| Refusal::Internal(format!("the close task failed: {e}")))?
+    }
+
+    /// Change a queued run's priority (`devjob_priority`): the change is recorded in
+    /// `priority_changes` with its time. Only a queued run (waiting for a slot, its repository,
+    /// the disk or the limit) may change; any other is refused with its status. The same
+    /// priority again changes nothing and records nothing.
+    pub fn set_priority(&self, run_id: &str, priority: Priority) -> Result<RunRecord, Refusal> {
+        let _gate = lock(&self.gate);
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        let refused = |s: RunStatus| {
+            Refusal::State(format!(
+                "{run_id} is {}; only a queued run's priority can be changed",
+                s.label()
+            ))
+        };
+        if rec.status != RunStatus::Queued {
+            return Err(refused(rec.status));
+        }
+        if rec.priority == priority {
+            return Ok(rec);
+        }
+        let now = rfc(now_ms());
+        let mut status = RunStatus::Queued;
+        let updated = update_run(&self.settings.run_dir(run_id), |r| {
+            status = r.status;
+            if r.status != RunStatus::Queued {
+                return;
+            }
+            r.priority_changes.push(PriorityChange {
+                at: now.clone(),
+                from: r.priority,
+                to: priority,
+            });
+            r.priority = priority;
+        })
+        .map_err(Refusal::Internal)?;
+        if status != RunStatus::Queued {
+            return Err(refused(status));
+        }
+        eprintln!(
+            "jesse-bridge: hostrun PRIORITY {run_id} {} -> {}",
+            rec.priority.label(),
+            priority.label()
+        );
+        Ok(updated)
+    }
+
+    /// [`HostRuns::set_priority`], then one queue pass, so a run raised into a free slot starts
+    /// now. Answers the record as the pass left it.
+    pub async fn set_priority_and_pump(
+        self: &Arc<Self>,
+        run_id: &str,
+        priority: Priority,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        let rec = tokio::task::spawn_blocking(move || this.set_priority(&id, priority))
+            .await
+            .map_err(|e| Refusal::Internal(format!("the priority task failed: {e}")))??;
+        let effects = self.pump_blocking().await;
+        self.send_effects(effects).await;
+        self.wake();
+        Ok(self.get(run_id).unwrap_or(rec))
     }
 
     /// The watcher's settling: close every `needs_you`, `interrupted` or `failed` run whose
@@ -5946,6 +6145,8 @@ pub async fn jesse_runs_start(
             again,
             reviewer,
             review_focus,
+            // The app sets no priority yet: the draft's `devjob-priority:`, else `normal`.
+            priority: None,
         })
         .await
         .map_err(refusal)?;

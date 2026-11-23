@@ -510,7 +510,7 @@ mod tests {
             ),
             (4, 31, 6)
         );
-        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 417));
+        assert_eq!((count(GrantKind::Web), count(GrantKind::Mcp)), (2, 418));
         assert_eq!(servers.len(), 29);
     }
 

@@ -991,6 +991,35 @@ enabled = true
 **Which repository.** The draft's `devjob-repo`, else the caller's `repo`, else the strand's one
 `repos:` entry. A strand listing several repositories needs `repo`.
 
+**Priority (0.215.0).** A queued run carries one of four levels: `low`, `normal` (the default),
+`high` or `urgent`, stored by name in `run.json` as `priority` (written only when not `normal`,
+so a record from an older bridge, with no field, reads as `normal` and nothing is migrated).
+
+- **Setting it at launch.** `devjob_start` with `host: "studio"` and `priority`, or a draft whose
+  front matter says `devjob-priority: high`. The argument wins over the draft; with neither the
+  run is `normal`. Any other value is refused, naming the four, never read as `normal`. The
+  cluster and the cloud refuse `priority`: their own queues start runs in the order asked.
+  `POST /jesse/runs` takes no `priority` yet; the draft's key still applies there and to a
+  strand schedule entry.
+- **Changing it while queued.** `devjob_priority { run_id, priority }` changes a `queued` run
+  (whatever it waits for: a slot, its repository, the disk or the usage limit), appends
+  `{ at, from, to }` to the run's `priority_changes`, and runs the queue pass once. A run that is
+  running, paused, reviewing, finished, closed or cancelled is refused with its status.
+- **The order.** The queue pass sorts queued runs by: the watcher's own resumed rounds first (a
+  run the usage limit or a restart stopped gets its slot back first), then priority, highest
+  first, then the order of the wait (`queued_at`, else `created_at`), then the run id. With every
+  run `normal` this is exactly the order before 0.215.0. A free cloud slot taking a
+  `devjob-host: any` run (`docs/devjob-cloud.md`) takes them in the same order.
+- **Never preempts.** Priority only decides which eligible queued run takes a free slot. It never
+  stops, pauses or overtakes a running run, and never bypasses `max_concurrent`, a repository's
+  cap, the usage limit hold or the disk check. Each run is still checked on its own, so an
+  `urgent` run whose repository is at its cap waits (`waiting_for: "repo <owner/name>"`) and a
+  `normal` run in an idle repository takes the free slot.
+- **Showing it.** `devjob_status` and every run in `devjob_list` carry `priority`. The list's
+  Studio `active` gives the running, paused and reviewing runs first, newest first, then the
+  queued runs in the order the queue pass would start them, each with `queue_position`, its place
+  (from 1) among its repository's queued runs. Reports, pushes and the app are unchanged.
+
 **Local repositories (0.202.0).** `local/<name>` (the name follows the `owner/name` rules) is a
 repository that exists only on the Studio: a bare repository at `<root>/local/<name>.git` with no
 remote, created on a run's first round with one empty commit `init` on `main` by `Jesse Bridge`.

@@ -500,6 +500,8 @@ pub async fn fire(
                     // A scheduled start's reviewer is its draft's `devjob-reviewer:`.
                     reviewer: None,
                     review_focus: None,
+                    // And its priority its draft's `devjob-priority:`.
+                    priority: None,
                 })
                 .await
             {

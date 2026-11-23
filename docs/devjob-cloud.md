@@ -34,13 +34,14 @@ exists, not merely when a slot is free, because Kubernetes starts `activeDeadlin
 resume: a Job resumed onto no worker would spend its clock waiting for a droplet.
 
 **Draining (`any`).** Each cloud pass, while a cloud slot is free (active plus queued cloud Jobs
-under `max_concurrent`) and the cost cap allows, the cloud takes the oldest queued Studio run that
-is waiting (`waiting_for` set: slot, repo, disk or limit), has never started a round, and whose
-draft says `devjob-host: any`. The take is atomic under the Studio queue's gate: the Studio record
-becomes `closed` with `closed_reason: moved to the cloud`, then the Job is created with the same
-run id, so the report keeps its name. If the Job cannot be created the record goes back to
-`queued`. The Studio's pump starts the same run if a Studio slot frees first; both decide under
-the same gate, so a run starts once.
+under `max_concurrent`) and the cost cap allows, the cloud takes the first queued Studio run, in
+the Studio queue's own order (resumed rounds, then priority, then oldest first; see "Priority"
+in `bridge/README.md`), that is waiting (`waiting_for` set: slot, repo, disk or limit), has
+never started a round, and whose draft says `devjob-host: any`. The take is atomic under
+the Studio queue's gate: the Studio record becomes `closed` with `closed_reason: moved to the
+cloud`, then the Job is created with the same run id, so the report keeps its name. If the Job
+cannot be created the record goes back to `queued`. The Studio's pump starts the same run if a
+Studio slot frees first; both decide under the same gate, so a run starts once.
 
 Two runs on one repository may now run at once (two cloud runs, or a cloud run beside a Studio
 run). Each cuts its branch from a freshly fetched `origin/main`; the Job rebases onto

@@ -478,13 +478,15 @@ fn an_in_process_row_in_a_set_reaches_a_spawned_child_through_the_stub_with_the_
     let mut tools = devjob.tools.clone();
     tools.sort();
     // `devjob_reply` and `devjob_cancel` (0.197.0), `devjob_close` (0.200.0), `devjob_review` and
-    // `devjob_review_reply` (0.211.0) reach exactly the turns `devjob_start` does.
+    // `devjob_review_reply` (0.211.0), `devjob_priority` (0.215.0) reach exactly the turns
+    // `devjob_start` does.
     assert_eq!(
         tools,
         [
             "devjob_cancel",
             "devjob_close",
             "devjob_list",
+            "devjob_priority",
             "devjob_reply",
             "devjob_review",
             "devjob_review_reply",
@@ -523,13 +525,13 @@ fn an_in_process_row_in_a_set_reaches_a_spawned_child_through_the_stub_with_the_
             "args": ["--upstream", "devjob", "--socket", "/tmp/jesse-gw-unit/gw/job-1/devjob.sock"],
         })
     );
-    // Codex takes the stub too, with no environment and exactly the eight grants.
+    // Codex takes the stub too, with no environment and exactly the nine grants.
     let codex = codex_mcp_args(CODEX_ID, &child, DEFAULT_ALLOWED_TOOLS).unwrap();
     assert!(codex
         .iter()
         .any(|a| a == r#"mcp_servers.devjob.command="/opt/bin/jesse-gateway-mcp""#));
     assert!(codex.iter().any(|a| a
-        == r#"mcp_servers.devjob.enabled_tools=["devjob_start", "devjob_status", "devjob_list", "devjob_reply", "devjob_cancel", "devjob_close", "devjob_review", "devjob_review_reply"]"#));
+        == r#"mcp_servers.devjob.enabled_tools=["devjob_start", "devjob_status", "devjob_list", "devjob_reply", "devjob_cancel", "devjob_close", "devjob_review", "devjob_review_reply", "devjob_priority"]"#));
     assert!(!codex
         .iter()
         .any(|a| a.starts_with("mcp_servers.devjob.env")));

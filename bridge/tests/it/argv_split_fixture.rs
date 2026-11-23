@@ -250,6 +250,10 @@
 //! Code's two write sites only.** `main-write` and `main-write-resume` moved their
 //! `--allowedTools` digest for the two new `mcp__devjob__*` grants. No `--mcp-config` digest
 //! moved and no Codex site moved, for the reason 0.197.0 gives. No other site moved.
+//!
+//! **AND AGAIN, in bridge 0.215.0, for `devjob_priority`, on Claude Code's two write sites only.**
+//! `main-write` and `main-write-resume` moved their `--allowedTools` digest for the one new
+//! `mcp__devjob__*` grant, for the reason 0.197.0 gives. No other site moved.
 //! Regenerate with no `GIT_CONFIG_*` in the environment (a Studio run's own shell has them),
 //! or the `env_keys` of every site shift by the ambient count.
 //!

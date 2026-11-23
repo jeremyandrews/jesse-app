@@ -2900,8 +2900,8 @@ reaches git, qmd or a turn's file tools.
 ## Coding agents on the cluster (`devjob`, 0.186.0; needs the gateway)
 
 `[devjob] enabled = true` (off by default) adds the `devjob` server to the main set: three tools,
-`devjob_start`, `devjob_status` and `devjob_list` (eight with `[hostrun]` on: `devjob_reply`,
-`devjob_cancel`, `devjob_close`, `devjob_review` and `devjob_review_reply` steer Studio runs, below), served **inside the bridge process**
+`devjob_start`, `devjob_status` and `devjob_list` (nine with `[hostrun]` on: `devjob_reply`,
+`devjob_cancel`, `devjob_close`, `devjob_review`, `devjob_review_reply` and `devjob_priority` steer Studio runs, below), served **inside the bridge process**
 (`Transport::InProcess`, `bridge/src/devjob.rs`). A main turn hands it a repository, a prompt and
 an agent; the bridge creates one ConfigMap and one Job in the cluster's `jesse-dev` namespace from
 a copy of `apps/jesse-dev/job-template.yaml` in the k3s repository, watches the run to its end
@@ -2916,7 +2916,7 @@ pushes a notification. A `kind = "devjob"` schedule entry does the same unattend
 | The container holds | the Secret `jesse-dev-agent-keys`: the three agents' API keys and **a GitHub credential (`GH_TOKEN`) that can push branches and open pull requests on any repository that credential reaches** |
 | The container does | clone the repository, run the agent and the test command, push `jesse/<slug>`, open a pull request against `main`. It never merges and never pushes to `main`; that is the entrypoint's rule, on the cluster side |
 | The bridge does | create the ConfigMap and the Job (both labelled `jesse.dev/devjob=true`), resume queued Jobs, read the pod's log, annotate the Job, delete the ConfigMap, write one vault note under the write lock |
-| Classes | `devjob_start`, `devjob_reply`, `devjob_cancel`, `devjob_close`, `devjob_review` and `devjob_review_reply` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
+| Classes | `devjob_start`, `devjob_reply`, `devjob_cancel`, `devjob_close`, `devjob_review`, `devjob_review_reply` and `devjob_priority` are `write` (write turns only, on every harness that renders the server: Claude Code's `--allowedTools`, Codex's `enabled_tools`, the direct harness through the gateway); `devjob_status` and `devjob_list` are reads |
 
 **The tool cannot choose a file path, a namespace, an image or a credential.** Its arguments are
 `repo`, `prompt`, `agent`, `model`, `branch_slug`, `test_command` and `timeout_minutes`, and any
@@ -3119,6 +3119,11 @@ the posture nor the loop: one review cycle and one answering round per run, howe
 reviewed. A default reviewer that is down never blocks a run (it goes on unreviewed and says so
 on its report's first line); a reviewer named explicitly that is down is refused at the start.
 Every reviewer of a cycle reads the same base and head, read once before any of them starts.
+**Since 0.215.0, `devjob_priority` joins them**, classed and granted exactly as `devjob_cancel`
+(write turns only, on every harness that renders the server); the battery's stand-in lists nine
+tools, and only the write rows' grants move, by this one tool. It changes which queued Studio run
+takes the next free slot and nothing else: it never stops, pauses or overtakes a running run and
+never bypasses `max_concurrent`, a repository's cap, the usage limit hold or the disk check.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or

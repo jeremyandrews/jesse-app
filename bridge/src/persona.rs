@@ -532,6 +532,10 @@ struct LocalConfig {
     /// and the diet CSV mirror. See [`crate::HealthDbConfig`].
     #[serde(default)]
     healthdb: Option<HealthDbToml>,
+    /// The optional top-level `[housedb]` table: the read-only role over Home Assistant's
+    /// recorder that `jesse-housedb-mcp` connects as. See [`crate::HouseDbConfig`].
+    #[serde(default)]
+    housedb: Option<crate::HouseDbToml>,
     /// The optional top-level `[gateway]` table: the tool gateway's flag and listeners. See
     /// [`crate::gateway`].
     #[serde(default)]
@@ -800,6 +804,12 @@ pub fn load_house_table(home: &str) -> Option<HouseToml> {
 /// table, is `None`: no pool, no task, and the ingest route answers `not_configured`.
 pub fn load_healthdb_table(home: &str) -> Option<HealthDbToml> {
     load_local_config(home).and_then(|c| c.healthdb)
+}
+
+/// Read the `[housedb]` table from the same overlay file. Absent or malformed file, or no
+/// table, is `None`: no server is started.
+pub fn load_housedb_table(home: &str) -> Option<crate::HouseDbToml> {
+    load_local_config(home).and_then(|c| c.housedb)
 }
 
 /// Read the `[gateway]` table and the `[mcp.<name>]` overrides from the same overlay file.

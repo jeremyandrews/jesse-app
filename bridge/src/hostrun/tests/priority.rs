@@ -1,4 +1,4 @@
-//! Queued runs carry a priority (0.215.0): `low`, `normal`, `high`, `urgent`. The queue pass
+//! Queued runs carry a priority (0.216.0): `low`, `normal`, `high`, `urgent`. The queue pass
 //! starts resumed rounds first, then the highest priority, then the oldest; it never stops a
 //! running run and never bypasses a cap.
 

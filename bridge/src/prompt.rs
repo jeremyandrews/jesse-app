@@ -224,6 +224,16 @@ the health block attached to this turn (longer history, other metrics, workouts,
 rows), query the archive with the `healthdb` server, `healthdb_schema` first and then \
 `healthdb_query`, and quote the numbers from the result.)";
 
+/// Appended after [`HEALTHDB_CAPABILITY`] on a turn whose harness registers the `housedb`
+/// server ([`crate::main_turn_loads_housedb`]), and on no other. One instruction: for how the
+/// house has been doing over days (energy, heating, air, plant, alarms, sensors), query the
+/// house history, the `house_*` views first, and quote the numbers the query returned.
+pub const HOUSEDB_CAPABILITY: &str = "\n\n(House history: for how the house has been doing over \
+time (heat pump and pool energy, outdoor temperature, CO2 and humidity by floor, pumps and \
+ventilation, alarms, frozen or unavailable sensors), query Home Assistant's history with the \
+`housedb` server, `housedb_schema` first and then `housedb_query` on the `house_*` views, and \
+quote the numbers from the result.)";
+
 // ---- Optional recent-workouts context (health_context) --------------------
 //
 // The phone may attach a compact "recent workouts" block from Apple Health so
@@ -1267,6 +1277,10 @@ pub struct TurnPrompt<'a> {
     /// told to query the archive for health questions the attached block cannot answer
     /// ([`HEALTHDB_CAPABILITY`]). `false` for every turn that cannot reach it.
     pub healthdb: bool,
+    /// This turn's harness registers the `housedb` server on this deployment, so the turn is
+    /// told to query the house history for questions about how the house has been doing
+    /// ([`HOUSEDB_CAPABILITY`]). `false` for every turn that cannot reach it.
+    pub housedb: bool,
 }
 
 impl<'a> TurnPrompt<'a> {
@@ -1281,6 +1295,7 @@ impl<'a> TurnPrompt<'a> {
             floor_override: None,
             house: false,
             healthdb: false,
+            housedb: false,
         }
     }
 }
@@ -1379,6 +1394,7 @@ pub fn build_prompt_at(
         floor_override,
         house,
         healthdb,
+        housedb,
     } = turn;
     // Validate the mode and pick both the built-in wrapper and the default floor —
     // an unknown mode is still a 400, override or not.
@@ -1466,6 +1482,10 @@ pub fn build_prompt_at(
     if healthdb {
         p.push_str(HEALTHDB_CAPABILITY);
     }
+    // …and the house history note, only when this turn can reach that server.
+    if housedb {
+        p.push_str(HOUSEDB_CAPABILITY);
+    }
     // Device-channel notes, ONE per channel. Within a channel exactly one of three
     // states applies, checked in priority order so the agent is never told two
     // contradictory things about it:
@@ -1538,6 +1558,7 @@ mod tests {
                 floor_override: floor,
                 house: false,
                 healthdb: false,
+                housedb: false,
             },
             &DeviceContexts::default(),
             &Persona::default(),
@@ -1807,6 +1828,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                 floor_override: Some("Do nothing {owner} did not ask for."),
                 house: false,
                 healthdb: false,
+                housedb: false,
             },
             &DeviceContexts::default(),
             &persona,
@@ -1858,6 +1880,36 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
             assert!(!HEALTHDB_CAPABILITY.contains(dash));
         }
         assert!(!HEALTHDB_CAPABILITY.contains("--"));
+    }
+
+    #[test]
+    fn the_housedb_note_is_present_exactly_when_the_turn_loads_the_server() {
+        let persona = named("Alex Example", "her");
+        let ask = || TurnPrompt::new("ask", "how much did the heat pump use this week");
+        let without =
+            build_prompt_at(TEST_CLOCK, &ask(), &DeviceContexts::default(), &persona).unwrap();
+        assert!(!without.contains(HOUSEDB_CAPABILITY));
+        let with = build_prompt_at(
+            TEST_CLOCK,
+            &TurnPrompt {
+                house: true,
+                healthdb: true,
+                housedb: true,
+                ..ask()
+            },
+            &DeviceContexts::default(),
+            &persona,
+        )
+        .unwrap();
+        let at = with.find(HOUSEDB_CAPABILITY).expect("the note is there");
+        assert!(at > with.find(HEALTHDB_CAPABILITY).unwrap());
+        assert!(HOUSEDB_CAPABILITY.contains("`housedb_query`"));
+        assert!(HOUSEDB_CAPABILITY.contains("`house_*` views"));
+        assert!(HOUSEDB_CAPABILITY.contains("quote the numbers"));
+        for dash in ['\u{2014}', '\u{2013}'] {
+            assert!(!HOUSEDB_CAPABILITY.contains(dash));
+        }
+        assert!(!HOUSEDB_CAPABILITY.contains("--"));
     }
 
     /// THE HOUSE NOTE RIDES ONLY A TURN THAT CAN REACH THE SERVER, after the managed-repos
@@ -2077,6 +2129,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                 floor_override: Some("x"),
                 house: false,
                 healthdb: false,
+                housedb: false,
                 ..TurnPrompt::new("shout", "hey")
             },
             &DeviceContexts::default(),
@@ -2169,6 +2222,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                     floor_override: None,
                     house: false,
                     healthdb: false,
+                    housedb: false,
                 },
                 &DeviceContexts::default(),
                 &Persona::default(),

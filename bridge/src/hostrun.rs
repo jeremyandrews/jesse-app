@@ -962,7 +962,7 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<Review>,
     /// How soon the run wants a slot while queued ([`Priority`]). Written only when not
-    /// `normal`, so a record from before 0.215.0 (no field) reads as `normal` and an all
+    /// `normal`, so a record from before 0.216.0 (no field) reads as `normal` and an all
     /// `normal` record is byte for byte what it was.
     #[serde(default, skip_serializing_if = "Priority::is_normal")]
     pub priority: Priority,

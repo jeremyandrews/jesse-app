@@ -128,6 +128,8 @@ pub(crate) fn test_config() -> Config {
         hostrun: crate::hostrun::HostRunSettings::default(),
         // No `[healthdb]` table: the shipped default. No pool, no task, `not_configured`.
         healthdb: HealthDbConfig::Absent,
+        // No `[housedb]` table: the shipped default. No server is started.
+        housedb: HouseDbConfig::Absent,
         // Speech transcription OFF in the fixture: no intake or models directory is ever
         // touched. The speech tests build their own service over a scratch root and fakes.
         speech: crate::speech::SpeechConfig::disabled(),

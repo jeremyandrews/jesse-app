@@ -171,9 +171,9 @@ cannot, and the gap is the whole point rather than a limitation to close:
 - **6 `Skill` grants** (`diet-logging`, `health-new-day`, `dashboard-regen`,
   `archive-processing`, `draft-lint`, `health-export-import`), each of which is a directory of
   instructions and scripts.
-- **25 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
+- **26 MCP servers** — `qmd`, `slack`, `browser`, `homeassistant`, `roon`, `google`, `github`,
   `fastmail`, `unifi`, `routeros`, `proxmox`, `whatsapp`, `imcp`, `google-perseido`, `build`,
-  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `house` (when the deployment configures it), `healthdb` (when the deployment configures it), `clockify-rs`, `runn-rs` — several of which are documented in this file as full-control (Home Assistant,
+  `places`, `inbound`, `kubernetes`, `rybbit`, `tag1`, `plex`, `house` (when the deployment configures it), `healthdb` (when the deployment configures it), `clockify-rs`, `runn-rs`, `housedb` (when the deployment configures it) — several of which are documented in this file as full-control (Home Assistant,
   UniFi, Proxmox) and several of which reach correspondence and documents.
 - **`WebSearch` / `WebFetch`** at the root, with no host allowlist.
 
@@ -240,6 +240,7 @@ every server is a row of.
 | healthdb | bridge_stdio | `JESSE_HEALTHDB_RO_URL_FILE JESSE_HEALTHDB_CA_FILE JESSE_HEALTHDB_MCP_LEDGER` (paths) |
 | clockify-rs | bridge_stdio | `JESSE_CLOCKIFY_API_KEY` |
 | runn-rs | bridge_stdio | `JESSE_RUNN_API_TOKEN` (the launcher pins the host and the caller email) |
+| housedb | bridge_stdio | `JESSE_HOUSEDB_RO_URL_FILE JESSE_HOUSEDB_CA_FILE JESSE_HOUSEDB_MCP_LEDGER` (paths) |
 | devjob | in_process (0.186.0) | none: no process is started. The bridge itself holds the `[devjob] kubeconfig` and calls the cluster from its own process; see "Coding agents on the cluster" |
 | qmd | child | none |
 
@@ -1013,6 +1014,7 @@ and read-only). Only the servers named in that config load:
 | `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
 | `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
 | `reminders` | Timed reminders, added 2026-11-10 (bridge 0.208.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0208)
+| `housedb` | The house's history, **read only**, added 2026-11-20 (bridge 0.215.0): this repository's own `jesse-housedb-mcp`, the same server as `healthdb` over Home Assistant's recorder, both `mcp__housedb__*` tools (`housedb_schema`, `housedb_query`). Registered only when the `[housedb]` table is ready. See [House history](#house-history-read-only-sql-2026-11-20) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1969,6 +1971,46 @@ the main (write) turn's list; a `Read` CLI child keeps its qmd-only list, as for
 - **The prompt names it.** A turn whose harness registers the server is told, in one appended
   line, to query the archive for health questions past the attached block and to quote the
   numbers from the result. A turn that cannot reach it is not told.
+
+### House history (read-only SQL, 2026-11-20)
+
+Bridge 0.215.0 adds `housedb`, this repository's own `jesse-housedb-mcp`, to every main turn on
+**all three harnesses in the same change**, as the twenty-ninth server on Claude Code and Codex
+and a stdio grant on `direct`. It reads Home Assistant's recorder in Postgres on the home
+cluster (`househistorydb.pozza:5432`, database `homeassistant`): every state change Home
+Assistant records, its statistics, and the daily rollups in `analytics` (`house_daily_energy`,
+`house_daily_air`, `house_daily_plant`, `house_alarm_changes`, `house_frozen_sensors`,
+`house_unavailable`). Two tools, `housedb_schema` and `housedb_query`.
+
+**It is `healthdb`'s server, not a copy of it.** One implementation in `src/healthquery.rs`
+holds every guard listed under [Health archive](#health-archive-read-only-sql-2026-10-12) (one
+read statement, `BEGIN READ ONLY`, `ROLLBACK`, 15 s, 500 rows, content-free logs), and the two
+servers differ only in data (`RoDbServer`). Everything said there about the guards holds here
+word for word; `tests/it/housedb_mcp_pg.rs` proves the refusal of an `INSERT` (by the guard, by the
+role, and by the transaction as the owner), the row cap and the timeout on this server too.
+
+- **Switched on by the deployment.** Declared in `MAIN_CHILD_MCP_CONFIG` as a bare
+  `jesse-housedb-mcp` (in `deploy-bins.toml`); `render_housedb_mcp` keeps it only when
+  `[housedb]` is ready, so a deployment without the table runs the recorded posture minus this
+  server. `direct` commits the grant in its record either way and connects it only when ready.
+- **The credential.** The `house_ro` role, `SELECT` on `public` and `analytics` only. Its URL
+  is in `ro_url_file` (default `<state_dir>/housedb-ro-url`), refused at startup unless a
+  regular file owned by the bridge's user with no group or other permission. The bridge reads
+  and checks it and drops it; a child gets three PATHS (`JESSE_HOUSEDB_RO_URL_FILE`,
+  `JESSE_HOUSEDB_CA_FILE`, the ledger), which Codex forwards by name. TLS is `verify-full`
+  against the house-history Cluster's own CA (`ca_file`).
+- **Both tools are `egress` on `direct`**, for `healthdb`'s reason; on Claude Code and Codex
+  they are in `DEFAULT_ALLOWED_TOOLS`, the write turn's list, and a `Read` child's list is
+  unchanged.
+- **What it adds to the risk.** One more read-only credential and one more LAN host. A turn can
+  read the house's whole recorded history: when rooms were occupied, when alarms went off,
+  which doors and sensors changed state and when. That reveals when the owner is home. A turn
+  steered by injected text could put it in a reply; this is the point of the server and is
+  accepted on the owner's decision, with no new egress on Claude Code and Codex beyond what a
+  main turn already holds. Entity names and attributes are whatever Home Assistant was given and
+  enter the turn as untrusted text. No write path.
+- **The prompt names it.** A turn that registers it is told, in one line, to query the house
+  history (the `house_*` views first) for how the house has been doing, and to quote the numbers.
 
 ### Roon (no auth, 2026-08-07)
 
@@ -3119,7 +3161,7 @@ the posture nor the loop: one review cycle and one answering round per run, howe
 reviewed. A default reviewer that is down never blocks a run (it goes on unreviewed and says so
 on its report's first line); a reviewer named explicitly that is down is refused at the start.
 Every reviewer of a cycle reads the same base and head, read once before any of them starts.
-**Since 0.215.0, `devjob_priority` joins them**, classed and granted exactly as `devjob_cancel`
+**Since 0.216.0, `devjob_priority` joins them**, classed and granted exactly as `devjob_cancel`
 (write turns only, on every harness that renders the server); the battery's stand-in lists nine
 tools, and only the write rows' grants move, by this one tool. It changes which queued Studio run
 takes the next free slot and nothing else: it never stops, pauses or overtakes a running run and

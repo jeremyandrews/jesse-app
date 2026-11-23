@@ -96,6 +96,7 @@ impl Scratch {
     /// The server's config, as the read-only role.
     fn ro(&self) -> HealthQueryConfig {
         HealthQueryConfig::from_options(
+            &HEALTHDB,
             self.admin
                 .clone()
                 .database(&self.name)
@@ -148,7 +149,7 @@ async fn writes_ddl_and_role_changes_all_fail() {
     // Past the guard, a write in a read statement is refused: as the read-only role, by its
     // grants; and as the OWNER, who may write, by the read-only transaction. The second is the
     // point: the server's guard holds whatever the role turns out to be allowed.
-    let owner = HealthQueryConfig::from_options(s.admin.clone().database(&s.name));
+    let owner = HealthQueryConfig::from_options(&HEALTHDB, s.admin.clone().database(&s.name));
     for sql in [
         "WITH x AS (INSERT INTO raw.diet_file (file, sha256) VALUES ('x', 'y') RETURNING 1) SELECT * FROM x",
         "WITH x AS (UPDATE raw.route_point SET lat = 0 RETURNING 1) SELECT count(*) FROM x",

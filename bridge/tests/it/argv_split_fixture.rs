@@ -250,12 +250,21 @@
 //! Code's two write sites only.** `main-write` and `main-write-resume` moved their
 //! `--allowedTools` digest for the two new `mcp__devjob__*` grants. No `--mcp-config` digest
 //! moved and no Codex site moved, for the reason 0.197.0 gives. No other site moved.
-//!
-//! **AND AGAIN, in bridge 0.215.0, for `devjob_priority`, on Claude Code's two write sites only.**
-//! `main-write` and `main-write-resume` moved their `--allowedTools` digest for the one new
-//! `mcp__devjob__*` grant, for the reason 0.197.0 gives. No other site moved.
 //! Regenerate with no `GIT_CONFIG_*` in the environment (a Studio run's own shell has them),
 //! or the `env_keys` of every site shift by the ambient count.
+//!
+//! **AND AGAIN, in bridge 0.215.0, for `housedb`, on Claude Code's two write sites only.**
+//! `main-write` and `main-write-resume` moved their `--allowedTools` digest for
+//! `mcp__housedb__housedb_query` and `mcp__housedb__housedb_schema`. Nothing else moved, for
+//! `healthdb`'s 0.173.0 reason: the fixture's config has no `[housedb]` table, so the rendered
+//! `--mcp-config` drops the `housedb` entry, Codex's argv gains nothing, and no child gains a
+//! `JESSE_HOUSEDB_*` variable. The rendering is pinned by the unit tests in
+//! `src/housequery.rs` and `src/harness/claude_code.rs`. Regenerated with no `GIT_CONFIG_*` in
+//! the environment.
+//!
+//! **AND AGAIN, in bridge 0.216.0, for `devjob_priority`, on Claude Code's two write sites only.**
+//! `main-write` and `main-write-resume` moved their `--allowedTools` digest for the one new
+//! `mcp__devjob__*` grant, for the reason 0.197.0 gives. No other site moved.
 //!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test

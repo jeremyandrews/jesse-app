@@ -887,9 +887,10 @@ mod tests {
         let reminders =
             crate::mcpservers::render_entry(crate::mcpservers::row("reminders").unwrap());
         assert!(MAIN_CHILD_MCP_CONFIG.ends_with(&format!(
-            "{}{},{clockify_rs},{runn_rs},{sheets},{k8s_cloud},{reminders}}}}}",
+            "{}{},{clockify_rs},{runn_rs},{sheets},{k8s_cloud},{reminders}{}}}}}",
             HOUSE_MCP_ENTRY.as_str(),
-            HEALTHDB_MCP_ENTRY.as_str()
+            HEALTHDB_MCP_ENTRY.as_str(),
+            HOUSEDB_MCP_ENTRY.as_str()
         )));
     }
 }

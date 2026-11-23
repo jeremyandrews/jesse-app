@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.212.0"
+version = "0.215.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -13,16 +13,16 @@ license = "Apache-2.0"
 # on the always-compiled path in `src/containment.rs`, because the startup gate reads
 # all three on every boot.
 #
-#   cargo test    --features containment-probe          # incl. tests/containment.rs
+#   cargo test    --features containment-probe          # incl. tests/it/containment.rs
 #   cargo run     --features containment-probe --bin containment-probe -- --write
 #   cargo build   --release                             # the serving binary, without it
 [features]
 containment-probe = []
-# THE LIVE DEV-JOB TEST (`tests/devjob_live.rs`): starts one real coding-agent Job on the cluster
+# THE LIVE DEV-JOB TEST (`tests/it/devjob_live.rs`): starts one real coding-agent Job on the cluster
 # through `src/devjob.rs` and waits for its report. OFF by default and skipped when the
 # kubeconfig is absent, because it spends agent credits and cluster time.
 #
-#   cargo test --features devjob-live --test devjob_live -- --nocapture
+#   cargo test --features devjob-live --test it devjob_live:: -- --nocapture
 devjob-live = []
 
 # Declared (rather than auto-discovered) so `required-features` can keep them out of a
@@ -31,9 +31,10 @@ devjob-live = []
 name = "containment-probe"
 required-features = ["containment-probe"]
 
-[[test]]
-name = "containment"
-required-features = ["containment-probe"]
+# The integration tests are ONE target, `tests/it/main.rs`, auto-discovered; its feature gated
+# modules (`containment`, `devjob_live`) are gated there with `#[cfg]` rather than here with
+# `required-features`. The `[[test]]` entries below are the documented exceptions that stay
+# their own binaries (see `tests/it/main.rs`).
 
 # The gateway's fake upstream, and the tests that drive it. Same gate as the battery: a
 # release build contains no binary that pretends to be an MCP server.
@@ -50,10 +51,6 @@ required-features = ["containment-probe"]
 [[test]]
 name = "gateway_fds"
 required-features = ["containment-probe"]
-
-[[test]]
-name = "devjob_live"
-required-features = ["devjob-live"]
 
 # A Studio run's env file reaches the agent and no log: no harness, so the bridge's own
 # `eprintln!` reaches the process's stderr, which the test points at a file and reads back.
@@ -267,6 +264,10 @@ quick-xml = "=0.42.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }   # ServiceExt::oneshot
+# `test-util`: tokio's paused clock (`#[tokio::test(start_paused = true)]`, `time::advance`),
+# the default for a test that checks timer logic rather than real time (docs/testing.md). A
+# dev-dependency feature, so no build of the serving binary carries it.
+tokio = { version = "1", features = ["test-util"] }
 
 # Metal on macOS — the Studio's GPU — with the shader library EMBEDDED in the binary, so a
 # deployed bridge needs nothing beside it. Other targets build the same engine on the CPU,

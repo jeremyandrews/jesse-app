@@ -35,7 +35,7 @@
 //! did is not evidence — that is the battery's oldest rule (`enumerated denial is not a
 //! boundary`) and it applies with equal force here. A child that reports "I wrote the file"
 //! and a child that reports "I was refused" are indistinguishable until you look on disk.
-mod common;
+use crate::common;
 use common::*;
 use jesse_bridge::*;
 use std::path::{Path, PathBuf};

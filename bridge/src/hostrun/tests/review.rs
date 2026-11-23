@@ -12,17 +12,40 @@ use crate::hostrun::review::*;
 /// and unhealthy, anything else unknown. Each `review` takes the next scripted answer and
 /// records the call; with `write` set it also writes into its worktree, as a reviewer whose
 /// posture failed would.
+/// `by_id` scripts one reviewer's answers apart from the shared queue, for reviews that run at
+/// once; `barrier` makes every review wait for the others, so reviews that did not run at once
+/// fail instead of passing.
 #[derive(Default)]
-struct FakeReviewer {
-    answers: Mutex<Vec<Result<String, String>>>,
-    calls: Mutex<Vec<ReviewCall>>,
-    write: Mutex<bool>,
+pub(super) struct FakeReviewer {
+    pub(super) answers: Mutex<Vec<Result<String, String>>>,
+    pub(super) calls: Mutex<Vec<ReviewCall>>,
+    pub(super) write: Mutex<bool>,
+    pub(super) by_id: Mutex<HashMap<String, Vec<Result<String, String>>>>,
+    pub(super) barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
 impl FakeReviewer {
-    fn answering(answers: Vec<Result<String, String>>) -> Arc<FakeReviewer> {
+    pub(super) fn answering(answers: Vec<Result<String, String>>) -> Arc<FakeReviewer> {
         Arc::new(FakeReviewer {
             answers: Mutex::new(answers),
+            ..FakeReviewer::default()
+        })
+    }
+
+    /// Each reviewer its own answers; with `together`, every review waits (at most five
+    /// seconds) until that many are in flight.
+    pub(super) fn per_reviewer(
+        scripts: Vec<(&str, Vec<Result<String, String>>)>,
+        together: Option<usize>,
+    ) -> Arc<FakeReviewer> {
+        Arc::new(FakeReviewer {
+            by_id: Mutex::new(
+                scripts
+                    .into_iter()
+                    .map(|(id, a)| (id.to_string(), a))
+                    .collect(),
+            ),
+            barrier: together.map(|n| Arc::new(tokio::sync::Barrier::new(n))),
             ..FakeReviewer::default()
         })
     }
@@ -50,36 +73,53 @@ impl Reviewer for FakeReviewer {
         if *lock(&self.write) {
             let _ = std::fs::write(call.cwd.join("README.md"), "changed by the reviewer\n");
         }
+        let id = call.reviewer.clone();
         lock(&self.calls).push(call);
         let next = {
-            let mut a = lock(&self.answers);
+            let mut by_id = lock(&self.by_id);
+            let mut shared = lock(&self.answers);
+            let a = match by_id.get_mut(&id) {
+                Some(a) => a,
+                None => &mut *shared,
+            };
             if a.is_empty() {
                 Err("no scripted answer".to_string())
             } else {
                 a.remove(0)
             }
         };
-        Box::pin(async move { next })
+        let barrier = self.barrier.clone();
+        Box::pin(async move {
+            if let Some(b) = barrier {
+                if tokio::time::timeout(Duration::from_secs(5), b.wait())
+                    .await
+                    .is_err()
+                {
+                    return Err("the reviews did not run at once".to_string());
+                }
+            }
+            next
+        })
     }
 }
 
-const TWO_FINDINGS: &str = r#"{"findings": [
+pub(super) const TWO_FINDINGS: &str = r#"{"findings": [
  {"id": "F1", "severity": "bug", "file": "src/calc.rs", "line": 3, "claim": "The loop stops one short.", "evidence": "It uses < len - 1.", "disproof": "A test summing [1, 2, 3] returns 6."},
  {"id": "F2", "severity": "nit", "file": "src/calc.rs", "line": 9, "claim": "The shift is unusual.", "evidence": "It writes x << 1 for doubling.", "disproof": "It is equal to x * 2 for every u32 below 2^31."}
 ], "summary": "One real defect and one style point."}"#;
 
-fn findings() -> Vec<Finding> {
+pub(super) fn findings() -> Vec<Finding> {
     parse_review(TWO_FINDINGS).unwrap().findings
 }
 
 /// A rig with `reviewer` attached.
-fn review_rig(s: &Scratch, reviewer: Arc<FakeReviewer>) -> Rig {
+pub(super) fn review_rig(s: &Scratch, reviewer: Arc<FakeReviewer>) -> Rig {
     let r = rig(s);
     r.svc.attach_reviewer(reviewer);
     r
 }
 
-fn reviewed(req: StartRequest, reviewer: &str) -> StartRequest {
+pub(super) fn reviewed(req: StartRequest, reviewer: &str) -> StartRequest {
     StartRequest {
         reviewer: Some(reviewer.into()),
         ..req
@@ -87,7 +127,7 @@ fn reviewed(req: StartRequest, reviewer: &str) -> StartRequest {
 }
 
 /// A commit in the run's worktree, as its agent would make one.
-fn commit(r: &Rig, run_id: &str, file: &str, text: &str, message: &str) -> String {
+pub(super) fn commit(r: &Rig, run_id: &str, file: &str, text: &str, message: &str) -> String {
     let wt = r.svc.settings.run_dir(run_id).join(WORKTREE_DIR);
     if let Some(parent) = Path::new(file).parent() {
         std::fs::create_dir_all(wt.join(parent)).unwrap();
@@ -98,12 +138,12 @@ fn commit(r: &Rig, run_id: &str, file: &str, text: &str, message: &str) -> Strin
     sh(&wt, &["rev-parse", "HEAD"]).trim().to_string()
 }
 
-async fn settle(r: &Rig) {
+pub(super) async fn settle(r: &Rig) {
     r.svc.pass(now_ms()).await;
     r.svc.reviews_settled().await;
 }
 
-fn pushes(r: &Rig) -> Vec<(String, String, String)> {
+pub(super) fn pushes(r: &Rig) -> Vec<(String, String, String)> {
     lock(&r.rec.pushes).clone()
 }
 
@@ -194,6 +234,7 @@ fn a_reviewed_run_is_served_one_more_sentence_and_nothing_else() {
         branch: "gd5-x",
         default_branch: "main",
         run_dir: dir,
+        keep_days: 7,
         pr_title_tag: true,
         reviewed,
     };
@@ -290,9 +331,14 @@ fn the_hand_off_reply_is_exactly_this() {
         ensure_unreviewed("Done.\n", "it timed out."),
         "UNREVIEWED: it timed out\n\nDone.\n"
     );
+    // One the session wrote is replaced by the recorded reason, whatever it said.
     assert_eq!(
-        ensure_unreviewed("UNREVIEWED: down\n\nDone.\n", "x"),
-        "UNREVIEWED: down\n\nDone.\n"
+        ensure_unreviewed("UNREVIEWED: down\n\nDone.\n", "it timed out"),
+        "UNREVIEWED: it timed out\n\nDone.\n"
+    );
+    assert_eq!(
+        ensure_unreviewed("UNREVIEWED:\nDone.\n", "it timed out"),
+        "UNREVIEWED: it timed out\n\nDone.\n"
     );
 }
 
@@ -378,9 +424,9 @@ fn a_draft_names_its_reviewer_in_front_matter() {
     )
     .unwrap();
     let it = studio_item(&s.notes(), "Gd", "GD5", OptIn::Schedule).unwrap();
-    assert_eq!(it.reviewer.as_deref(), Some("codex-write"));
+    assert_eq!(it.reviewer, Some("codex-write".into()));
     let dr = studio_draft(&s.notes(), "Projects/drafts/gd5-prompt.md", None).unwrap();
-    assert_eq!(dr.reviewer.as_deref(), Some("codex-write"));
+    assert_eq!(dr.reviewer, Some("codex-write".into()));
     // None named: none.
     assert_eq!(
         studio_item(&s.notes(), "Gd", "GD6", OptIn::Request { repo: None })
@@ -476,7 +522,7 @@ async fn a_start_refuses_a_bad_reviewer_before_anything_runs() {
             review_focus,
             ..
         } => {
-            assert_eq!(reviewer.as_deref(), Some("glm"));
+            assert_eq!(reviewer, Some("glm".into()));
             assert_eq!(review_focus.as_deref(), Some("bounds"));
         }
         other => panic!("{other:?}"),
@@ -1066,7 +1112,7 @@ async fn a_review_that_waits_is_noted_then_handed_off_by_review_reply() {
     assert_eq!(out["isError"], true);
 }
 
-async fn devjob_server(s: &Scratch, r: &Rig) -> devjob::DevJobs {
+pub(super) async fn devjob_server(s: &Scratch, r: &Rig) -> devjob::DevJobs {
     let kc = s.base.join("kc-review.yaml");
     std::fs::write(
         &kc,

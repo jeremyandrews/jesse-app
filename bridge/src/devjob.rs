@@ -48,6 +48,8 @@ use serde::Serialize;
 
 use crate::*;
 
+pub mod cloud;
+
 // ---- NAMES ---------------------------------------------------------------------------
 
 /// The server's row name: the middle of every `mcp__devjob__<tool>` grant.
@@ -215,10 +217,16 @@ pub struct DevJobArgs {
     /// `host: "studio"`: a draft by its path, run as a free run `s-<file stem>`.
     pub draft: Option<String>,
     pub again: Option<bool>,
-    /// `host: "studio"`: a registry model that reviews the run before it finishes.
-    pub reviewer: Option<String>,
+    /// `host: "studio"`: who reviews the run before it finishes: a registry id, a list of at
+    /// most three, or `"none"`. Absent: the draft's, else `[hostrun] default_reviewers`.
+    pub reviewer: Option<crate::hostrun::review::ReviewerArg>,
+    /// `host: "studio"`: `reviewer`'s list spelling; refused beside it.
+    pub reviewers: Option<Vec<String>>,
     /// `host: "studio"`, with `reviewer`: what the reviewer should look at most closely.
     pub review_focus: Option<String>,
+    /// `host: "cloud"`: merge the pull request once CI on its head is green. Absent: the
+    /// draft's `devjob-merge`, else no.
+    pub merge: Option<bool>,
 }
 
 /// Where a `devjob_start` goes, decided from its arguments alone.
@@ -230,10 +238,42 @@ pub enum StartPlan {
     Studio {
         kind: crate::hostrun::StartKind,
         again: bool,
-        /// A reviewed run's reviewer (a registry id), checked when the run is created.
-        reviewer: Option<String>,
+        /// Who reviews the run (ids, or `none`), checked when the run is created; `None` is the
+        /// draft's, else the bridge's default.
+        reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
     },
+    /// `host: "cloud"`: a Job on kc1 ([`cloud`]).
+    Cloud(CloudStart),
+}
+
+/// What a cloud start names: a strand item, a draft or a free prompt, as on the Studio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudKind {
+    Item {
+        strand: String,
+        item_id: String,
+        repo: Option<String>,
+    },
+    Draft {
+        draft: String,
+        repo: Option<String>,
+    },
+    /// Checked already: the prompt is the spec's, the run id `s-<branch_slug>`.
+    Free(DevJobSpec),
+}
+
+/// A `devjob_start` with `host: "cloud"`, decided from its arguments alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudStart {
+    pub kind: CloudKind,
+    /// The tool's `merge`; `None` defers to the draft's `devjob-merge`.
+    pub merge: Option<bool>,
+    /// `agent`, `test_command` and `timeout_minutes`, applied when a draft is resolved; a free
+    /// prompt's are in its spec already.
+    pub agent: Option<String>,
+    pub test_command: Option<String>,
+    pub timeout_minutes: Option<u64>,
 }
 
 /// Decide a start. Without `host` (or with `cluster`) this is [`DevJobSpec::validate`] and
@@ -247,6 +287,11 @@ pub enum StartPlan {
 /// so `agent` may only be `claude`.
 pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, String> {
     match args.host.as_deref().map(str::trim) {
+        None | Some("cluster") | Some("studio") if args.merge.is_some() => Err(
+            "merge applies only with host \"cloud\": a Studio run merges as its prompt \
+                 says, and the cluster never merges"
+                .into(),
+        ),
         None | Some("cluster") => {
             if args.strand.is_some()
                 || args.item_id.is_some()
@@ -257,7 +302,17 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                     "strand, item_id, draft and again apply only with host \"studio\"".into(),
                 );
             }
-            if args.reviewer.is_some() || args.review_focus.is_some() {
+            // The cluster has no review path: `[hostrun] default_reviewers` does not apply to
+            // it, `none` is accepted and changes nothing, and a reviewer by name is refused.
+            let reviewer = crate::hostrun::review::merge_spellings(
+                args.reviewer.clone(),
+                args.reviewers.clone(),
+            )?;
+            let off = matches!(
+                crate::hostrun::review::choose(reviewer.as_ref()),
+                Ok(crate::hostrun::review::ReviewerChoice::Off)
+            );
+            if (reviewer.is_some() && !off) || args.review_focus.is_some() {
                 return Err(
                     "reviewer and review_focus apply only with host \"studio\": the cluster's \
                      runs are not reviewed"
@@ -289,12 +344,12 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 }
             }
             let again = args.again.unwrap_or(false);
-            let reviewer = args
-                .reviewer
-                .as_deref()
-                .map(str::trim)
-                .filter(|r| !r.is_empty())
-                .map(str::to_string);
+            let reviewer = crate::hostrun::review::merge_spellings(
+                args.reviewer.clone(),
+                args.reviewers.clone(),
+            )?;
+            // Its shape now; whether the registry knows each id when the run is created.
+            crate::hostrun::review::choose(reviewer.as_ref())?;
             let review_focus = args.review_focus.clone();
             let repo = match args.repo.as_deref().map(str::trim) {
                 None => None,
@@ -366,7 +421,102 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 _ => Err("strand and item_id go together".into()),
             }
         }
-        Some(other) => Err(format!("host {other:?} is not cluster or studio")),
+        Some("cloud") => plan_cloud(args, default_agent).map(StartPlan::Cloud),
+        Some(other) => Err(format!("host {other:?} is not cluster, studio or cloud")),
+    }
+}
+
+/// `host: "cloud"`: a strand item, a draft or a free prompt, like the Studio's three, with the
+/// cluster's `agent`, `test_command` and `timeout_minutes`. No review, no `again`, never a
+/// `local/<name>` repository.
+fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, String> {
+    if args.again.is_some() {
+        return Err("again applies only with host \"studio\"".into());
+    }
+    let reviewer =
+        crate::hostrun::review::merge_spellings(args.reviewer.clone(), args.reviewers.clone())?;
+    let off = matches!(
+        crate::hostrun::review::choose(reviewer.as_ref()),
+        Ok(crate::hostrun::review::ReviewerChoice::Off)
+    );
+    if (reviewer.is_some() && !off) || args.review_focus.is_some() {
+        return Err(
+            "reviewer and review_focus apply only with host \"studio\": cloud runs are not \
+             reviewed"
+                .into(),
+        );
+    }
+    let repo = match args.repo.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(r) if is_local_repo(r) => return Err(LOCAL_ONLY_STUDIO.into()),
+        Some(r) if valid_repo(r) => Some(r.to_string()),
+        Some(r) => return Err(format!("repo {r:?} is not owner/name")),
+    };
+    if let Some(a) = args.agent.as_deref() {
+        Agent::parse(a)?;
+    }
+    if args.timeout_minutes == Some(0) {
+        return Err("timeout_minutes must be at least 1".into());
+    }
+    let merge = args.merge;
+    let from_draft = |kind: CloudKind, args: &DevJobArgs| -> Result<CloudStart, String> {
+        if args.prompt.is_some() || args.branch_slug.is_some() || args.model.is_some() {
+            return Err(
+                "a draft takes its prompt and model from the file: pass strand and item_id, or \
+                 draft, and repo if it names none"
+                    .into(),
+            );
+        }
+        Ok(CloudStart {
+            kind,
+            merge,
+            agent: args.agent.clone(),
+            test_command: args.test_command.clone(),
+            timeout_minutes: args.timeout_minutes,
+        })
+    };
+    if let Some(draft) = args.draft.clone() {
+        if args.strand.is_some() || args.item_id.is_some() {
+            return Err("pass draft, or strand and item_id, not both".into());
+        }
+        return from_draft(
+            CloudKind::Draft {
+                draft: draft.trim().to_string(),
+                repo,
+            },
+            &args,
+        );
+    }
+    match (args.strand.clone(), args.item_id.clone()) {
+        (Some(strand), Some(item_id)) => from_draft(
+            CloudKind::Item {
+                strand: strand.trim().to_string(),
+                item_id: item_id.trim().to_string(),
+                repo,
+            },
+            &args,
+        ),
+        (None, None) => {
+            if repo.is_none() {
+                return Err(
+                    "repo is missing: a cloud run's free prompt names its repository".into(),
+                );
+            }
+            let (agent, test_command, timeout_minutes) = (
+                args.agent.clone(),
+                args.test_command.clone(),
+                args.timeout_minutes,
+            );
+            let spec = DevJobSpec::validate(args, default_agent)?;
+            Ok(CloudStart {
+                kind: CloudKind::Free(spec),
+                merge,
+                agent,
+                test_command,
+                timeout_minutes,
+            })
+        }
+        _ => Err("strand and item_id go together".into()),
     }
 }
 
@@ -606,6 +756,8 @@ pub struct DevJobToml {
     pub image: Option<String>,
     pub max_concurrent: Option<usize>,
     pub default_agent: Option<String>,
+    /// `[devjob.cloud]`: the second cluster, kc1 ([`cloud`]).
+    pub cloud: Option<cloud::CloudToml>,
 }
 
 /// `[devjob]`, resolved. [`DevJobSettings::problems`] says whether it may boot.
@@ -620,6 +772,8 @@ pub struct DevJobSettings {
     pub default_agent: Result<Agent, String>,
     /// The running service, filled at startup when enabled. Cloning shares it.
     pub service: DevJobSlot,
+    /// `[devjob.cloud]`, resolved; off unless it says `enabled = true`.
+    pub cloud: cloud::CloudSettings,
 }
 
 impl Default for DevJobSettings {
@@ -662,6 +816,7 @@ impl DevJobSettings {
                 Some(a) => Agent::parse(&a).map_err(|_| a),
             },
             service: DevJobSlot::default(),
+            cloud: cloud::CloudSettings::from_toml(t.cloud, home),
         }
     }
 
@@ -674,8 +829,10 @@ impl DevJobSettings {
     pub fn problems(&self, gateway_enabled: bool) -> Vec<String> {
         let mut out = Vec::new();
         if !self.enabled {
-            return out;
+            // Only the cloud table can be wrong now: it needs this one on.
+            return self.cloud.problems(false);
         }
+        out.extend(self.cloud.problems(true));
         if !gateway_enabled {
             out.push(
                 "[devjob] enabled needs [gateway] enabled: the kubeconfig must stay in the \
@@ -1070,6 +1227,121 @@ pub fn build_job(
     .expect("a Job literal deserialises")
 }
 
+/// What a cloud Job carries beyond the spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudJobExtras {
+    pub run_id: String,
+    pub merge: cloud::MergeDecision,
+    /// `MERGE_DENY`: the deny list again, which the entrypoint checks itself.
+    pub merge_deny: String,
+}
+
+/// The Job for kc1: `cloud/infrastructure/jesse-dev/job-template.yaml` in the k3s repository,
+/// field for field. Against [`build_job`]: the dev job pool's node selector and toleration, one
+/// job per `s-4vcpu-8gb-intel` worker (3 CPU / 6Gi), no cache claim (the workers are disposable,
+/// so the caches live on the run's 60Gi `emptyDir`), debug info and incremental builds off, and
+/// the merge path's variables. The deadline adds the merge path's longest wait. Always created
+/// suspended: it is released only onto an idle worker ([`cloud::cloud_resumable`]).
+pub fn build_cloud_job(
+    namespace: &str,
+    job_name: &str,
+    config_map: &str,
+    image: &str,
+    spec: &DevJobSpec,
+    extras: &CloudJobExtras,
+    origin: &str,
+) -> Job {
+    let annotation = serde_json::to_string(&SpecAnnotation::from(spec)).expect("serialises");
+    let mut labels = run_labels(&spec.branch_slug);
+    labels[cloud::LABEL_RUN_ID] = json!(extras.run_id);
+    let deadline = spec.active_deadline_secs() + cloud::MERGE_WAIT_SECONDS * cloud::MERGE_ATTEMPTS;
+    serde_json::from_value(json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": job_name,
+            "namespace": namespace,
+            "labels": labels,
+            "annotations": {
+                ANN_SPEC: annotation,
+                ANN_ORIGIN: origin,
+                cloud::ANN_MERGE: extras.merge.annotation(),
+            },
+        },
+        "spec": {
+            "suspend": true,
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": deadline,
+            "ttlSecondsAfterFinished": 172800,
+            "template": {
+                "metadata": { "labels": labels },
+                "spec": {
+                    "restartPolicy": "Never",
+                    "nodeSelector": {
+                        cloud::BURST_LABEL: "true",
+                        cloud::POOL_LABEL: cloud::POOL_VALUE,
+                    },
+                    "tolerations": [{
+                        "key": cloud::BURST_LABEL,
+                        "operator": "Equal",
+                        "value": "true",
+                        "effect": "NoSchedule",
+                    }],
+                    "securityContext": {
+                        "runAsUser": 1000,
+                        "runAsGroup": 1000,
+                        "runAsNonRoot": true,
+                        "fsGroup": 1000,
+                    },
+                    "containers": [{
+                        "name": "agent",
+                        "image": image,
+                        "imagePullPolicy": "IfNotPresent",
+                        "securityContext": { "allowPrivilegeEscalation": false },
+                        "env": [
+                            { "name": "REPO", "value": spec.repo },
+                            { "name": "AGENT", "value": spec.agent.label() },
+                            { "name": "MODEL", "value": spec.model.clone().unwrap_or_default() },
+                            { "name": "BRANCH_SLUG", "value": spec.branch_slug },
+                            { "name": "PR_TITLE", "value": spec.branch_slug },
+                            { "name": "TEST_COMMAND", "value": spec.test_command.clone().unwrap_or_default() },
+                            { "name": "PROMPT_FILE", "value": "/prompt/prompt.md" },
+                            { "name": "AGENT_TIMEOUT_SECONDS", "value": spec.agent_timeout_secs().to_string() },
+                            { "name": "RUN_ID", "value": extras.run_id },
+                            { "name": "JESSE_RUN_REPORT", "value": cloud::RUN_REPORT_FILE },
+                            { "name": "PR_TITLE_FILE", "value": cloud::PR_TITLE_FILE },
+                            { "name": "AGENT_GITHUB", "value": "none" },
+                            { "name": "REBASE_ON_MAIN", "value": "true" },
+                            { "name": "AUTO_MERGE", "value": extras.merge.auto_merge_env() },
+                            { "name": "MERGE_DENY", "value": extras.merge_deny },
+                            { "name": "MERGE_WAIT_SECONDS", "value": cloud::MERGE_WAIT_SECONDS.to_string() },
+                            { "name": "CARGO_PROFILE_DEV_DEBUG", "value": "0" },
+                            { "name": "CARGO_PROFILE_TEST_DEBUG", "value": "0" },
+                            { "name": "CARGO_INCREMENTAL", "value": "0" },
+                        ],
+                        "envFrom": [{ "secretRef": { "name": "jesse-dev-agent-keys" } }],
+                        "resources": {
+                            "requests": { "cpu": "3", "memory": "6Gi", "ephemeral-storage": "20Gi" },
+                            "limits": { "cpu": "4", "memory": "7Gi" },
+                        },
+                        "volumeMounts": [
+                            { "name": "prompt", "mountPath": "/prompt", "readOnly": true },
+                            { "name": "work", "mountPath": "/home/agent/work" },
+                            { "name": "work", "mountPath": "/home/agent/.cargo/registry", "subPath": "cargo-registry" },
+                            { "name": "work", "mountPath": "/home/agent/.npm", "subPath": "npm" },
+                        ],
+                    }],
+                    "volumes": [
+                        { "name": "prompt", "configMap": { "name": config_map } },
+                        { "name": "work", "emptyDir": { "sizeLimit": "60Gi" } },
+                    ],
+                },
+            },
+        },
+    }))
+    .expect("a Job literal deserialises")
+}
+
 // ---- A JOB, AS THE WATCHER SEES IT ---------------------------------------------------
 
 /// How a run stands.
@@ -1106,6 +1378,10 @@ pub struct JobView {
     pub active_deadline_secs: Option<i64>,
     /// The `Failed` condition's reason and message (`DeadlineExceeded: …`), when it failed.
     pub failure_reason: Option<String>,
+    /// A cloud run's id ([`cloud::LABEL_RUN_ID`]); `None` on the home cluster.
+    pub run_id: Option<String>,
+    /// A cloud run a person cancelled ([`cloud::ANN_CANCELLED`]).
+    pub cancelled: bool,
 }
 
 fn time_ms(t: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Time) -> u64 {
@@ -1161,6 +1437,8 @@ impl JobView {
                     (None, None) => "Failed".to_string(),
                 }
             }),
+            run_id: labels.get(cloud::LABEL_RUN_ID).cloned(),
+            cancelled: ann.get(cloud::ANN_CANCELLED).map(String::as_str) == Some("true"),
         }
     }
 
@@ -1337,6 +1615,17 @@ pub fn lead_with(text: &str, line: &str) -> String {
 }
 
 pub fn render_report_for(r: &ReportInput, strand: Option<&StrandRef>) -> String {
+    render_report_with(r, strand, None)
+}
+
+/// [`render_report_for`], and for a cloud run (`cloud_run`, its run id) `host: cloud` and
+/// `run: <run_id>` in the front matter and the run id in the title. With `None` it is byte for
+/// byte the home cluster's report.
+pub fn render_report_with(
+    r: &ReportInput,
+    strand: Option<&StrandRef>,
+    cloud_run: Option<&str>,
+) -> String {
     let outcome = RunOutcome::of(r.report);
     let mut s = String::new();
     s.push_str(&format!(
@@ -1345,6 +1634,9 @@ pub fn render_report_for(r: &ReportInput, strand: Option<&StrandRef>) -> String 
         r.spec.repo,
         outcome.label()
     ));
+    if let Some(id) = cloud_run {
+        s.push_str(&format!("host: cloud\nrun: {id}\n"));
+    }
     if let Some(step) = strand {
         s.push_str(&format!(
             "strand: {}\nstrand-id: {}\nprompt: {}\n",
@@ -1352,7 +1644,10 @@ pub fn render_report_for(r: &ReportInput, strand: Option<&StrandRef>) -> String 
         ));
     }
     s.push_str("---\n\n");
-    s.push_str(&format!("# Dev job {}: {}\n\n", r.slug, outcome.label()));
+    match cloud_run {
+        Some(id) => s.push_str(&format!("# Cloud run {id}: {}\n\n", outcome.label())),
+        None => s.push_str(&format!("# Dev job {}: {}\n\n", r.slug, outcome.label())),
+    }
     if let Some(url) = r.report.pull_request_url() {
         s.push_str(&format!("Pull request: [{url}]({url})\n\n"));
     }
@@ -1423,7 +1718,13 @@ pub fn render_report_for(r: &ReportInput, strand: Option<&StrandRef>) -> String 
 /// `Inbox/<date>-dev-job-<slug>.md`, or `-2`, `-3`, … when a run with the same slug was reported
 /// the same day. `exists` answers for a path under the notes directory.
 pub fn report_rel_path(date: &str, slug: &str, exists: impl Fn(&str) -> bool) -> String {
-    let base = format!("{}/{date}-dev-job-{slug}", crate::vaultwrites::INBOX_DIR);
+    report_rel_path_stem(date, &format!("dev-job-{slug}"), exists)
+}
+
+/// `Inbox/<date>-<stem>.md`, or `-2`, `-3`, … : [`report_rel_path`] with the stem named. A cloud
+/// run's stem is `run-<run_id>`, the Studio's name for a run's report.
+pub fn report_rel_path_stem(date: &str, stem: &str, exists: impl Fn(&str) -> bool) -> String {
+    let base = format!("{}/{date}-{stem}", crate::vaultwrites::INBOX_DIR);
     let first = format!("{base}.md");
     if !exists(&first) {
         return first;
@@ -1437,8 +1738,13 @@ pub fn report_rel_path(date: &str, slug: &str, exists: impl Fn(&str) -> bool) ->
 /// The report already written for `job_name`, if any: a `*-dev-job-<slug>*.md` in the Inbox whose
 /// front matter names the Job.
 pub fn find_existing_report(notes_root: &Path, slug: &str, job_name: &str) -> Option<String> {
+    find_existing_report_stem(notes_root, &format!("dev-job-{slug}"), job_name)
+}
+
+/// [`find_existing_report`] with the stem named.
+pub fn find_existing_report_stem(notes_root: &Path, stem: &str, job_name: &str) -> Option<String> {
     let inbox = notes_root.join(crate::vaultwrites::INBOX_DIR);
-    let marker = format!("-dev-job-{slug}");
+    let marker = format!("-{stem}");
     let needle = format!("\ndevjob: {job_name}\n");
     for e in std::fs::read_dir(&inbox).ok()?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -1600,11 +1906,16 @@ pub struct DevJobs {
     /// pod that outlives `activeDeadlineSeconds`). Memory only: a restart loses it, and the
     /// report then says the log was gone.
     tails: Mutex<HashMap<String, Vec<String>>>,
-    wake: tokio::sync::Notify,
+    wake: Arc<tokio::sync::Notify>,
     /// Serialises every queue decision (a start, a resume) against every other.
     gate: tokio::sync::Mutex<()>,
     /// Studio runs (`[hostrun]`), when enabled: `host: "studio"` and the two Studio tools.
     studio: OnceLock<Arc<crate::hostrun::HostRuns>>,
+    /// The cloud host's own server, when `[devjob.cloud]` is on ([`DevJobs::attach_cloud`]).
+    cloud: OnceLock<Arc<DevJobs>>,
+    /// On the cloud host's own server only: its workers, its ledger and its settings. `None` is
+    /// the home cluster, whose every path is exactly what it was before the cloud existed.
+    rt: Option<cloud::CloudRuntime>,
 }
 
 impl std::fmt::Debug for DevJobs {
@@ -1619,6 +1930,31 @@ impl std::fmt::Debug for DevJobs {
 impl DevJobs {
     /// Build the client from the kubeconfig. Connects to nothing.
     pub async fn connect(settings: DevJobSettings) -> Result<DevJobs, String> {
+        DevJobs::connect_with(settings, None).await
+    }
+
+    /// The cloud host's server, from `[devjob.cloud]`: its own client, namespace, image and
+    /// cap, and kc-burst for its workers. Connects to nothing.
+    pub async fn connect_cloud(home: &DevJobSettings) -> Result<DevJobs, String> {
+        let burst: Arc<dyn cloud::Burst> = Arc::new(cloud::KcBurstCli {
+            path: home.cloud.kc_burst.clone(),
+        });
+        DevJobs::connect_cloud_with(home, burst).await
+    }
+
+    /// [`DevJobs::connect_cloud`] with the workers' driver named (a recorder in tests).
+    pub async fn connect_cloud_with(
+        home: &DevJobSettings,
+        burst: Arc<dyn cloud::Burst>,
+    ) -> Result<DevJobs, String> {
+        let rt = cloud::CloudRuntime::new(home.cloud.clone(), burst);
+        DevJobs::connect_with(home.cloud.cluster_settings(home), Some(rt)).await
+    }
+
+    async fn connect_with(
+        settings: DevJobSettings,
+        rt: Option<cloud::CloudRuntime>,
+    ) -> Result<DevJobs, String> {
         let kc = read_kubeconfig(&settings.kubeconfig)?;
         let config =
             kube::Config::from_custom_kubeconfig(kc, &kube::config::KubeConfigOptions::default())
@@ -1632,22 +1968,52 @@ impl DevJobs {
             client,
             sink: OnceLock::new(),
             tails: Mutex::new(HashMap::new()),
-            wake: tokio::sync::Notify::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
             gate: tokio::sync::Mutex::new(()),
             studio: OnceLock::new(),
+            cloud: OnceLock::new(),
+            rt,
         })
+    }
+
+    /// Serve `host: "cloud"` through `cloud`, which shares this server's report sink and
+    /// Studio. Its watcher starts with this one's ([`DevJobs::spawn_watcher`]).
+    pub fn attach_cloud(&self, cloud: Arc<DevJobs>) {
+        if let Some(s) = self.studio.get() {
+            cloud.attach_studio(s.clone());
+        }
+        if let Some(sink) = self.sink.get() {
+            cloud.attach(sink.clone());
+        }
+        let _ = self.cloud.set(cloud);
+    }
+
+    /// The cloud host's server, when attached.
+    pub fn cloud(&self) -> Option<&Arc<DevJobs>> {
+        self.cloud.get()
+    }
+
+    /// The cloud runtime, on the cloud host's own server.
+    pub fn cloud_runtime(&self) -> Option<&cloud::CloudRuntime> {
+        self.rt.as_ref()
     }
 
     /// Serve Studio runs too: `host: "studio"` on `devjob_start`, Studio runs in
     /// `devjob_status` and `devjob_list`, and `devjob_reply`, `devjob_cancel` and
     /// `devjob_close`.
     pub fn attach_studio(&self, studio: Arc<crate::hostrun::HostRuns>) {
+        if let Some(c) = self.cloud.get() {
+            c.attach_studio(studio.clone());
+        }
         let _ = self.studio.set(studio);
     }
 
     /// Where reports go. Until this is called the watcher keeps the queue moving but reports
     /// nothing, and a finished run waits, unreported, for the next pass after it.
     pub fn attach(&self, sink: ReportSink) {
+        if let Some(c) = self.cloud.get() {
+            c.attach(sink.clone());
+        }
         let _ = self.sink.set(sink);
         self.wake.notify_one();
     }
@@ -1704,9 +2070,21 @@ impl DevJobs {
         origin: &str,
         strand: Option<&StrandRef>,
     ) -> Result<Started, String> {
+        self.create_run(spec, origin, strand, None).await
+    }
+
+    /// The prompt ConfigMap and the Job, for the home cluster (`cloud` `None`: [`build_job`],
+    /// suspended when the queue says so) or the cloud ([`build_cloud_job`], always suspended).
+    async fn create_run(
+        &self,
+        spec: &DevJobSpec,
+        origin: &str,
+        strand: Option<&StrandRef>,
+        cloud: Option<&CloudJobExtras>,
+    ) -> Result<Started, String> {
         let _gate = self.gate.lock().await;
         let views: Vec<JobView> = self.views().await?.into_iter().map(|(_, v)| v).collect();
-        let queued = must_queue(&views, self.settings.max_concurrent);
+        let queued = cloud.is_some() || must_queue(&views, self.settings.max_concurrent);
         let (job_name, cm_name) = object_names(&spec.branch_slug, &name_suffix());
         let ns = &self.settings.namespace;
         let cm = build_config_map(ns, &cm_name, spec);
@@ -1714,15 +2092,26 @@ impl DevJobs {
             .create(&PostParams::default(), &cm)
             .await
             .map_err(|e| format!("could not create the prompt ConfigMap: {e}"))?;
-        let mut job = build_job(
-            ns,
-            &job_name,
-            &cm_name,
-            &self.settings.image,
-            spec,
-            queued,
-            origin,
-        );
+        let mut job = match cloud {
+            None => build_job(
+                ns,
+                &job_name,
+                &cm_name,
+                &self.settings.image,
+                spec,
+                queued,
+                origin,
+            ),
+            Some(x) => build_cloud_job(
+                ns,
+                &job_name,
+                &cm_name,
+                &self.settings.image,
+                spec,
+                x,
+                origin,
+            ),
+        };
         if let Some(step) = strand {
             let meta = &mut job.metadata;
             let labels = meta.labels.get_or_insert_with(Default::default);
@@ -1759,12 +2148,15 @@ impl DevJobs {
             }
         }
         eprintln!(
-            "jesse-bridge: devjob START {job_name} repo={} agent={} slug={} queued={queued} origin={origin}{}",
+            "jesse-bridge: devjob START {job_name} repo={} agent={} slug={} queued={queued} origin={origin}{}{}",
             spec.repo,
             spec.agent.label(),
             spec.branch_slug,
             strand
                 .map(|s| format!(" strand={} step={}", s.note, s.id))
+                .unwrap_or_default(),
+            cloud
+                .map(|x| format!(" host=cloud run={} merge={}", x.run_id, x.merge.annotation()))
                 .unwrap_or_default()
         );
         drop(_gate);
@@ -1914,10 +2306,13 @@ impl DevJobs {
         };
         let waiting_reason =
             match phase {
-                Phase::Queued => Some(format!(
-                    "queued: {} runs are already active ([devjob] max_concurrent)",
-                    self.settings.max_concurrent
-                )),
+                Phase::Queued => Some(match &self.rt {
+                    None => format!(
+                        "queued: {} runs are already active ([devjob] max_concurrent)",
+                        self.settings.max_concurrent
+                    ),
+                    Some(rt) => rt.queued_reason(),
+                }),
                 Phase::Pending => match &pod {
                     Some(p) => pod_pending_reason(p),
                     None => Some(self.job_warning(&v.name).await.unwrap_or_else(|| {
@@ -1985,8 +2380,9 @@ impl DevJobs {
         running.sort_by_key(|v| v.created_ms);
         finished.sort_by_key(|v| std::cmp::Reverse(v.finished_ms.unwrap_or(v.created_ms)));
         finished.truncate(LIST_FINISHED);
+        let cloud_host = self.rt.is_some();
         let brief = |v: &JobView| {
-            json!({
+            let mut b = json!({
                 "job_name": v.name,
                 "slug": v.slug,
                 "repo": v.spec.repo,
@@ -1997,7 +2393,12 @@ impl DevJobs {
                 "outcome": v.outcome,
                 "reported": v.reported,
                 "report_path": v.report_path,
-            })
+            });
+            if cloud_host {
+                b["host"] = json!("cloud");
+                b["run_id"] = json!(v.run_id);
+            }
+            b
         };
         Ok(json!({
             "running": running.into_iter().map(brief).collect::<Vec<_>>(),
@@ -2051,6 +2452,10 @@ impl DevJobs {
                 }
             }
         }
+        if let Some(rt) = &self.rt {
+            self.cloud_pass(rt).await;
+            return;
+        }
         let _gate = self.gate.lock().await;
         // Re-listed under the gate, so a start that landed meanwhile is counted.
         let views: Vec<JobView> = match self.views().await {
@@ -2084,7 +2489,12 @@ impl DevJobs {
         strand: Option<&StrandRef>,
         sink: &ReportSink,
     ) -> Result<(), String> {
-        let rel = match find_existing_report(&sink.notes_root, &v.slug, &v.name) {
+        let cloud_run = self.rt.as_ref().and(v.run_id.as_deref());
+        let existing = match cloud_run {
+            None => find_existing_report(&sink.notes_root, &v.slug, &v.name),
+            Some(id) => find_existing_report_stem(&sink.notes_root, &format!("run-{id}"), &v.name),
+        };
+        let rel = match existing {
             Some(rel) => {
                 eprintln!("jesse-bridge: devjob {}: already reported at {rel}", v.name);
                 (rel, None, None)
@@ -2123,6 +2533,11 @@ impl DevJobs {
                         report.failure = Some(format!("the Job failed ({why}); {f}"));
                     }
                 }
+                if v.cancelled {
+                    let f = report.failure.take().unwrap_or_default();
+                    report.status = "failed".into();
+                    report.failure = Some(format!("cancelled by Jeremy; {f}"));
+                }
                 let prompt = match &v.config_map {
                     Some(cm) => self
                         .config_maps()
@@ -2145,7 +2560,7 @@ impl DevJobs {
                     .ok()
                     .flatten()
                 };
-                let text = render_report_for(
+                let text = render_report_with(
                     &ReportInput {
                         job_name: &v.name,
                         slug: &v.slug,
@@ -2158,6 +2573,7 @@ impl DevJobs {
                         finished_ms: v.finished_ms,
                     },
                     strand,
+                    cloud_run,
                 );
                 let text = match &attribution {
                     Some(line) => {
@@ -2167,7 +2583,11 @@ impl DevJobs {
                     None => text,
                 };
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-                let rel = write_report(sink, &v.name, &date, &v.slug, &text).await?;
+                let stem = match cloud_run {
+                    None => format!("dev-job-{}", v.slug),
+                    Some(id) => format!("run-{id}"),
+                };
+                let rel = write_report(sink, &v.name, &date, &stem, &text).await?;
                 eprintln!(
                     "jesse-bridge: devjob REPORT {} outcome={} at {rel}",
                     v.name,
@@ -2185,12 +2605,12 @@ impl DevJobs {
                 let wall = wall_secs(report, v.started_ms, v.finished_ms)
                     .map(human_secs)
                     .unwrap_or_else(|| "unknown time".into());
-                n.notify(
-                    outcome.title().to_string(),
-                    format!("{} · {wall}", v.slug),
-                    v.name.clone(),
-                )
-                .await;
+                let body = match cloud_run {
+                    None => format!("{} · {wall}", v.slug),
+                    Some(id) => format!("{id} in the cloud · {wall}"),
+                };
+                n.notify(outcome.title().to_string(), body, v.name.clone())
+                    .await;
             }
         }
         // A hit is pushed whoever started the run, and says what it found.
@@ -2256,7 +2676,20 @@ impl DevJobs {
 
     /// Start the watcher on the runtime.
     pub fn spawn_watcher(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        if let Some(c) = self.cloud.get() {
+            c.spawn_watcher();
+        }
         tokio::spawn(self.clone().run_watcher())
+    }
+
+    /// Wake the watcher for a pass now.
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// The watcher's wake, for a task that outlives the call that spawned it.
+    fn self_wake(&self) -> Arc<tokio::sync::Notify> {
+        self.wake.clone()
     }
 }
 
@@ -2265,12 +2698,12 @@ async fn write_report(
     sink: &ReportSink,
     job: &str,
     date: &str,
-    slug: &str,
+    stem: &str,
     text: &str,
 ) -> Result<String, String> {
     let turn = format!("devjob:{job}");
     loop {
-        let rel = report_rel_path(date, slug, |p| sink.notes_root.join(p).exists());
+        let rel = report_rel_path_stem(date, stem, |p| sink.notes_root.join(p).exists());
         let abs = sink.notes_root.join(&rel);
         let key = LockKey::Path(resolve_lock_path(&abs, "/"));
         if !sink.broker.acquire_direct(&key, &turn, "report").await {
@@ -2366,12 +2799,17 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              loose draft local/scratch, and a free prompt local/<branch_slug>. The cluster \
              refuses local/<name>. It returns a run_id; the report lands in \
              Inbox/<date>-run-<run_id>.md. A second start of an item that is still queued, \
-             running, paused or needs Jeremy is refused unless again is true. On the Studio, \
-             reviewer (a model id from the model picker: a Codex, Fireworks, local or Claude \
-             model) makes it a reviewed run: when the run reports, that model reads its diff \
-             read only, the run's own session checks each finding and fixes what holds, and only \
-             then is the pull request marked ready (and merged if the prompt said so) and Jeremy \
-             told. A draft may name one as devjob-reviewer:."
+             running, paused or needs Jeremy is refused unless again is true. On the Studio \
+             every run is a reviewed run unless it says otherwise: when the run reports, a second \
+             model reads its diff read only, the run's own session checks each finding and fixes \
+             what holds, and only then is the pull request marked ready (and merged if the prompt \
+             said so) and Jeremy told. With no reviewer named the bridge's default reviewers \
+             (Codex) review it, and a default reviewer that is down does not stop the run: it \
+             goes on unreviewed and its report says so. reviewer names the reviewer instead (a \
+             model id from the model picker: a Codex, Fireworks, local or Claude model), or a \
+             list of up to three that review at once and are answered in one round, or \"none\" \
+             for no review. A draft may say the same as devjob-reviewer:. The cluster's runs \
+             are never reviewed."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
             props.insert(
@@ -2408,12 +2846,17 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             props.insert(
                 "reviewer".into(),
                 json!({ "type": "string",
-                        "description": "host studio: a model id, exactly as the model picker names it, that reviews the run read only before it finishes; an unknown or unhealthy one is refused" }),
+                        "description": "host studio: who reviews the run read only before it finishes: a model id exactly as the model picker names it, or \"none\" for no review (several: reviewers). Absent: the draft's devjob-reviewer:, else the bridge's default reviewers. A named one that is unknown or unhealthy is refused" }),
+            );
+            props.insert(
+                "reviewers".into(),
+                json!({ "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3,
+                        "description": "host studio: up to three model ids, no repeats, that review at once and are answered in one round; [\"none\"] is no review. Pass reviewer or reviewers, not both" }),
             );
             props.insert(
                 "review_focus".into(),
                 json!({ "type": "string",
-                        "description": "host studio, with reviewer: what the reviewer should look at most closely, at most 4 KiB" }),
+                        "description": "host studio: what the reviewers should look at most closely, at most 4 KiB; refused when nothing reviews the run" }),
             );
         }
         start["inputSchema"]["required"] = json!([]);
@@ -2467,18 +2910,22 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             model picker names: Codex, a Fireworks model, a local model, another Claude) reads \
             the run's diff from its merge base with main to its head, read only, in a worktree \
             of its own, and the bridge writes its findings to \
-            Inbox/<date>-run-<run_id>-review-<n>.md. With auto_reply (the default) the findings \
-            then go to the run's own session as its next round, which checks each one, fixes \
-            only what holds and reports a verdict table. Refused for a run that is queued, \
-            running, paused or already being reviewed, one with no commits beyond its base, and \
-            a model that is unknown or unhealthy.",
+            Inbox/<date>-run-<run_id>-review-<n>.md. reviewer may be a list of up to three: \
+            they review at once, each writes its own note, and their findings are handed off \
+            together. With auto_reply (the default) the findings then go to the run's own \
+            session as its next round, one round however many reviewed, which checks each one, \
+            fixes only what holds and reports a verdict table. Refused for a run that is \
+            queued, running, paused or already being reviewed, one with no commits beyond its \
+            base, and a model that is unknown or unhealthy.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["run_id", "reviewer"],
+            "required": ["run_id"],
             "properties": {
                 "run_id": { "type": "string" },
-                "reviewer": { "type": "string", "description": "a model id, exactly as the model picker names it" },
+                "reviewer": { "type": "string", "description": "a model id, exactly as the model picker names it (several: reviewers)" },
+                "reviewers": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3,
+                               "description": "up to three model ids, no repeats, reviewed at once and handed off together; pass reviewer or reviewers, not both" },
                 "focus": { "type": "string", "description": "what to look at most closely, at most 4 KiB" },
                 "auto_reply": { "type": "boolean", "description": "hand the findings to the run's session at once; default true" },
             },
@@ -2544,7 +2991,9 @@ struct CloseArgs {
 #[serde(deny_unknown_fields)]
 struct ReviewArgs {
     run_id: String,
-    reviewer: String,
+    /// One id, or (also accepted here) a list.
+    reviewer: Option<crate::hostrun::review::ReviewerArg>,
+    reviewers: Option<Vec<String>>,
     focus: Option<String>,
     auto_reply: Option<bool>,
 }
@@ -2556,6 +3005,13 @@ fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) 
         .log_lines(&r.run_id, STATUS_LOG_LINES)
         .unwrap_or_default());
     v
+}
+
+/// Whether a Studio run was taken by a cloud slot: its id now names a cloud run.
+fn moved_to_cloud(r: &crate::hostrun::RunRecord) -> bool {
+    r.closed_reason
+        .as_deref()
+        .is_some_and(|c| c.starts_with(crate::hostrun::MOVED_TO_CLOUD))
 }
 
 /// One Studio run, as `devjob_list` names it.
@@ -2575,6 +3031,8 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "resume_at": r.resume_at,
         "closed_reason": r.closed_reason,
         "reviewer": r.reviewer,
+        "reviewers": r.reviewer_ids(),
+        "reviewers_source": r.source_of_reviewers(),
         "reviews": crate::hostrun::reviews_json(r, None),
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
@@ -2587,7 +3045,7 @@ impl DevJobs {
         &self,
         kind: crate::hostrun::StartKind,
         again: bool,
-        reviewer: Option<String>,
+        reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
     ) -> Value {
         let Some(svc) = self.studio.get() else {
@@ -2612,12 +3070,84 @@ impl DevJobs {
     }
 }
 
+impl DevJobs {
+    /// `devjob_list`'s `cloud` key, when the cloud host is attached: its running, queued and
+    /// finished runs, or the error that kept them from being listed.
+    async fn list_cloud(&self, v: &mut Value) {
+        if let Some(c) = self.cloud.get() {
+            v["cloud"] = match c.list().await {
+                Ok(l) => l,
+                Err(e) => json!({ "running": [], "queued": [], "finished": [], "cloud_error": e }),
+            };
+        }
+    }
+}
+
+/// The tools with the cloud host: `host` gains `cloud`, `devjob_start` gains `merge`, and
+/// `devjob_cancel` is listed (it cancels cloud runs as well as Studio ones). Without the cloud
+/// the tools are exactly [`tool_descriptors`] or [`tool_descriptors_with_studio`].
+pub fn with_cloud(mut tools: Vec<Value>) -> Vec<Value> {
+    if let Some(start) = tools.iter_mut().find(|t| t["name"] == TOOL_START) {
+        let d = start["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        start["description"] = json!(format!(
+            "{d} With host \"cloud\" it runs on kc1, two at a time, on burst workers the \
+             bridge starts and stops: pass strand and item_id or draft (the draft must say \
+             devjob-host: cloud or any) or prompt, branch_slug and repo, as on the Studio, with \
+             agent, test_command and timeout_minutes as on the cluster. The agent has no GitHub \
+             credential; the job rebases onto origin/main, pushes, opens a pull request titled \
+             [<run_id>] and, with merge true (or devjob-merge: true in the draft), merges it once \
+             every CI run on its exact head is green; repositories on the deny list never \
+             merge. It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A \
+             queued Studio run whose draft says devjob-host: any is started by whichever of a \
+             Studio slot and a cloud slot frees first."
+        ));
+        let props = &mut start["inputSchema"]["properties"];
+        let hosts = match props.get("host") {
+            Some(_) => json!(["cluster", "studio", "cloud"]),
+            None => json!(["cluster", "cloud"]),
+        };
+        props["host"] = json!({ "type": "string", "enum": hosts,
+                                "description": "where the run goes; default cluster" });
+        props["merge"] = json!({ "type": "boolean",
+                                 "description": "host cloud: merge the pull request once every CI run on its head is green; default the draft's devjob-merge, else false" });
+        if props.get("strand").is_none() {
+            props["strand"] =
+                json!({ "type": "string", "description": "host cloud: the strand note's slug" });
+            props["item_id"] =
+                json!({ "type": "string", "description": "host cloud: the Drafts line's bold id" });
+            props["draft"] = json!({ "type": "string", "description": "host cloud: a draft's path under Projects/drafts/" });
+        }
+        start["inputSchema"]["required"] = json!([]);
+    }
+    if !tools.iter().any(|t| t["name"] == TOOL_CANCEL) {
+        tools.push(json!({
+            "name": TOOL_CANCEL,
+            "description": "Cancel a cloud run by run_id or job name: a queued one is deleted; a running one is stopped and reported.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["run_id"],
+                "properties": { "run_id": { "type": "string" } },
+            },
+        }));
+    }
+    tools
+}
+
 impl crate::gateway::InProcessServer for DevJobs {
     fn tools(&self) -> Vec<Value> {
-        if self.studio.get().is_some() {
+        let tools = if self.studio.get().is_some() {
             tool_descriptors_with_studio()
         } else {
             tool_descriptors()
+        };
+        if self.cloud.get().is_some() {
+            with_cloud(tools)
+        } else {
+            tools
         }
     }
 
@@ -2643,6 +3173,17 @@ impl crate::gateway::InProcessServer for DevJobs {
                         }) => {
                             return Ok(self.start_studio(kind, again, reviewer, review_focus).await)
                         }
+                        Ok(StartPlan::Cloud(req)) => {
+                            let Some(c) = self.cloud.get() else {
+                                return Ok(error_result(
+                                    "host \"cloud\" needs [devjob.cloud] enabled on this bridge",
+                                ));
+                            };
+                            return Ok(match c.start_cloud(req, "turn").await {
+                                Ok(v) => text_result(&v, false),
+                                Err(e) => error_result(&e),
+                            });
+                        }
                         Err(e) => return Ok(error_result(&e)),
                     };
                     match self.start(&spec, "turn").await {
@@ -2657,7 +3198,20 @@ impl crate::gateway::InProcessServer for DevJobs {
                     };
                     if let Some(svc) = self.studio.get() {
                         if let Some(r) = svc.get(args.job_name.trim()) {
-                            return Ok(text_result(&studio_status(svc, &r), false));
+                            // A run the cloud took is answered by its Job, when there is one.
+                            if !(moved_to_cloud(&r) && self.cloud.get().is_some()) {
+                                return Ok(text_result(&studio_status(svc, &r), false));
+                            }
+                        }
+                    }
+                    if let Some(c) = self.cloud.get() {
+                        if let Ok(Some(v)) = c.find_cloud_job(args.job_name.trim()).await {
+                            if let Ok(Some(r)) = c.run(&v.name).await {
+                                let mut out = json!(r);
+                                out["host"] = json!("cloud");
+                                out["run_id"] = json!(v.run_id);
+                                return Ok(text_result(&out, false));
+                            }
                         }
                     }
                     match self.run(args.job_name.trim()).await {
@@ -2675,7 +3229,10 @@ impl crate::gateway::InProcessServer for DevJobs {
                     }
                     let Some(svc) = self.studio.get() else {
                         return match self.list().await {
-                            Ok(v) => Ok(text_result(&v, false)),
+                            Ok(mut v) => {
+                                self.list_cloud(&mut v).await;
+                                Ok(text_result(&v, false))
+                            }
                             Err(e) => Ok(error_result(&e)),
                         };
                     };
@@ -2709,6 +3266,7 @@ impl crate::gateway::InProcessServer for DevJobs {
                         "active": runs.iter().filter(|r| !r.status.is_finished()).map(studio_brief).collect::<Vec<_>>(),
                         "finished": finished,
                     });
+                    self.list_cloud(&mut v).await;
                     Ok(text_result(&v, false))
                 }
                 TOOL_REPLY => {
@@ -2725,14 +3283,33 @@ impl crate::gateway::InProcessServer for DevJobs {
                     }
                 }
                 TOOL_CANCEL => {
-                    let Some(svc) = self.studio.get() else {
+                    if self.studio.get().is_none() && self.cloud.get().is_none() {
                         return Err(format!("devjob has no tool {tool:?}"));
-                    };
+                    }
                     let args: CancelArgs = match serde_json::from_value(arguments) {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
-                    match svc.cancel_and_wake(args.run_id.trim()).await {
+                    let id = args.run_id.trim();
+                    let studio_has = self
+                        .studio
+                        .get()
+                        .and_then(|s| s.get(id))
+                        .is_some_and(|r| !moved_to_cloud(&r));
+                    if !studio_has {
+                        if let Some(c) = self.cloud.get() {
+                            if let Ok(Some(_)) = c.find_cloud_job(id).await {
+                                return Ok(match c.cancel_cloud(id).await {
+                                    Ok(v) => text_result(&v, false),
+                                    Err(e) => error_result(&e),
+                                });
+                            }
+                        }
+                    }
+                    let Some(svc) = self.studio.get() else {
+                        return Ok(error_result(&format!("no run is named {id:?}")));
+                    };
+                    match svc.cancel_and_wake(id).await {
                         Ok(r) => Ok(text_result(&studio_brief(&r), false)),
                         Err(e) => Ok(error_result(e.message())),
                     }
@@ -2758,10 +3335,20 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
+                    let who = match crate::hostrun::review::merge_spellings(
+                        args.reviewer,
+                        args.reviewers,
+                    ) {
+                        Ok(Some(w)) => w,
+                        Ok(None) => {
+                            return Ok(error_result("reviewer is missing: name a model id"))
+                        }
+                        Err(e) => return Ok(error_result(&e)),
+                    };
                     match svc
                         .request_review_and_start(
                             args.run_id.trim(),
-                            &args.reviewer,
+                            who,
                             args.focus,
                             args.auto_reply.unwrap_or(true),
                         )

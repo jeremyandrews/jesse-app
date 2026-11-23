@@ -8,7 +8,7 @@
 //! Its own `house_ro` style role may `SELECT` from both schemas and nothing else. All of it is
 //! dropped at the end.
 //!
-//! The guards are the ones `healthdb` has (`tests/healthdb_mcp_pg.rs`): this proves they hold
+//! The guards are the ones `healthdb` has (`tests/it/healthdb_mcp_pg.rs`): this proves they hold
 //! on the house server too, because it is the same code with another configuration.
 
 use std::str::FromStr;

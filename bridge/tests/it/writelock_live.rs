@@ -28,7 +28,7 @@
 //! whose hook silently never ran are indistinguishable until you look at the other side. Every
 //! assertion below reads the broker's own record.
 
-mod common;
+use crate::common;
 use common::*;
 use jesse_bridge::*;
 use std::path::PathBuf;

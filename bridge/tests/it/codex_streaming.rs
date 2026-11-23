@@ -22,7 +22,7 @@
 //! `/bin/sh` stand-in speaking the App Server's frame. It is the bridge's MODEL of codex-cli
 //! and cannot be evidence for that model being right; `tests/codex_live_turn.rs` is where the
 //! real binary is asked.
-mod common;
+use crate::common;
 use common::*;
 use jesse_bridge::*;
 use std::sync::Arc;

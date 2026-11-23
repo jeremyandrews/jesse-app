@@ -267,6 +267,29 @@ final class StudioRunsWireTests: XCTestCase {
         XCTAssertNotNil(review.base)
     }
 
+    /// A run two models reviewed in one cycle, as bridge 0.213.0 serves it once its one
+    /// answering round reported (`two_reviewers_review_at_once_and_are_answered_in_one_round_
+    /// and_one_push`): `reviewer` is the first one, `reviewer_label` joins both labels, and
+    /// `reviews` has an entry per reviewer, both answered.
+    func testARunWithTwoReviewsDecodesBoth() throws {
+        let run = try StudioRun.decode(from: fixture("studio-run-two-reviews-served"))
+        XCTAssertEqual(run.status, .reported)
+        XCTAssertEqual(run.reviewer, "codex-write")
+        XCTAssertEqual(run.reviewerLabel, "Codex + GLM 5")
+        XCTAssertTrue(run.isReviewed)
+        XCTAssertEqual(run.reviews.count, 2)
+        XCTAssertEqual(run.reviews.map(\.n), [1, 2])
+        XCTAssertEqual(run.reviews.map(\.reviewer), ["codex-write", "glm"])
+        XCTAssertEqual(run.reviews.map(\.reviewerLabel), ["Codex", "GLM 5"])
+        XCTAssertEqual(run.reviews.map(\.status), [.answered, .answered])
+        for review in run.reviews {
+            XCTAssertTrue(review.path?.hasPrefix("Inbox/archive/") ?? false,
+                          "\(review.path ?? "nil")")
+            XCTAssertNotNil(review.head)
+        }
+        XCTAssertTrue(run.reviews[1].path?.hasSuffix("-review-2.md") ?? false)
+    }
+
     /// A run never reviewed, and every run from a bridge before 0.211.0, sends none of the
     /// review keys: it decodes with none of them.
     func testARunWithoutReviewKeysDecodesWithNoReview() throws {

@@ -1107,6 +1107,11 @@ mod tests {
                 .allow,
             "a subagent shares the conversation, so its write is not foreign"
         );
+        // The parent's edit completes. Without this post its lock stays held, and the
+        // different conversation below would be refused by the 30 s lock wait timing out
+        // rather than by the compare-and-swap this test is about.
+        b.handle(post_in("conv-A", "t1", "parent-edit", Some(&p)))
+            .await;
 
         // ...but a genuinely different conversation that had read the OLD bytes is still stale.
         b.handle(post_in("conv-B", "t2", "read-old", Some(&p)))
@@ -1172,7 +1177,9 @@ mod tests {
         assert!(!b.try_take(&LockKey::Global, "t2", "c2"));
     }
 
-    #[tokio::test]
+    // Paused clock: the wait below proves the call is still blocked, which is tokio timer
+    // logic, so it elapses in virtual time rather than real.
+    #[tokio::test(start_paused = true)]
     async fn a_wait_that_exceeds_the_timeout_fails_loudly() {
         let b = Arc::new(LockBroker::new());
         // Hold the global lock and never release it.
@@ -1289,7 +1296,9 @@ mod tests {
 
     /// The other half, asserted SEPARATELY: re-entrancy per turn must not have loosened the
     /// cross-turn property, which is the one that actually protects the vault.
-    #[tokio::test]
+    // Paused clock: the wait below proves the call is still blocked, which is tokio timer
+    // logic, so it elapses in virtual time rather than real.
+    #[tokio::test(start_paused = true)]
     async fn a_different_turn_still_blocks_on_a_held_lock() {
         let b = Arc::new(LockBroker::new());
         let d = tmpdir();

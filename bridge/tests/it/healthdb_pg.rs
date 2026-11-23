@@ -9,7 +9,7 @@
 //! pool goes through, minus the verify-full TLS the service container does not offer. The TLS
 //! options themselves are unit tested in `src/healthdb.rs`.
 
-mod common;
+use crate::common;
 
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};

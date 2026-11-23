@@ -1014,7 +1014,7 @@ and read-only). Only the servers named in that config load:
 | `healthdb` | The owner's health archive, **read only**, added 2026-10-12 (bridge 0.173.0): this repository's own `jesse-healthdb-mcp`, both `mcp__healthdb__*` tools (`healthdb_schema`, `healthdb_query`), every guard in the server. Registered only when the `[healthdb]` table has an `ro_url_file`. See [Health archive](#health-archive-read-only-sql-2026-10-12) |
 | `runn-rs` | Tag1's own Runn server, **read only**, added 2026-10-16 (bridge 0.180.0): all thirteen `mcp__runn-rs__*` tools, every one a read, GET only. Staff schedules, leave and skills reach the turn; money follows the owner's Runn financial permission and notes are never read. See [Runn, Tag1's own server](#runn-tag1s-own-server-staffing-and-schedules-read-only-2026-10-16) |
 | `reminders` | Timed reminders, added 2026-11-10 (bridge 0.208.0): this repository's own `jesse-reminders-mcp`, all four `mcp__reminders__*` tools (`create_reminder`, `list_reminders`, `cancel_reminder`, `snooze_reminder`). One file in the state dir, no credential, no host. A reminder becomes a push, never a turn. See [Timed reminders](#timed-reminders-reminders-0208)
-| `housedb` | The house's history, **read only**, added 2026-11-20 (bridge 0.212.0): this repository's own `jesse-housedb-mcp`, the same server as `healthdb` over Home Assistant's recorder, both `mcp__housedb__*` tools (`housedb_schema`, `housedb_query`). Registered only when the `[housedb]` table is ready. See [House history](#house-history-read-only-sql-2026-11-20) |
+| `housedb` | The house's history, **read only**, added 2026-11-20 (bridge 0.215.0): this repository's own `jesse-housedb-mcp`, the same server as `healthdb` over Home Assistant's recorder, both `mcp__housedb__*` tools (`housedb_schema`, `housedb_query`). Registered only when the `[housedb]` table is ready. See [House history](#house-history-read-only-sql-2026-11-20) |
 
 **All five servers load on BOTH harnesses.** Until 0.66.0 Claude Code had
 qmd+slack and Codex had qmd alone; a capability now lands on every harness in the
@@ -1974,7 +1974,7 @@ the main (write) turn's list; a `Read` CLI child keeps its qmd-only list, as for
 
 ### House history (read-only SQL, 2026-11-20)
 
-Bridge 0.212.0 adds `housedb`, this repository's own `jesse-housedb-mcp`, to every main turn on
+Bridge 0.215.0 adds `housedb`, this repository's own `jesse-housedb-mcp`, to every main turn on
 **all three harnesses in the same change**, as the twenty-ninth server on Claude Code and Codex
 and a stdio grant on `direct`. It reads Home Assistant's recorder in Postgres on the home
 cluster (`househistorydb.pozza:5432`, database `homeassistant`): every state change Home
@@ -1986,7 +1986,7 @@ Assistant records, its statistics, and the daily rollups in `analytics` (`house_
 holds every guard listed under [Health archive](#health-archive-read-only-sql-2026-10-12) (one
 read statement, `BEGIN READ ONLY`, `ROLLBACK`, 15 s, 500 rows, content-free logs), and the two
 servers differ only in data (`RoDbServer`). Everything said there about the guards holds here
-word for word; `tests/housedb_mcp_pg.rs` proves the refusal of an `INSERT` (by the guard, by the
+word for word; `tests/it/housedb_mcp_pg.rs` proves the refusal of an `INSERT` (by the guard, by the
 role, and by the transaction as the owner), the row cap and the timeout on this server too.
 
 - **Switched on by the deployment.** Declared in `MAIN_CHILD_MCP_CONFIG` as a bare
@@ -3021,6 +3021,29 @@ turn can already call directly, and **there is still no repository allowlist (Je
 merges, and every run lands as an Inbox report and a push. The bridge reads the strand note and
 the prompt; it never writes, renames or moves anything under `Strands/` or `Projects/drafts/`.
 
+### The cloud host (`[devjob.cloud]`, 0.214.0)
+
+`host: "cloud"` runs the same Job on kc1 (`docs/devjob-cloud.md`). What differs:
+
+- **Its own identity.** The bridge talks to kc1 as the ServiceAccount `jesse:devjob`
+  (`[devjob.cloud] kubeconfig`), which may create Jobs and ConfigMaps in `jesse-dev`, read their
+  pods, logs and events, and read nodes; nothing else. It is not `jesse:jesse`, the identity chat
+  turns' `kubernetes-cloud` server uses, because creating a pod in a namespace is reading its
+  Secrets, and `jesse-dev`'s Secret holds a GitHub token that can merge. `jesse:jesse` has no
+  write in `jesse-dev`.
+- **Where it runs.** kc1's admission policy keeps `jesse-dev` pods on burst workers labelled
+  `kc.pozza/pool=devjob`, as the tokenless `default` account; the namespace's NetworkPolicies
+  allow DNS and the public internet only.
+- **Merging.** The Job, not the agent, merges: the agent runs without `GH_TOKEN` or the git
+  credential store, and the entrypoint merges only with `AUTO_MERGE=true`, which the bridge sets
+  only when asked and the repository is on no deny pattern (the seed `tag1consulting/scolta*`
+  and `tag1consulting/goose` cannot be removed by config), and only once every CI run on the
+  exact head passed, with `--match-head-commit`. The agent and the entrypoint are one user, so
+  this stops an agent following a "merge it" sentence, not one that reads the entrypoint's
+  memory; the token's own reach is the wall.
+- **Cost.** The bridge runs the Studio's `kc-burst` with its own config and credentials, which it
+  never reads. Every `up` and `extend` is committed against a hard daily cap before it runs.
+
 ## Coding agents on the Studio (`hostrun`, 0.196.0; off by default)
 
 `[hostrun] enabled = true` lets a coding agent run on the Mac Studio itself, outside any chat turn
@@ -3130,7 +3153,14 @@ each claim and reject what does not hold. **Nothing about a review reaches GitHu
 reply forbids it in commit messages, the pull request and the code, and the bridge reads the
 answering round's commit messages, pull request title and body and added lines for the
 reviewer's name and the finding ids and puts a `REVIEW LEAK:` line on the Inbox report if it
-finds one. The review note stays in the vault.
+finds one. The review note stays in the vault. **Since 0.213.0 a run is reviewed by default**
+(`[hostrun] default_reviewers`, `["codex-write"]` unless configured) and may name up to three
+reviewers: each runs separately at the same posture, in its own detached worktree, and the
+leak check reads for every reviewer's name and every finding id. More reviewers change neither
+the posture nor the loop: one review cycle and one answering round per run, however many
+reviewed. A default reviewer that is down never blocks a run (it goes on unreviewed and says so
+on its report's first line); a reviewer named explicitly that is down is refused at the start.
+Every reviewer of a cycle reads the same base and head, read once before any of them starts.
 
 **Why there is no clock.** A run is its own launchd job (`<ns>.jesse-run.<run_id>`, where
 `<ns>.jesse-bridge` is the bridge's own label as launchd reports it in `XPC_SERVICE_NAME`, or

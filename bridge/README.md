@@ -922,6 +922,29 @@ followed again, the queue is the set of suspended Jobs, and a finished Job witho
 is reported. The report names its Job, so a restart between writing it and annotating the Job
 does not write a second one.
 
+**The cloud host (`[devjob.cloud]`, 0.214.0).** `devjob_start` with `host: "cloud"` runs the
+same kind of Job on kc1, in namespace `jesse-dev`, two at a time, on DigitalOcean burst workers
+the bridge starts (`kc-burst up 1 --label kc.pozza/pool=devjob`) when a cloud run waits and stops
+once idle, under a hard daily cost cap. A cloud run is launched like a Studio run (strand and
+item, a draft, or a free prompt), is reported to `Inbox/<date>-run-<run_id>.md`, appears in
+`devjob_status`, `devjob_list` (under `cloud`) and `devjob_cancel`, and merges its pull request
+only when asked (`merge`, or `devjob-merge: true` in the draft), once every CI run on its exact
+head is green, and never for a repository on the deny list. Only a draft that says
+`devjob-host: cloud` or `any` may go; a queued Studio run whose draft says `any` starts on
+whichever of a Studio slot and a cloud slot frees first. The design, the failure modes and every
+key are in `docs/devjob-cloud.md`; `src/devjob/cloud.rs` is the code.
+
+```toml
+[devjob.cloud]
+enabled = true                                   # default false; needs [devjob] enabled
+kubeconfig = "~/.kube/kc1-devjob.yaml"           # the default: the jesse:devjob ServiceAccount
+image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # required, no default
+# max_concurrent = 2
+# daily_cost_cap_eur = 5.0
+# idle_minutes = 10
+# merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
+```
+
 **The containment battery** registers a stand-in `devjob` (the same three tools, every call
 refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the
 gateway-on record names the server without a probe ever creating a Job:
@@ -1051,16 +1074,32 @@ and reports stay where they are.
   `interrupted` or `failed` run. A run unarchived by hand is left alone until the bridge restarts,
   so an Undo is not taken back by the next pass.
 
-**A second model reviews a run (0.211.0, `src/hostrun/review.rs`).** A Studio run can be checked
-by any model in the registry before it finishes, and the session that did the work judges what
-that model said.
+**A second model reviews a run (0.211.0, `src/hostrun/review.rs`; on by default since 0.213.0).**
+Every Studio run is checked by a model in the registry before it finishes, unless it says not
+to, and the session that did the work judges what that model said.
 
-- **Starting a reviewed run.** `devjob_start` with `host: "studio"` and `reviewer: "<model id>"`
-  (optionally `review_focus`, at most 4 KiB), `POST /jesse/runs` with the same two keys, or a
-  draft whose front matter says `devjob-reviewer: <model id>`. The reviewer is checked before
-  anything is created: a model the registry does not know, one not configured, one marked
-  unhealthy, or one whose harness cannot give it a read only posture is refused, naming why. On
-  the cluster (`host` not `studio`) both keys are refused.
+- **Who reviews.** Resolved when the run is created, in this order: `none` (the string, or
+  `["none"]`) means no review; an explicit id or list, from the start's `reviewer` or else the
+  draft's `devjob-reviewer:`, is used exactly, in its order; otherwise `[hostrun]
+  default_reviewers` applies, which defaults in code to `["codex-write"]` (no config edit needed;
+  `default_reviewers = []` turns the default off for the whole bridge). At most 3 reviewers a
+  run; a repeated one, `none` beside an id, and both `reviewer` and `reviewers` at once are
+  refused.
+- **Starting a run.** `devjob_start` with `host: "studio"` and optionally `reviewer` (one model
+  id, a list of up to three, or `"none"`; `reviewers` is the list spelling) and `review_focus` (at
+  most 4 KiB), `POST /jesse/runs` with the same keys, or a draft whose front matter says
+  `devjob-reviewer: <id>`, `devjob-reviewer: [<id>, <id>]` (or a block list, one `- <id>` a
+  line) or `devjob-reviewer: none`. A reviewer named explicitly is checked before anything is
+  created: a model the registry does not know, one not configured, one marked unhealthy, or one
+  whose harness cannot give it a read only posture is refused, naming why. **A default reviewer
+  that cannot review does not refuse the run**: the run goes on unreviewed, as an ordinary run
+  (even when other default reviewers could have reviewed), and its finished report's first line
+  is `UNREVIEWED: default reviewer <id> unavailable: <reason>` (each such one, joined with
+  `; `). The run records `reviewers`,
+  `reviewers_source` (`explicit`, `default` or `none`) and any `reviewers_skipped`.
+- **The cluster** has no review path: a cluster `devjob_start` never gets the default (no
+  refusal, no review), `reviewer: "none"` changes nothing there, and a reviewer by name (and
+  `review_focus`) is refused as before.
 - **The rounds.** The served prompt gains one sentence (GitHub: open the pull request as a draft,
   do not merge it, do not mark it ready; local: commit on the branch, do not merge into `main`
   yet). The implementing round's report is kept in the run directory but not written to the
@@ -1069,14 +1108,28 @@ that model said.
   finding, accept, reject or partial, fix only what holds with a regression test, rerun the
   verification, push, then finish (mark ready, and merge only if the original prompt said to;
   local: merge into `main`). That answering round's report is the one Inbox report and the one
-  push, with a link to the review note. Exactly one review per reviewed run: later rounds are not
-  reviewed again.
+  push, with a link to the review note. Exactly one review cycle per reviewed run: later rounds are
+  not reviewed again.
+- **Several reviewers, one cycle.** With more than one reviewer the cycle's range (base, head and
+  diff) is read once, then every review runs at once on it, each in its own detached read only
+  worktree at that head (`review-<n>`), each with the same prompt,
+  schema, retry and timeout, and each writes its own note. Their reviews are tagged `A`, `B`, `C`
+  and every finding id is shown with its tag (`A.F1`, `B.F1`) in the notes, the hand off and the
+  verdict table, so ids are unique across the hand off. Once every review has answered or failed
+  the run gets **one** hand off carrying every finding, one block per reviewer (`## Block A:
+  Codex (codex-write)`; the reviewers are named in the hand off only), and exactly one answering
+  round, never one per reviewer. If every review failed the run is handed off unreviewed as
+  below; if some failed, the rest are handed off and the final report's first line is `PARTLY
+  REVIEWED: <id>: <reason>` (each failed one, joined with `; `).
 - **When the review cannot run** (the reviewer down, a timeout, an answer that fails the schema
   twice, a reviewer that changed its worktree), the run is handed off all the same with a reply
   saying the check could not run and why, and the report's first line is `UNREVIEWED: <reason>`
-  (the bridge puts it there if the session did not).
+  (the bridge writes that line from its own record, replacing one the session wrote). The same
+  holds for `PARTLY REVIEWED:`, and a `REVIEW LEAK:` line goes right after it, never above it.
 - **After the fact.** `devjob_review { run_id, reviewer, focus?, auto_reply? }` or `POST
-  /jesse/runs/:id/review` (paired device token) reviews a finished Studio run's commits. Refused
+  /jesse/runs/:id/review` (paired device token) reviews a finished Studio run's commits;
+  `reviewer` is one id or a list of up to three (`reviewers` on the tool), which run as one cycle
+  with one hand off. Refused
   with the reason for a run that is not a Studio run, one queued or running, one with no commits
   beyond its base, an unknown or unhealthy reviewer, and while another review of that run is
   running or waiting. `auto_reply` (default true) hands off at once; false writes the note,
@@ -1097,10 +1150,16 @@ that model said.
   closed or archived with the review never handed off. It is not a round report: a run's
   `report archived` close and archive look at its round reports only.
 - **The leak check.** After the answering round the bridge reads the round's commit messages, the
-  pull request's title and body and the diff's added lines for the reviewer's id and label, the
-  finding ids and the words `reviewer`, `code review` and `review finding`. A hit puts a
+  pull request's title and body and the diff's added lines for every reviewer's id and label
+  (the ones whose review failed too),
+  every finding id (as given, `F1`, and as shown, `A.F1`) and the words `reviewer`, `code
+  review` and `review finding`. A hit puts a
   `REVIEW LEAK: …` line at the top of that Inbox report; it blocks nothing.
-- **In the JSON.** A reviewed run carries `reviewer`, `reviewer_label`, `review_focus`, status
+- **In the JSON.** Every run carries `reviewers` (the ids, in order; `[]` when none) and
+  `reviewers_source` (`explicit`, `default` or `none`; a record from before 0.213.0 serves what it
+  must have been). A reviewed run carries `reviewer` (the first reviewer's id) and
+  `reviewer_label` (every label joined with ` + `, `Codex + GLM 5`), as strings exactly as
+  before, `review_focus`, status
   `reviewing` while its review runs (counted as `moving`), and `reviews[]`: `n`, `reviewer`,
   `reviewer_label`, `origin` (`start` or `request`), `status` (`running`, `ready`, `handed_off`,
   `answered`, `failed`, `dropped`), `head`, `base`, `path` (where the note is now), `findings`
@@ -1720,7 +1779,7 @@ A turn that registers it is told, in one line, to query the archive for health q
 the attached block and to quote the numbers. The binary is in `deploy-bins.toml`. The tests
 are in `src/healthquery.rs` and `tests/healthdb_mcp_pg.rs`.
 
-## The house history (`[housedb]`, `jesse-housedb-mcp`, 0.212.0)
+## The house history (`[housedb]`, `jesse-housedb-mcp`, 0.215.0)
 
 The same read-only server over a second database: Home Assistant's recorder on the home
 cluster (database `homeassistant` on `househistorydb.pozza:5432`, role `house_ro`), with the
@@ -1747,8 +1806,8 @@ server is started with `JESSE_HOUSEDB_RO_URL_FILE`, `JESSE_HOUSEDB_CA_FILE` and
 `JESSE_HOUSEDB_MCP_LEDGER` (paths), and its calls land in `<state_dir>/housedb-mcp-calls.log`,
 tallied under `housedb.counters` on `GET /health` as `housedb_mcp_query_total` and
 `housedb_mcp_schema_total`. The binary is in `deploy-bins.toml`. Tests:
-`src/housequery.rs`, `tests/housedb_mcp_pg.rs` (an `INSERT` refused, the row cap, the timeout,
-the schema order) and `tests/rodb_mcp_stdio.rs` (both built binaries' names and tools).
+`src/housequery.rs`, `tests/it/housedb_mcp_pg.rs` (an `INSERT` refused, the row cap, the timeout,
+the schema order) and `tests/it/rodb_mcp_stdio.rs` (both built binaries' names and tools).
 
 Registered on every main turn, chat and scheduled alike, on all three harnesses wherever
 `healthdb` is, and only when `[housedb]` is ready: the twenty-ninth server in

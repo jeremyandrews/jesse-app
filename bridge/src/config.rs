@@ -1037,7 +1037,7 @@ pub const DEFAULT_MAX_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 // write `<state_dir>/reminders.json` and nothing else; a reminder becomes a push from the
 // bridge's ticker, never a turn. Never a wildcard.
 //
-// HOUSEDB: BOTH TOOLS ON THE HOUSE HISTORY, READ ONLY (0.212.0).
+// HOUSEDB: BOTH TOOLS ON THE HOUSE HISTORY, READ ONLY (0.215.0).
 //
 // `jesse-housedb-mcp` is `jesse-healthdb-mcp`'s code over Home Assistant's recorder, and its
 // `tools/list` is the closed set `DbTool::ALL` as `HOUSEDB` names it: `housedb_schema` and

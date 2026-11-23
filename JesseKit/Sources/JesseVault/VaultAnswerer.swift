@@ -319,6 +319,12 @@ public struct VaultAnswerer: Sendable {
                          question: question) else {
             return .unanswered(.abstained)
         }
+        // …and every NUMBER it states has to be in a note it cites. One shared word is
+        // enough for the check above, and the value asked for is usually the number.
+        guard numbersNotIn(text, chunks: chunks.filter { cited.contains($0.path) })
+                .isEmpty else {
+            return .unanswered(.abstained)
+        }
         // …and it has to STATE the value, not copy a template that leaves a slot for it.
         guard !hasUnfilledSlot(text) else { return .unanswered(.abstained) }
         // …and a question about the asker is not answered by somebody else's fact.
@@ -381,6 +387,83 @@ public struct VaultAnswerer: Sendable {
         guard !words.isEmpty else { return false }
         return words.contains { word in
             chunks.contains { $0.text.localizedStandardContains(word) }
+        }
+    }
+
+    /// One number as an answer or a note states it: the digits, with thousands commas and
+    /// leading zeros dropped (`2,040` is `2040`, the `09` of a date is `9`), and the unit
+    /// letters that follow it, folded for case and diacritics, with any space between
+    /// them gone (`30 G` is `30g`). An empty unit is a bare number.
+    public struct NumericToken: Equatable, Hashable, Sendable {
+        public let number: String
+        public let unit: String
+        public init(number: String, unit: String) {
+            self.number = number
+            self.unit = unit
+        }
+    }
+
+    /// Every numeric token in `text`, in order.
+    ///
+    /// A token is a run of digits with an optional decimal part, plus the letters attached
+    /// to it or one space after it (`30g`, `30 g`, `1.5 tbsp`, `2,040 kcal`). Years, times
+    /// and dates are numbers like any other: `2026-09-27` is 2026, 9 and 27, `18:30` is 18
+    /// and 30. A number written as a word (`two`) is not a token. Two things that follow a
+    /// number and are not its unit are left off it, on both sides of the comparison: a
+    /// stop word (`2024 the`, `3 of`), and an ordinal ending (`27th`).
+    public static func numericTokens(_ text: String) -> [NumericToken] {
+        let pattern = #"(\p{Nd}+(?:[.,]\p{Nd}+)*)(?: ?(\p{L}+))?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = text as NSString
+        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map {
+            match in
+            var number = ns.substring(with: match.range(at: 1))
+                .replacingOccurrences(of: ",", with: "")
+            let integerEnd = number.firstIndex(of: ".") ?? number.endIndex
+            let zeros = number[..<integerEnd].prefix { $0 == "0" }.count
+            number.removeFirst(min(zeros, number.distance(from: number.startIndex,
+                                                          to: integerEnd) - 1))
+            var unit = ""
+            if match.range(at: 2).location != NSNotFound {
+                let word = ns.substring(with: match.range(at: 2))
+                    .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+                let attached = match.range(at: 2).location == NSMaxRange(match.range(at: 1))
+                let ordinal = attached && ["st", "nd", "rd", "th"].contains(word)
+                if !ordinal && !LookupQuery.isStopWord(word) { unit = word }
+            }
+            return NumericToken(number: number, unit: unit)
+        }
+    }
+
+    /// The numeric tokens of `answer` that no chunk in `chunks` states.
+    ///
+    /// On 2026-11-22, with the bridge unreachable, "What's the quantities of nuts and
+    /// seeds?" was answered "Walnuts: 30g; seed mix: 24g. These quantities are from the
+    /// seeded honey hazelnut loaf recipe.", citing a clam pasta note and a hot sauce note.
+    /// Real paths, and "honey" was in the hot sauce note, so `isGrounded` passed it. The
+    /// bread recipe it named was a note it did not cite, and "24g" was in neither note it
+    /// did. The numbers were the answer, and nothing cited stated them.
+    ///
+    /// A number with a unit is stated when a chunk has the same number with the same
+    /// unit, or with a unit one of whose spellings begins the other's and is at least
+    /// three letters long (`8 Oct` for `8 October`). A bare number is stated when a chunk
+    /// has the same number with any unit or none.
+    ///
+    /// Like `isGrounded`, a floor: a number a cited note states for something else still
+    /// passes (the clam salt's `30g` would have covered the walnuts on its own).
+    public static func numbersNotIn(_ answer: String,
+                                    chunks: [RetrievedChunk]) -> [NumericToken] {
+        let wanted = numericTokens(answer)
+        guard !wanted.isEmpty else { return [] }
+        let stated = Set(chunks.flatMap { numericTokens($0.text) })
+        return wanted.filter { token in
+            !stated.contains { have in
+                guard have.number == token.number else { return false }
+                if token.unit.isEmpty || have.unit == token.unit { return true }
+                let (short, long) = have.unit.count < token.unit.count
+                    ? (have.unit, token.unit) : (token.unit, have.unit)
+                return short.count >= 3 && long.hasPrefix(short)
+            }
         }
     }
 

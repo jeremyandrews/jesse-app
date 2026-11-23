@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [bridge 0.212.0] - 2026-11-20
+## [bridge 0.215.0] - 2026-11-23
 
 **`jesse-housedb-mcp`: the house's history, read only, as the same server `healthdb` is.** Two
 tools, `housedb_schema` and `housedb_query`, over Home Assistant's recorder on the home cluster
@@ -59,10 +59,204 @@ query daily house trends. Configured by a new `[housedb]` table; without it noth
   0.211.0 added). Codex's two main-row `[[accepted]]` blocks are re-pointed to the new labels by
   Jeremy Andrews on that identical-probe result; Codex's gate is the standing `basic/none` fail,
   unchanged. `golden/capability-args.json` and the argv fixture are re-blessed for the new tools.
-- Tests: `tests/housedb_mcp_pg.rs` (an `INSERT` refused by the guard, by the role and by the
+- Tests: `tests/it/housedb_mcp_pg.rs` (an `INSERT` refused by the guard, by the role and by the
   read-only transaction; the 500-row cap; the 15 s timeout; the morning query; the schema
-  order), `tests/rodb_mcp_stdio.rs` (both built binaries' names and tool lists, and each
+  order), `tests/it/rodb_mcp_stdio.rs` (both built binaries' names and tool lists, and each
   refusing the other's variables), and unit tests for `[housedb]` and both servers' tool names.
+
+## [bridge 0.214.0] - 2026-11-23
+
+**Dev jobs get two cloud slots on kc1 beside the Studio's slot, and a cloud run merges its own
+pull request at green when asked.** On 2026-11-23 about 44 `jeremyandrews/trovato` Studio runs
+waited behind one running run (`waiting_for: repo`). `devjob_start` now takes `host: "cloud"`:
+a Job in namespace `jesse-dev` on kc1 (`cloud/infrastructure/jesse-dev/` in the k3s repository),
+two at a time, on `s-4vcpu-8gb-intel` burst workers the bridge starts with `kc-burst` when a
+cloud run waits, extends while one runs and stops after `idle_minutes`, under a hard
+`daily_cost_cap_eur` kept in a ledger file. The design is `docs/devjob-cloud.md`.
+
+- **Routing.** A cloud start is a strand item, a draft or a free prompt, as on the Studio, with
+  the cluster's `agent`, `test_command` and `timeout_minutes`. A draft goes only if it says
+  `devjob-host: cloud` or `any`; `local/<name>` never goes. The home `cluster` host is unchanged
+  (its Job, report name and tool listing are byte for byte what they were).
+- **Lifecycle.** Strand labels and keys, the report in `Inbox/<date>-run-<run_id>.md` (front
+  matter `host: cloud`, `run: <run_id>`), the agent's own `JESSE_RUN_REPORT` as its final
+  message, a push, `devjob_status` by run id or Job name, `devjob_list` under `cloud`, and
+  `devjob_cancel` (a queued Job is deleted, a running one stopped and reported).
+- **Merging.** With `merge: true` (or `devjob-merge: true` in the draft) and a repository on no
+  deny pattern (`[devjob.cloud] merge_deny`, always including `tag1consulting/scolta*` and
+  `tag1consulting/goose`), the Job sets `AUTO_MERGE=true`: after the agent (which runs with no
+  GitHub credential) exits, the entrypoint rebases onto a fresh `origin/main`, pushes, opens the
+  pull request, waits for every CI run whose `headSha` is the exact head to pass, and merges with
+  `--match-head-commit`. Never red, never pending, never `main`.
+- **Draining.** A queued Studio run whose draft says `devjob-host: any` is taken by a free cloud
+  slot (`closed`, `moved to the cloud as <job>`, same run id) unless a Studio slot frees first;
+  both decide under the Studio queue's gate. A draft with no declaration waits for the Studio as
+  before. Two runs on one repository may now run at once; each cuts its branch from a freshly
+  fetched `origin/main` and rebases before merging, which the cloud agent's text says.
+- **Tests.** `devjob/cloud/tests.rs` (routing, the deny list and merge decision, the cloud Job,
+  slot counting, the burst plan, idle time on tokio's paused clock, the ledger, kc-burst's JSON)
+  and two in `hostrun/tests.rs` (the `any` hand off and its refusals). No new test file, no sleep.
+
+Nothing to do until it is configured: `[devjob.cloud]` is off by default. To turn it on see
+`docs/devjob-cloud.md`, "Config" (the `jesse:devjob` token, the amd64 image digest and the Secret
+`jesse-dev-agent-keys` in `jesse-dev` on kc1 come first).
+
+## [bridge 0.213.2] - 2026-11-22
+
+**`url` 2.5.8 to 2.5.9, for RUSTSEC-2026-0592 (a stack overflow in `Url::origin()` on nested
+`blob:` URLs), so `cargo audit` passes again.** The advisory was published 2026-11-20 and failed
+the audit step of the `bridge` and `agent` CI jobs on every run after it. Lockfile only, in
+`Cargo.lock` and `bridge/Cargo.lock`: `cargo update -p url --precise 2.5.9`, which also moves
+`form_urlencoded` 1.2.2 to 1.2.3, the minimum `url` 2.5.9 requires. No source change and nothing
+to restart for behavior, though the next build picks it up.
+
+## [App 1.0 (226)] - 2026-11-22
+
+**An on device answer whose numbers are not in any note it cites is a "not found" now, not a
+sourced looking reply.** On 2026-11-22, with the bridge unreachable, a question about the
+quantities of nuts and seeds in a loaf was answered "Walnuts: 30g; seed mix: 24g. These
+quantities are from the seeded honey hazelnut loaf recipe.", citing a clam pasta note and a
+hot sauce note. The bread recipe it named was in a note it did not cite, and "24g" was in
+neither note it did. The cause: `VaultAnswerer.validate` grounds an answer when any one
+significant word of it is in a cited note, and "honey" (hot sauce) was enough. The numbers
+were the answer, and nothing checked them.
+
+- **The fix.** Beside `isGrounded`, every numeric token in the answer must be in at least one
+  cited note, or the answer abstains. A token is a run of digits with an optional decimal part
+  and the unit letters attached to it or one space after it (`30g`, `30 g`, `1.5 tbsp`,
+  `2,040 kcal`), compared with case, diacritics and that space folded out, so `30 G` in a
+  note is the `30g` of an answer. A bare number matches the same number anywhere in the
+  cited notes. Years, times and dates are numbers too. A stop word after a number (`2024
+  the`) and an ordinal ending (`27th`) are not its unit, and a unit of three or more letters
+  matches its longer spelling (`8 Oct`, `8 October`).
+- **Unchanged.** `isGrounded`'s rule, the lookup gate, the retriever, the time limit and the
+  model instructions. A number written as a word (`two`) is not a numeric token, and an
+  answer with no digits is unaffected.
+
+## [App 1.0 (225)] - 2026-11-22
+
+**`UnreadBadgeRenderUITests.testATabSwitchCostsTheConversationListABoundedNumberOfBodyEvaluations`
+passes on a reused simulator again, so `scripts/local-ci-macos.sh` passes in full.** The root
+cause: the 1,000 conversation scale store is seeded once per simulator install and dated from
+the clock at the moment it was seeded, so from the third day on its newest conversations,
+the probe row among them, were filed into a collapsed month folder. The store was up; the row
+the test waits for was hidden behind "November 2026", and the test waited out its 900 s. The
+hosted runner seeds on a fresh simulator every run, so it never saw it. Test seam only: nothing
+a user sees changes.
+
+- **The fix.** `ScaleSeedUITestSeam` re-dates a reused store at launch when its probe
+  conversation is not from today: every date the seed derived from its clock (the
+  conversations', their turns', the failed sends') moves forward by the same amount, so the
+  store is the one a seed at this launch would have written. The stub's millisecond clocks
+  are fixed and unaffected, so a pull still changes nothing. `NavigationCostUITests` shares
+  the store and the fix.
+- **Unchanged.** The test, its wait and its bound (3 list body evaluations per Chats, Today,
+  Chats round trip).
+
+## [bridge 0.213.1] - 2026-11-21
+
+**Linux CI gates a pull request in about 3 to 5 minutes instead of 25, with the same tests and
+the same assertions, and a CI enforced budget keeps it fast.** Tests and CI only: no bridge
+behavior or API changes, and nothing to restart.
+
+- **Four bridge jobs at once.** The one `bridge` job ran its release build, both test builds,
+  both clippy runs and coverage one after another. They are now `bridge-build` (release build
+  `--locked`, `cargo audit`, gitleaks, the source guards), `bridge-test` (the
+  `containment-probe` tests with Postgres), `bridge-lint` (the default feature `--lib` tests,
+  both clippy runs, `cargo fmt`) and `bridge-coverage`. Same commands, flags and 1.100.0
+  toolchain.
+- **Coverage is off the gate.** Report only as before, it runs on pushes to `main` and on a
+  manual dispatch of `ci.yml`, under `cargo llvm-cov nextest` without `--test-threads=1`.
+- **A cache that hits.** `Swatinem/rust-cache@v2` in every Rust job, one key per job, saved only
+  by runs on `main`.
+- **cargo-nextest.** Every `cargo test` step is `cargo nextest run` with the same features, plus
+  `cargo test --doc` where doc tests ran. `tests/hostrun_env_file.rs` (no harness) now answers
+  `--list`, so nextest can run it.
+- **One integration binary.** The files under `bridge/tests/` are modules of
+  `bridge/tests/it/main.rs`; test names gain the module as a prefix
+  (`integration::a_turn_that_omits_the_location_fields_is_unchanged`). `gateway.rs`,
+  `gateway_fds.rs` and `hostrun_env_file.rs` stay their own binaries, each for a stated reason.
+- **Fewer waits.** `writelock`'s `a_subagents_write_refreshes_the_same_conversations_baseline`
+  was refused by the 30 s lock wait timing out, not by the compare-and-swap it is named for; the
+  parent's edit now completes first, so the refusal is the compare-and-swap, at once. Three
+  timer-only tests run on tokio's paused clock (`test-util`, a dev-dependency feature). The
+  live dev-job tests are a nextest test group of one, as `SERIAL` made them in one process.
+- **Two flakes, root caused.** `heic_transcode_leaves_no_temp_dir_behind` counts staging dirs in
+  the shared temp dir, so every HEIC transcode test is a nextest test group of one.
+  `a_turn_that_omits_the_location_fields_is_unchanged` failed when its two turns straddled a
+  minute; it now compares everything after the per turn clock line byte for byte.
+- **Kept fast.** A 5 s slow mark and a 10 s limit with an allowlist
+  (`bridge/.config/slow-tests.txt`), a wall clock budget on each test step (93 s for the
+  feature tests, 41 s for the default feature `--lib` tests: the slowest of four CI runs plus 50
+  percent), and two new
+  `scripts/ci-guards.sh` checks: no new top level `bridge/tests/*.rs`, and no new real sleep of
+  a second or more in test code. See `docs/testing.md`.
+
+## [bridge 0.213.0] - 2026-11-21
+
+**A Studio run is reviewed by a second model unless it says not to: Codex reviews by default, a
+run can name a different reviewer or up to three, and a run can switch the review off.** Takes
+effect on the next bridge restart, with no config edit.
+
+- **A default.** `[hostrun] default_reviewers`, a list of registry ids, defaults in code to
+  `["codex-write"]`. `default_reviewers = []` turns the default off for the whole bridge.
+- **Per run.** `reviewer` on `devjob_start`, `POST /jesse/runs`, `devjob_review` and `POST
+  /jesse/runs/:id/review` takes a string or a list of strings; `reviewers` is the list spelling
+  on the two starts and on `devjob_review` (both at once is refused). The tool schemas advertise
+  `reviewer` as a string and `reviewers` as the list, so no harness meets a `oneOf`. `devjob-reviewer:` front matter takes one id, a
+  YAML list (flow or block) or `none`. In order: `none` (or `["none"]`) means no review, an
+  explicit id or list is used exactly, otherwise the default applies. At most 3 reviewers;
+  repeats are refused.
+- **Named versus default.** A reviewer named explicitly that is unknown or unhealthy is refused
+  before anything runs, as before. A default one does not refuse the run: the run goes on
+  unreviewed (even if other defaults could review), and its final report's first line is
+  `UNREVIEWED: default reviewer <id> unavailable: <reason>`. The run records `reviewers`, `reviewers_source` (`explicit`, `default`
+  or `none`) and `reviewers_skipped`.
+- **Several reviewers, one cycle.** The cycle's base, head and diff are read once; then every
+  review runs at once on them, each in its own detached read only worktree at that head with the existing prompt, schema, retry and timeout, and each writes
+  its own note. Once all have finished or failed, one hand off carries every finding, one block
+  per reviewer, ids prefixed with the reviewer's tag (`A.F1`, `B.F1`); exactly one answering
+  round per run. Every review failed: the existing `UNREVIEWED:` path. Some failed: the rest are
+  handed off and the final report's first line is `PARTLY REVIEWED: <id>: <reason>`, with any
+  `REVIEW LEAK:` line after it. The bridge writes the `UNREVIEWED:` and `PARTLY REVIEWED:` lines
+  from its own record, replacing one the session wrote. The leak check reads for every
+  reviewer's id and label (failed ones too) and every finding id.
+- **Drafts.** A block list under `devjob-reviewer:` may hold blank lines and `#` comments; a
+  trailing comment on the value is ignored.
+- **Run JSON.** `reviewer` and `reviewer_label` stay strings (the first reviewer's id; every label
+  joined with ` + `), so App 1.0 (224) decodes and shows them unchanged. Every run gains
+  `reviewers` (ids) and `reviewers_source`. A new app wire fixture,
+  `studio-run-two-reviews-served.json`, pins a run with two `reviews[]` entries, and a JesseKit
+  test decodes it.
+- **The cluster** still has no review path: a cluster `devjob_start` ignores `default_reviewers`,
+  `reviewer: "none"` changes nothing there, and a reviewer by name is refused as before.
+
+## [bridge 0.212.0] - 2026-11-21
+
+**A Studio run's `extra/` folder (the further repositories and outputs it made) now survives until
+`keep_days` after the run finished, whatever happened to its branch.** Root cause: the cleanup
+treated a merged branch as the end of a run's need for `extra/`, which holds work that is not in
+the branch. On 2026-11-20 run GO330 finished at 21:30:11Z and its 1 GiB `extra/` build was gone
+at 21:35:52Z, before the follow up run could publish it. Takes effect on the next bridge restart.
+
+- **Two tiers.** `target/` and the recorded DerivedData folders (rebuildable build output) keep
+  today's rule: removed once the pull request is merged or closed, the branch is gone, or a local
+  branch is in `main`, or `keep_days` after the run finished. `extra/` is removed only `keep_days`
+  after the run finished, never because of the branch.
+- **A warning first.** On the first cleanup pass within 24 hours of `keep_days`, a finished run
+  whose `extra/` holds anything gets one push, `<run_id>: extra/ is removed in about a day`, and
+  `run.json` records `cleanup.extra_warned` (RFC 3339). `extra/` goes only on a later pass past
+  `keep_days`. A reply that finishes the run again moves `finished_at`, and an older warning no
+  longer counts.
+- **The disk cap.** The space pass removes build output of every finished run first, then
+  worktrees, then `extra/` only of runs past `keep_days` and warned. If it is still over its limit
+  it logs one line naming the runs whose `extra/` it kept and why, and stops there.
+- **The agent is told.** The served prompt's sentence about `extra/` gains: everything under it is
+  deleted `keep_days` days after the run finishes (the configured number), so anything a later run
+  or a person needs must be pushed to its remote or written outside the run directory before the
+  run ends.
+- Unchanged: a live run (queued, running, paused, reviewing, needs you) never loses `extra/`; run
+  directories and `run.json` are never removed; no new configuration key.
 
 ## [bridge 0.211.0] - 2026-11-20
 

@@ -146,7 +146,55 @@ impl Drop for Stderr {
     }
 }
 
+/// The one test this binary holds, under the name a test runner lists and filters it by.
+const TEST_NAME: &str = "hostrun_env_file";
+
+/// Just enough of libtest's command line for cargo-nextest (and `cargo test <filter>`) to
+/// treat this harness-less binary as one test: `--list` names it (`--list --ignored` names
+/// nothing, since it is not ignored), and a filter that does not select it skips the run.
+/// Returns whether the test should run.
+fn selected_by_args() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let exact = args.iter().any(|a| a == "--exact");
+    let ignored_only = args.iter().any(|a| a == "--ignored");
+    // Positional arguments are filters; the value of an option that takes one is not.
+    let mut filters: Vec<&String> = Vec::new();
+    let mut skipped = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--skip" {
+            skipped |= it.next().is_some_and(|s| TEST_NAME.contains(s.as_str()));
+        } else if matches!(
+            a.as_str(),
+            "--format" | "--logfile" | "--test-threads" | "--color" | "-Z"
+        ) {
+            it.next();
+        } else if !a.starts_with('-') {
+            filters.push(a);
+        }
+    }
+    let matches = !skipped
+        && (filters.is_empty()
+            || filters.iter().any(|f| {
+                if exact {
+                    f.as_str() == TEST_NAME
+                } else {
+                    TEST_NAME.contains(f.as_str())
+                }
+            }));
+    if args.iter().any(|a| a == "--list") {
+        if matches && !ignored_only {
+            println!("{TEST_NAME}: test");
+        }
+        return false;
+    }
+    matches && !ignored_only
+}
+
 fn main() {
+    if !selected_by_args() {
+        return;
+    }
     let base = std::env::temp_dir().join(format!("jesse-hostrun-env-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();

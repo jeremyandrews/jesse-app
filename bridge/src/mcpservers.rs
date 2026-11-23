@@ -365,7 +365,7 @@ use crate::house::HOUSE_URL_PLACEHOLDER;
 // `healthdb` (0.173.0) reads two PATHS and a ledger path, never a credential: the bridge
 // sets them on the Codex child that loads the server ([`crate::apply_healthdb_env`]) and
 // they are not in the plist. Without the first two it exits at once and registers nothing.
-// `housedb` (0.212.0) is the same server over the house history, and the same holds for its
+// `housedb` (0.215.0) is the same server over the house history, and the same holds for its
 // three `JESSE_HOUSEDB_*` paths ([`crate::apply_housedb_env`]).
 // `clockify-rs` (0.175.0) is a stdio server, so its key travels by NAME here and never in
 // the bearer table. `JESSE_CLOCKIFY_API_KEY` is set in the plist; the `clockify-rs-mcp`
@@ -839,7 +839,7 @@ pub const MCP_SERVERS: &[McpServerRow] = &[
         ),
         &["create_reminder", "cancel_reminder", "snooze_reminder"],
     ),
-    // THE HOUSE HISTORY (0.212.0): this repository's own `jesse-housedb-mcp`, the same server
+    // THE HOUSE HISTORY (0.215.0): this repository's own `jesse-housedb-mcp`, the same server
     // as `healthdb` over Home Assistant's recorder on the home cluster, as `house_ro`. Like
     // `healthdb` it reads two PATHS and a ledger path, never a credential, set on the child
     // that loads it ([`crate::apply_housedb_env`]), and it is CONDITIONAL: the rendered set

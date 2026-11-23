@@ -373,6 +373,9 @@ Answer the question I asked, not the one you wish I had asked.
 #   not overlap root.
 # max_concurrent, max_per_repo, stall_minutes, permission_mode, keep_days, min_free_gb,
 #   max_total_gb, label_prefix, auto_resume_interrupted, claude (optional).
+# default_reviewers (optional): who reviews a run that names no reviewer and does not say "none".
+#   Default ["codex-write"]; [] turns the default review off. At most 3 registry ids.
+# review_timeout_minutes (optional): default 30, per reviewer answer.
 #
 # [hostrun]
 # enabled = true

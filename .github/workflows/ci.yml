@@ -24,6 +24,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A manual run, for the coverage job (which otherwise runs only on pushes to main).
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,14 +49,12 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add clippy rustfmt
 
+      # Saved by runs on main only; see the bridge jobs' cache step.
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-agent-${{ hashFiles('Cargo.lock') }}
+          shared-key: agent
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `--locked` for the same reason it is on the bridge's release build: the lock must be
       # the one that ships, not one CI quietly regenerated. See that step's comment.
@@ -106,14 +106,12 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add clippy rustfmt
 
+      # Saved by runs on main only; see the bridge jobs' cache step.
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-eval-${{ hashFiles('Cargo.lock') }}
+          shared-key: eval
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `--locked`, as on the other two builds — see the bridge's release step.
       - name: Build
@@ -131,31 +129,25 @@ jobs:
       - name: Format check
         run: cargo fmt -p jesse-eval --check
 
-  bridge:
-    name: bridge (build, test, clippy, guards, audit, coverage)
+  # THE BRIDGE, AS FOUR JOBS THAT RUN AT ONCE. Until QT1 this was one `bridge` job whose steps
+  # ran one after another (release build, both test builds, both clippy runs, coverage), so
+  # every pull request waited for the sum of them: 25 minutes. The commands, their flags and the
+  # pinned toolchain are unchanged; only the grouping is new, and each job keeps its own cache
+  # so the release, test, lint and instrumented profiles stop evicting each other.
+  #
+  # Every job here keeps `bridge` as the first word of its name: the sentinel's deploy gate
+  # (`src/sentinel/deploy.rs`, `job_matches`) accepts a green run that carries a green job
+  # named `bridge` or `bridge (...)`.
+  #
+  # The test budgets and the slow test allowlist that keep this fast are in docs/testing.md.
+
+  # (a) THE SERVING BINARY, THE DEPENDENCY AUDIT AND THE SOURCE GUARDS.
+  bridge-build:
+    name: bridge (release build, audit, guards)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: bridge
-    # THE HEALTH ARCHIVE'S DATABASE TESTS (`tests/healthdb_pg.rs`). They run only when
-    # JESSE_TEST_PG_URL is set, and each creates and drops its own database on this throwaway
-    # server, so the three test builds below (both feature sets and coverage) never see each
-    # other's rows. Nothing else in the job touches it, and the build itself needs no database:
-    # every query is a runtime `sqlx::query`.
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      JESSE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       # Full history, NOT the default depth-1: scripts/version-guard.sh derives its
       # diff base from the merge base with origin/main, and at depth 1 there is no
@@ -172,7 +164,8 @@ jobs:
       # gate must not change without a commit. Moving to a newer Rust is a deliberate pull
       # request that bumps this version AND fixes the new lints in the same change. The
       # version is printed so every run's log names the toolchain it was judged by.
-      # SCOPE: this job only; `agent` and `eval` still use the image's stable.
+      # SCOPE: the four bridge jobs, each installing the same version with this same step;
+      # `agent` and `eval` still use the image's stable.
       - name: Install Rust toolchain
         run: |
           rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt,llvm-tools-preview
@@ -180,14 +173,30 @@ jobs:
           rustc --version
           cargo clippy --version
 
+      # One cache per job (`shared-key`), so the release profile is never evicted by the test
+      # or lint profile. Saved only by runs on main; a pull request restores main's and never
+      # writes its own, so a branch cannot crowd main's entries out of the repository's quota.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
+      - name: Refresh the git index
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
+
       - name: Cache cargo
-        uses: actions/cache@v6
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            bridge/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('bridge/Cargo.lock') }}
+          workspaces: bridge
+          shared-key: bridge-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The SERVING binary, built exactly as a deploy builds it: without
       # `containment-probe`. The probe prompts, the battery runner and its loopback
@@ -207,19 +216,212 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
+      # Prebuilt binary (no from-source compile): the dependency-CVE gate.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Fails the build on a known-vulnerable dependency (reqwest/ring/rustls are
+      # in the graph). Currently clean — no advisories, no ignore list. If an
+      # unpatchable transitive advisory ever surfaces, add it to an audited ignore
+      # list (`cargo audit --ignore RUSTSEC-YYYY-NNNN`, or a `deny.toml`
+      # `[advisories] ignore` block) with a note on why it isn't reachable here —
+      # never silently pin to a vulnerable version.
+      # A weekly scheduled run (audit.yml) covers advisories that land between
+      # pushes.
+      - name: Dependency CVE audit
+        run: cargo audit
+
+      - name: Install gitleaks
+        working-directory: ${{ github.workspace }}
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Source guards (incl. R5 personal-infra + gitleaks)
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci-guards.sh
+
+  # (b) THE TESTS, WITH THE FEATURE ON, UNDER CARGO-NEXTEST.
+  bridge-test:
+    name: bridge (test, containment-probe)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    # THE HEALTH ARCHIVE'S DATABASE TESTS (`tests/it/healthdb_pg.rs`). They run only when
+    # JESSE_TEST_PG_URL is set, and each creates and drops its own database on this throwaway
+    # server, so concurrent test processes never see each other's rows. Nothing else in the
+    # job touches it, and the build itself needs no database: every query is a runtime
+    # `sqlx::query`. The coverage job below has its own server, for the same tests.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      JESSE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # THE WALL CLOCK BUDGET for the `Test` step below (test execution only; the build is its
+      # own step). Measured at 48 to 62 s over four runs (PR #354), the slowest plus 50 percent;
+      # see docs/testing.md before raising it.
+      TEST_BUDGET_SECS: 93
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned: see the toolchain step in `bridge-build`.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default 1.100.0
+          rustc --version
+          cargo clippy --version
+
+      # Its own cache: see `bridge-build`.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
+      - name: Refresh the git index
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+          shared-key: bridge-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Prebuilt binary. nextest runs every test in its own process, all of them at once, so
+      # the suite takes as long as its slowest tests rather than the sum of its test binaries.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # The build, on its own so the `Test` step's time (and its budget) is the tests alone.
+      - name: Build tests
+        run: cargo nextest run --features containment-probe --profile ci --no-run
+
       # Tests and lints DO enable the feature, so the probe module and the containment
-      # record's consistency checks (tests/containment.rs, which requires the feature to
+      # record's consistency checks (tests/it/containment.rs, which requires the feature to
       # read the probe table) are gated on every merge. The live battery inside that file
       # stays `#[ignore]`d — it spawns real agent turns.
       - name: Test
-        run: cargo test --features containment-probe
+        run: |
+          start=$(date +%s)
+          cargo nextest run --features containment-probe --profile ci
+          took=$(( $(date +%s) - start ))
+          echo "Test took ${took}s against a budget of ${TEST_BUDGET_SECS}s."
+          if [ "$took" -gt "$TEST_BUDGET_SECS" ]; then
+            echo "::error title=Test wall clock budget exceeded::The tests took ${took}s; the budget is ${TEST_BUDGET_SECS}s. Find what got slower in the slow test report (target/nextest/ci/junit.xml, uploaded as an artifact) and see docs/testing.md, 'When the budget trips'."
+            exit 1
+          fi
+
+      # nextest does not run doc tests, and `cargo test --features containment-probe` did.
+      - name: Doc tests
+        run: cargo test --doc --features containment-probe
+
+      # Any test over 10 s that is not on bridge/.config/slow-tests.txt fails the job.
+      - name: Slow test check
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci-guards.sh --slow-tests bridge/target/nextest/ci/junit.xml
+
+      - name: Upload test timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-bridge-test
+          path: bridge/target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # (c) THE DEFAULT FEATURE SET, BOTH CLIPPY RUNS AND FORMATTING.
+  bridge-lint:
+    name: bridge (default-feature test, clippy, fmt)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    env:
+      # THE WALL CLOCK BUDGET for `Test (default features)`: measured at 13 to 27 s over four runs
+      # (PR #354), the slowest plus 50 percent; see `bridge-test` and docs/testing.md.
+      TEST_BUDGET_SECS: 41
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned: see the toolchain step in `bridge-build`.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default 1.100.0
+          rustc --version
+          cargo clippy --version
+
+      # Its own cache: see `bridge-build`.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
+      - name: Refresh the git index
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+          shared-key: bridge-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Build tests (default features)
+        run: cargo nextest run --lib --profile ci --no-run
 
       # The library tests AGAIN, on the default feature set. Every other test build here
       # enables the feature, so a test that reached a feature gated item compiled green
       # under it and broke every default test build (0.145.0 to 0.147.0), with nothing
       # reporting it. This is the build a developer gets from a bare `cargo test --lib`.
       - name: Test (default features)
-        run: cargo test --lib
+        run: |
+          start=$(date +%s)
+          cargo nextest run --lib --profile ci
+          took=$(( $(date +%s) - start ))
+          echo "Test (default features) took ${took}s against a budget of ${TEST_BUDGET_SECS}s."
+          if [ "$took" -gt "$TEST_BUDGET_SECS" ]; then
+            echo "::error title=Test wall clock budget exceeded::The default feature tests took ${took}s; the budget is ${TEST_BUDGET_SECS}s. See docs/testing.md, 'When the budget trips'."
+            exit 1
+          fi
+
+      - name: Slow test check (default features)
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci-guards.sh --slow-tests bridge/target/nextest/ci/junit.xml
 
       - name: Clippy
         run: cargo clippy --all-targets --features containment-probe -- -D warnings
@@ -250,47 +452,83 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-      # Prebuilt binaries (no from-source compile): a dependency-CVE gate and the
-      # coverage tool.
-      - name: Install cargo-audit and cargo-llvm-cov
+  # (d) COVERAGE, OFF THE GATE PATH. Report-only, non-gating: emit a coverage number so a
+  # floor can be chosen later. It rebuilds the crate instrumented and reruns every test, which
+  # cost every pull request seven minutes for a number nobody gates on, so it runs only on
+  # pushes to main (and a manual dispatch of this workflow).
+  bridge-coverage:
+    name: bridge (coverage, report-only)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    # The same throwaway server as `bridge-test`, for the same database tests.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      JESSE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned: see the toolchain step in `bridge-build`.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default 1.100.0
+          rustc --version
+          cargo clippy --version
+
+      # Its own cache: see `bridge-build`.
+      # `build.rs` stamps the commit into the binary and tells cargo to rerun when the index, the
+      # branch ref or `packed-refs` changes. Two things in a fresh checkout made every cargo
+      # command after the first rebuild the whole crate (100 s per test step):
+      #   * `git status` in build.rs REWRITES a freshly checked out index. Refreshing it once,
+      #     before any build, leaves it nothing to write.
+      #   * On a push to main the checkout is on a branch, and a shallow fetch writes no
+      #     `packed-refs`; cargo treats a watched file that does not exist as changed, every
+      #     time. (A pull request checks out a detached merge commit and watches no ref.) An
+      #     empty, valid `packed-refs` makes it a file that exists and does not change.
+      - name: Refresh the git index
+        run: |
+          git update-index -q --refresh || true
+          common="$(git rev-parse --path-format=absolute --git-common-dir)"
+          [ -e "$common/packed-refs" ] || printf '# pack-refs with: peeled fully-peeled sorted \n' > "$common/packed-refs"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+          shared-key: bridge-coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Prebuilt binaries (no from-source compile): the coverage tool and the runner it drives.
+      - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit,cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
 
-      # Fails the build on a known-vulnerable dependency (reqwest/ring/rustls are
-      # in the graph). Currently clean — no advisories, no ignore list. If an
-      # unpatchable transitive advisory ever surfaces, add it to an audited ignore
-      # list (`cargo audit --ignore RUSTSEC-YYYY-NNNN`, or a `deny.toml`
-      # `[advisories] ignore` block) with a note on why it isn't reachable here —
-      # never silently pin to a vulnerable version.
-      # A weekly scheduled run (audit.yml) covers advisories that land between
-      # pushes.
-      - name: Dependency CVE audit
-        run: cargo audit
-
-      # Report-only, non-gating: emit a coverage number so a floor can be chosen
-      # later. Single-threaded to dodge the known fake-`claude` subprocess timing
-      # flakes in the integration tests (STATUS §Q/§T1), and continue-on-error so
-      # a coverage hiccup never blocks a merge.
+      # Under nextest every test is its own process, so the fake-`claude` subprocess tests no
+      # longer share one and the `--test-threads=1` this step used to need is gone.
+      # continue-on-error so a coverage hiccup never fails main.
       - name: Coverage (report-only)
         continue-on-error: true
         run: |
           set -uo pipefail
           echo "### bridge coverage" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cargo llvm-cov --summary-only -- --test-threads=1 | tee -a "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov nextest --summary-only | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Install gitleaks
-        working-directory: ${{ github.workspace }}
-        run: |
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
-            | tar -xz -C /usr/local/bin gitleaks
-          gitleaks version
-
-      - name: Source guards (incl. R5 personal-infra + gitleaks)
-        working-directory: ${{ github.workspace }}
-        run: bash scripts/ci-guards.sh
 
   # The iOS deployment-target rule, guarded on Linux so it is checked on EVERY
   # push rather than only when someone runs the Mac gate. The rule (build at the

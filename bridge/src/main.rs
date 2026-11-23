@@ -433,6 +433,26 @@ async fn main() {
                     "jesse-bridge: devjob ON (namespace {}, image {}, at most {} at once)",
                     cfg.devjob.namespace, cfg.devjob.image, cfg.devjob.max_concurrent
                 );
+                // THE CLOUD HOST: dev jobs on kc1's burst workers, `host: "cloud"`. Its own
+                // client, namespace and watcher, started with the home cluster's.
+                if cfg.devjob.cloud.enabled {
+                    match jesse_bridge::devjob::DevJobs::connect_cloud(&cfg.devjob).await {
+                        Ok(c) => {
+                            d.attach_cloud(std::sync::Arc::new(c));
+                            eprintln!(
+                                "jesse-bridge: devjob cloud ON (namespace {}, image {}, at most {} at once, cap {:.2} EUR a day)",
+                                cfg.devjob.cloud.namespace,
+                                cfg.devjob.cloud.image,
+                                cfg.devjob.cloud.max_concurrent,
+                                cfg.devjob.cloud.daily_cost_cap_eur
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("jesse-bridge: refusing to start — [devjob.cloud]: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Some(d)
             }
             Err(e) => {

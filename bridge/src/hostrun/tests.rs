@@ -226,6 +226,8 @@ fn settings(s: &Scratch) -> HostRunSettings {
     st.derived_data_root = s.derived();
     st.remote_base = format!("{}/", s.base.join("remote").to_string_lossy());
     st.label_prefix = sys::DEFAULT_LABEL_PREFIX.to_string();
+    // No default review: the tests that want one say so (`tests/review.rs`).
+    st.default_reviewers = Vec::new();
     st
 }
 
@@ -467,11 +469,12 @@ fn the_served_prompt_is_the_section_then_the_generated_section_exactly() {
         branch: "gd5b-run-the-thing",
         default_branch: "main",
         run_dir: Path::new("/Users/j/jesse-runs/runs/GD5b"),
+        keep_days: 7,
         pr_title_tag: true,
         reviewed: false,
     };
     let expected = format!(
-        "{SECTION}### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of jeremyandrews/jesse-app on branch gd5b-run-the-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/GD5b/extra/ and work there.\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n"
+        "{SECTION}### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of jeremyandrews/jesse-app on branch gd5b-run-the-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/GD5b/extra/ and work there. Everything under /Users/j/jesse-runs/runs/GD5b/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n"
     );
     assert_eq!(served_prompt(SECTION, &place), expected);
     // The section is taken byte for byte, up to the rule before the archive checkboxes.
@@ -502,6 +505,7 @@ async fn the_run_gets_the_served_prompt_on_disk() {
                 branch: "gd5-run-the-thing-on-the-studio",
                 default_branch: "main",
                 run_dir: &dir,
+                keep_days: 7,
                 pr_title_tag: false,
                 reviewed: false,
             }
@@ -1849,12 +1853,13 @@ fn the_generated_section_tags_the_title_only_where_pr_title_tag_says() {
         branch: "ab1-thing",
         default_branch: "main",
         run_dir: dir,
+        keep_days: 7,
         pr_title_tag: tag,
         reviewed: false,
     };
     let where_ = |repo: &str| {
         format!(
-            "### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of {repo} on branch ab1-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/AB1/extra/ and work there.\n\n"
+            "### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of {repo} on branch ab1-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/AB1/extra/ and work there. Everything under /Users/j/jesse-runs/runs/AB1/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\n"
         )
     };
     let rest = "Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
@@ -2375,7 +2380,7 @@ async fn an_env_file_is_recorded_by_path_only_and_a_missing_one_refuses_the_star
 // -- extra/ ------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn extra_goes_with_the_artifacts_and_never_while_the_run_is_live() {
+async fn extra_outlives_a_merge_and_never_goes_while_the_run_is_live() {
     let s = Scratch::new();
     vault_fixture(&s);
     remote_fixture(&s);
@@ -2408,14 +2413,106 @@ async fn extra_goes_with_the_artifacts_and_never_while_the_run_is_live() {
     r.svc.cleanup(now_ms() + 8 * day);
     assert!(!dir.join(TARGET_DIR).exists());
     assert!(dir.join("extra/o-m/work.txt").is_file());
-    // Reported and merged: extra/ goes with the artifacts; the record stays.
+    // Reported and merged: target/ goes, extra/ stays (it holds work that is not in the branch).
     std::fs::create_dir_all(dir.join(TARGET_DIR)).unwrap();
-    update_run(&dir, |x| x.status = RunStatus::Reported).unwrap();
+    let t0 = now_ms();
+    update_run(&dir, |x| {
+        x.status = RunStatus::Reported;
+        x.finished_at = Some(rfc(t0));
+    })
+    .unwrap();
     let rec = r.svc.get("GD5").unwrap();
     lock(&r.forge.states).insert(rec.branch.clone(), PrState::Merged);
-    r.svc.cleanup(now_ms());
-    assert!(!dir.join(EXTRA_DIR).exists());
+    assert!(r.svc.cleanup(t0).is_empty());
     assert!(!dir.join(TARGET_DIR).exists());
+    assert!(dir.join("extra/o-m/work.txt").is_file());
+    assert_eq!(r.svc.get("GD5").unwrap().cleanup.extra_warned, None);
+    // Five days on, still more than a day from keep_days (7): nothing.
+    assert!(r.svc.cleanup(t0 + 5 * day).is_empty());
+    assert!(dir.join("extra/o-m/work.txt").is_file());
+    // Past keep_days, never warned: the warning, and extra/ stays this pass.
+    let late = t0 + 8 * day;
+    let effects = r.svc.cleanup(late);
+    assert!(dir.join("extra/o-m/work.txt").is_file());
+    assert_eq!(
+        r.svc.get("GD5").unwrap().cleanup.extra_warned,
+        Some(rfc(late))
+    );
+    let bodies: Vec<String> = effects
+        .iter()
+        .map(|e| match e {
+            Effect::Push { body, .. } => body.clone(),
+        })
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["GD5: extra/ is removed in about a day".to_string()]
+    );
+    // The next pass: extra/ goes; the record stays, and the warning is not repeated.
+    assert!(r.svc.cleanup(late + 3_600_000).is_empty());
+    assert!(!dir.join(EXTRA_DIR).exists());
+    assert!(dir.join(RUN_JSON).is_file());
+}
+
+#[tokio::test]
+async fn extra_is_warned_a_day_before_keep_days_and_goes_after() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    let day = 24 * 3_600_000;
+    r.svc.start(item("GD5")).await.unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    std::fs::create_dir_all(dir.join("extra/out")).unwrap();
+    std::fs::write(dir.join("extra/out/build.bin"), "1 GiB, say").unwrap();
+    let t0 = now_ms();
+    update_run(&dir, |x| {
+        x.status = RunStatus::Reported;
+        x.finished_at = Some(rfc(t0));
+    })
+    .unwrap();
+    // Within a day of keep_days: warned, kept.
+    let effects = r.svc.cleanup(t0 + 6 * day + 3_600_000);
+    assert_eq!(effects.len(), 1);
+    assert!(r.svc.get("GD5").unwrap().cleanup.extra_warned.is_some());
+    assert!(dir.join("extra/out/build.bin").is_file());
+    // Warned, but not yet past keep_days: kept.
+    assert!(r.svc.cleanup(t0 + 6 * day + 2 * 3_600_000).is_empty());
+    assert!(dir.join("extra/out/build.bin").is_file());
+    // Past keep_days: gone.
+    assert!(r.svc.cleanup(t0 + 7 * day).is_empty());
+    assert!(!dir.join(EXTRA_DIR).exists());
+    assert!(dir.join(RUN_JSON).is_file());
+}
+
+#[tokio::test]
+async fn a_space_pass_keeps_extra_of_a_run_that_finished_an_hour_ago() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    r.svc.start(item("GD5")).await.unwrap();
+    let dir = r.svc.settings.run_dir("GD5");
+    std::fs::create_dir_all(dir.join(TARGET_DIR)).unwrap();
+    std::fs::write(dir.join(TARGET_DIR).join("o"), "build output").unwrap();
+    std::fs::create_dir_all(dir.join("extra/o-m")).unwrap();
+    std::fs::write(dir.join("extra/o-m/work.txt"), "unpushed").unwrap();
+    let now = now_ms();
+    update_run(&dir, |x| {
+        x.status = RunStatus::Reported;
+        x.finished_at = Some(rfc(now - 3_600_000));
+    })
+    .unwrap();
+    let rec = r.svc.get("GD5").unwrap();
+    lock(&r.forge.states).insert(rec.branch.clone(), PrState::Merged);
+    let mut st = r.svc.settings.clone();
+    st.max_total_bytes = 0;
+    let tight = HostRuns::new(st, s.notes(), r.launcher.clone(), r.forge.clone());
+    tight.space_pass(now);
+    // Build output and the worktree go; extra/ stays: the run is within keep_days.
+    assert!(!dir.join(TARGET_DIR).exists());
+    assert!(!dir.join(WORKTREE_DIR).exists());
+    assert!(dir.join("extra/o-m/work.txt").is_file());
     assert!(dir.join(RUN_JSON).is_file());
 }
 
@@ -2499,7 +2596,6 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
     let log = log_json("GD5", r.svc.log_lines("GD5", LOG_DEFAULT).unwrap());
     assert!(!log["lines"].as_array().unwrap().is_empty());
 
-    let base = s.base.to_string_lossy().into_owned();
     // The list as the app polls it, before anything is archived.
     let list = r.svc.list_json();
     // Then the reported run archived by hand: `?archived=all` carries `archived_at` and
@@ -2536,32 +2632,39 @@ async fn the_app_wire_fixtures_match_what_the_run_routes_serialize() {
         ("strands-annotated.json", annotated),
         ("strands-before-runs.json", plain),
     ];
+    for (name, v) in files {
+        pin_app_fixture(&s, name, &v);
+    }
+}
+
+/// One app wire fixture: rewritten under `JESSE_RUN_FIXTURE_WRITE=1`, otherwise its key paths
+/// must be exactly `v`'s.
+fn pin_app_fixture(s: &Scratch, name: &str, v: &Value) {
+    let base = s.base.to_string_lossy().into_owned();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../JesseKit/Tests/JesseNetworkingTests/Fixtures");
-    for (name, v) in files {
-        // The scratch folder's path is this machine's and this run's; the app never reads it.
-        let text = serde_json::to_string_pretty(&v)
-            .unwrap()
-            .replace(&base, "/scratch")
-            + "\n";
-        let path = dir.join(name);
-        if std::env::var("JESSE_RUN_FIXTURE_WRITE").is_ok() {
-            std::fs::write(&path, text).unwrap();
-            continue;
-        }
-        let committed: Value = serde_json::from_str(
-            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
-        )
-        .unwrap();
-        let (mut want, mut have) = (Default::default(), Default::default());
-        key_paths(&committed, "", &mut want);
-        key_paths(&v, "", &mut have);
-        assert_eq!(
-            want, have,
-            "{name}: the serializer's keys moved; regenerate with JESSE_RUN_FIXTURE_WRITE=1 and \
-             check the app's decoding"
-        );
+    // The scratch folder's path is this machine's and this run's; the app never reads it.
+    let text = serde_json::to_string_pretty(v)
+        .unwrap()
+        .replace(&base, "/scratch")
+        + "\n";
+    let path = dir.join(name);
+    if std::env::var("JESSE_RUN_FIXTURE_WRITE").is_ok() {
+        std::fs::write(&path, text).unwrap();
+        return;
     }
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .unwrap();
+    let (mut want, mut have) = (Default::default(), Default::default());
+    key_paths(&committed, "", &mut want);
+    key_paths(v, "", &mut have);
+    assert_eq!(
+        want, have,
+        "{name}: the serializer's keys moved; regenerate with JESSE_RUN_FIXTURE_WRITE=1 and \
+         check the app's decoding"
+    );
 }
 
 // ---- SETTLED RUNS CLOSE THEMSELVES (0.200.0) ---------------------------------------------
@@ -3456,11 +3559,12 @@ fn the_generated_section_for_a_local_repository_has_no_push_and_no_pull_request(
         branch: "s-x",
         default_branch: "main",
         run_dir: dir,
+        keep_days: 7,
         pr_title_tag: true,
         reviewed: false,
     };
     let local = served_prompt("Do it.\n", &place("local/x"));
-    let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
+    let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there. Everything under /Users/j/jesse-runs/runs/s-x/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
     assert_eq!(local, expected);
     assert!(!local.contains("pull request title"));
     assert!(!local.contains("origin/"));
@@ -3835,4 +3939,160 @@ async fn a_blind_continue_to_a_question_is_refused() {
 
 mod archive;
 mod review;
+mod reviewers;
 mod settle_failed;
+
+// ---- the cloud's drain (`devjob-host: any`) -------------------------------------------
+
+fn loose(host: &str) -> String {
+    format!("---\ndevjob-repo: o/n\n{host}---\n# x\n\n## PROMPT\nFix it.\n")
+}
+
+fn by_draft(path: &str) -> StartRequest {
+    StartRequest {
+        kind: StartKind::Draft {
+            draft: path.into(),
+            repo: None,
+        },
+        origin: "turn".into(),
+        again: false,
+        reviewer: None,
+        review_focus: None,
+    }
+}
+
+#[tokio::test]
+async fn a_free_cloud_slot_takes_only_a_waiting_any_draft_and_can_give_it_back() {
+    let s = Scratch::new();
+    remote_fixture(&s);
+    let d = s.notes().join("Projects/drafts");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("any-a.md"), loose("devjob-host: any\n")).unwrap();
+    std::fs::write(d.join("cloud-b.md"), loose("devjob-host: cloud\n")).unwrap();
+    std::fs::write(d.join("studio-c.md"), loose("devjob-host: studio\n")).unwrap();
+    std::fs::write(d.join("none-d.md"), loose("")).unwrap();
+    let r = rig(&s);
+    // Nothing waits yet: nothing to take.
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+    // An `any` draft that gets a Studio slot at once is the Studio's: it never waited.
+    let first = r
+        .svc
+        .start(by_draft("Projects/drafts/any-a.md"))
+        .await
+        .unwrap();
+    assert_eq!(first.status, RunStatus::Running);
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+    // Behind it on the same repository, one of each declaration.
+    for f in ["none-d", "studio-c", "cloud-b"] {
+        let q = r
+            .svc
+            .start(by_draft(&format!("Projects/drafts/{f}.md")))
+            .await
+            .unwrap();
+        assert_eq!(q.status, RunStatus::Queued, "{f}");
+        assert_eq!(q.waiting_for.as_deref(), Some("repo o/n"), "{f}");
+    }
+    // None of them says `any`: a run with no declaration (or studio, or cloud) keeps waiting
+    // for the Studio, as before.
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+
+    // A second `any` run: the oldest waiting one is taken, closed as moved, exactly once.
+    std::fs::write(d.join("any-e.md"), loose("devjob-host: any\n")).unwrap();
+    let e = r
+        .svc
+        .start(by_draft("Projects/drafts/any-e.md"))
+        .await
+        .unwrap();
+    assert_eq!(e.status, RunStatus::Queued);
+    let took = r.svc.take_for_cloud(&s.notes()).unwrap();
+    assert_eq!(took.run_id, "s-any-e");
+    assert_eq!(took.status, RunStatus::Closed);
+    assert_eq!(took.closed_reason.as_deref(), Some(MOVED_TO_CLOUD));
+    assert_eq!(took.waiting_for, None);
+    assert!(r.svc.take_for_cloud(&s.notes()).is_none());
+    // Taken, it no longer counts for the Studio's queue: the pump never starts it.
+    finish_round(&r, "s-any-a", 0, Some("ok\n"), "");
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("s-any-e").unwrap().status, RunStatus::Closed);
+    assert_eq!(r.svc.get("s-none-d").unwrap().status, RunStatus::Running);
+
+    // The cloud could not make its Job: back in the queue, the reason recorded, and taken again
+    // by the next free slot.
+    r.svc.return_from_cloud("s-any-e", "kc1 refused the Job");
+    let back = r.svc.get("s-any-e").unwrap();
+    assert_eq!(back.status, RunStatus::Queued);
+    assert_eq!(back.closed_reason, None);
+    assert!(back
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("kc1 refused the Job"));
+    r.svc.pump(now_ms());
+    assert_eq!(
+        r.svc.get("s-any-e").unwrap().waiting_for.as_deref(),
+        Some("repo o/n")
+    );
+    let again = r.svc.take_for_cloud(&s.notes()).unwrap();
+    assert_eq!(again.run_id, "s-any-e");
+    r.svc.note_moved("s-any-e", "agent-s-any-e-abcde");
+    assert_eq!(
+        r.svc.get("s-any-e").unwrap().closed_reason.as_deref(),
+        Some("moved to the cloud as agent-s-any-e-abcde")
+    );
+    // A run already given away is not given back by a late failure report.
+    r.svc.return_from_cloud("s-none-d", "not ours");
+    assert_eq!(r.svc.get("s-none-d").unwrap().status, RunStatus::Running);
+    assert!(r.svc.run_ids().contains(&"s-any-e".to_string()));
+}
+
+#[test]
+fn only_a_waiting_never_started_draft_run_on_github_is_drainable() {
+    let base = RunRecord {
+        run_id: "X1".into(),
+        status: RunStatus::Queued,
+        waiting_for: Some("slot".into()),
+        prompt_path: Some("Projects/drafts/x.md".into()),
+        repo: "o/n".into(),
+        ..RunRecord::default()
+    };
+    assert!(drainable(&base));
+    for (why, r) in [
+        (
+            "running",
+            RunRecord {
+                status: RunStatus::Running,
+                ..base.clone()
+            },
+        ),
+        (
+            "not waiting",
+            RunRecord {
+                waiting_for: None,
+                ..base.clone()
+            },
+        ),
+        (
+            "started once",
+            RunRecord {
+                started_at: Some("2026-11-23T00:00:00Z".into()),
+                ..base.clone()
+            },
+        ),
+        (
+            "no draft",
+            RunRecord {
+                prompt_path: None,
+                ..base.clone()
+            },
+        ),
+        (
+            "local",
+            RunRecord {
+                repo: "local/scratch".into(),
+                ..base.clone()
+            },
+        ),
+    ] {
+        assert!(!drainable(&r), "{why}");
+    }
+}

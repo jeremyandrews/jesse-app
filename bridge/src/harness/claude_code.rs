@@ -1572,15 +1572,15 @@ pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALT
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets", "kubernetes-cloud"])));
 
 /// The twenty-seven-server set PLUS **`reminders`**, every main turn on BOTH harnesses from
-/// bridge 0.208.0 until 0.212.0. Twenty-eight servers.
+/// bridge 0.208.0 until 0.215.0. Twenty-eight servers.
 ///
-/// **RETIRED AS THE MAIN SET IN 0.212.0**, split out rather than grown in place for the reason
+/// **RETIRED AS THE MAIN SET IN 0.215.0**, split out rather than grown in place for the reason
 /// every predecessor was: [`crate::McpSet::MessagesBuildPlacesInboundKubernetesRybbitTag1PlexHouseHealthdbClockifyRsRunnRsGoogleSheetsKubernetesCloudReminders`] still names it.
 pub static MESSAGES_BUILD_PLACES_INBOUND_KUBERNETES_RYBBIT_TAG1_PLEX_HOUSE_HEALTHDB_CLOCKIFY_RS_RUNN_RS_GOOGLE_SHEETS_KUBERNETES_CLOUD_REMINDERS_MCP_CONFIG: LazyLock<String> =
     LazyLock::new(|| mcp_config_json(&messages_plus(&["build", "places", "inbound", "kubernetes", "rybbit", "tag1", "plex", "house", "healthdb", "clockify-rs", "runn-rs", "google-sheets", "kubernetes-cloud", "reminders"])));
 
 /// The twenty-eight-server set PLUS **`housedb`**: every main turn on BOTH harnesses from
-/// bridge 0.212.0. Twenty-nine servers.
+/// bridge 0.215.0. Twenty-nine servers.
 ///
 /// What `housedb` adds is this repository's own `jesse-housedb-mcp`, the same read-only server
 /// as `healthdb` over Home Assistant's recorder on the home cluster, as `house_ro`

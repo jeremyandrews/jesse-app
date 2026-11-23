@@ -222,6 +222,115 @@ final class VaultAnswererTests: XCTestCase {
         XCTAssertTrue(VaultAnswerer.isGrounded("TERRASOLE", in: [cafe]))
     }
 
+    // MARK: - Numbers
+
+    /// Synthetic stand-ins for the 2026-11-22 incident: a clam pasta recipe whose only
+    /// "30g" is salt for soaking, and a hot sauce recipe that says "honey" but never "24g".
+    private var pasta: RetrievedChunk {
+        chunk("Recipes/Clam-Pasta.md", line: 4,
+              text: "Soak the clams in water with about 30g of salt per litre for an hour.")
+    }
+    private var hotSauce: RetrievedChunk {
+        chunk("Recipes/Hot-Sauce.md", line: 6,
+              text: "Blend the roasted chillies with 15ml honey, 12g salt and the vinegar.")
+    }
+    private var loaf: RetrievedChunk {
+        chunk("Recipes/Seeded-Loaf.md", line: 9,
+              text: "Fold in 30g hazelnuts and 24g seed mix, then drizzle with honey.")
+    }
+    private let nutsQuestion = "Some small changes: 180g squash, 1 tsp salt. I want to try "
+        + "walnuts this time. What's the quantities of nuts and seeds?"
+    private let nutsAnswer = "Walnuts: 30g; seed mix: 24g. These quantities are from the "
+        + "seeded honey hazelnut loaf recipe."
+
+    /// THE 2026-11-22 INCIDENT. One shared word ("honey") passed the grounding check, but
+    /// "24g" is in neither cited note: the value asked for was invented or carried from a
+    /// note the answer did not cite.
+    func testAnAnswerWhoseNumbersAreNotInWhatItCitesIsAnAbstain() {
+        let draft = VaultAnswerDraft(
+            answer: nutsAnswer,
+            citations: ["Recipes/Clam-Pasta.md", "Recipes/Hot-Sauce.md"], abstain: false)
+        XCTAssertEqual(
+            VaultAnswerer.validate(draft, chunks: [pasta, hotSauce, loaf],
+                                   question: nutsQuestion),
+            .unanswered(.abstained))
+    }
+
+    /// The same answer citing the note that does state both quantities is an answer.
+    func testTheSameAnswerCitingTheNoteThatStatesItsNumbersIsAnswered() {
+        let draft = VaultAnswerDraft(answer: nutsAnswer,
+                                     citations: ["Recipes/Seeded-Loaf.md"], abstain: false)
+        XCTAssertNotNil(
+            VaultAnswerer.validate(draft, chunks: [pasta, hotSauce, loaf],
+                                   question: nutsQuestion).answer)
+    }
+
+    /// An answer with no digits in it has no numbers to check.
+    func testAnAnswerWithNoDigitsIsUnaffectedByTheNumberCheck() {
+        XCTAssertEqual(VaultAnswerer.numbersNotIn("Tenmoku, cone ten.", chunks: []), [])
+        let glazes = chunk("Workshop/Glazes.md", line: 3,
+                           text: "Tenmoku is fired to cone ten in reduction.")
+        let draft = VaultAnswerDraft(answer: "Tenmoku, fired to cone ten.",
+                                     citations: ["Workshop/Glazes.md"], abstain: false)
+        XCTAssertNotNil(VaultAnswerer.validate(draft, chunks: [glazes]).answer)
+    }
+
+    /// A number written as a word is not a numeric token: "two" is checked, if at all, by
+    /// the grounding rule, not this one.
+    func testANumberWrittenAsAWordIsNotANumericToken() {
+        XCTAssertEqual(VaultAnswerer.numericTokens("two eggs and a dozen walnuts"), [])
+        let eggs = chunk("Recipes/Omelette.md", line: 1, text: "Whisk the eggs with chives.")
+        let draft = VaultAnswerDraft(answer: "Two eggs, whisked with chives.",
+                                     citations: ["Recipes/Omelette.md"], abstain: false)
+        XCTAssertNotNil(VaultAnswerer.validate(draft, chunks: [eggs]).answer)
+    }
+
+    /// Every number in the answer is somewhere in what it cites, with its unit, whatever
+    /// the spacing and case: `30 G` in a note is the `30g` of an answer.
+    func testAnAnswerWhoseNumbersAreAllInACitedNotePasses() {
+        let label = chunk("Food/Label.md", line: 2,
+                          text: "Per pack: 2,040 kcal. Use 1.5 Tbsp. Add 30 G sugar.")
+        let draft = VaultAnswerDraft(answer: "30g sugar and 1.5 tbsp, 2,040 kcal in all.",
+                                     citations: ["Food/Label.md"], abstain: false)
+        XCTAssertNotNil(VaultAnswerer.validate(draft, chunks: [label]).answer)
+    }
+
+    /// The tokenizer: a run of digits with an optional decimal part, and its unit when the
+    /// letters are attached or one space away; the space and case are folded out.
+    func testNumericTokensCarryTheirUnitFoldedAndUnspaced() {
+        XCTAssertEqual(VaultAnswerer.numericTokens("30g, 30 G, 1.5 tbsp, 2,040 kcal"),
+                       [.init(number: "30", unit: "g"), .init(number: "30", unit: "g"),
+                        .init(number: "1.5", unit: "tbsp"), .init(number: "2040", unit: "kcal")])
+        // Years, times and dates are numbers too.
+        XCTAssertEqual(VaultAnswerer.numericTokens("2026-09-27 at 18:30"),
+                       [.init(number: "2026", unit: ""), .init(number: "9", unit: ""),
+                        .init(number: "27", unit: ""), .init(number: "18", unit: ""),
+                        .init(number: "30", unit: "")])
+    }
+
+    /// The unit is part of the number: `30ml` is not the `30g` of a note.
+    func testANumberWithTheWrongUnitIsNotInTheNote() {
+        let note = chunk("Recipes/Dressing.md", line: 1, text: "Whisk 30ml olive oil.")
+        XCTAssertEqual(VaultAnswerer.numbersNotIn("30g olive oil", chunks: [note]),
+                       [.init(number: "30", unit: "g")])
+        // …but a bare number matches the same number anywhere, whatever its unit there.
+        XCTAssertEqual(VaultAnswerer.numbersNotIn("30, olive oil", chunks: [note]), [])
+    }
+
+    /// A date in an answer is checked like any other number: a year the note never
+    /// states is not in the note.
+    func testAYearTheCitedNoteDoesNotStateIsAnAbstain() {
+        let boiler = chunk("House/Boiler.md", line: 2,
+                           text: "The boiler service is booked for 8 October 2026.")
+        let wrong = VaultAnswerDraft(answer: "The boiler service is on 8 October 2025.",
+                                     citations: ["House/Boiler.md"], abstain: false)
+        XCTAssertEqual(VaultAnswerer.validate(wrong, chunks: [boiler]),
+                       .unanswered(.abstained))
+        let right = VaultAnswerDraft(answer: "The boiler service is on 8 October 2026.",
+                                     citations: ["House/Boiler.md"], abstain: false)
+        XCTAssertNotNil(VaultAnswerer.validate(right, chunks: [boiler]).answer)
+    }
+
     // MARK: - The prompt
 
     func testThePromptIsTheDateTheQuestionAndTheNotesAndNothingElse() {

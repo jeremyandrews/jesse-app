@@ -253,7 +253,7 @@
 //! Regenerate with no `GIT_CONFIG_*` in the environment (a Studio run's own shell has them),
 //! or the `env_keys` of every site shift by the ambient count.
 //!
-//! **AND AGAIN, in bridge 0.212.0, for `housedb`, on Claude Code's two write sites only.**
+//! **AND AGAIN, in bridge 0.215.0, for `housedb`, on Claude Code's two write sites only.**
 //! `main-write` and `main-write-resume` moved their `--allowedTools` digest for
 //! `mcp__housedb__housedb_query` and `mcp__housedb__housedb_schema`. Nothing else moved, for
 //! `healthdb`'s 0.173.0 reason: the fixture's config has no `[housedb]` table, so the rendered
@@ -265,7 +265,7 @@
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.
-mod common;
+use crate::common;
 
 use jesse_bridge::*;
 use serde_json::{json, Value};

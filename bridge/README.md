@@ -1072,20 +1072,28 @@ pull request's head, with the first line `AWAITING MERGE: https://github.com/<ow
 
 - The run becomes `awaiting_merge`, keeping its worktree and session, and records `merge_wait`
   (`url`, `owner`, `repo`, `number`, `title`, `since`, `last_check_at`, `last_push_at`, and once
-  over `ended` and `ended_at`; absent on every other run). One push, `Merge needed`, body
-  `<run_id> (<strand ID>): <pull request title>` then the URL, goes through the usual notifier.
-- The watcher's pass, beside the usage limit resume, reads each such pull request every 5 minutes
-  with `gh pr view <url> --json state,mergedAt,mergeCommit,title` as the bridge user. Open:
-  nothing changes, and a fresh push goes out once a day. Merged: the run's next round is queued
-  exactly as a reply is, in the same session, with `Jeremy merged <url> at <mergedAt UTC> as <merge
-  commit SHA>. Continue from the next step.` (`auto: "merge"`); the queue, the caps and the usage
-  limit hold apply as to any reply. Closed without merging: the run is `needs_you`, with one push.
-  A read that fails is logged and asked again at the next check and never changes the run. There
-  is no cap on the wait.
-- A reply, `devjob_close`, an archive and the automatic closes treat an `awaiting_merge` run as a
-  `needs_you` one (cancel refuses both), and each ends the wait. An empty `Continue where you left
-  off.` is accepted: the run asked nothing. It counts in `needs_me` and in a strand's
-  `runs_needs_you`, and its worktree is never removed while it waits.
+  over `ended` and `ended_at`; absent on every other run). A query or fragment after the number
+  (`?diff=split`, `#issuecomment-…`) is dropped.
+- Each pass of the watcher starts a check, on its own task, for every such run not read in the
+  last 5 minutes and with no check still in flight: `gh pr view <url> --json
+  state,mergedAt,mergeCommit,title` as the bridge user. The pass never waits for a check, so a
+  `gh` that hangs holds up only that run's watch. The first check sends the one push, `Merge
+  needed`, body `<run_id> (<strand ID>): <pull request title>` then the URL, through the usual
+  notifier, unless the pull request is already merged or closed by then; while it stays open a
+  fresh push goes out once a day. Merged, with its merge time and commit: the run's next round is
+  queued exactly as a reply is, in the same session, with `Jeremy merged <url> at <mergedAt UTC>
+  as <merge commit SHA>. Continue from the next step.` (`auto: "merge"`), and the queue is pumped,
+  so the caps and the usage limit hold apply as to any reply. Merged but GitHub has not given the
+  time or the commit yet: asked again at the next check. Closed without merging: the run is
+  `needs_you`, with one push. A read that fails is logged and asked again at the next check and
+  never changes the run. There is no cap on the wait.
+- A reply, `devjob_close` and an archive of the run treat an `awaiting_merge` run as a `needs_you`
+  one, and each ends the wait; cancel refuses both, and so does an empty `Continue where you left
+  off.` (the run waits for a merge; a blind continue would carry on as if it had happened). Of
+  the automatic closes, a ticked Drafts line and a later run of the item close it; moving its
+  Inbox report to `Inbox/archive/` does not, so filing the "merge needed" report never drops the
+  wait. It counts in `needs_me` and in a strand's `runs_needs_you`, and its worktree is never
+  removed while it waits.
 - `AWAITING MERGE:` with no GitHub pull request URL on that line is read as `NEEDS YOU:`.
   The bridge only reads the pull request: it never merges it and never pushes for the run.
 

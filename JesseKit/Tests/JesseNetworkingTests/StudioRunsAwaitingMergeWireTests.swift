@@ -2,9 +2,10 @@ import XCTest
 @testable import JesseNetworking
 
 /// `awaiting_merge` (DJ12): a run whose only remaining blocker is its owner merging a pull
-/// request, carrying `merge_wait`. `studio-run-awaiting-merge.json` is the GD5 record of
-/// `studio-run-needs-you-served.json` (the bridge's own serialization) with the status and the
-/// `merge_wait` object the bridge serves for it; the bridge's fixture test may pin it later.
+/// request, carrying `merge_wait`. `studio-run-awaiting-merge.json` is the bridge's own
+/// serialization of run GD5 waiting on jeremyandrews/jesse-app#362, rewritten by
+/// `JESSE_RUN_FIXTURE_WRITE=1 cargo test the_app_awaiting_merge_fixture`; these tests read only
+/// what that run always serves.
 final class StudioRunsAwaitingMergeWireTests: XCTestCase {
 
     private func fixture(_ name: String) throws -> Data {
@@ -53,7 +54,7 @@ final class StudioRunsAwaitingMergeWireTests: XCTestCase {
 
     func testAnAwaitingMergeRunDecodesWithItsMergeWait() throws {
         let run = try StudioRun.decode(from: fixture("studio-run-awaiting-merge"))
-        XCTAssertEqual(run.runID, "DJ12")
+        XCTAssertEqual(run.runID, "GD5")
         XCTAssertEqual(run.status, .awaitingMerge)
         XCTAssertFalse(run.isArchived)
         let wait = try XCTUnwrap(run.mergeWait)
@@ -63,9 +64,10 @@ final class StudioRunsAwaitingMergeWireTests: XCTestCase {
         XCTAssertEqual(wait.number, 362)
         XCTAssertEqual(wait.title,
                        "Bridge 0.217.1: read a quoted devjob-priority followed by a comment")
-        XCTAssertEqual(wait.since, "2026-11-24T09:12:00Z")
-        XCTAssertEqual(wait.lastCheckAt, "2026-11-24T09:17:00Z")
-        XCTAssertEqual(wait.lastPushAt, "2026-11-24T09:12:00Z")
+        // The times are when the bridge recorded the fixture: present, never pinned.
+        XCTAssertNotNil(wait.since)
+        XCTAssertNotNil(wait.lastCheckAt)
+        XCTAssertNotNil(wait.lastPushAt)
         XCTAssertNil(wait.ended)
         XCTAssertNil(wait.endedAt)
         XCTAssertFalse(wait.hasEnded)
@@ -112,7 +114,7 @@ final class StudioRunsAwaitingMergeWireTests: XCTestCase {
         ]
         for value in malformed {
             let run = try StudioRun.decode(from: edited { $0["merge_wait"] = value })
-            XCTAssertEqual(run.runID, "DJ12", "\(value)")
+            XCTAssertEqual(run.runID, "GD5", "\(value)")
             XCTAssertEqual(run.status, .awaitingMerge)
             XCTAssertNil(run.mergeWait, "\(value)")
         }
@@ -162,8 +164,8 @@ final class StudioRunsAwaitingMergeWireTests: XCTestCase {
         list["runs"] = ((list["runs"] as? [Any]) ?? []) + [run]
         let decoded = try StudioRunList.decode(
             from: JSONSerialization.data(withJSONObject: list))
-        let dj12 = try XCTUnwrap(decoded.runs.first { $0.runID == "DJ12" })
-        XCTAssertEqual(dj12.status, .awaitingMerge)
-        XCTAssertEqual(dj12.mergeWait?.number, 362)
+        let waiting = try XCTUnwrap(decoded.runs.last { $0.runID == "GD5" })
+        XCTAssertEqual(waiting.status, .awaitingMerge)
+        XCTAssertEqual(waiting.mergeWait?.number, 362)
     }
 }

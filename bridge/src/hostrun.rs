@@ -2100,6 +2100,16 @@ pub trait TurnSender: Send + Sync {
     fn send(&self, text: String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
+/// The turn a Studio run event submits: a `tell` of `text` ([`start_turn_text`] or
+/// [`report_turn_text`]), folded away by the apps as a Studio run and marked with
+/// [`STUDIO_RUN_ORIGIN`], which is what wraps it in [`crate::prompt::RUN_EVENT_PREAMBLE`].
+pub fn run_turn_request(text: String) -> JesseRequest {
+    let mut req = JesseRequest::scheduled("tell", text, None);
+    req.set_sent_for("Studio run");
+    req.set_origin(STUDIO_RUN_ORIGIN);
+    req
+}
+
 /// The bridge's turn, as a [`TurnSender`]: a `tell`, marked as the bridge's own studio-run
 /// sender.
 pub struct AppTurns {
@@ -2110,10 +2120,7 @@ impl TurnSender for AppTurns {
     fn send(&self, text: String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let st = self.st.clone();
         Box::pin(async move {
-            let mut req = JesseRequest::scheduled("tell", text.clone(), None);
-            req.set_sent_for("Studio run");
-            req.set_origin(STUDIO_RUN_ORIGIN);
-            match start_turn(&st, req, None).await {
+            match start_turn(&st, run_turn_request(text.clone()), None).await {
                 Ok(TurnStart::Accepted { job_id, .. }) => {
                     eprintln!("jesse-bridge: hostrun TURN {text:?} job={job_id}");
                     Ok(())

@@ -276,6 +276,8 @@ async fn prompts_returns_both_built_in_defaults() {
     // The fixed safety floors are exposed too, so the app can show them read-only.
     assert_eq!(body["ask_floor"], p.render(ASK_FLOOR));
     assert_eq!(body["tell_floor"], p.render(TELL_FLOOR));
+    // …and the wrapper for the bridge's own run and strand tick turns, read-only.
+    assert_eq!(body["run_event"], p.render(RUN_EVENT_PREAMBLE));
 }
 #[tokio::test]
 async fn result_endpoint_returns_persisted_job_after_restart() {

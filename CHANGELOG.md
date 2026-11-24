@@ -14,6 +14,12 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.220.0] - 2026-11-24
+
+**When a Studio run starts or reports, or a strand step is ticked, the reply explains the work in plain words: what it was and why, what someone can now do or see, what it gets the owner, whether the owner needs to do anything, with ids last.**
+
+Root cause: the bridge's own run and tick turns were wrapped as ordinary tells, and the Tell wrapper asks for a one or two sentence confirmation, so run outcomes reached the owner as ids ("BG14 is done, PRs 264, 265 and 267 merged") instead of an explanation. Those turns, picked out by their bridge-only origin (`studio-run`, `strand-tick`), now take a new `RUN_EVENT_PREAMBLE` behind the unchanged tell floor. A custom Tell wrapper saved in the app's Settings does not replace it, since those overrides are for turns the owner types. `GET /jesse/prompts` shows the new default read-only as `run_event`. The session list recovers the event text by that wrapper's whole last sentence, so a saved Tell wrapper that says "Event:" on a line of its own still unwraps to exactly what the owner typed. Ordinary ask, tell and voice turns are unchanged.
+
 ## [bridge 0.219.0] - 2026-11-24
 
 **A cloud dev job's memory, CPU and agent time come from `[devjob.cloud]` config, with defaults

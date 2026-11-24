@@ -14,6 +14,30 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.219.0] - 2026-11-24
+
+**A cloud dev job's memory, CPU and agent time come from `[devjob.cloud]` config, with defaults
+that let a Rust workspace the size of trovato build and test.** Root cause: the cloud Job's pod
+resources were fixed in code for the cheapest 8 GB worker (3 CPU / 6Gi request, 4 CPU / 7Gi
+limit), and nothing tied them to the worker size, so choosing a bigger `burst_size` changed
+nothing and three trovato runs on 2026-11-24 were `OOMKilled` after 57 to 120 minutes, losing
+all their work.
+
+- New `[devjob.cloud]` keys: `job_memory_gi` (default 14), `job_memory_request_gi` (12),
+  `job_cpu` (4), `job_cpu_request` (3) and `max_agent_minutes` (480). The bridge refuses to boot
+  when a request is above its limit, any of them is 0, or `max_agent_minutes` is past a worker's
+  8 hour life. A config without them gets the defaults.
+- `burst_size` defaults to `g-4vcpu-16gb` (4 vCPU, 16 GB), which the new defaults fit.
+  `hourly_cost_eur` still defaults to the old 8 GB worker's price, which was not re-read: set it
+  to the new size's price so the daily cost cap counts it.
+- The Job sets `CARGO_BUILD_JOBS` to `job_cpu`, so cargo never runs more parallel rustc
+  processes than the pod has CPUs; those, not the CPU count, set a build's peak memory.
+- A cloud run's `timeout_minutes` is capped at `max_agent_minutes` instead of the cluster's 240;
+  the `devjob_start` description and schema say so. The cluster's cap is unchanged.
+- A cloud run whose pod was `OOMKilled` says so first in its report's failure line ("killed at
+  the 14 Gi memory limit (OOMKilled)"), read from the pod's terminated state, instead of only
+  `BackoffLimitExceeded`.
+
 ## [bridge 0.218.1] - 2026-11-24
 
 **The merge watch runs each check on its own task, so a `gh` that hangs holds up only its own run, never the watcher, the queue or the other runs; the one "Merge needed" push comes from the first check, so a pull request already merged or closed gets none; a merge missing its time or commit is asked again; a blind "Continue where you left off." is refused while a run waits for a merge; and a link with `?…` or `#…` after the number is watched.**

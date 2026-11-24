@@ -104,6 +104,42 @@ public struct StudioRunCloudBadge: View {
     }
 }
 
+/// The pull request an `awaiting_merge` run waits on, as a tappable link that opens it in the
+/// browser: `owner/repo#number`, its title beside it. Borderless, so in a list row it is its
+/// own tap target and not the row's.
+public struct StudioRunMergeLinkView: View {
+    let link: StudioRunMergeLink
+    var font: Font = .caption
+
+    public init(link: StudioRunMergeLink, font: Font = .caption) {
+        self.link = link
+        self.font = font
+    }
+
+    public var body: some View {
+        Link(destination: link.url) {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.pull")
+                Text(link.text)
+                    .monospacedDigit()
+                    .underline()
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if let title = link.title {
+                    Text(title)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .font(font)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(link.accessibilityLabel)
+        .accessibilityHint("Opens the pull request")
+        .accessibilityIdentifier("studio-run-merge-link")
+    }
+}
+
 // MARK: - The board's badge
 
 /// The count of a strand's active runs, in the needs-you colour when one waits on its owner.
@@ -448,6 +484,9 @@ struct StudioRunRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if let link = StudioRunSemantics.rowMergeLink(run) {
+                StudioRunMergeLinkView(link: link)
+            }
             if let line = StudioRunSemantics.movingLine(run) {
                 Text(line)
                     .font(.caption)
@@ -683,6 +722,17 @@ public struct StudioRunDetailView: View {
                 }
             }
             .padding(.vertical, 2)
+            if let link = StudioRunSemantics.mergeLink(run) {
+                VStack(alignment: .leading, spacing: 4) {
+                    StudioRunMergeLinkView(link: link, font: .body)
+                    if let line = StudioRunSemantics.mergeLine(run, now: now) {
+                        Text(line)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             if let path = run.latestReportPath {
                 Button {
                     reportAction?.open(path)

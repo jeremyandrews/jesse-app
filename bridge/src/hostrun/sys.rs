@@ -359,6 +359,49 @@ pub trait Forge: Send + Sync {
     fn github(&self) -> Option<&dyn crate::attribution::GitHubView> {
         None
     }
+
+    /// One pull request's merge state, read by its URL, for a run that waits on Jeremy's
+    /// merge. `Err` says why it could not be read (network, rate limit, auth); the watch asks
+    /// again at its next check.
+    fn pull_merge(&self, url: &str) -> Result<PullMerge, String> {
+        Err(format!("this forge cannot read {url}"))
+    }
+}
+
+/// What `gh pr view <url> --json state,mergedAt,mergeCommit,title` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullMerge {
+    pub state: PrState,
+    pub merged_at: Option<String>,
+    pub merge_commit: Option<String>,
+    pub title: Option<String>,
+}
+
+/// [`PullMerge`] from `gh pr view`'s JSON.
+pub fn parse_pull_merge(v: &serde_json::Value) -> Result<PullMerge, String> {
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    let state = match v.get("state").and_then(|x| x.as_str()) {
+        Some("MERGED") => PrState::Merged,
+        Some("CLOSED") => PrState::Closed,
+        Some("OPEN") => PrState::Open,
+        other => return Err(format!("gh answered state {other:?}")),
+    };
+    Ok(PullMerge {
+        state,
+        merged_at: s("mergedAt"),
+        merge_commit: v
+            .get("mergeCommit")
+            .and_then(|c| c.get("oid"))
+            .and_then(|x| x.as_str())
+            .filter(|x| !x.is_empty())
+            .map(str::to_string),
+        title: s("title"),
+    })
 }
 
 /// `gh pr list`, as the bridge user (its own `gh` login).
@@ -387,6 +430,31 @@ impl Forge for GhForge {
             "OPEN" => Some(PrState::Open),
             _ => None,
         }
+    }
+
+    fn pull_merge(&self, url: &str) -> Result<PullMerge, String> {
+        let out = Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                url,
+                "--json",
+                "state,mergedAt,mergeCommit,title",
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run gh: {e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "gh pr view exited {}: {}",
+                out.status,
+                err.trim().lines().next().unwrap_or("")
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("gh pr view answered something unreadable: {e}"))?;
+        parse_pull_merge(&v)
     }
 }
 

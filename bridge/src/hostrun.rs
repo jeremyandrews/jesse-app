@@ -116,6 +116,19 @@ pub const BRANCH_TEXT_CHARS: usize = 40;
 
 /// The first line of a report that asks for a decision.
 pub const NEEDS_YOU_PREFIX: &str = "NEEDS YOU:";
+/// The first line of a report whose only blocker is Jeremy merging a pull request the run may
+/// not merge itself: the run is `awaiting_merge` and resumes by itself once it merges.
+pub const AWAITING_MERGE_PREFIX: &str = "AWAITING MERGE:";
+/// [`Round::auto`] of the round a merge of an `awaiting_merge` run's pull request queues.
+pub const AUTO_MERGE: &str = "merge";
+/// How often the watcher reads an `awaiting_merge` run's pull request.
+pub const MERGE_CHECK_EVERY_MS: u64 = 5 * 60 * 1000;
+/// How often a fresh "Merge needed" push goes out while the pull request stays open.
+pub const MERGE_PUSH_EVERY_MS: u64 = 24 * 60 * 60 * 1000;
+/// `MergeWait::ended` when Jeremy answers the run before the merge.
+pub const MERGE_WAIT_ANSWERED: &str = "answered";
+/// The title of the push that asks Jeremy for a merge.
+pub const MERGE_PUSH_TITLE: &str = "Merge needed";
 /// The reply that resumes a run from the app, and the round a run paused for the usage limit
 /// gets at its `resume_at`.
 pub const CONTINUE_TEXT: &str = "Continue where you left off.";
@@ -714,6 +727,11 @@ pub enum RunStatus {
     /// A second model is reading the run's work ([`review`]); the bridge hands its findings to
     /// the run's session when it answers. Moving, like `running`: nothing to reply to yet.
     Reviewing,
+    /// Its report's first line was [`AWAITING_MERGE_PREFIX`]: the only thing left is Jeremy
+    /// merging the pull request in `merge_wait`. The watcher reads it every
+    /// [`MERGE_CHECK_EVERY_MS`] and resumes the run in its session when it merges. Waits on
+    /// Jeremy, like `needs_you`: a reply or a close ends the wait.
+    AwaitingMerge,
 }
 
 impl RunStatus {
@@ -729,6 +747,7 @@ impl RunStatus {
             RunStatus::Paused => "paused",
             RunStatus::Closed => "closed",
             RunStatus::Reviewing => "reviewing",
+            RunStatus::AwaitingMerge => "awaiting_merge",
         }
     }
 
@@ -736,6 +755,7 @@ impl RunStatus {
     pub fn outcome(self) -> &'static str {
         match self {
             RunStatus::NeedsYou => "needs you",
+            RunStatus::AwaitingMerge => "awaiting merge",
             other => other.label(),
         }
     }
@@ -750,6 +770,7 @@ impl RunStatus {
                 | RunStatus::NeedsYou
                 | RunStatus::Paused
                 | RunStatus::Reviewing
+                | RunStatus::AwaitingMerge
         )
     }
 
@@ -767,11 +788,15 @@ impl RunStatus {
         self.is_terminal()
     }
 
-    /// Needs Jeremy: waiting on him, cut off, or failed. The list's `needs_me` count.
+    /// Needs Jeremy: waiting on him (a question or a merge), cut off, or failed. The list's
+    /// `needs_me` count.
     pub fn needs_me(self) -> bool {
         matches!(
             self,
-            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+            RunStatus::NeedsYou
+                | RunStatus::AwaitingMerge
+                | RunStatus::Interrupted
+                | RunStatus::Failed
         )
     }
 
@@ -785,7 +810,10 @@ impl RunStatus {
     pub fn is_settleable(self) -> bool {
         matches!(
             self,
-            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+            RunStatus::NeedsYou
+                | RunStatus::AwaitingMerge
+                | RunStatus::Interrupted
+                | RunStatus::Failed
         )
     }
 
@@ -803,7 +831,11 @@ impl RunStatus {
     pub fn is_active(self) -> bool {
         matches!(
             self,
-            RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused | RunStatus::Reviewing
+            RunStatus::Running
+                | RunStatus::NeedsYou
+                | RunStatus::AwaitingMerge
+                | RunStatus::Paused
+                | RunStatus::Reviewing
         )
     }
 }
@@ -970,6 +1002,127 @@ pub struct RunRecord {
     /// Every change of `priority` while queued (`devjob_priority`), oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub priority_changes: Vec<PriorityChange>,
+    /// The pull request an `awaiting_merge` run waits on, and how the watch stands; kept, with
+    /// `ended`, once the wait is over. Absent on every run that never waited (and on records
+    /// before 0.218.0), so their JSON is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_wait: Option<MergeWait>,
+}
+
+/// What an `awaiting_merge` run waits on ([`RunRecord::merge_wait`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeWait {
+    /// `https://github.com/<owner>/<repo>/pull/<number>`.
+    pub url: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    /// The pull request's title, once GitHub answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// When the wait began (RFC 3339).
+    #[serde(default)]
+    pub since: String,
+    /// When the watcher last asked GitHub, answered or not.
+    #[serde(default)]
+    pub last_check_at: Option<String>,
+    /// When the last "Merge needed" push went out.
+    #[serde(default)]
+    pub last_push_at: Option<String>,
+    /// How the wait ended: `merged at <time> as <sha>`, `<url> was closed without merging`,
+    /// [`MERGE_WAIT_ANSWERED`] or `closed (<reason>)`. Absent while it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+}
+
+impl MergeWait {
+    /// `owner/repo#number`: what stands for the title until GitHub gives one.
+    pub fn short(&self) -> String {
+        format!("{}/{}#{}", self.owner, self.repo, self.number)
+    }
+
+    /// End the wait, once: a later end does not overwrite the first.
+    fn end(&mut self, how: &str, at: &str) {
+        if self.ended.is_none() {
+            self.ended = Some(how.to_string());
+            self.ended_at = Some(at.to_string());
+        }
+    }
+}
+
+/// The pull request an `AWAITING MERGE:` first line names: the first `https://github.com/<owner>/
+/// <repo>/pull/<number>` on that line, canonical. `None` when the report does not start with the
+/// prefix or the line names no such URL (the run is then `needs_you`).
+pub fn awaiting_merge_pull(report: &str) -> Option<MergeWait> {
+    let line = first_line(report);
+    let rest = line.strip_prefix(AWAITING_MERGE_PREFIX)?;
+    let url = pull_request_url(rest)?;
+    let parts: Vec<&str> = url["https://github.com/".len()..].split('/').collect();
+    let (owner, repo) = (parts.first()?, parts.get(1)?);
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !ok(owner) || !ok(repo) {
+        return None;
+    }
+    Some(MergeWait {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number: parts.get(3)?.parse().ok()?,
+        url,
+        ..MergeWait::default()
+    })
+}
+
+/// The one message an `awaiting_merge` run is resumed with once its pull request merged.
+pub fn merged_text(url: &str, merged_at: Option<&str>, sha: Option<&str>) -> String {
+    format!(
+        "Jeremy merged {url} {}. Continue from the next step.",
+        merged_facts(merged_at, sha)
+    )
+}
+
+/// Whether the run still waits on the merge of `url`.
+fn still_waiting(r: &RunRecord, url: &str) -> bool {
+    r.status == RunStatus::AwaitingMerge && r.merge_wait.as_ref().is_some_and(|x| x.url == url)
+}
+
+/// `at <merged_at UTC> as <merge commit SHA>`.
+fn merged_facts(merged_at: Option<&str>, sha: Option<&str>) -> String {
+    let at = merged_at
+        .map(|t| {
+            chrono::DateTime::parse_from_rfc3339(t)
+                .map(|d| {
+                    d.with_timezone(&chrono::Utc)
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string()
+                })
+                .unwrap_or_else(|_| t.to_string())
+        })
+        .unwrap_or_else(|| "an unknown time".to_string());
+    format!("at {at} as {}", sha.unwrap_or("an unknown commit"))
+}
+
+/// `<run_id> (<strand ID>)`, or `<run_id>` for a run of no strand item.
+fn run_and_item(rec: &RunRecord) -> String {
+    match &rec.item_id {
+        Some(id) => format!("{} ({id})", rec.run_id),
+        None => rec.run_id.clone(),
+    }
+}
+
+/// The "Merge needed" push's body: `<run_id> (<strand ID>): <title>`, then the URL.
+pub fn merge_push_body(rec: &RunRecord, w: &MergeWait) -> String {
+    format!(
+        "{}: {}\n{}",
+        run_and_item(rec),
+        w.title.clone().unwrap_or_else(|| w.short()),
+        w.url
+    )
 }
 
 impl RunRecord {
@@ -1441,9 +1594,17 @@ pub fn generated_paragraph(run_id: &str, pr_title_tag: bool) -> String {
          report back, the same text you would answer with, to the file named in the \
          environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision \
          from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed \
-         by the one question, and end the run."
+         by the one question, and end the run. {AWAITING_MERGE_SENTENCE}"
     )
 }
+
+/// What every Studio run is told after the `NEEDS YOU:` rule, exactly: how to wait for a merge it
+/// may not make itself.
+pub const AWAITING_MERGE_SENTENCE: &str = "If the only thing left before your next step is \
+Jeremy merging a pull request you may not merge yourself, get CI green on that pull request's \
+head, then end the turn with a first line of AWAITING MERGE: followed by the pull request's full \
+https:// URL. Never poll for the merge yourself: the bridge watches it, and after the merge this \
+session is resumed with the merge commit SHA.";
 
 /// What a local repository's run is told in place of the push, pull request and fetch
 /// sentences, exactly.
@@ -1463,7 +1624,8 @@ pub fn generated_paragraph_local(run_id: &str) -> String {
          When you finish, or stop early, write your complete report back, the same text you \
          would answer with, to the file named in the environment variable JESSE_RUN_REPORT, \
          then answer as usual. If you need a decision from Jeremy to continue, stop, make the \
-         first line of that report NEEDS YOU: followed by the one question, and end the run."
+         first line of that report NEEDS YOU: followed by the one question, and end the run. \
+         {AWAITING_MERGE_SENTENCE}"
     )
 }
 
@@ -2274,6 +2436,13 @@ pub fn round_status(round: &Round, exit: &ExitInfo, report: &str) -> RunStatus {
         RunStatus::Cancelled
     } else if first_line(report).starts_with(NEEDS_YOU_PREFIX) {
         RunStatus::NeedsYou
+    } else if first_line(report).starts_with(AWAITING_MERGE_PREFIX) {
+        // With no pull request URL to watch it is a question, never dropped.
+        if awaiting_merge_pull(report).is_some() {
+            RunStatus::AwaitingMerge
+        } else {
+            RunStatus::NeedsYou
+        }
     } else if exit.code == Some(0) {
         RunStatus::Reported
     } else {
@@ -2331,6 +2500,11 @@ fn close_run(
     let rec = update_run(dir, |r| {
         if !may(r.status) {
             return;
+        }
+        if r.status == RunStatus::AwaitingMerge {
+            if let Some(w) = r.merge_wait.as_mut() {
+                w.end(&format!("closed ({reason})"), &rfc(now));
+            }
         }
         r.status = RunStatus::Closed;
         r.closed_reason = Some(reason.to_string());
@@ -3362,6 +3536,7 @@ impl HostRuns {
             && !matches!(
                 rec.status,
                 RunStatus::NeedsYou
+                    | RunStatus::AwaitingMerge
                     | RunStatus::Reported
                     | RunStatus::Failed
                     | RunStatus::Interrupted
@@ -3400,6 +3575,12 @@ impl HostRuns {
                 auto: auto.map(str::to_string),
                 ..Round::default()
             });
+            // An answer ends a wait for a merge; the merge's own round says so in `also`.
+            if r.status == RunStatus::AwaitingMerge {
+                if let Some(w) = r.merge_wait.as_mut() {
+                    w.end(MERGE_WAIT_ANSWERED, &now);
+                }
+            }
             r.status = RunStatus::Queued;
             r.queued_at = Some(now.clone());
             r.waiting_for = None;
@@ -3445,6 +3626,170 @@ impl HostRuns {
                 let _ = update_run(&self.settings.run_dir(&r.run_id), |x| {
                     x.resume_at = Some(at.clone())
                 });
+            }
+        }
+    }
+
+    /// The merge watch, one step of the watcher's pass: every `awaiting_merge` run whose pull
+    /// request was not read in the last [`MERGE_CHECK_EVERY_MS`] is read now. Open: nothing
+    /// changes but the check time, and a fresh push goes out once [`MERGE_PUSH_EVERY_MS`] has
+    /// passed since the last. Merged: the run's next round is queued exactly as a reply is
+    /// ([`HostRuns::queue_round_with`]), with [`merged_text`]; the pass's pump then starts it
+    /// under the usual rules. Closed: the run is `needs_you`, with one push. A read that fails
+    /// is logged and asked again at the next check; it never changes the run. No total cap:
+    /// the wait ends only on a merge, a close of the pull request, or the run leaving
+    /// `awaiting_merge` (a reply, a close, an archive).
+    pub async fn watch_merges(self: &Arc<Self>, now: u64) {
+        let due: Vec<(PathBuf, RunRecord, MergeWait)> = self
+            .runs()
+            .into_iter()
+            .filter(|(_, r)| r.status == RunStatus::AwaitingMerge)
+            .filter_map(|(d, r)| {
+                let w = r.merge_wait.clone()?;
+                let recent = ms_opt(&w.last_check_at)
+                    .is_some_and(|t| now.saturating_sub(t) < MERGE_CHECK_EVERY_MS);
+                (!recent).then_some((d, r, w))
+            })
+            .collect();
+        for (dir, rec, w) in due {
+            let run_id = rec.run_id.clone();
+            let forge = self.forge.clone();
+            let url = w.url.clone();
+            let got = tokio::task::spawn_blocking(move || forge.pull_merge(&url))
+                .await
+                .unwrap_or_else(|e| Err(format!("the check task failed: {e}")));
+            let checked = rfc(now);
+            let still = |r: &RunRecord| still_waiting(r, &w.url);
+            let p = match got {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "jesse-bridge: hostrun {run_id}: could not read {} (asking again in \
+                         {} minutes): {e}",
+                        w.url,
+                        MERGE_CHECK_EVERY_MS / 60_000
+                    );
+                    let _gate = lock(&self.gate);
+                    let _ = update_run(&dir, |r| {
+                        if still(r) {
+                            if let Some(x) = r.merge_wait.as_mut() {
+                                x.last_check_at = Some(checked.clone());
+                            }
+                        }
+                    });
+                    continue;
+                }
+            };
+            match p.state {
+                PrState::Open => {
+                    let push_due = ms_opt(&w.last_push_at)
+                        .is_none_or(|t| now.saturating_sub(t) >= MERGE_PUSH_EVERY_MS);
+                    let mut push = None;
+                    {
+                        let _gate = lock(&self.gate);
+                        let _ = update_run(&dir, |r| {
+                            if !still(r) {
+                                return;
+                            }
+                            if let Some(x) = r.merge_wait.as_mut() {
+                                x.last_check_at = Some(checked.clone());
+                                if p.title.is_some() {
+                                    x.title = p.title.clone();
+                                }
+                                if push_due {
+                                    x.last_push_at = Some(checked.clone());
+                                }
+                            }
+                            if push_due {
+                                if let Some(x) = &r.merge_wait {
+                                    push = Some(merge_push_body(r, x));
+                                }
+                            }
+                        });
+                    }
+                    if let Some(body) = push {
+                        eprintln!(
+                            "jesse-bridge: hostrun {run_id} AWAITING MERGE {}: still open; \
+                             push sent",
+                            w.url
+                        );
+                        self.send_effects(vec![Effect::Push {
+                            title: MERGE_PUSH_TITLE.into(),
+                            body,
+                            run_id: run_id.clone(),
+                        }])
+                        .await;
+                    }
+                }
+                PrState::Merged => {
+                    let text =
+                        merged_text(&w.url, p.merged_at.as_deref(), p.merge_commit.as_deref());
+                    let ended = format!(
+                        "merged {}",
+                        merged_facts(p.merged_at.as_deref(), p.merge_commit.as_deref())
+                    );
+                    let this = self.clone();
+                    let id = run_id.clone();
+                    let url = w.url.clone();
+                    let res = tokio::task::spawn_blocking(move || {
+                        let _gate = lock(&this.gate);
+                        // Read again under the gate: a reply or a close since the check wins.
+                        match this.get(&id) {
+                            Some(r) if still_waiting(&r, &url) => {}
+                            _ => return Ok(None),
+                        }
+                        this.queue_round_with(&id, &text, Some(AUTO_MERGE), |r, _| {
+                            if let Some(x) = r.merge_wait.as_mut() {
+                                x.last_check_at = Some(checked.clone());
+                                x.ended = Some(ended.clone());
+                                x.ended_at = Some(checked.clone());
+                            }
+                        })
+                        .map(Some)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(Refusal::Internal(e.to_string())));
+                    match res {
+                        Ok(Some(_)) => eprintln!(
+                            "jesse-bridge: hostrun {run_id} MERGED {}: resuming in its session",
+                            w.url
+                        ),
+                        Ok(None) => {}
+                        Err(e) => eprintln!(
+                            "jesse-bridge: hostrun {run_id}: {} merged but the round could not \
+                             be queued (trying again at the next check): {}",
+                            w.url,
+                            e.message()
+                        ),
+                    }
+                }
+                PrState::Closed => {
+                    let why = format!("{} was closed without merging", w.url);
+                    let mut changed = None;
+                    {
+                        let _gate = lock(&self.gate);
+                        let _ = update_run(&dir, |r| {
+                            if !still(r) {
+                                return;
+                            }
+                            r.status = RunStatus::NeedsYou;
+                            if let Some(x) = r.merge_wait.as_mut() {
+                                x.last_check_at = Some(checked.clone());
+                                x.end(&why, &checked);
+                            }
+                            changed = Some(format!("{}: {why}", run_and_item(r)));
+                        });
+                    }
+                    if let Some(body) = changed {
+                        eprintln!("jesse-bridge: hostrun {run_id} NEEDS YOU: {why}");
+                        self.send_effects(vec![Effect::Push {
+                            title: format!("Run {run_id} {}", RunStatus::NeedsYou.outcome()),
+                            body,
+                            run_id: run_id.clone(),
+                        }])
+                        .await;
+                    }
+                }
             }
         }
     }
@@ -3661,7 +4006,10 @@ impl HostRuns {
         let may = |s: RunStatus| {
             matches!(
                 s,
-                RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+                RunStatus::NeedsYou
+                    | RunStatus::AwaitingMerge
+                    | RunStatus::Interrupted
+                    | RunStatus::Failed
             )
         };
         let _gate = lock(&self.gate);
@@ -4880,6 +5228,11 @@ impl HostRuns {
         }
         let mut report = round_report(&dir, &round);
         let mut status = round_status(&round, &exit, &report);
+        // The pull request an `AWAITING MERGE:` report names, read before anything is put above
+        // its first line.
+        let wait = (status == RunStatus::AwaitingMerge)
+            .then(|| awaiting_merge_pull(&report))
+            .flatten();
         // THE ANSWERING ROUND of a review cycle that was handed off: when no review of it ran
         // the report leads with `UNREVIEWED:`, when only some did with `PARTLY REVIEWED:`, and
         // with any `REVIEW LEAK:` the check found over every review that ran.
@@ -5005,8 +5358,29 @@ impl HostRuns {
             .unwrap_or(0);
         let at = exit.ended_at.clone();
         let rel2 = rel.clone();
+        // An attribution hit made it `needs_you`: then nothing is watched.
+        let wait = match wait.filter(|_| status == RunStatus::AwaitingMerge) {
+            Some(mut w) => {
+                let forge = self.forge.clone();
+                let url = w.url.clone();
+                match tokio::task::spawn_blocking(move || forge.pull_merge(&url)).await {
+                    Ok(Ok(p)) => w.title = p.title,
+                    Ok(Err(e)) => eprintln!(
+                        "jesse-bridge: hostrun {run_id}: the title of {} could not be read: {e}",
+                        w.url
+                    ),
+                    Err(e) => eprintln!("jesse-bridge: hostrun {run_id}: {e}"),
+                }
+                w.since = at.clone();
+                Some(w)
+            }
+            None => None,
+        };
         let rec = update_run(&dir, |r| {
             r.status = status;
+            if let Some(w) = &wait {
+                r.merge_wait = Some(w.clone());
+            }
             r.finished_at = Some(at.clone());
             r.stalled_since = None;
             r.pgid = None;
@@ -5041,7 +5415,10 @@ impl HostRuns {
                 }
             }
         })?;
-        if matches!(status, RunStatus::Reported | RunStatus::NeedsYou) {
+        if matches!(
+            status,
+            RunStatus::Reported | RunStatus::NeedsYou | RunStatus::AwaitingMerge
+        ) {
             self.lift_limit(now_ms());
         }
         if rec.round().is_some_and(|r| r.notified) {
@@ -5062,17 +5439,43 @@ impl HostRuns {
                 );
             }
         }
+        let merge_wait = rec
+            .merge_wait
+            .clone()
+            .filter(|_| rec.status == RunStatus::AwaitingMerge);
         if let Some(n) = &sink.notifier {
-            let title = format!("Run {run_id} {}", status.outcome());
-            let body: String = first_line(&report).chars().take(180).collect();
-            n.notify(title, body, run_id.to_string()).await;
+            match &merge_wait {
+                Some(w) => {
+                    n.notify(
+                        MERGE_PUSH_TITLE.to_string(),
+                        merge_push_body(&rec, w),
+                        run_id.to_string(),
+                    )
+                    .await;
+                    eprintln!(
+                        "jesse-bridge: hostrun {run_id} AWAITING MERGE {}: push sent",
+                        w.url
+                    );
+                }
+                None => {
+                    let title = format!("Run {run_id} {}", status.outcome());
+                    let body: String = first_line(&report).chars().take(180).collect();
+                    n.notify(title, body, run_id.to_string()).await;
+                }
+            }
         }
         if let Some(note) = &rec.strand {
             self.send_turn(report_turn_text(run_id, note, &rel)).await;
         }
+        let pushed_at = rfc(now_ms());
         update_run(&dir, |r| {
             if let Some(cur) = r.round_mut() {
                 cur.notified = true;
+            }
+            if merge_wait.is_some() && r.status == RunStatus::AwaitingMerge {
+                if let Some(w) = r.merge_wait.as_mut() {
+                    w.last_push_at = Some(pushed_at.clone());
+                }
             }
         })?;
         Ok(())
@@ -5215,6 +5618,7 @@ impl HostRuns {
         let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.archive_settled(now)).await;
+        self.watch_merges(now).await;
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;
@@ -5433,7 +5837,10 @@ impl HostRuns {
             if wt.exists() {
                 if terminal && (gone || past_keep) {
                     self.remove_worktree(&dir, &rec, now);
-                } else if !terminal && age >= PAUSED_KEEP_DAYS * DAY_MS {
+                } else if !terminal
+                    && rec.status != RunStatus::AwaitingMerge
+                    && age >= PAUSED_KEEP_DAYS * DAY_MS
+                {
                     match &rec.cleanup.worktree_warned {
                         None => {
                             let at = rfc(now);
@@ -5919,7 +6326,8 @@ pub fn annotate_strands(
         let needs_you = runs
             .iter()
             .filter(|r| {
-                r.strand.as_deref() == Some(strand.slug.as_str()) && r.status == RunStatus::NeedsYou
+                r.strand.as_deref() == Some(strand.slug.as_str())
+                    && matches!(r.status, RunStatus::NeedsYou | RunStatus::AwaitingMerge)
             })
             .count();
         obj.insert("runs_needs_you".into(), json!(needs_you as u32));

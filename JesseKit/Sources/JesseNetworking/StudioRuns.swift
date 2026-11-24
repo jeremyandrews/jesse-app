@@ -40,6 +40,10 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
     /// bridge hands its findings to the run's own session: moving, like `running`, with
     /// nothing to reply to yet.
     case reviewing
+    /// The round finished and its only remaining blocker is the owner merging a GitHub pull
+    /// request (`merge_wait`). The bridge watches the pull request and resumes the run itself
+    /// once it merges. Waits on its owner, as `needsYou` does; a reply still continues it.
+    case awaitingMerge
     /// A status a newer bridge serves. Carries the word so the screen can still show it.
     case unknown(String)
 
@@ -55,6 +59,7 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
         case "paused": self = .paused
         case "closed": self = .closed
         case "reviewing": self = .reviewing
+        case "awaiting_merge": self = .awaitingMerge
         default: self = .unknown(wire)
         }
     }
@@ -83,6 +88,7 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
         case .paused: return "paused"
         case .closed: return "closed"
         case .reviewing: return "reviewing"
+        case .awaitingMerge: return "awaiting_merge"
         case .unknown(let w): return w
         }
     }
@@ -91,11 +97,11 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
     // spelled out per case with no `default`, so a status added here must be decided in each.
     // The views read these; none decides for itself what a status means.
 
-    /// Queued, running, waiting on the owner, paused or being reviewed: the bridge's
-    /// `is_live`, which is what refuses a second start of the same draft.
+    /// Queued, running, waiting on the owner (a question or a merge), paused or being
+    /// reviewed: the bridge's `is_live`, which is what refuses a second start of the same draft.
     public var isLive: Bool {
         switch self {
-        case .queued, .running, .needsYou, .paused, .reviewing: return true
+        case .queued, .running, .needsYou, .awaitingMerge, .paused, .reviewing: return true
         case .reported, .failed, .cancelled, .interrupted, .closed, .unknown: return false
         }
     }
@@ -106,7 +112,8 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
     public var isMoving: Bool {
         switch self {
         case .queued, .running, .paused, .reviewing: return true
-        case .needsYou, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
+        case .needsYou, .awaitingMerge, .reported, .failed, .cancelled, .interrupted, .closed,
+             .unknown:
             return false
         }
     }
@@ -115,7 +122,7 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
     /// a strand's `runs_active` counts.
     public var isActive: Bool {
         switch self {
-        case .running, .needsYou, .paused, .reviewing: return true
+        case .running, .needsYou, .awaitingMerge, .paused, .reviewing: return true
         case .queued, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
             return false
         }
@@ -127,25 +134,27 @@ public enum StudioRunStatus: Equatable, Hashable, Sendable, Codable {
     public var isArchivable: Bool {
         switch self {
         case .reported, .failed, .cancelled, .closed, .unknown: return true
-        case .queued, .running, .needsYou, .interrupted, .paused, .reviewing: return false
-        }
-    }
-
-    /// What the bridge's cancel route accepts: a queued, running, paused or reviewing run.
-    /// A reviewing run is cancelled at once and its review recorded as failed.
-    public var isCancellable: Bool {
-        switch self {
-        case .queued, .running, .paused, .reviewing: return true
-        case .needsYou, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
+        case .queued, .running, .needsYou, .awaitingMerge, .interrupted, .paused, .reviewing:
             return false
         }
     }
 
-    /// Waits on its owner: a question, a cut off round, or a failure. The `Needs me` filter,
-    /// the bridge's `needs_me` count.
+    /// What the bridge's cancel route accepts: a queued, running, paused or reviewing run.
+    /// A reviewing run is cancelled at once and its review recorded as failed. A run waiting
+    /// on its owner (a question or a merge) is refused.
+    public var isCancellable: Bool {
+        switch self {
+        case .queued, .running, .paused, .reviewing: return true
+        case .needsYou, .awaitingMerge, .reported, .failed, .cancelled, .interrupted, .closed, .unknown:
+            return false
+        }
+    }
+
+    /// Waits on its owner: a question, a pull request to merge, a cut off round, or a failure.
+    /// The `Needs me` filter, the bridge's `needs_me` count.
     public var needsMe: Bool {
         switch self {
-        case .needsYou, .interrupted, .failed: return true
+        case .needsYou, .awaitingMerge, .interrupted, .failed: return true
         case .queued, .running, .reported, .cancelled, .paused, .closed, .reviewing, .unknown:
             return false
         }
@@ -326,6 +335,91 @@ public struct StudioRunReview: Decodable, Equatable, Hashable, Sendable {
     }
 }
 
+/// The pull request an `awaiting_merge` run waits on (`merge_wait`), which the bridge watches
+/// and resumes the run from once it merges. Absent on every other run and on every older
+/// record. Every key but `url` is optional, and a malformed one decodes to nil rather than
+/// failing the run.
+public struct StudioRunMergeWait: Decodable, Equatable, Hashable, Sendable {
+    /// The pull request's page, `https://github.com/<owner>/<repo>/pull/<number>`.
+    public var url: String
+    public var owner: String?
+    public var repo: String?
+    public var number: Int?
+    /// The pull request's title, when the bridge read it.
+    public var title: String?
+    /// When the wait began (RFC 3339).
+    public var since: String?
+    /// When the bridge last looked at the pull request; nil before its first look.
+    public var lastCheckAt: String?
+    /// When the bridge last sent the "Merge needed" notification.
+    public var lastPushAt: String?
+    /// How the wait ended (`merged at … as abc123`, closed, replied, closed by Jeremy); nil
+    /// while it waits.
+    public var ended: String?
+    public var endedAt: String?
+
+    public init(url: String, owner: String? = nil, repo: String? = nil, number: Int? = nil,
+                title: String? = nil, since: String? = nil, lastCheckAt: String? = nil,
+                lastPushAt: String? = nil, ended: String? = nil, endedAt: String? = nil) {
+        self.url = url
+        self.owner = owner
+        self.repo = repo
+        self.number = number
+        self.title = title
+        self.since = since
+        self.lastCheckAt = lastCheckAt
+        self.lastPushAt = lastPushAt
+        self.ended = ended
+        self.endedAt = endedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case url, owner, repo, number, title, since, ended
+        case lastCheckAt = "last_check_at"
+        case lastPushAt = "last_push_at"
+        case endedAt = "ended_at"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        url = try c.decode(String.self, forKey: .url)
+        owner = (try? c.decodeIfPresent(String.self, forKey: .owner)) ?? nil
+        repo = (try? c.decodeIfPresent(String.self, forKey: .repo)) ?? nil
+        number = (try? c.decodeIfPresent(Int.self, forKey: .number)) ?? nil
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil
+        since = (try? c.decodeIfPresent(String.self, forKey: .since)) ?? nil
+        lastCheckAt = (try? c.decodeIfPresent(String.self, forKey: .lastCheckAt)) ?? nil
+        lastPushAt = (try? c.decodeIfPresent(String.self, forKey: .lastPushAt)) ?? nil
+        ended = (try? c.decodeIfPresent(String.self, forKey: .ended)) ?? nil
+        endedAt = (try? c.decodeIfPresent(String.self, forKey: .endedAt)) ?? nil
+    }
+
+    /// Whether the wait is over (merged, closed, replied to, or closed by its owner).
+    public var hasEnded: Bool {
+        !(ended?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || endedAt != nil
+    }
+
+    /// `owner/repo#number`: from the bridge's own fields, else read from a GitHub pull request
+    /// URL, else nil.
+    public var reference: String? {
+        if let owner, !owner.isEmpty, let repo, !repo.isEmpty, let number {
+            return "\(owner)/\(repo)#\(number)"
+        }
+        guard let parts = URL(string: url)?.pathComponents.filter({ $0 != "/" }),
+              parts.count >= 4, parts[2] == "pull", Int(parts[3]) != nil else { return nil }
+        return "\(parts[0])/\(parts[1])#\(parts[3])"
+    }
+
+    /// The URL a link opens: only an http or https one.
+    public var webURL: URL? {
+        guard let u = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = u.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              u.host != nil else { return nil }
+        return u
+    }
+}
+
 /// One run, as `run_json` serves it.
 public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable {
     public var runID: String
@@ -385,6 +479,9 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
     public var jobName: String?
     /// The pull request a cloud run's report named.
     public var pullRequest: String?
+    /// The pull request an `awaiting_merge` run waits on, and how the wait ended once it has.
+    /// Nil on every other run, from an older bridge, and when the bridge's object is malformed.
+    public var mergeWait: StudioRunMergeWait?
 
     /// `host: "cloud"`: a dev job on kc1, served beside the Studio's runs (bridge 0.216.0).
     /// Read only here: its actions are Jesse's.
@@ -407,7 +504,7 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
                 reviewer: String? = nil, reviewerLabel: String? = nil,
                 reviewFocus: String? = nil, reviews: [StudioRunReview] = [],
                 outcome: String? = nil, agent: String? = nil, jobName: String? = nil,
-                pullRequest: String? = nil) {
+                pullRequest: String? = nil, mergeWait: StudioRunMergeWait? = nil) {
         self.runID = runID
         self.strand = strand
         self.itemID = itemID
@@ -443,6 +540,7 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         self.agent = agent
         self.jobName = jobName
         self.pullRequest = pullRequest
+        self.mergeWait = mergeWait
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -450,6 +548,7 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         case reviewer, reviews, outcome, agent
         case jobName = "job_name"
         case pullRequest = "pull_request"
+        case mergeWait = "merge_wait"
         case reviewerLabel = "reviewer_label"
         case reviewFocus = "review_focus"
         case runID = "run_id"
@@ -508,6 +607,8 @@ public struct StudioRun: Decodable, Equatable, Hashable, Identifiable, Sendable 
         agent = try c.decodeIfPresent(String.self, forKey: .agent)
         jobName = try c.decodeIfPresent(String.self, forKey: .jobName)
         pullRequest = try c.decodeIfPresent(String.self, forKey: .pullRequest)
+        // Never fails the run: a malformed `merge_wait` is simply none.
+        mergeWait = (try? c.decodeIfPresent(StudioRunMergeWait.self, forKey: .mergeWait)) ?? nil
     }
 
     public static func decode(from data: Data) throws -> StudioRun {
@@ -788,7 +889,8 @@ public protocol StudioRunsProviding: Sendable {
     func replyToRun(id: String, text: String) async throws -> StudioRun
     func cancelRun(id: String) async throws -> StudioRun
     /// `POST /jesse/runs/:id/archive`: out of the list. Refused (409) for a queued, running,
-    /// paused or reviewing run; a `needs_you` or `interrupted` run is closed first.
+    /// paused or reviewing run; a `needs_you`, `awaiting_merge` or `interrupted` run is closed
+    /// first.
     func archive(id: String) async throws -> StudioRun
     /// `POST /jesse/runs/:id/unarchive`: back in the list.
     func unarchive(id: String) async throws -> StudioRun

@@ -3129,7 +3129,8 @@ direct records were re-recorded with them: only the write rows moved, by these t
 **Since 0.200.0, `POST /jesse/runs/:id/close` (paired device) and `devjob_close` join them**,
 classed and granted exactly as `devjob_cancel`; the battery's stand-in lists six tools and both
 records were re-recorded again, moving only the write rows' grants, by that one tool. A close stops
-nothing and deletes nothing: it marks a `needs_you`, `interrupted` or `failed` run `closed`. The
+nothing and deletes nothing: it marks a `needs_you`, `awaiting_merge`, `interrupted` or `failed`
+run `closed`. The
 watcher closes a waiting run by itself only when a further run of its item supersedes it, its
 Drafts line is ticked, or its report has moved to `Inbox/archive/`, and never a queued, running
 or paused one.
@@ -3203,9 +3204,13 @@ recorded as its own (folders directly under `~/Library/Developer/Xcode/DerivedDa
 the logs and the reports stay. Build artifacts (`target/`, those DerivedData folders) go once the
 pull request is merged or closed or the branch (seen on origin before) is gone, or after
 `keep_days`; `<run dir>/extra/` (where a run clones any further repository it needs) goes with the
-build artifacts under the same rules, but never while the run is live (queued, running, needs you
+build artifacts under the same rules, but never while the run is live (queued, running, needs you, awaiting merge
 or paused); worktrees and their local branches go on the same rule for `reported`, `failed` and
 `cancelled` runs, and after 30 days (with a push first) for `needs_you` and `interrupted` ones.
+An `awaiting_merge` run (0.218.0) keeps its worktree for as long as it waits: the watcher only
+reads its pull request's state (`gh pr view <url> --json state,mergedAt,mergeCommit,title`, the
+bridge user's `gh` login, read only), never merges it and never pushes for the run; on the merge
+it queues the run's next round as a reply would be.
 A `paused` run is not finished: nothing of it is cleaned up.
 The space pass removes artifacts, then finished worktrees, oldest first, when the runs exceed
 `max_total_gb` or free space drops under `min_free_gb`; it never touches a running, queued or paused run.

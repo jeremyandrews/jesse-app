@@ -14,6 +14,14 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.218.0] - 2026-11-24
+
+**A Studio run that only waits for your merge says `AWAITING MERGE: <pull request URL>`, pushes "Merge needed", and resumes itself in its session when that pull request merges.**
+
+## [App 1.0 (228)] - 2026-11-24
+
+**The Runs page shows an `awaiting_merge` run as "Awaiting your merge" with its pull request link, among the runs that need you.**
+
 ## [bridge 0.217.1] - 2026-11-24
 
 **A quoted `devjob-priority:` followed by a comment is read, not refused.** A draft line such as

@@ -97,14 +97,15 @@ public enum WorkSemantics {
     }
 
     /// The runs that wait on the owner, in the order the Your turn section lists them:
-    /// questions first, then cut off runs, then failures.
+    /// questions first, then pull requests to merge, then cut off runs, then failures.
     public static func yourTurnRuns(_ slug: String, in runs: [StudioRun]) -> [StudioRun] {
         let current = currentRuns(of: slug, in: runs)
         let rank: (StudioRunStatus) -> Int? = { status in
             switch status {
             case .needsYou: return 0
-            case .interrupted: return 1
-            case .failed: return 2
+            case .awaitingMerge: return 1
+            case .interrupted: return 2
+            case .failed: return 3
             case .queued, .running, .reported, .cancelled, .paused, .closed, .reviewing,
                  .unknown:
                 return nil
@@ -169,6 +170,9 @@ public enum WorkSemantics {
                     return "For you: answer \u{201C}\(q)\u{201D}"
                 }
                 return "For you: answer \(title)"
+            case .awaitingMerge:
+                if let ref = run.mergeWait?.reference { return "For you: merge \(ref)" }
+                return "For you: merge the pull request for \(title)"
             case .interrupted: return "For you: resume \(title)"
             default: return "For you: see why \(title) failed"
             }
@@ -219,8 +223,8 @@ public enum WorkSemantics {
             case .running: return 0
             case .reviewing: return 1
             case .paused: return 2
-            case .queued, .needsYou, .reported, .failed, .cancelled, .interrupted, .closed,
-                 .unknown:
+            case .queued, .needsYou, .awaitingMerge, .reported, .failed, .cancelled,
+                 .interrupted, .closed, .unknown:
                 return 3
             }
         }
@@ -234,8 +238,8 @@ public enum WorkSemantics {
         case .queued: word = "Queued"
         case .paused: word = "Paused"
         case .reviewing: word = "Reviewing"
-        case .running, .needsYou, .reported, .failed, .cancelled, .interrupted, .closed,
-             .unknown:
+        case .running, .needsYou, .awaitingMerge, .reported, .failed, .cancelled, .interrupted,
+             .closed, .unknown:
             word = "Running"
         }
         // The others by what they are doing: a queued run is not running.
@@ -409,7 +413,7 @@ public enum WorkSemantics {
     /// Settled with something to read: what `Since your last look` counts.
     public static func countsAsFinished(_ status: StudioRunStatus) -> Bool {
         switch status {
-        case .reported, .needsYou, .failed, .interrupted: return true
+        case .reported, .needsYou, .awaitingMerge, .failed, .interrupted: return true
         case .queued, .running, .cancelled, .paused, .closed, .reviewing, .unknown: return false
         }
     }

@@ -363,6 +363,13 @@ struct WorkYourTurnRow: View {
                     .fixedSize()
                     .disabled(!detail.canSend)
                 }
+            case .awaitingMerge:
+                Text("Waiting for you to merge its pull request.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let link = StudioRunSemantics.mergeLink(run) {
+                    StudioRunMergeLinkView(link: link, font: .subheadline)
+                }
             case .interrupted:
                 HStack {
                     Text("Cut off before it finished.")

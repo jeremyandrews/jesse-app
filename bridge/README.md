@@ -1063,6 +1063,32 @@ written to a note.
 - `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
   refused with 409: the run asked a question, and an empty continue would answer it blind.
 
+**Waiting for Jeremy's merge (0.218.0).** A run reaches Jeremy mid work with the first line of its
+report: `NEEDS YOU: <question>` makes it `needs_you` and pushes `Run <id> needs you`, and it
+continues when he replies. When the only thing left is Jeremy merging a pull request the run may not
+merge itself (`jeremyandrews/k3s`, Goose, Scolta), the run ends its turn, once CI is green on that
+pull request's head, with the first line `AWAITING MERGE: https://github.com/<owner>/<repo>/pull/<n>`
+(every run's prompt says so, after the `NEEDS YOU:` rule).
+
+- The run becomes `awaiting_merge`, keeping its worktree and session, and records `merge_wait`
+  (`url`, `owner`, `repo`, `number`, `title`, `since`, `last_check_at`, `last_push_at`, and once
+  over `ended` and `ended_at`; absent on every other run). One push, `Merge needed`, body
+  `<run_id> (<strand ID>): <pull request title>` then the URL, goes through the usual notifier.
+- The watcher's pass, beside the usage limit resume, reads each such pull request every 5 minutes
+  with `gh pr view <url> --json state,mergedAt,mergeCommit,title` as the bridge user. Open:
+  nothing changes, and a fresh push goes out once a day. Merged: the run's next round is queued
+  exactly as a reply is, in the same session, with `Jeremy merged <url> at <mergedAt UTC> as <merge
+  commit SHA>. Continue from the next step.` (`auto: "merge"`); the queue, the caps and the usage
+  limit hold apply as to any reply. Closed without merging: the run is `needs_you`, with one push.
+  A read that fails is logged and asked again at the next check and never changes the run. There
+  is no cap on the wait.
+- A reply, `devjob_close`, an archive and the automatic closes treat an `awaiting_merge` run as a
+  `needs_you` one (cancel refuses both), and each ends the wait. An empty `Continue where you left
+  off.` is accepted: the run asked nothing. It counts in `needs_me` and in a strand's
+  `runs_needs_you`, and its worktree is never removed while it waits.
+- `AWAITING MERGE:` with no GitHub pull request URL on that line is read as `NEEDS YOU:`.
+  The bridge only reads the pull request: it never merges it and never pushes for the run.
+
 **The board row's phrases (0.205.0, `src/hostrun/work/row.rs`).** Three more fields on every
 strand of `GET /jesse/strands`, derived on read from what the note already says, so a Work board
 row can say what a project is about and what is the owner's to do. No model call, nothing written

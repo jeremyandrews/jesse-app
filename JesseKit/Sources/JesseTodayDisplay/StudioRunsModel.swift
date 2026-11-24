@@ -34,6 +34,7 @@ public enum StudioRunSemantics {
         case .paused: return "Paused"
         case .closed: return "Closed"
         case .reviewing: return "Reviewing"
+        case .awaitingMerge: return "Awaiting your merge"
         case .unknown(let word): return word.isEmpty ? "Unknown" : word
         }
     }
@@ -50,6 +51,7 @@ public enum StudioRunSemantics {
         case .paused: return "pause.circle.fill"
         case .closed: return "checkmark.circle"
         case .reviewing: return "magnifyingglass.circle.fill"
+        case .awaitingMerge: return "arrow.triangle.merge"
         case .unknown: return "questionmark.circle"
         }
     }
@@ -67,6 +69,8 @@ public enum StudioRunSemantics {
         case .closed: return .secondary
         // A second model is working on it: drawn as running is.
         case .reviewing: return .blue
+        // Waits on its owner, as a question does: drawn in the needs-you colour.
+        case .awaitingMerge: return .orange
         case .unknown: return .neutral
         }
     }
@@ -107,7 +111,8 @@ public enum StudioRunSemantics {
 
     // MARK: Order
 
-    /// Live runs first (queued, running, needs you, paused, reviewing), then the rest; newest first
+    /// Live runs first (queued, running, needs you, awaiting your merge, paused, reviewing),
+    /// then the rest; newest first
     /// within each, by creation and then by id so two runs created in one millisecond keep a
     /// stable order.
     public static func sorted(_ runs: [StudioRun]) -> [StudioRun] {
@@ -172,7 +177,7 @@ public enum StudioRunSemantics {
     /// open to a follow up.
     public static func canReply(_ status: StudioRunStatus) -> Bool {
         switch status {
-        case .needsYou, .interrupted, .reported, .closed: return true
+        case .needsYou, .awaitingMerge, .interrupted, .reported, .closed: return true
         case .queued, .running, .failed, .cancelled, .paused, .reviewing, .unknown: return false
         }
     }
@@ -191,8 +196,8 @@ public enum StudioRunSemantics {
         switch status {
         case .interrupted:
             return composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .queued, .running, .needsYou, .reported, .failed, .cancelled, .paused, .closed,
-             .reviewing, .unknown:
+        case .queued, .running, .needsYou, .awaitingMerge, .reported, .failed, .cancelled,
+             .paused, .closed, .reviewing, .unknown:
             return false
         }
     }
@@ -222,6 +227,42 @@ public enum StudioRunSemantics {
             return "Reviewing with \(name)"
         }
         guard let line = run.lastLine, !line.isEmpty else { return nil }
+        return line
+    }
+
+    // MARK: Awaiting a merge
+
+    /// The pull request link a run shows: on an `awaiting_merge` run (and on any run that still
+    /// carries a `merge_wait`, whose wait has ended), when its URL is a web one. Nil otherwise.
+    public static func mergeLink(_ run: StudioRun) -> StudioRunMergeLink? {
+        guard let wait = run.mergeWait, let url = wait.webURL else { return nil }
+        let reference = wait.reference
+        let trimmed = wait.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title: String? = trimmed.isEmpty ? nil : trimmed
+        let text = reference ?? title ?? url.absoluteString
+        let shownTitle = reference != nil ? title : nil
+        let spoken = ["Pull request", reference, shownTitle].compactMap { $0 }
+            .joined(separator: ", ")
+        return StudioRunMergeLink(url: url, text: text, title: shownTitle,
+                                  accessibilityLabel: spoken)
+    }
+
+    /// Whether a row shows the pull request link: only while the run waits on the merge.
+    public static func rowMergeLink(_ run: StudioRun) -> StudioRunMergeLink? {
+        guard run.status == .awaitingMerge, run.mergeWait?.hasEnded != true else { return nil }
+        return mergeLink(run)
+    }
+
+    /// The line beside the link: what happens while it waits, or how the wait ended.
+    public static func mergeLine(_ run: StudioRun, now: Date) -> String? {
+        guard let wait = run.mergeWait else { return nil }
+        if let ended = wait.ended?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !ended.isEmpty {
+            return "Wait ended: \(ended)"
+        }
+        guard run.status == .awaitingMerge else { return nil }
+        var line = "Merge it and the run continues by itself."
+        if let at = clock(wait.lastCheckAt, now: now) { line += " Last checked \(at)." }
         return line
     }
 
@@ -262,7 +303,7 @@ public enum StudioRunSemantics {
             return "A cloud run on kc1. Cloud runs are managed through Jesse."
         }
         switch run.status {
-        case .needsYou, .interrupted, .reported, .closed:
+        case .needsYou, .awaitingMerge, .interrupted, .reported, .closed:
             return nil
         case .queued:
             return "Queued. A reply can be sent once the round has run."
@@ -289,15 +330,17 @@ public enum StudioRunSemantics {
     public static func keepsPolling(_ status: StudioRunStatus) -> Bool {
         switch status {
         case .reported, .failed, .cancelled, .closed, .unknown: return false
-        case .queued, .running, .needsYou, .interrupted, .paused, .reviewing: return true
+        // Awaiting a merge: the bridge resumes the run by itself when the pull request merges.
+        case .queued, .running, .needsYou, .awaitingMerge, .interrupted, .paused, .reviewing:
+            return true
         }
     }
 
     // MARK: Archiving
 
     /// Whether Archive is offered: on a run that is not moving and not archived. The bridge
-    /// refuses a queued, running, paused or reviewing run; a `needs_you` or `interrupted` run it closes
-    /// first, so those are offered too.
+    /// refuses a queued, running, paused or reviewing run; a `needs_you`, `awaiting_merge` or
+    /// `interrupted` run it closes first, so those are offered too.
     public static func canArchive(_ run: StudioRun) -> Bool {
         !run.isCloud && !run.status.isMoving && !run.isArchived
     }
@@ -326,6 +369,16 @@ public enum StudioRunSemantics {
     public static func badge(for strand: Strand) -> StudioRunBadge? {
         badge(active: strand.runsActive, needsYou: strand.runsNeedsYou)
     }
+}
+
+/// The pull request a run waits on, as a link: `owner/repo#number`, its title beside it.
+public struct StudioRunMergeLink: Equatable, Sendable {
+    public let url: URL
+    /// The link's words: `owner/repo#number`, else the title, else the URL.
+    public let text: String
+    /// The pull request's title, shown beside a reference; nil when `text` is the title.
+    public let title: String?
+    public let accessibilityLabel: String
 }
 
 /// One timed row of a run's Details: what the time is, and the RFC 3339 stamp.

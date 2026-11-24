@@ -1,3 +1,4 @@
+use super::sys::PullMerge;
 use super::*;
 use std::collections::HashSet;
 
@@ -177,12 +178,24 @@ struct FakeForge {
     states: Mutex<BTreeMap<String, PrState>>,
     /// Every repository the forge was asked about, in order.
     asked: Mutex<Vec<String>>,
+    /// What `pull_merge` answers for each pull request URL; unanswered when absent.
+    pulls: Mutex<BTreeMap<String, Result<PullMerge, String>>>,
+    /// Every pull request URL `pull_merge` was asked about, in order.
+    pull_asks: Mutex<Vec<String>>,
 }
 
 impl Forge for FakeForge {
     fn pr_state(&self, repo: &str, branch: &str) -> Option<PrState> {
         lock(&self.asked).push(repo.to_string());
         lock(&self.states).get(branch).copied()
+    }
+
+    fn pull_merge(&self, url: &str) -> Result<PullMerge, String> {
+        lock(&self.pull_asks).push(url.to_string());
+        lock(&self.pulls)
+            .get(url)
+            .cloned()
+            .unwrap_or_else(|| Err(format!("no answer for {url}")))
     }
 }
 
@@ -476,7 +489,7 @@ fn the_served_prompt_is_the_section_then_the_generated_section_exactly() {
         reviewed: false,
     };
     let expected = format!(
-        "{SECTION}### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of jeremyandrews/jesse-app on branch gd5b-run-the-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/GD5b/extra/ and work there. Everything under /Users/j/jesse-runs/runs/GD5b/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n"
+        "{SECTION}### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of jeremyandrews/jesse-app on branch gd5b-run-the-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/GD5b/extra/ and work there. Everything under /Users/j/jesse-runs/runs/GD5b/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\nThis run is GD5b. Start every branch name with gd5b- and put [GD5b] at the start of the pull request title. Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run. If the only thing left before your next step is Jeremy merging a pull request you may not merge yourself, get CI green on that pull request's head, then end the turn with a first line of AWAITING MERGE: followed by the pull request's full https:// URL. Never poll for the merge yourself: the bridge watches it, and after the merge this session is resumed with the merge commit SHA.\n"
     );
     assert_eq!(served_prompt(SECTION, &place), expected);
     // The section is taken byte for byte, up to the rule before the archive checkboxes.
@@ -1870,7 +1883,7 @@ fn the_generated_section_tags_the_title_only_where_pr_title_tag_says() {
             "### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of {repo} on branch ab1-thing, cut from origin/main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/AB1/extra/ and work there. Everything under /Users/j/jesse-runs/runs/AB1/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\n"
         )
     };
-    let rest = "Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
+    let rest = "Other runs and people work on this repository at the same time: before your final verification, and again right before any merge, fetch the latest default branch, merge or rebase it into your branch, resolve any conflicts, and re-run your checks. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run. If the only thing left before your next step is Jeremy merging a pull request you may not merge yourself, get CI green on that pull request's head, then end the turn with a first line of AWAITING MERGE: followed by the pull request's full https:// URL. Never poll for the merge yourself: the bridge watches it, and after the merge this session is resumed with the merge commit SHA.\n";
     let with = |repo: &str| {
         format!(
             "Do it.\n\n{}This run is AB1. Start every branch name with ab1- and put [AB1] at the start of the pull request title. {rest}",
@@ -3601,7 +3614,7 @@ fn the_generated_section_for_a_local_repository_has_no_push_and_no_pull_request(
         reviewed: false,
     };
     let local = served_prompt("Do it.\n", &place("local/x"));
-    let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there. Everything under /Users/j/jesse-runs/runs/s-x/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run.\n";
+    let expected = "Do it.\n\n### Run ID and report\n\nYou are running on the Mac Studio as a Studio run, in a fresh worktree of local/x (Studio only) on branch s-x, cut from main. Wherever the prompt above names another machine, host, user or directory to work in, this worktree replaces it: do not change machines, do not stop because the host differs, and do not work in any other checkout of this repository. If the work needs another repository, clone it under /Users/j/jesse-runs/runs/s-x/extra/ and work there. Everything under /Users/j/jesse-runs/runs/s-x/extra/ is deleted 7 days after the run finishes, so anything a later run or a person needs must be pushed to its remote or written outside the run directory before the run ends.\n\nThis run is s-x. Start every branch name with s-x-. This repository exists only on the Mac Studio and has no remote: there is no push, no pull request and no CI. Wherever the prompt above asks for a branch push, a pull request, CI or a merge, do this instead: commit on your branch, and once your verification passes, merge your branch into main of this repository with a fast forward (rebase onto main first if it moved), then report the main commit. Keep everything you create inside your working directory or the system temporary directory. When you finish, or stop early, write your complete report back, the same text you would answer with, to the file named in the environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed by the one question, and end the run. If the only thing left before your next step is Jeremy merging a pull request you may not merge yourself, get CI green on that pull request's head, then end the turn with a first line of AWAITING MERGE: followed by the pull request's full https:// URL. Never poll for the merge yourself: the bridge watches it, and after the merge this session is resumed with the merge commit SHA.\n";
     assert_eq!(local, expected);
     assert!(!local.contains("pull request title"));
     assert!(!local.contains("origin/"));
@@ -3975,6 +3988,7 @@ async fn a_blind_continue_to_a_question_is_refused() {
 }
 
 mod archive;
+mod awaiting_merge;
 mod priority;
 mod review;
 mod reviewers;

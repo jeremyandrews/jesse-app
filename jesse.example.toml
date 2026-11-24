@@ -331,8 +331,11 @@ Answer the question I asked, not the one you wish I had asked.
 # `Inbox/<date>-dev-job-<slug>.md`. The bridge holds the kubeconfig and nothing else reads it,
 # which is why it refuses to boot without `[gateway] enabled`, with an unreadable kubeconfig, or
 # with an image not pinned by digest. A `[[schedule]]` entry with `kind = "devjob"` (repo, agent,
-# branch_slug, prompt_file, optional model, test_command, timeout in minutes) does the same on a
-# clock. See SECURITY.md ("Coding agents on the cluster") and bridge/README.md.
+# branch_slug, prompt_file, optional model, test_command, timeout in minutes, capped at 240) does
+# the same on a clock. `devjob_start` with `host = "cloud"` ([devjob.cloud], see
+# docs/devjob-cloud.md) has its own, usually higher, timeout cap (`max_timeout_minutes`); a
+# scheduled entry never runs there. See SECURITY.md ("Coding agents on the cluster") and
+# bridge/README.md.
 #
 # A devjob entry with `strand` instead runs a strand's next step: at each fire, the first eligible
 # `## Drafts` line of Strands/<Note>.md whose linked prompt under Projects/drafts/ names the strand

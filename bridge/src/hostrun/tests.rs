@@ -281,6 +281,7 @@ fn item(id: &str) -> StartRequest {
         again: false,
         reviewer: None,
         review_focus: None,
+        priority: None,
     }
 }
 
@@ -296,6 +297,7 @@ fn free(slug: &str) -> StartRequest {
         again: false,
         reviewer: None,
         review_focus: None,
+        priority: None,
     }
 }
 
@@ -593,6 +595,7 @@ fn devjob_args_keep_refusing_unknown_keys_and_without_host_build_the_same_cluste
             again: true,
             reviewer: None,
             review_focus: None,
+            priority: None,
         }
     );
 }
@@ -1651,6 +1654,7 @@ fn asked(strand: &str, id: &str, repo: Option<&str>) -> StartRequest {
         again: false,
         reviewer: None,
         review_focus: None,
+        priority: None,
     }
 }
 
@@ -1716,6 +1720,7 @@ async fn a_strand_schedule_entry_still_needs_both_keys() {
             again: false,
             reviewer: None,
             review_focus: None,
+            priority: None,
         })
         .await
         .unwrap_err();
@@ -1748,6 +1753,7 @@ async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
             again: false,
             reviewer: None,
             review_focus: None,
+            priority: None,
         })
         .await
         .unwrap();
@@ -1820,6 +1826,7 @@ async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
             again: false,
             reviewer: None,
             review_focus: None,
+            priority: None,
         }
     );
     assert_eq!(
@@ -1834,6 +1841,7 @@ async fn a_draft_by_its_path_runs_as_a_free_run_with_an_s_id() {
             again: false,
             reviewer: None,
             review_focus: None,
+            priority: None,
         }
     );
     assert!(plan(json!({ "host": "studio", "draft": "x", "prompt": "p" })).is_err());
@@ -1931,6 +1939,7 @@ fn reply_and_cancel_reach_exactly_the_turns_start_reaches_on_every_harness() {
         "devjob_close",
         "devjob_review",
         "devjob_review_reply",
+        "devjob_priority",
     ];
     let row = crate::mcpservers::row(devjob::DEVJOB_SERVER).unwrap();
     for t in names {
@@ -3292,6 +3301,7 @@ fn free_in(repo: &str, slug: &str) -> StartRequest {
         again: false,
         reviewer: None,
         review_focus: None,
+        priority: None,
     }
 }
 
@@ -3454,6 +3464,7 @@ async fn with_nothing_named_a_studio_run_falls_back_to_a_local_repository() {
             again: false,
             reviewer: None,
             review_focus: None,
+            priority: None,
         })
         .await
         .unwrap();
@@ -3477,6 +3488,7 @@ async fn with_nothing_named_a_studio_run_falls_back_to_a_local_repository() {
             again: false,
             reviewer: None,
             review_focus: None,
+            priority: None,
         }
     );
 }
@@ -3963,6 +3975,7 @@ async fn a_blind_continue_to_a_question_is_refused() {
 }
 
 mod archive;
+mod priority;
 mod review;
 mod reviewers;
 mod settle_failed;
@@ -3983,6 +3996,7 @@ fn by_draft(path: &str) -> StartRequest {
         again: false,
         reviewer: None,
         review_focus: None,
+        priority: None,
     }
 }
 

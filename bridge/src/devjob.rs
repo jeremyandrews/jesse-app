@@ -73,8 +73,10 @@ pub const TOOL_CLOSE: &str = "devjob_close";
 pub const TOOL_REVIEW: &str = "devjob_review";
 /// Hand off a review that is waiting (`auto_reply: false`). Classed `write`.
 pub const TOOL_REVIEW_REPLY: &str = "devjob_review_reply";
-/// The eight tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
-pub const STUDIO_TOOLS: [&str; 8] = [
+/// Change a queued Studio run's priority. Classed `write`, beside `devjob_cancel`.
+pub const TOOL_PRIORITY: &str = "devjob_priority";
+/// The nine tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
+pub const STUDIO_TOOLS: [&str; 9] = [
     TOOL_START,
     TOOL_STATUS,
     TOOL_LIST,
@@ -83,6 +85,7 @@ pub const STUDIO_TOOLS: [&str; 8] = [
     TOOL_CLOSE,
     TOOL_REVIEW,
     TOOL_REVIEW_REPLY,
+    TOOL_PRIORITY,
 ];
 
 /// On every object a run creates: the selector the watcher lists by.
@@ -227,6 +230,9 @@ pub struct DevJobArgs {
     /// `host: "cloud"`: merge the pull request once CI on its head is green. Absent: the
     /// draft's `devjob-merge`, else no.
     pub merge: Option<bool>,
+    /// `host: "studio"`: how soon the run wants a slot: `low`, `normal`, `high` or `urgent`.
+    /// Absent: the draft's `devjob-priority:`, else `normal`. Anything else is refused.
+    pub priority: Option<String>,
 }
 
 /// Where a `devjob_start` goes, decided from its arguments alone.
@@ -242,6 +248,8 @@ pub enum StartPlan {
         /// draft's, else the bridge's default.
         reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
+        /// How soon the run wants a slot; `None` is the draft's `devjob-priority:`, else `normal`.
+        priority: Option<crate::hostrun::Priority>,
     },
     /// `host: "cloud"`: a Job on kc1 ([`cloud`]).
     Cloud(CloudStart),
@@ -290,6 +298,13 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
         None | Some("cluster") | Some("studio") if args.merge.is_some() => Err(
             "merge applies only with host \"cloud\": a Studio run merges as its prompt \
                  says, and the cluster never merges"
+                .into(),
+        ),
+        // The cluster's and kc1's own queues have no priority: a priority there would be
+        // silently ignored, so it is refused.
+        None | Some("cluster") | Some("cloud") if args.priority.is_some() => Err(
+            "priority applies only with host \"studio\": the cluster and the cloud start their \
+             runs in the order they were asked for"
                 .into(),
         ),
         None | Some("cluster") => {
@@ -351,6 +366,11 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
             // Its shape now; whether the registry knows each id when the run is created.
             crate::hostrun::review::choose(reviewer.as_ref())?;
             let review_focus = args.review_focus.clone();
+            let priority = args
+                .priority
+                .as_deref()
+                .map(crate::hostrun::Priority::parse)
+                .transpose()?;
             let repo = match args.repo.as_deref().map(str::trim) {
                 None => None,
                 Some(r) if valid_repo(r) => Some(r.to_string()),
@@ -377,6 +397,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                     again,
                     reviewer: reviewer.clone(),
                     review_focus: review_focus.clone(),
+                    priority,
                 });
             }
             match (args.strand, args.item_id) {
@@ -398,6 +419,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                         again,
                         reviewer: reviewer.clone(),
                         review_focus: review_focus.clone(),
+                        priority,
                     })
                 }
                 (None, None) => {
@@ -416,6 +438,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                         again,
                         reviewer: reviewer.clone(),
                         review_focus: review_focus.clone(),
+                        priority,
                     })
                 }
                 _ => Err("strand and item_id go together".into()),
@@ -2860,7 +2883,9 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              model id from the model picker: a Codex, Fireworks, local or Claude model), or a \
              list of up to three that review at once and are answered in one round, or \"none\" \
              for no review. A draft may say the same as devjob-reviewer:. The cluster's runs \
-             are never reviewed."
+             are never reviewed. priority (low, normal, high or urgent; a draft may say \
+             devjob-priority:) decides which queued Studio run takes a free slot first; \
+             devjob_priority changes it while the run waits."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
             props.insert(
@@ -2908,6 +2933,11 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
                 "review_focus".into(),
                 json!({ "type": "string",
                         "description": "host studio: what the reviewers should look at most closely, at most 4 KiB; refused when nothing reviews the run" }),
+            );
+            props.insert(
+                "priority".into(),
+                json!({ "type": "string", "enum": crate::hostrun::Priority::NAMES,
+                        "description": "host studio: how soon the run wants a slot while queued; queued runs start highest first, oldest first within a level, and a priority never stops a running run or bypasses a cap. Absent: the draft's devjob-priority:, else normal. Change it while queued with devjob_priority" }),
             );
         }
         start["inputSchema"]["required"] = json!([]);
@@ -2994,6 +3024,25 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             "properties": { "run_id": { "type": "string" } },
         },
     }));
+    tools.push(json!({
+        "name": TOOL_PRIORITY,
+        "description": "Change the priority of a queued Studio run (one waiting for a slot, its \
+            repository, the disk or the usage limit), then run the queue once. Queued runs start \
+            highest priority first (urgent, high, normal, low), oldest first within a level; a \
+            run the usage limit or a restart stopped still goes first. A priority never stops \
+            or pauses a running run and never bypasses a cap: a high run in a busy repository \
+            leaves a free slot to a lower run in an idle one. Refused for a run that is \
+            running, finished, closed or cancelled.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "priority"],
+            "properties": {
+                "run_id": { "type": "string" },
+                "priority": { "type": "string", "enum": crate::hostrun::Priority::NAMES },
+            },
+        },
+    }));
     tools
 }
 
@@ -3033,6 +3082,13 @@ struct CancelArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PriorityArgs {
+    run_id: String,
+    priority: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CloseArgs {
     run_id: String,
     reason: Option<String>,
@@ -3055,6 +3111,8 @@ fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) 
     v["log_tail"] = json!(svc
         .log_lines(&r.run_id, STATUS_LOG_LINES)
         .unwrap_or_default());
+    // The record leaves out a `normal` priority; the tool always says it.
+    v["priority"] = json!(r.priority);
     v
 }
 
@@ -3074,6 +3132,7 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "branch": r.branch,
         "status": r.status,
         "waiting_for": r.waiting_for,
+        "priority": r.priority,
         "strand": r.strand,
         "item_id": r.item_id,
         "created_at": r.created_at,
@@ -3090,6 +3149,23 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
     })
 }
 
+/// `devjob_list`'s Studio `active`: the running, paused and reviewing runs, newest first as `runs` gives them, then the queued runs in the order the queue
+/// pass would start them ([`crate::hostrun::start_order`]), each with `queue_position`, its
+/// place among its repository's queued runs (from 1).
+fn studio_active(runs: &[crate::hostrun::RunRecord]) -> Vec<Value> {
+    let mut out: Vec<Value> = runs
+        .iter()
+        .filter(|r| !r.status.is_finished() && r.status != crate::hostrun::RunStatus::Queued)
+        .map(studio_brief)
+        .collect();
+    for (r, place) in crate::hostrun::start_order(runs) {
+        let mut v = studio_brief(r);
+        v["queue_position"] = json!(place);
+        out.push(v);
+    }
+    out
+}
+
 impl DevJobs {
     /// `devjob_start` with `host: "studio"`.
     async fn start_studio(
@@ -3098,6 +3174,7 @@ impl DevJobs {
         again: bool,
         reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
+        priority: Option<crate::hostrun::Priority>,
     ) -> Value {
         let Some(svc) = self.studio.get() else {
             return error_result("host \"studio\" needs [hostrun] enabled on this bridge");
@@ -3109,11 +3186,18 @@ impl DevJobs {
                 again,
                 reviewer,
                 review_focus,
+                priority,
             })
             .await
         {
             Ok(s) => text_result(
-                &json!({ "run_id": s.run_id, "host": "studio", "status": s.status, "waiting_for": s.waiting_for }),
+                &json!({
+                    "run_id": s.run_id,
+                    "host": "studio",
+                    "status": s.status,
+                    "waiting_for": s.waiting_for,
+                    "priority": svc.get(&s.run_id).map(|r| r.priority).unwrap_or_default(),
+                }),
                 false,
             ),
             Err(e) => error_result(e.message()),
@@ -3221,8 +3305,11 @@ impl crate::gateway::InProcessServer for DevJobs {
                             again,
                             reviewer,
                             review_focus,
+                            priority,
                         }) => {
-                            return Ok(self.start_studio(kind, again, reviewer, review_focus).await)
+                            return Ok(self
+                                .start_studio(kind, again, reviewer, review_focus, priority)
+                                .await)
                         }
                         Ok(StartPlan::Cloud(req)) => {
                             let Some(c) = self.cloud.get() else {
@@ -3314,7 +3401,7 @@ impl crate::gateway::InProcessServer for DevJobs {
                         .map(studio_brief)
                         .collect();
                     v["studio"] = json!({
-                        "active": runs.iter().filter(|r| !r.status.is_finished()).map(studio_brief).collect::<Vec<_>>(),
+                        "active": studio_active(&runs),
                         "finished": finished,
                     });
                     self.list_cloud(&mut v).await;
@@ -3422,13 +3509,33 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Err(e) => Ok(error_result(e.message())),
                     }
                 }
+                TOOL_PRIORITY => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: PriorityArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    let priority = match crate::hostrun::Priority::parse(&args.priority) {
+                        Ok(p) => p,
+                        Err(e) => return Ok(error_result(&e)),
+                    };
+                    match svc
+                        .set_priority_and_pump(args.run_id.trim(), priority)
+                        .await
+                    {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
                 other => Err(format!("devjob has no tool {other:?}")),
             }
         })
     }
 }
 
-/// The containment battery's `devjob`: the eight tools, listed exactly as the real server lists
+/// The containment battery's `devjob`: the nine tools, listed exactly as the real server lists
 /// them on the Studio (with `[hostrun]` attached), and every call refused. Only in a
 /// `containment-probe` build.
 #[cfg(feature = "containment-probe")]

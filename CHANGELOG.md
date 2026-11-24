@@ -14,6 +14,48 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.217.0] - 2026-11-23
+
+**A queued Studio run carries a priority, so urgent work no longer waits behind routine work in
+the same repository.** On 2026-11-23 about 38 `jeremyandrews/trovato` runs were queued behind
+one running run (repository cap 1), and a one line kernel fix blocking another project's release
+was launched and landed last, with no lever but cancelling the others. Four fixed levels: `low`,
+`normal` (the default), `high`, `urgent`.
+
+- **The order.** The queue pass (`HostRuns::pump`, via `hostrun::queue_order`) starts the
+  watcher's own resumed rounds first, as before, then the highest priority, then the oldest wait
+  (`queued_at`, else `created_at`), then the run id. With every run `normal` the order is exactly
+  the old one. A free cloud slot taking a `devjob-host: any` run uses the same order.
+- **Never preempts.** Priority only decides which eligible queued run takes a free slot. It never
+  stops, pauses or overtakes a running run and never bypasses `max_concurrent`, a repository's
+  cap, the usage limit hold or the disk check; each run is still checked on its own, so an
+  `urgent` run in a repository at its cap leaves the free slot to a `normal` run elsewhere.
+- **At launch.** `devjob_start` with `host: "studio"` takes `priority`; a draft may say
+  `devjob-priority: <level>`; the argument wins. An unknown value is refused, naming the four.
+  The cluster and the cloud refuse `priority` (their queues are separate and have none).
+- **While queued.** New tool `devjob_priority { run_id, priority }` changes a queued run's
+  priority, records `{ at, from, to }` in the run's `priority_changes`, and runs the queue pass
+  once. A running, paused, reviewing, finished, closed or cancelled run is refused with its
+  status. Classed `write` beside `devjob_cancel` and granted wherever the other devjob tools are:
+  `DEFAULT_ALLOWED_TOOLS`, the `devjob` row in `mcpservers.rs`, `capability-map.toml`, the
+  battery stand-in. The golden `capability-args.json` moved on the Claude Code and direct write
+  rows only, and the argv fixture on Claude Code's two write sites only, for the one new grant.
+- **Showing it.** `devjob_status`, every run in `devjob_list` and `devjob_start`'s answer carry
+  `priority`. `devjob_list`'s Studio `active` lists the queued runs last, in the order the queue
+  pass would start them, each with `queue_position` (its place among its repository's queued
+  runs, from 1).
+- **The record.** `priority` is stored by name in `run.json` and written only when not `normal`,
+  with `priority_changes` only when there are any, so a record from an older bridge reads as
+  `normal`, nothing is migrated, and an all `normal` record and the app's wire JSON are unchanged.
+- **Tests.** `hostrun/tests/priority.rs` (a module, not a new test file): a mixed queue in one
+  repository starts in priority then age order, one slot goes to the urgent run, a high run in a
+  capped repository leaves the slot to a normal run in another, resumed rounds go first, an all
+  `normal` queue keeps the old order, a record with no field reads as `normal`, the draft key
+  and the start argument (which wins), unknown values refused, and `devjob_priority` changing a
+  queued run and refusing a running, cancelled or unknown one. No sleep.
+
+Takes effect once the bridge is deployed.
+
 ## [bridge 0.216.0] - 2026-11-23
 
 **`GET /jesse/runs` lists the cloud's dev jobs beside the Studio's runs, read only.** Cloud

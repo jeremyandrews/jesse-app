@@ -148,6 +148,7 @@ fn free(slug: &str) -> StartRequest {
         again: false,
         reviewer: None,
         review_focus: None,
+        priority: None,
     }
 }
 

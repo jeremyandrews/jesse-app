@@ -268,6 +268,33 @@ impl JesseRequest {
         }
     }
 
+    /// The bridge started this turn because a Studio run or a strand step changed state:
+    /// its `origin` is [`crate::hostrun::STUDIO_RUN_ORIGIN`] or [`STRAND_TICK_ORIGIN`].
+    /// Such a turn is wrapped in [`crate::prompt::RUN_EVENT_PREAMBLE`]. Read off `origin`,
+    /// which only the bridge's own senders can set, never off the turn's text.
+    pub fn is_run_event(&self) -> bool {
+        matches!(
+            self.origin.as_deref(),
+            Some(crate::hostrun::STUDIO_RUN_ORIGIN) | Some(STRAND_TICK_ORIGIN)
+        )
+    }
+
+    /// The request's own part of its [`TurnPrompt`]: mode (already trimmed and lowercased
+    /// by the caller), text, followup, voice, the app's two overrides, and whether it is a
+    /// run event. The three server flags are `false` here; [`start_turn`] sets them from the
+    /// harness serving the turn.
+    pub fn turn_prompt<'a>(&'a self, mode: &'a str, is_followup: bool) -> TurnPrompt<'a> {
+        TurnPrompt {
+            is_followup,
+            voice: self.voice,
+            instructions: self.instructions.as_deref(),
+            floor_override: self.floor_override.as_deref(),
+            // A run or strand step changed state: explain the work, not a confirmation.
+            run_event: self.is_run_event(),
+            ..TurnPrompt::new(mode, &self.text)
+        }
+    }
+
     /// The validated `client_kind`: a value from [`CLIENT_KINDS`], or `None` for an absent
     /// or off-list one.
     pub fn client_kind(&self) -> Option<&'static str> {
@@ -793,6 +820,9 @@ pub async fn jesse_prompts(
         "tell": p.render(TELL_PREAMBLE),
         "ask_floor": p.render(ASK_FLOOR),
         "tell_floor": p.render(TELL_FLOOR),
+        // Read-only: the wrapper for the bridge's own run and strand tick turns. The app's
+        // Tell override never replaces it.
+        "run_event": p.render(RUN_EVENT_PREAMBLE),
     })))
 }
 
@@ -1086,18 +1116,13 @@ pub async fn start_turn(
     let prompt = build_prompt_at(
         &clock,
         &TurnPrompt {
-            mode: &mode,
-            text: &req.text,
-            is_followup,
-            voice: req.voice,
-            instructions: req.instructions.as_deref(),
-            floor_override: req.floor_override.as_deref(),
             // Told about the house model only when the harness serving this turn registers it.
             house: main_turn_loads_house(&st.cfg, st.cfg.harnesses.serving(&active)),
             // …and about the health archive only when it registers that server.
             healthdb: main_turn_loads_healthdb(&st.cfg, st.cfg.harnesses.serving(&active)),
             // …and about the house history only when it registers that server.
             housedb: main_turn_loads_housedb(&st.cfg, st.cfg.harnesses.serving(&active)),
+            ..req.turn_prompt(&mode, is_followup)
         },
         &device_contexts,
         &st.cfg.persona,
@@ -3215,6 +3240,99 @@ mod tests {
             r#"{"mode":"ask","text":"hi","client_kind":"mac","client_device":"Jeremy’s Mac Studio","voice":true}"#,
         );
         assert_eq!(source_of(&mac), "SOURCE: mac (Jeremy's Mac Studio), voice");
+    }
+
+    /// The prompt [`start_turn`] would build for `req`, through the same
+    /// [`JesseRequest::turn_prompt`], with a fixed clock and no device data.
+    fn built(req: &JesseRequest) -> String {
+        let mode = req.mode.trim().to_lowercase();
+        build_prompt_at(
+            "Current date/time: Tuesday, 2026-11-24 09:00 CET (UTC+01:00).",
+            &req.turn_prompt(&mode, req.session_id.is_some()),
+            &DeviceContexts::default(),
+            &Persona::default(),
+        )
+        .expect("a valid turn")
+    }
+
+    const CONFIRMATION: &str = "one or two sentence confirmation";
+
+    /// A bridge-originated run or tick turn: led by the unchanged tell floor, wrapped in
+    /// RUN_EVENT_PREAMBLE, never in the Tell wrapper's "confirmation" ask.
+    fn assert_run_event(prompt: &str, text: &str) {
+        let p = Persona::default();
+        let floor = p.render(TELL_FLOOR);
+        let wrapper = p.render(RUN_EVENT_PREAMBLE);
+        assert!(
+            prompt.contains(&format!("{floor}\n\n{wrapper}{text}")),
+            "{prompt}"
+        );
+        assert!(!prompt.contains(CONFIRMATION), "{prompt}");
+        assert!(!prompt.contains(&p.render(TELL_PREAMBLE)), "{prompt}");
+    }
+
+    #[test]
+    fn a_studio_run_report_turn_asks_for_a_plain_words_update() {
+        let text = crate::hostrun::report_turn_text("BG14", "Homelab", "Inbox/run-BG14.md");
+        let req = crate::hostrun::run_turn_request(text.clone());
+        assert!(req.is_run_event());
+        let prompt = built(&req);
+        println!("{prompt}");
+        assert_run_event(&prompt, &text);
+        // The start event takes the same wrapper.
+        let text = crate::hostrun::start_turn_text("BG14", "t3", "Homelab");
+        assert_run_event(
+            &built(&crate::hostrun::run_turn_request(text.clone())),
+            &text,
+        );
+    }
+
+    #[test]
+    fn a_strand_tick_turn_asks_for_a_plain_words_update() {
+        let key = crate::strandticks::TickKey::new("Homelab.md", "t1");
+        let req = crate::strandticks::tick_request(&key);
+        assert!(req.is_run_event());
+        assert_run_event(&built(&req), &key.sentence());
+    }
+
+    #[test]
+    fn an_ordinary_tell_keeps_the_tell_wrapper() {
+        let req = wire(r#"{"mode":"tell","text":"I ate an apple"}"#);
+        assert!(!req.is_run_event());
+        let prompt = built(&req);
+        assert!(prompt.contains(CONFIRMATION));
+        assert!(!prompt.contains("\n\nEvent: "));
+        // Byte for byte the plain tell turn the prompt layer builds.
+        assert_eq!(
+            prompt,
+            build_prompt_at(
+                "Current date/time: Tuesday, 2026-11-24 09:00 CET (UTC+01:00).",
+                &TurnPrompt::new("tell", "I ate an apple"),
+                &DeviceContexts::default(),
+                &Persona::default(),
+            )
+            .unwrap()
+        );
+        // A scheduled tell is not a run event either.
+        let mut sched = JesseRequest::scheduled("tell", "brief".into(), None);
+        sched.set_origin("schedule:morning-brief");
+        assert!(!sched.is_run_event());
+        assert!(built(&sched).contains(CONFIRMATION));
+    }
+
+    #[test]
+    fn a_saved_tell_override_never_replaces_the_run_event_wrapper() {
+        let custom = "CUSTOM TELL WRAPPER: ";
+        let text = crate::hostrun::report_turn_text("BG14", "Homelab", "Inbox/run-BG14.md");
+        let mut req = crate::hostrun::run_turn_request(text.clone());
+        req.instructions = Some(custom.into());
+        let prompt = built(&req);
+        assert!(!prompt.contains(custom), "{prompt}");
+        assert_run_event(&prompt, &text);
+        // The same override still applies to a turn the owner types.
+        let mut typed = wire(r#"{"mode":"tell","text":"I ate an apple"}"#);
+        typed.instructions = Some(custom.into());
+        assert!(built(&typed).contains(&format!("{custom}I ate an apple")));
     }
 
     #[test]

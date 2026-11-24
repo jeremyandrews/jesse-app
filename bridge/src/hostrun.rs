@@ -673,7 +673,7 @@ pub fn queue_order(a: &RunRecord, b: &RunRecord) -> std::cmp::Ordering {
         .then(a.run_id.cmp(&b.run_id))
 }
 
-/// The queued runs among `runs` in the order the queue pass would start them ([`queue_order`]),
+/// The queued runs among `runs` in the order the queue pass considers them ([`queue_order`]),
 /// each with its place, from 1, among its own repository's queued runs. Which of them starts
 /// next still depends on the caps: a run whose repository is full waits whatever its place.
 pub fn start_order(runs: &[RunRecord]) -> Vec<(&RunRecord, usize)> {
@@ -1542,7 +1542,9 @@ pub fn draft_reviewer(path: &str, src: &str) -> Result<Option<review::ReviewerAr
 pub fn draft_priority(path: &str, src: &str) -> Result<Option<Priority>, String> {
     match fm(src, PRIORITY_KEY) {
         None => Ok(None),
-        Some(v) => match strip_comment(&v) {
+        // The comment comes off before the quotes: in `"high" # release` the comment hides the
+        // closing quote from `fm`, which then hands the whole line back still quoted.
+        Some(v) => match unquote(strip_comment(&v)).as_str() {
             "" => Ok(None),
             v => Priority::parse(v).map(Some).map_err(|e| {
                 format!(

@@ -1017,8 +1017,11 @@ so a record from an older bridge, with no field, reads as `normal` and nothing i
   `normal` run in an idle repository takes the free slot.
 - **Showing it.** `devjob_status` and every run in `devjob_list` carry `priority`. The list's
   Studio `active` gives the running, paused and reviewing runs first, newest first, then the
-  queued runs in the order the queue pass would start them, each with `queue_position`, its place
-  (from 1) among its repository's queued runs. Reports, pushes and the app are unchanged.
+  queued runs in the order the queue pass considers them, each with `queue_position`, its place
+  (from 1) among its repository's queued runs. Within a repository that is the start order; across
+  repositories the caps still decide, so a run whose repository is full waits whatever its place,
+  and the first queued run listed is not always the next to start. Reports, pushes and the app are
+  unchanged.
 
 **Local repositories (0.202.0).** `local/<name>` (the name follows the `owner/name` rules) is a
 repository that exists only on the Studio: a bare repository at `<root>/local/<name>.git` with no

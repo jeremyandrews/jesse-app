@@ -14,6 +14,16 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.217.1] - 2026-11-24
+
+**A quoted `devjob-priority:` followed by a comment is read, not refused.** A draft line such as
+`devjob-priority: "high" # release` was refused as an unknown priority: the trailing comment hid
+the closing quote, so the value reached the check still quoted. The comment now comes off before
+the quotes. The docs for `devjob_list` also say plainly that the queued runs are listed in the
+order the queue pass considers them: `queue_position` is the start order within a repository,
+but across repositories the caps still decide, so the first queued run listed is not always the
+next to start.
+
 ## [bridge 0.217.0] - 2026-11-23
 
 **A queued Studio run carries a priority, so urgent work no longer waits behind routine work in

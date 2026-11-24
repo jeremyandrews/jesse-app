@@ -36,9 +36,11 @@ exists, not merely when a slot is free, because Kubernetes starts `activeDeadlin
 resume: a Job resumed onto no worker would spend its clock waiting for a droplet. It is further
 resumed only onto a worker whose **remaining life covers its own deadline**
 (`worker_life_minutes` minus the worker's age, from kc-burst's `age_seconds`; with no age
-reported, the worker's current `expires` stands in): a worker too old for the Job stays idle
-(and is stopped by the idle rule below, in time) while `plan_burst` starts the Job a fresh one
-([`cloud_resumable`]).
+reported, the worker's current `expires` stands in), and the resume pins the Job's pod to that
+worker by a required node affinity on its name, so the scheduler cannot pick another idle worker
+too old for it ([`cloud_resumable`], [`pin_to_worker`]). An idle worker too old for every queued
+Job that found none is spent: it does not count as the queue's capacity, so `plan_pass` starts
+the Job a fresh worker in the same pass, and the spent one is stopped once idle `idle_minutes`.
 
 **Draining (`any`).** Each cloud pass, while a cloud slot is free (active plus queued cloud Jobs
 under `max_concurrent`) and the cost cap allows, the cloud takes the first queued Studio run, in

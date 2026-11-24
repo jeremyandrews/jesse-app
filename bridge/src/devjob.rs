@@ -2925,10 +2925,8 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "test_command": { "type": "string", "description": "run after the agent, at most 1 KiB" },
                     "timeout_minutes": { "type": "integer", "minimum": 1,
                                          "description": "the agent's time limit; default 120, \
-                                             capped at 240 on the cluster or the Studio, higher \
-                                             with host \"cloud\" ([devjob.cloud] \
-                                             max_timeout_minutes); a reduced value is named in \
-                                             the reply's timeout_note" },
+                                             capped at 240; a reduced value is named in the \
+                                             reply's timeout_note" },
                 },
             },
         }),

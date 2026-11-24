@@ -3150,8 +3150,9 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
 }
 
 /// `devjob_list`'s Studio `active`: the running, paused and reviewing runs, newest first as `runs` gives them, then the queued runs in the order the queue
-/// pass would start them ([`crate::hostrun::start_order`]), each with `queue_position`, its
-/// place among its repository's queued runs (from 1).
+/// pass considers them ([`crate::hostrun::start_order`]), each with `queue_position`, its
+/// place among its repository's queued runs (from 1). Across repositories the caps still decide
+/// which starts next.
 fn studio_active(runs: &[crate::hostrun::RunRecord]) -> Vec<Value> {
     let mut out: Vec<Value> = runs
         .iter()

@@ -438,3 +438,26 @@ async fn devjob_priority_changes_a_queued_run_and_refuses_a_running_one() {
         Err(Refusal::NotFound(_))
     ));
 }
+
+#[test]
+fn a_quoted_draft_priority_reads_with_or_without_a_trailing_comment() {
+    let fm = |line: &str| format!("---\n{line}\n---\nbody\n");
+    for line in [
+        "devjob-priority: high",
+        "devjob-priority: high # release",
+        "devjob-priority: \"high\"",
+        "devjob-priority: \"high\" # release",
+        "devjob-priority: 'high'  # release",
+    ] {
+        assert_eq!(
+            draft_priority("d.md", &fm(line)),
+            Ok(Some(Priority::High)),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        draft_priority("d.md", &fm("devjob-priority: # later")),
+        Ok(None)
+    );
+    assert!(draft_priority("d.md", &fm("devjob-priority: \"asap\" # x")).is_err());
+}

@@ -262,6 +262,10 @@
 //! `src/housequery.rs` and `src/harness/claude_code.rs`. Regenerated with no `GIT_CONFIG_*` in
 //! the environment.
 //!
+//! **AND AGAIN, in bridge 0.217.0, for `devjob_priority`, on Claude Code's two write sites only.**
+//! `main-write` and `main-write-resume` moved their `--allowedTools` digest for the one new
+//! `mcp__devjob__*` grant, for the reason 0.197.0 gives. No other site moved.
+//!
 //! To regenerate — which should only ever happen alongside a DELIBERATE argv change, in the
 //! same commit as its changelog entry: `JESSE_ARGV_FIXTURE_WRITE=1 cargo test --test
 //! argv_split_fixture`.

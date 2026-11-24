@@ -274,6 +274,7 @@ printf 'Pushed the change.\n' > "$JESSE_RUN_REPORT"
                 again: false,
                 reviewer: None,
                 review_focus: None,
+                priority: None,
             })
             .await
             .unwrap();

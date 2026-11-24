@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [bridge 0.216.0] - 2026-11-23
+## [bridge 0.221.0] - 2026-11-24
 
 **Cloud dev jobs may run up to the burst worker's life, not a fixed 240 minutes.** The cluster
 and Studio cap (`MAX_TIMEOUT_MINUTES`, 240) stays as it was; `host: "cloud"` now has its own,
@@ -39,6 +39,183 @@ of being silently clamped.
   idle rule, while `plan_burst` starts the Job a fresh one. `parse_status` reads kc-burst's
   `age_seconds`; with no age reported, a worker's current `expires` stands in rather than
   assuming it has its whole life left.
+- **One cloud cap, not two.** 0.219.0's `[devjob.cloud] max_agent_minutes` (default 480) capped
+  the same `timeout_minutes`, at a value whose Job could not fit one worker; it is folded into
+  `max_timeout_minutes`, which still reads a config that says `max_agent_minutes`, and the
+  `devjob_start` description names the configured cap.
+
+## [bridge 0.220.0] - 2026-11-24
+
+**When a Studio run starts or reports, or a strand step is ticked, the reply explains the work in plain words: what it was and why, what someone can now do or see, what it gets the owner, whether the owner needs to do anything, with ids last.**
+
+Root cause: the bridge's own run and tick turns were wrapped as ordinary tells, and the Tell wrapper asks for a one or two sentence confirmation, so run outcomes reached the owner as ids ("BG14 is done, PRs 264, 265 and 267 merged") instead of an explanation. Those turns, picked out by their bridge-only origin (`studio-run`, `strand-tick`), now take a new `RUN_EVENT_PREAMBLE` behind the unchanged tell floor. A custom Tell wrapper saved in the app's Settings does not replace it, since those overrides are for turns the owner types. `GET /jesse/prompts` shows the new default read-only as `run_event`. The session list recovers the event text by that wrapper's whole last sentence, so a saved Tell wrapper that says "Event:" on a line of its own still unwraps to exactly what the owner typed. Ordinary ask, tell and voice turns are unchanged.
+
+## [bridge 0.219.0] - 2026-11-24
+
+**A cloud dev job's memory, CPU and agent time come from `[devjob.cloud]` config, with defaults
+that let a Rust workspace the size of trovato build and test.** Root cause: the cloud Job's pod
+resources were fixed in code for the cheapest 8 GB worker (3 CPU / 6Gi request, 4 CPU / 7Gi
+limit), and nothing tied them to the worker size, so choosing a bigger `burst_size` changed
+nothing and three trovato runs on 2026-11-24 were `OOMKilled` after 57 to 120 minutes, losing
+all their work.
+
+- New `[devjob.cloud]` keys: `job_memory_gi` (default 14), `job_memory_request_gi` (12),
+  `job_cpu` (4), `job_cpu_request` (3) and `max_agent_minutes` (480). The bridge refuses to boot
+  when a request is above its limit, any of them is 0, or `max_agent_minutes` is past a worker's
+  8 hour life, or when a request does not fit the worker `burst_size` names (its GB and vCPUs,
+  read from the size's name). A config without them gets defaults that follow its `burst_size`:
+  14 / 12 Gi and 4 / 3 CPU on the 16 GB default, and the former 7 / 6 Gi and 4 / 3 CPU on an
+  8 GB worker, so a config pinned to `s-4vcpu-8gb-intel` keeps scheduling.
+- Two cloud Jobs never share a worker, whatever their requests: the pod carries a required
+  anti-affinity on the hostname against every other cloud run's pod.
+- `burst_size` defaults to `g-4vcpu-16gb` (4 vCPU, 16 GB), which the new defaults fit.
+  `hourly_cost_eur` still defaults to the old 8 GB worker's price, which was not re-read: set it
+  to the new size's price so the daily cost cap counts it.
+- The Job sets `CARGO_BUILD_JOBS` to `job_cpu`, so cargo never runs more parallel rustc
+  processes than the pod has CPUs; those, not the CPU count, set a build's peak memory.
+- A cloud run's `timeout_minutes` is capped at `max_agent_minutes` instead of the cluster's 240;
+  the `devjob_start` description and schema say so. The cluster's cap is unchanged.
+- A cloud run whose pod was `OOMKilled` says so first in its report's failure line ("killed at
+  the 14 Gi memory limit (OOMKilled)"), read from the pod's terminated state, instead of only
+  `BackoffLimitExceeded`.
+
+## [bridge 0.218.1] - 2026-11-24
+
+**The merge watch runs each check on its own task, so a `gh` that hangs holds up only its own run, never the watcher, the queue or the other runs; the one "Merge needed" push comes from the first check, so a pull request already merged or closed gets none; a merge missing its time or commit is asked again; a blind "Continue where you left off." is refused while a run waits for a merge; and a link with `?…` or `#…` after the number is watched.**
+
+## [bridge 0.218.0] - 2026-11-24
+
+**A Studio run that only waits for your merge says `AWAITING MERGE: <pull request URL>`, pushes "Merge needed", and resumes itself in its session when that pull request merges.**
+
+## [App 1.0 (228)] - 2026-11-24
+
+**The Runs page shows an `awaiting_merge` run as "Awaiting your merge" with its pull request link, among the runs that need you.**
+
+## [bridge 0.217.1] - 2026-11-24
+
+**A quoted `devjob-priority:` followed by a comment is read, not refused.** A draft line such as
+`devjob-priority: "high" # release` was refused as an unknown priority: the trailing comment hid
+the closing quote, so the value reached the check still quoted. The comment now comes off before
+the quotes. The docs for `devjob_list` also say plainly that the queued runs are listed in the
+order the queue pass considers them: `queue_position` is the start order within a repository,
+but across repositories the caps still decide, so the first queued run listed is not always the
+next to start.
+
+## [bridge 0.217.0] - 2026-11-23
+
+**A queued Studio run carries a priority, so urgent work no longer waits behind routine work in
+the same repository.** On 2026-11-23 about 38 `jeremyandrews/trovato` runs were queued behind
+one running run (repository cap 1), and a one line kernel fix blocking another project's release
+was launched and landed last, with no lever but cancelling the others. Four fixed levels: `low`,
+`normal` (the default), `high`, `urgent`.
+
+- **The order.** The queue pass (`HostRuns::pump`, via `hostrun::queue_order`) starts the
+  watcher's own resumed rounds first, as before, then the highest priority, then the oldest wait
+  (`queued_at`, else `created_at`), then the run id. With every run `normal` the order is exactly
+  the old one. A free cloud slot taking a `devjob-host: any` run uses the same order.
+- **Never preempts.** Priority only decides which eligible queued run takes a free slot. It never
+  stops, pauses or overtakes a running run and never bypasses `max_concurrent`, a repository's
+  cap, the usage limit hold or the disk check; each run is still checked on its own, so an
+  `urgent` run in a repository at its cap leaves the free slot to a `normal` run elsewhere.
+- **At launch.** `devjob_start` with `host: "studio"` takes `priority`; a draft may say
+  `devjob-priority: <level>`; the argument wins. An unknown value is refused, naming the four.
+  The cluster and the cloud refuse `priority` (their queues are separate and have none).
+- **While queued.** New tool `devjob_priority { run_id, priority }` changes a queued run's
+  priority, records `{ at, from, to }` in the run's `priority_changes`, and runs the queue pass
+  once. A running, paused, reviewing, finished, closed or cancelled run is refused with its
+  status. Classed `write` beside `devjob_cancel` and granted wherever the other devjob tools are:
+  `DEFAULT_ALLOWED_TOOLS`, the `devjob` row in `mcpservers.rs`, `capability-map.toml`, the
+  battery stand-in. The golden `capability-args.json` moved on the Claude Code and direct write
+  rows only, and the argv fixture on Claude Code's two write sites only, for the one new grant.
+- **Showing it.** `devjob_status`, every run in `devjob_list` and `devjob_start`'s answer carry
+  `priority`. `devjob_list`'s Studio `active` lists the queued runs last, in the order the queue
+  pass would start them, each with `queue_position` (its place among its repository's queued
+  runs, from 1).
+- **The record.** `priority` is stored by name in `run.json` and written only when not `normal`,
+  with `priority_changes` only when there are any, so a record from an older bridge reads as
+  `normal`, nothing is migrated, and an all `normal` record and the app's wire JSON are unchanged.
+- **Tests.** `hostrun/tests/priority.rs` (a module, not a new test file): a mixed queue in one
+  repository starts in priority then age order, one slot goes to the urgent run, a high run in a
+  capped repository leaves the slot to a normal run in another, resumed rounds go first, an all
+  `normal` queue keeps the old order, a record with no field reads as `normal`, the draft key
+  and the start argument (which wins), unknown values refused, and `devjob_priority` changing a
+  queued run and refusing a running, cancelled or unknown one. No sleep.
+
+Takes effect once the bridge is deployed.
+
+## [bridge 0.216.0] - 2026-11-23
+
+**`GET /jesse/runs` lists the cloud's dev jobs beside the Studio's runs, read only.** Cloud
+runs (`host: "cloud"`, Jobs in `jesse-dev` on kc1) were visible only through `devjob_list`. The
+Runs list now carries them too, in the run JSON shape, so the app can show what is running and
+queued in the cloud. New module `src/hostrun/cloud.rs`.
+
+- **The rows.** The cloud's queued, running and last 20 finished Jobs, `devjob_list`'s window
+  (`DevJobs::listed`, sharing `ListedViews` with `devjob_list`), each with `host: "cloud"`,
+  `run_id`, `job_name`, `repo`, `branch` (`jesse/<slug>`), `slug`, `agent`, `model`, `status`,
+  `created_at` and `queued_at` (the Job's creation), `started_at`, `finished_at`, `outcome`,
+  `pull_request`, `report_paths`, `error` (a failed Job's condition), `strand`, `item_id` and
+  `title` (the strand line's, for a Job a strand entry started; `JobView` now reads the
+  `jesse.dev/strand` and `jesse.dev/strand-id` labels). What the cloud lacks is null, never made
+  up: no rounds, no reviewer. Sorted with the Studio's rows by the list's rule (newest created,
+  then id); none under `?archived=only`.
+- **The status words.** Suspended: `queued`. Released and not finished (scheduling, running, or
+  being cancelled): `running`. Finished and cancelled: `cancelled`. Outcome `pull request
+  opened` or `no changes`: `reported`. Outcome `failed`: `failed`. Finished, not yet reported:
+  `failed` if the Job failed, `running` if it completed (its report is being written). An
+  outcome this build does not know: `reported` on a completed Job, else `failed`.
+- **Counts.** `counts.cloud` (`running`, `queued`, `needs_me`, `moving`, `finished`) holds the
+  cloud's tallies; every Studio count is unchanged.
+- **Unavailable.** `cloud_available` is true when the cloud was listed. When the bridge has no
+  `[devjob.cloud]`, or kc1 fails or does not answer within 3 s, it is false and
+  `cloud_unavailable` says why; the Studio's runs are served as before. The cloud is asked while
+  the Studio's store is scanned, so it never slows the Studio list past that bound.
+- **One cloud run.** `GET /jesse/runs/:id` and `/log` answer for a cloud run, by run id or Job
+  name, within 6 s: the row plus `waiting_for`, `last_line` and `elapsed_secs`, and the log: the
+  tail the watcher kept, continued by the tail read now (where the two overlap), so a running
+  Job's log is current. A cloud that fails or does not answer in time is 503 "cloud runs are
+  unavailable", not 404: the run may well exist. `?host=cloud` asks only the cloud; without it
+  the Studio is asked first, as before.
+- **No action.** `reply`, `review`, `cancel`, `close`, `archive` and `unarchive` answer 409 "<id>
+  is a cloud run: cloud runs are managed through Jesse, not from the Runs page" for
+  `?host=cloud`, even when a Studio run has the same id (a queued Studio run the cloud took keeps
+  its id), and for an id only the cloud knows. A Studio run's action never asks the cloud.
+- **Tests.** `hostrun::cloud::tests` (14: every phase and outcome to a status, the row's shape,
+  the merge and its order, counts, the archived list, titles, not configured, a failed and a
+  timed out listing on the paused clock, a failed and a timed out lookup as 503 beside a missing
+  run as 404, refused actions, the log continued across the kept and current tails) and three app wire
+  fixtures written by `the_app_wire_fixtures_match_what_the_run_routes_serialize`
+  (`studio-runs-list-cloud.json`, `studio-runs-list-cloud-unavailable.json`,
+  `cloud-run-detail.json`).
+
+## [App 1.0 (227)] - 2026-11-23
+
+**The Runs page shows the cloud's dev jobs in the same list as the Studio's runs, in teal.**
+Needs bridge 0.216.0; with an older bridge the page is exactly as before.
+
+- **The rows.** Each cloud run is a row in the one list, ordered with the Studio's by the list's
+  rule (live first, then newest), with a teal bar along its leading edge, its status in teal, a
+  `Cloud` badge with the `cloud` symbol, and its repository. Teal (the system colour, adapting
+  to light and dark mode) is used by no status. A cloud run with no strand line is called by its
+  id. The segment counts add the bridge's `counts.cloud` to the Studio's.
+- **Read only.** A cloud row has no swipe or context action, `Archive all finished` leaves it
+  out, and its detail (titled `Cloud run`, read with `?host=cloud`) shows its status, log tail
+  and details (job, agent, outcome, pull request; `Queued` and its time, not `Started`, until the
+  Job starts) with no Cancel, reply, Resume or Archive; one
+  line says cloud runs are managed through Jesse.
+- **Unavailable.** When the bridge says the cloud's runs are not listed, one quiet line above
+  the list says "Cloud runs are unavailable right now."; no error state.
+- **Apart from the Studio.** `StudioRunsModel.runs` stays the Studio's alone, so the Work view,
+  a strand's Drafts and the board's badge are unchanged; cloud runs are in `cloudRuns`. A cloud
+  row's identity is `cloud:<id>`, so a Studio run and a cloud run of the same id are two rows
+  with two detail screens.
+- **Tests.** `StudioRunsWireTests` (cloud list, unavailable list, a bridge without cloud rows, a
+  run with and without `host`, the cloud detail, `host=cloud`), `StudioRunsCloudModelTests` (the
+  cloud style, no actions, the merged order and counts, the cloud detail, the unavailable line,
+  an older bridge, the id title, the queued time), and `StudioRunsListEveryRunUITests` gains
+  `testCloudRowsShowInTheirOwnColourAndOfferNothing` against a loopback stub serving the
+  2026-11-23 18:20 CET snapshot, plus `PD1_CLOUD_RUNS` on the live bridge walk. Screenshots in
+  `docs/screenshots/dj7/`.
 
 ## [bridge 0.215.0] - 2026-11-23
 

@@ -64,6 +64,26 @@ fact, an instruction, or something to capture. Act on it per CLAUDE.md: log it, 
 file it, or update the vault as appropriate. Reply with a one or two sentence \
 confirmation of what you did.\n\nMessage: ";
 
+// The wrapper for a turn the BRIDGE starts because a run or strand step changed state:
+// a Studio run started or reported ([`crate::hostrun::STUDIO_RUN_ORIGIN`]) or a strand
+// step was ticked ([`crate::handlers::STRAND_TICK_ORIGIN`]). Nobody typed these, so the
+// Tell wrapper's "one or two sentence confirmation" is the wrong ask: it turned a finished
+// run into a list of pull request numbers. This one asks for the work explained in plain
+// words. It is NOT editable from the app: the Settings overrides are for turns the owner
+// types, so [`TurnPrompt::instructions`] never replaces it. The tell floor still leads it.
+// "What it gets {owner}", not "{owner_pronoun}": the persona carries only the possessive
+// pronoun ("his", "their"), which cannot stand where "him" belongs.
+pub const RUN_EVENT_PREAMBLE: &str = "This turn was started by the bridge, not typed by \
+{owner}: a run or strand step changed state. Update the vault as the owner's instructions \
+require. Then reply to {owner} in plain words for someone who has not read the prompt or the \
+pull request. For a finished run or step: one line on what the work was and why it was \
+wanted; one bullet per part saying what someone can now do or see; one line on what it gets \
+{owner}; then whether {owner} needs to do anything, with the exact how and why, \
+claiming an action only after checking it affects something {owner} actually runs, or \
+saying plainly that nothing is needed. Pull request numbers, commits and CI ids come last on \
+one line. For a run that just started: what it will build in one or two sentences, how long \
+it is likely to take, and where it runs. No preamble and no recap.\n\nEvent: ";
+
 // On a resumed thread the framing is already established — keep it light. The
 // record-facts invariant now lives in the always-applied floor, so the followup
 // wrappers no longer restate it.
@@ -693,17 +713,24 @@ pub fn is_title_mint_prompt(first_user_raw: &str) -> bool {
 /// the const by a test so they cannot drift.
 pub const REVIEW_CAPABILITY_MARKER: &str = "\n\n(Capability: you are running on the Mac Studio";
 
-/// The placeholder-free tails of the four built-in preambles (see [`ASK_PREAMBLE`],
-/// [`TELL_PREAMBLE`], [`ASK_FOLLOWUP`], [`TELL_FOLLOWUP`]). The user's text begins
+/// The tail of [`RUN_EVENT_PREAMBLE`] that the event text follows. It is the whole last
+/// sentence, not a bare `"\n\nEvent: "`: a saved Tell wrapper is free to say "Event:" on a
+/// line of its own, and since the earliest delimiter wins, a bare one there would cut that
+/// ordinary Tell at the wrong place and show the wrapper's own words as the owner's text.
+const RUN_EVENT_DELIMITER: &str = "No preamble and no recap.\n\nEvent: ";
+
+/// The placeholder-free tails of the five built-in preambles (see [`ASK_PREAMBLE`],
+/// [`TELL_PREAMBLE`], [`RUN_EVENT_PREAMBLE`], [`ASK_FOLLOWUP`], [`TELL_FOLLOWUP`]). The user's text begins
 /// immediately after whichever one leads it. The `{Owner}` placeholder only appears
 /// BEFORE these tails, so the tails are persona-independent and match any owner.
 ///
 /// This still holds now that the BODY is persona-rendered too: rendering happens
 /// during assembly, so a wrapped prompt contains substituted names, never placeholders,
 /// and these delimiters are unaffected by what the owner is called.
-const PREAMBLE_DELIMITERS: [&str; 4] = [
+const PREAMBLE_DELIMITERS: [&str; 5] = [
     "\n\nQuestion: ",                             // ASK_PREAMBLE tail (fresh)
     "\n\nMessage: ",                              // TELL_PREAMBLE tail (fresh)
+    RUN_EVENT_DELIMITER,                          // RUN_EVENT_PREAMBLE tail
     "follows up (still asking, keep it short): ", // ASK_FOLLOWUP tail
     "follows up (capture/act per CLAUDE.md): ",   // TELL_FOLLOWUP tail
 ];
@@ -1281,6 +1308,11 @@ pub struct TurnPrompt<'a> {
     /// told to query the house history for questions about how the house has been doing
     /// ([`HOUSEDB_CAPABILITY`]). `false` for every turn that cannot reach it.
     pub housedb: bool,
+    /// The bridge started this turn because a Studio run or strand step changed state
+    /// (see [`crate::handlers::JesseRequest::is_run_event`]). A `tell` so marked is wrapped
+    /// in [`RUN_EVENT_PREAMBLE`], fresh or followup, and `instructions` is ignored: the
+    /// app's saved Tell wrapper is for turns the owner types. The floor is unchanged.
+    pub run_event: bool,
 }
 
 impl<'a> TurnPrompt<'a> {
@@ -1296,6 +1328,7 @@ impl<'a> TurnPrompt<'a> {
             house: false,
             healthdb: false,
             housedb: false,
+            run_event: false,
         }
     }
 }
@@ -1395,6 +1428,7 @@ pub fn build_prompt_at(
         house,
         healthdb,
         housedb,
+        run_event,
     } = turn;
     // Validate the mode and pick both the built-in wrapper and the default floor —
     // an unknown mode is still a 400, override or not.
@@ -1428,7 +1462,12 @@ pub fn build_prompt_at(
     // framed as untrusted, and substituting into them would be an injection surface
     // rather than a personalization. `Persona::render` is single-pass, so nothing here
     // is scanned twice and a rendered value cannot be re-expanded — see its doc.
+    //
+    // A bridge-originated run or tick turn takes RUN_EVENT_PREAMBLE, and no app override:
+    // the saved Tell wrapper is written for what the owner types, not for a run report.
+    // Only a `tell` is so wrapped, so the mode still decides the floor (TELL_FLOOR).
     let preamble_template = match instructions {
+        _ if run_event && mode == "tell" => RUN_EVENT_PREAMBLE,
         Some(s) if !s.trim().is_empty() => s,
         _ => default_preamble,
     };
@@ -1559,6 +1598,7 @@ mod tests {
                 house: false,
                 healthdb: false,
                 housedb: false,
+                run_event: false,
             },
             &DeviceContexts::default(),
             &Persona::default(),
@@ -1648,6 +1688,57 @@ mod tests {
         assert!(followup.starts_with(&format!("{TEST_CLOCK}\n\n{}", rp(TELL_FLOOR))));
         assert!(followup.contains(&rp(TELL_FOLLOWUP)));
         assert!(followup.ends_with(PHONE_FORMAT));
+    }
+    #[test]
+    fn a_run_event_tell_takes_the_run_event_wrapper_and_keeps_the_floor() {
+        for followup in [false, true] {
+            let p = build_prompt_at(
+                TEST_CLOCK,
+                &TurnPrompt {
+                    is_followup: followup,
+                    instructions: Some("CUSTOM: "),
+                    run_event: true,
+                    ..TurnPrompt::new("tell", "Run BG14 started for t3 in Strands/Homelab.")
+                },
+                &DeviceContexts::default(),
+                &Persona::default(),
+            )
+            .unwrap();
+            assert!(p.starts_with(&format!(
+                "{TEST_CLOCK}\n\n{}\n\n{}Run BG14",
+                rp(TELL_FLOOR),
+                rp(RUN_EVENT_PREAMBLE)
+            )));
+            assert!(!p.contains("one or two sentence confirmation"));
+            assert!(!p.contains("CUSTOM: "));
+            assert!(p.ends_with(PHONE_FORMAT));
+            // The session list still recovers the event text from the wrapped turn.
+            assert_eq!(
+                strip_prompt_wrapper(&p),
+                "Run BG14 started for t3 in Strands/Homelab."
+            );
+        }
+    }
+    #[test]
+    fn a_custom_tell_wrapper_naming_an_event_still_strips_to_the_typed_text() {
+        // A saved Tell wrapper may use the word "Event:" on a line of its own. Only the
+        // run-event wrapper's own tail marks where its event text starts, so the ordinary
+        // Tell still unwraps to exactly what the owner typed.
+        let p = bp(
+            "tell",
+            "I ate an apple",
+            false,
+            false,
+            Some("Log this.\n\nEvent: capture the details.\n\nMessage: "),
+            None,
+        );
+        assert_eq!(strip_prompt_wrapper(&p), "I ate an apple");
+    }
+    #[test]
+    fn the_run_event_delimiter_is_the_placeholder_free_tail_of_its_wrapper() {
+        assert!(RUN_EVENT_PREAMBLE.ends_with(RUN_EVENT_DELIMITER));
+        assert!(!RUN_EVENT_DELIMITER.contains('{'));
+        assert!(PREAMBLE_DELIMITERS.contains(&RUN_EVENT_DELIMITER));
     }
     #[test]
     fn persona_renders_owner_name_and_pronoun_into_defaults() {
@@ -1829,6 +1920,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                 house: false,
                 healthdb: false,
                 housedb: false,
+                run_event: false,
             },
             &DeviceContexts::default(),
             &persona,
@@ -2130,6 +2222,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                 house: false,
                 healthdb: false,
                 housedb: false,
+                run_event: false,
                 ..TurnPrompt::new("shout", "hey")
             },
             &DeviceContexts::default(),
@@ -2223,6 +2316,7 @@ day, scanners, currency, or cheatsheets, and do not rebuild Today.md."
                     house: false,
                     healthdb: false,
                     housedb: false,
+                    run_event: false,
                 },
                 &DeviceContexts::default(),
                 &Persona::default(),

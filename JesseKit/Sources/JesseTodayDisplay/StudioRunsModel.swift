@@ -15,6 +15,9 @@ import JesseNetworking
 /// The colour family a status is drawn in. An enum rather than a `Color` so a test can pin it.
 public enum StudioRunTint: String, Equatable, Sendable {
     case neutral, blue, orange, green, red, yellow, purple, secondary
+    /// A cloud run's row accent and status badge, whatever its status: teal, apart from every
+    /// status colour.
+    case cloud
 }
 
 public enum StudioRunSemantics {
@@ -31,6 +34,7 @@ public enum StudioRunSemantics {
         case .paused: return "Paused"
         case .closed: return "Closed"
         case .reviewing: return "Reviewing"
+        case .awaitingMerge: return "Awaiting your merge"
         case .unknown(let word): return word.isEmpty ? "Unknown" : word
         }
     }
@@ -47,6 +51,7 @@ public enum StudioRunSemantics {
         case .paused: return "pause.circle.fill"
         case .closed: return "checkmark.circle"
         case .reviewing: return "magnifyingglass.circle.fill"
+        case .awaitingMerge: return "arrow.triangle.merge"
         case .unknown: return "questionmark.circle"
         }
     }
@@ -64,13 +69,50 @@ public enum StudioRunSemantics {
         case .closed: return .secondary
         // A second model is working on it: drawn as running is.
         case .reviewing: return .blue
+        // Waits on its owner, as a question does: drawn in the needs-you colour.
+        case .awaitingMerge: return .orange
         case .unknown: return .neutral
         }
     }
 
+    // MARK: Cloud runs
+
+    /// The word a cloud run's row and detail carry.
+    public static let cloudLabel = "Cloud"
+    /// Its SF Symbol.
+    public static let cloudSymbol = "cloud"
+
+    /// The tint of a run's status badge: a cloud run's is the cloud colour, so it reads as the
+    /// cloud's at a glance; a Studio run's is its status colour, as before.
+    public static func statusTint(_ run: StudioRun) -> StudioRunTint {
+        run.isCloud ? .cloud : tint(run.status)
+    }
+
+    /// The tint of a row's leading accent: the cloud colour on a cloud run, none on a Studio run.
+    public static func rowTint(_ run: StudioRun) -> StudioRunTint? {
+        run.isCloud ? .cloud : nil
+    }
+
+    /// The Details row that says when a run began: `Started` and its start. A cloud run that
+    /// has not started (the bridge serves no `started_at`) shows `Queued` and when it was
+    /// queued instead, never its queue time as a start. A Studio run keeps its own rule: its
+    /// creation stands in for a start it does not have yet.
+    public static func beganField(_ run: StudioRun) -> StudioRunTimeField? {
+        if let started = run.startedAt, !started.isEmpty {
+            return StudioRunTimeField(label: "Started", stamp: started)
+        }
+        let created = run.isCloud ? (run.queuedAt ?? run.createdAt) : run.createdAt
+        guard !created.isEmpty else { return nil }
+        return StudioRunTimeField(label: run.isCloud ? "Queued" : "Started", stamp: created)
+    }
+
+    /// The one quiet line the list shows when the bridge says the cloud's runs are not listed.
+    public static let cloudUnavailableLine = "Cloud runs are unavailable right now."
+
     // MARK: Order
 
-    /// Live runs first (queued, running, needs you, paused, reviewing), then the rest; newest first
+    /// Live runs first (queued, running, needs you, awaiting your merge, paused, reviewing),
+    /// then the rest; newest first
     /// within each, by creation and then by id so two runs created in one millisecond keep a
     /// stable order.
     public static func sorted(_ runs: [StudioRun]) -> [StudioRun] {
@@ -135,7 +177,7 @@ public enum StudioRunSemantics {
     /// open to a follow up.
     public static func canReply(_ status: StudioRunStatus) -> Bool {
         switch status {
-        case .needsYou, .interrupted, .reported, .closed: return true
+        case .needsYou, .awaitingMerge, .interrupted, .reported, .closed: return true
         case .queued, .running, .failed, .cancelled, .paused, .reviewing, .unknown: return false
         }
     }
@@ -154,8 +196,8 @@ public enum StudioRunSemantics {
         switch status {
         case .interrupted:
             return composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .queued, .running, .needsYou, .reported, .failed, .cancelled, .paused, .closed,
-             .reviewing, .unknown:
+        case .queued, .running, .needsYou, .awaitingMerge, .reported, .failed, .cancelled,
+             .paused, .closed, .reviewing, .unknown:
             return false
         }
     }
@@ -185,6 +227,42 @@ public enum StudioRunSemantics {
             return "Reviewing with \(name)"
         }
         guard let line = run.lastLine, !line.isEmpty else { return nil }
+        return line
+    }
+
+    // MARK: Awaiting a merge
+
+    /// The pull request link a run shows: on an `awaiting_merge` run (and on any run that still
+    /// carries a `merge_wait`, whose wait has ended), when its URL is a web one. Nil otherwise.
+    public static func mergeLink(_ run: StudioRun) -> StudioRunMergeLink? {
+        guard let wait = run.mergeWait, let url = wait.webURL else { return nil }
+        let reference = wait.reference
+        let trimmed = wait.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title: String? = trimmed.isEmpty ? nil : trimmed
+        let text = reference ?? title ?? url.absoluteString
+        let shownTitle = reference != nil ? title : nil
+        let spoken = ["Pull request", reference, shownTitle].compactMap { $0 }
+            .joined(separator: ", ")
+        return StudioRunMergeLink(url: url, text: text, title: shownTitle,
+                                  accessibilityLabel: spoken)
+    }
+
+    /// Whether a row shows the pull request link: only while the run waits on the merge.
+    public static func rowMergeLink(_ run: StudioRun) -> StudioRunMergeLink? {
+        guard run.status == .awaitingMerge, run.mergeWait?.hasEnded != true else { return nil }
+        return mergeLink(run)
+    }
+
+    /// The line beside the link: what happens while it waits, or how the wait ended.
+    public static func mergeLine(_ run: StudioRun, now: Date) -> String? {
+        guard let wait = run.mergeWait else { return nil }
+        if let ended = wait.ended?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !ended.isEmpty {
+            return "Wait ended: \(ended)"
+        }
+        guard run.status == .awaitingMerge else { return nil }
+        var line = "Merge it and the run continues by itself."
+        if let at = clock(wait.lastCheckAt, now: now) { line += " Last checked \(at)." }
         return line
     }
 
@@ -221,8 +299,11 @@ public enum StudioRunSemantics {
 
     /// The one line under a disabled composer, or nil where it is enabled.
     public static func replyDisabledReason(_ run: StudioRun, now: Date) -> String? {
+        if run.isCloud {
+            return "A cloud run on kc1. Cloud runs are managed through Jesse."
+        }
         switch run.status {
-        case .needsYou, .interrupted, .reported, .closed:
+        case .needsYou, .awaitingMerge, .interrupted, .reported, .closed:
             return nil
         case .queued:
             return "Queued. A reply can be sent once the round has run."
@@ -249,22 +330,24 @@ public enum StudioRunSemantics {
     public static func keepsPolling(_ status: StudioRunStatus) -> Bool {
         switch status {
         case .reported, .failed, .cancelled, .closed, .unknown: return false
-        case .queued, .running, .needsYou, .interrupted, .paused, .reviewing: return true
+        // Awaiting a merge: the bridge resumes the run by itself when the pull request merges.
+        case .queued, .running, .needsYou, .awaitingMerge, .interrupted, .paused, .reviewing:
+            return true
         }
     }
 
     // MARK: Archiving
 
     /// Whether Archive is offered: on a run that is not moving and not archived. The bridge
-    /// refuses a queued, running, paused or reviewing run; a `needs_you` or `interrupted` run it closes
-    /// first, so those are offered too.
+    /// refuses a queued, running, paused or reviewing run; a `needs_you`, `awaiting_merge` or
+    /// `interrupted` run it closes first, so those are offered too.
     public static func canArchive(_ run: StudioRun) -> Bool {
-        !run.status.isMoving && !run.isArchived
+        !run.isCloud && !run.status.isMoving && !run.isArchived
     }
 
-    /// Whether Unarchive is offered: on an archived run.
+    /// Whether Unarchive is offered: on an archived run. Never on a cloud run.
     public static func canUnarchive(_ run: StudioRun) -> Bool {
-        run.isArchived
+        !run.isCloud && run.isArchived
     }
 
     // MARK: The board's badge
@@ -286,6 +369,22 @@ public enum StudioRunSemantics {
     public static func badge(for strand: Strand) -> StudioRunBadge? {
         badge(active: strand.runsActive, needsYou: strand.runsNeedsYou)
     }
+}
+
+/// The pull request a run waits on, as a link: `owner/repo#number`, its title beside it.
+public struct StudioRunMergeLink: Equatable, Sendable {
+    public let url: URL
+    /// The link's words: `owner/repo#number`, else the title, else the URL.
+    public let text: String
+    /// The pull request's title, shown beside a reference; nil when `text` is the title.
+    public let title: String?
+    public let accessibilityLabel: String
+}
+
+/// One timed row of a run's Details: what the time is, and the RFC 3339 stamp.
+public struct StudioRunTimeField: Equatable, Sendable {
+    public let label: String
+    public let stamp: String
 }
 
 /// A strand row's run badge.
@@ -359,15 +458,19 @@ public enum StudioRunFilter: String, CaseIterable, Equatable, Sendable {
         }
     }
 
-    /// The bridge's tally for this filter, nil from a bridge that does not count it.
+    /// The bridge's tally for this filter, nil from a bridge that does not count it. The
+    /// cloud's tallies (`counts.cloud`) are added to the Studio's: the list shows both.
     public func count(in counts: StudioRunCounts) -> Int? {
+        let cloud = counts.cloud
         switch self {
-        case .needsMe: return counts.needsMe
-        case .moving: return counts.moving
-        case .finished: return counts.finished
+        case .needsMe: return counts.needsMe.map { $0 + (cloud?.needsMe ?? 0) }
+        case .moving: return counts.moving.map { $0 + (cloud?.moving ?? 0) }
+        case .finished: return counts.finished.map { $0 + (cloud?.finished ?? 0) }
         case .archived: return counts.archived
         case .all:
-            guard let a = counts.needsMe, let b = counts.moving, let c = counts.finished else {
+            guard let a = StudioRunFilter.needsMe.count(in: counts),
+                  let b = StudioRunFilter.moving.count(in: counts),
+                  let c = StudioRunFilter.finished.count(in: counts) else {
                 return nil
             }
             return a + b + c
@@ -402,8 +505,15 @@ public struct StudioRunUndo: Equatable, Identifiable, Sendable {
 public final class StudioRunsModel {
     nonisolated deinit {}
 
-    /// Every run not archived, live first then newest first.
+    /// Every Studio run not archived, live first then newest first. What the Work view, a
+    /// strand's Drafts and the board's badge read: the cloud's runs are not here.
     public private(set) var runs: [StudioRun] = []
+    /// The cloud's runs the bridge lists beside the Studio's (`host: "cloud"`, bridge 0.216.0),
+    /// shown in the Runs list only, read only. Empty from an older bridge.
+    public private(set) var cloudRuns: [StudioRun] = []
+    /// Why the cloud's runs are not listed, when the bridge says they are not; nil when they are
+    /// and from a bridge that predates cloud rows. One quiet line, never an error.
+    public private(set) var cloudUnavailable: String?
     /// The archived runs, newest archived first, once the Archived filter has asked for them.
     public private(set) var archivedRuns: [StudioRun] = []
     public private(set) var hasLoadedArchived = false
@@ -453,7 +563,10 @@ public final class StudioRunsModel {
         do {
             let list = try await makeClient().listRuns(archived: .hide)
             // An older bridge ignores the mode and serves every run: none is archived there.
-            runs = StudioRunSemantics.sorted(list.runs.filter { !$0.isArchived })
+            runs = StudioRunSemantics.sorted(list.runs.filter { !$0.isCloud && !$0.isArchived })
+            cloudRuns = StudioRunSemantics.sorted(list.runs.filter(\.isCloud))
+            cloudUnavailable = list.cloudAvailable == false
+                ? (list.cloudUnavailable ?? "") : nil
             counts = list.counts
             hasLoaded = true
             loadError = nil
@@ -466,7 +579,7 @@ public final class StudioRunsModel {
     public func loadArchived() async {
         do {
             let list = try await makeClient().listRuns(archived: .only)
-            archivedRuns = list.runs.filter(\.isArchived)
+            archivedRuns = list.runs.filter { !$0.isCloud && $0.isArchived }
             counts = list.counts
             hasLoadedArchived = true
             loadError = nil
@@ -477,10 +590,12 @@ public final class StudioRunsModel {
 
     // MARK: Filters
 
-    /// The rows a filter shows, every project's or one's. Archived runs are newest archived
-    /// first; the rest live first, then newest first.
+    /// The rows a filter shows, every project's or one's: the Studio's runs and the cloud's
+    /// together. Archived runs are newest archived first (none is a cloud run); the rest live
+    /// first, then newest first, whichever host runs them.
     public func runs(filter: StudioRunFilter, strand: String?) -> [StudioRun] {
-        let source = filter == .archived ? archivedRuns : runs
+        let source = filter == .archived
+            ? archivedRuns : StudioRunSemantics.sorted(runs + cloudRuns)
         return source.filter { (strand == nil || $0.strand == strand) && filter.includes($0) }
     }
 
@@ -505,9 +620,15 @@ public final class StudioRunsModel {
     /// `Archive all finished`: the runs the Finished filter shows (for one project, or every
     /// one), and no other.
     public func archiveAllFinished(strand: String?) async {
-        let shown = runs(filter: .finished, strand: strand)
+        let shown = archivableFinished(strand: strand)
         guard !shown.isEmpty else { return }
         await archive(shown, text: shown.count == 1 ? "Archived 1 run." : "Archived \(shown.count) runs.")
+    }
+
+    /// What `Archive all finished` archives: the Finished filter's Studio runs. A cloud run is
+    /// Jesse's, and stays.
+    public func archivableFinished(strand: String?) -> [StudioRun] {
+        runs(filter: .finished, strand: strand).filter { !$0.isCloud }
     }
 
     private func archive(_ targets: [StudioRun], text: String) async {
@@ -633,17 +754,26 @@ public final class StudioRunsModel {
     /// One detail model per run for the life of this model, so a screen rebuilt by its
     /// parent keeps its composer and its log. Seeded with the list's copy so it draws at once.
     public func detailModel(for runID: String) -> StudioRunDetailModel {
-        if let model = details[runID] { return model }
+        detailModel(for: StudioRunRoute(runID: runID))
+    }
+
+    /// The detail model of a run the list pushed: a Studio run's, or a cloud run's
+    /// (`route.isCloud`), each its own even when the two share an id.
+    public func detailModel(for route: StudioRunRoute) -> StudioRunDetailModel {
+        let key = route.id
+        if let model = details[key] { return model }
+        let runID = route.runID
+        let seed = route.isCloud
+            ? cloudRuns.first { $0.runID == runID }
+            : runs.first { $0.runID == runID } ?? archivedRuns.first { $0.runID == runID }
         let model = StudioRunDetailModel(
-            runID: runID,
-            run: runs.first { $0.runID == runID } ?? archivedRuns.first { $0.runID == runID },
-            makeClient: makeClient, now: now)
+            runID: runID, isCloud: route.isCloud, run: seed, makeClient: makeClient, now: now)
         model.onArchiveChanged = { [weak self] in
             guard let self else { return }
             await self.load()
             if self.hasLoadedArchived { await self.loadArchived() }
         }
-        details[runID] = model
+        details[key] = model
         return model
     }
 
@@ -661,6 +791,8 @@ public final class StudioRunDetailModel {
     nonisolated deinit {}
 
     public let runID: String
+    /// A cloud run (`host: "cloud"`): read with `?host=cloud`, and nothing is offered on it.
+    public let isCloud: Bool
     public private(set) var run: StudioRun?
     public private(set) var lines: [String] = []
     public private(set) var loadError: String?
@@ -677,10 +809,11 @@ public final class StudioRunDetailModel {
     private let makeClient: @MainActor () -> any StudioRunsProviding
     private let now: @Sendable () -> Date
 
-    public init(runID: String, run: StudioRun? = nil,
+    public init(runID: String, isCloud: Bool = false, run: StudioRun? = nil,
                 makeClient: @escaping @MainActor () -> any StudioRunsProviding,
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.runID = runID
+        self.isCloud = isCloud
         self.run = run
         self.makeClient = makeClient
         self.now = now
@@ -708,21 +841,25 @@ public final class StudioRunDetailModel {
 
     /// Whether the detail draws a composer at all (not while the run is being reviewed).
     public var showsComposer: Bool {
+        if isCloud { return false }
         guard let status else { return true }
         return StudioRunSemantics.showsComposer(status)
     }
 
     public var isComposerEnabled: Bool {
+        if isCloud { return false }
         guard let status else { return false }
         return StudioRunSemantics.canReply(status) && !isSending
     }
 
     public var showsResume: Bool {
+        if isCloud { return false }
         guard let status else { return false }
         return StudioRunSemantics.offersResume(status, composer: composer)
     }
 
     public var canCancel: Bool {
+        if isCloud { return false }
         guard let status, !isSending else { return false }
         return StudioRunSemantics.canCancel(status)
     }
@@ -760,8 +897,8 @@ public final class StudioRunDetailModel {
     public func refresh() async {
         let client = makeClient()
         do {
-            run = try await client.getRun(id: runID)
-            lines = try await client.runLog(id: runID, tail: Self.tail).lines
+            run = try await client.getRun(id: runID, cloud: isCloud)
+            lines = try await client.runLog(id: runID, tail: Self.tail, cloud: isCloud).lines
             loadError = nil
         } catch {
             loadError = StudioRunsModel.message(error)
@@ -784,7 +921,7 @@ public final class StudioRunDetailModel {
     /// Show a run the list already holds, without a call: a project's Your turn rows are drawn
     /// from the list, and their detail models must not lag it.
     public func adopt(_ newer: StudioRun) {
-        guard newer.runID == runID else { return }
+        guard newer.runID == runID, newer.isCloud == isCloud else { return }
         run = newer
     }
 

@@ -956,7 +956,20 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 # max_timeout_minutes = 315                      # the cloud's timeout_minutes cap
 # worker_life_minutes = 480                      # kc-burst's max_ttl; raise that first to go higher
 # merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
+# burst_size = "g-4vcpu-16gb"                    # one worker per cloud run
+# job_memory_gi = 14                             # the pod's memory limit; size it to burst_size
+# job_memory_request_gi = 12
+# job_cpu = 4                                    # the CPU limit, and CARGO_BUILD_JOBS
+# job_cpu_request = 3
 ```
+
+**The cloud Job's size comes from config (0.219.0).** Its memory and CPU, request and limit, are
+`job_memory_request_gi` / `job_memory_gi` and `job_cpu_request` / `job_cpu`, sized by default
+for the 16 GB, 4 vCPU `g-4vcpu-16gb` worker (absent keys follow `burst_size`, so an 8 GB worker
+keeps the former 6 / 7 Gi), and a pod anti-affinity keeps one cloud Job per worker; `CARGO_BUILD_JOBS` is `job_cpu`. A cloud run's
+`timeout_minutes` is capped at `max_timeout_minutes` (0.219.0's `max_agent_minutes` still reads
+as it), not the cluster's 240. A pod killed for
+memory is reported as `killed at the N Gi memory limit (OOMKilled)`.
 
 **The containment battery** registers a stand-in `devjob` (the same three tools, every call
 refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the
@@ -1004,6 +1017,38 @@ enabled = true
 **Which repository.** The draft's `devjob-repo`, else the caller's `repo`, else the strand's one
 `repos:` entry. A strand listing several repositories needs `repo`.
 
+**Priority (0.217.0).** A queued run carries one of four levels: `low`, `normal` (the default),
+`high` or `urgent`, stored by name in `run.json` as `priority` (written only when not `normal`,
+so a record from an older bridge, with no field, reads as `normal` and nothing is migrated).
+
+- **Setting it at launch.** `devjob_start` with `host: "studio"` and `priority`, or a draft whose
+  front matter says `devjob-priority: high`. The argument wins over the draft; with neither the
+  run is `normal`. Any other value is refused, naming the four, never read as `normal`. The
+  cluster and the cloud refuse `priority`: their own queues start runs in the order asked.
+  `POST /jesse/runs` takes no `priority` yet; the draft's key still applies there and to a
+  strand schedule entry.
+- **Changing it while queued.** `devjob_priority { run_id, priority }` changes a `queued` run
+  (whatever it waits for: a slot, its repository, the disk or the usage limit), appends
+  `{ at, from, to }` to the run's `priority_changes`, and runs the queue pass once. A run that is
+  running, paused, reviewing, finished, closed or cancelled is refused with its status.
+- **The order.** The queue pass sorts queued runs by: the watcher's own resumed rounds first (a
+  run the usage limit or a restart stopped gets its slot back first), then priority, highest
+  first, then the order of the wait (`queued_at`, else `created_at`), then the run id. With every
+  run `normal` this is exactly the order before 0.217.0. A free cloud slot taking a
+  `devjob-host: any` run (`docs/devjob-cloud.md`) takes them in the same order.
+- **Never preempts.** Priority only decides which eligible queued run takes a free slot. It never
+  stops, pauses or overtakes a running run, and never bypasses `max_concurrent`, a repository's
+  cap, the usage limit hold or the disk check. Each run is still checked on its own, so an
+  `urgent` run whose repository is at its cap waits (`waiting_for: "repo <owner/name>"`) and a
+  `normal` run in an idle repository takes the free slot.
+- **Showing it.** `devjob_status` and every run in `devjob_list` carry `priority`. The list's
+  Studio `active` gives the running, paused and reviewing runs first, newest first, then the
+  queued runs in the order the queue pass considers them, each with `queue_position`, its place
+  (from 1) among its repository's queued runs. Within a repository that is the start order; across
+  repositories the caps still decide, so a run whose repository is full waits whatever its place,
+  and the first queued run listed is not always the next to start. Reports, pushes and the app are
+  unchanged.
+
 **Local repositories (0.202.0).** `local/<name>` (the name follows the `owner/name` rules) is a
 repository that exists only on the Studio: a bare repository at `<root>/local/<name>.git` with no
 remote, created on a run's first round with one empty commit `init` on `main` by `Jesse Bridge`.
@@ -1043,6 +1088,40 @@ written to a note.
   `<state_dir>/work-last-look.json`, behind the paired device token.
 - `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
   refused with 409: the run asked a question, and an empty continue would answer it blind.
+
+**Waiting for Jeremy's merge (0.218.0).** A run reaches Jeremy mid work with the first line of its
+report: `NEEDS YOU: <question>` makes it `needs_you` and pushes `Run <id> needs you`, and it
+continues when he replies. When the only thing left is Jeremy merging a pull request the run may not
+merge itself (`jeremyandrews/k3s`, Goose, Scolta), the run ends its turn, once CI is green on that
+pull request's head, with the first line `AWAITING MERGE: https://github.com/<owner>/<repo>/pull/<n>`
+(every run's prompt says so, after the `NEEDS YOU:` rule).
+
+- The run becomes `awaiting_merge`, keeping its worktree and session, and records `merge_wait`
+  (`url`, `owner`, `repo`, `number`, `title`, `since`, `last_check_at`, `last_push_at`, and once
+  over `ended` and `ended_at`; absent on every other run). A query or fragment after the number
+  (`?diff=split`, `#issuecomment-…`) is dropped.
+- Each pass of the watcher starts a check, on its own task, for every such run not read in the
+  last 5 minutes and with no check still in flight: `gh pr view <url> --json
+  state,mergedAt,mergeCommit,title` as the bridge user. The pass never waits for a check, so a
+  `gh` that hangs holds up only that run's watch. The first check sends the one push, `Merge
+  needed`, body `<run_id> (<strand ID>): <pull request title>` then the URL, through the usual
+  notifier, unless the pull request is already merged or closed by then; while it stays open a
+  fresh push goes out once a day. Merged, with its merge time and commit: the run's next round is
+  queued exactly as a reply is, in the same session, with `Jeremy merged <url> at <mergedAt UTC>
+  as <merge commit SHA>. Continue from the next step.` (`auto: "merge"`), and the queue is pumped,
+  so the caps and the usage limit hold apply as to any reply. Merged but GitHub has not given the
+  time or the commit yet: asked again at the next check. Closed without merging: the run is
+  `needs_you`, with one push. A read that fails is logged and asked again at the next check and
+  never changes the run. There is no cap on the wait.
+- A reply, `devjob_close` and an archive of the run treat an `awaiting_merge` run as a `needs_you`
+  one, and each ends the wait; cancel refuses both, and so does an empty `Continue where you left
+  off.` (the run waits for a merge; a blind continue would carry on as if it had happened). Of
+  the automatic closes, a ticked Drafts line and a later run of the item close it; moving its
+  Inbox report to `Inbox/archive/` does not, so filing the "merge needed" report never drops the
+  wait. It counts in `needs_me` and in a strand's `runs_needs_you`, and its worktree is never
+  removed while it waits.
+- `AWAITING MERGE:` with no GitHub pull request URL on that line is read as `NEEDS YOU:`.
+  The bridge only reads the pull request: it never merges it and never pushes for the run.
 
 **The board row's phrases (0.205.0, `src/hostrun/work/row.rs`).** Three more fields on every
 strand of `GET /jesse/strands`, derived on read from what the note already says, so a Work board

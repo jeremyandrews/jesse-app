@@ -41,13 +41,14 @@ reported, the worker's current `expires` stands in): a worker too old for the Jo
 ([`cloud_resumable`]).
 
 **Draining (`any`).** Each cloud pass, while a cloud slot is free (active plus queued cloud Jobs
-under `max_concurrent`) and the cost cap allows, the cloud takes the oldest queued Studio run that
-is waiting (`waiting_for` set: slot, repo, disk or limit), has never started a round, and whose
-draft says `devjob-host: any`. The take is atomic under the Studio queue's gate: the Studio record
-becomes `closed` with `closed_reason: moved to the cloud`, then the Job is created with the same
-run id, so the report keeps its name. If the Job cannot be created the record goes back to
-`queued`. The Studio's pump starts the same run if a Studio slot frees first; both decide under
-the same gate, so a run starts once.
+under `max_concurrent`) and the cost cap allows, the cloud takes the first queued Studio run, in
+the Studio queue's own order (resumed rounds, then priority, then oldest first; see "Priority"
+in `bridge/README.md`), that is waiting (`waiting_for` set: slot, repo, disk or limit), has
+never started a round, and whose draft says `devjob-host: any`. The take is atomic under
+the Studio queue's gate: the Studio record becomes `closed` with `closed_reason: moved to the
+cloud`, then the Job is created with the same run id, so the report keeps its name. If the Job
+cannot be created the record goes back to `queued`. The Studio's pump starts the same run if a
+Studio slot frees first; both decide under the same gate, so a run starts once.
 
 Two runs on one repository may now run at once (two cloud runs, or a cloud run beside a Studio
 run). Each cuts its branch from a freshly fetched `origin/main`; the Job rebases onto
@@ -56,10 +57,23 @@ The text the cloud agent receives says so (`cloud_paragraph`).
 
 ## Burst workers
 
-Each cloud slot is one `s-4vcpu-8gb-intel` worker (the Job asks 3 CPU / 6Gi, so two never share
-one), started by the bridge with `kc-burst up 1 --ttl <burst_ttl_minutes>m --size <burst_size>
+Each cloud slot is one `g-4vcpu-16gb` worker (4 vCPU, 16 GB), started by the bridge with `kc-burst up 1 --ttl <burst_ttl_minutes>m --size <burst_size>
 --label kc.pozza/pool=devjob --json`. kc1's admission policy keeps `jesse-dev` pods on workers
 with that label, so a dev job never lands on kc1 or a load test's worker.
+
+The Job's resources come from config, sized to `burst_size`: `job_memory_request_gi` /
+`job_memory_gi` (default 12 / 14 Gi) and `job_cpu_request` / `job_cpu` (default 3 / 4). Absent
+keys follow `burst_size`: on an 8 GB worker they are the former 6 / 7 Gi and 3 / 4 CPU. A request
+the named worker cannot hold (its GB and vCPUs read from the size's name) refuses to boot. A
+required pod anti-affinity on the hostname keeps two cloud Jobs off one worker whatever the
+requests. `CARGO_BUILD_JOBS` is set to `job_cpu`, so cargo never runs more parallel
+rustc processes than the pod has CPUs: the parallel rustcs, not the CPU count, set a build's
+peak memory. A bigger `burst_size` needs these raised with it. Until 0.219.0 the pod was fixed at
+3 CPU / 6Gi request, 7Gi limit for the 8 GB worker, and trovato's builds were `OOMKilled` there.
+
+A cloud run's agent time is capped at `max_timeout_minutes` (default 315, sized so the whole
+Job fits a worker's 8 hour life; see "How long a run may take"), not the cluster's 240. Bridge
+0.219.0 called this key `max_agent_minutes`, and a config that still says so keeps working.
 
 Each cloud pass ([`plan_burst`]):
 
@@ -125,6 +139,25 @@ run id or Job name, `devjob_list` (under `cloud`), and `devjob_cancel` (a queued
 a running one is stopped through `activeDeadlineSeconds` and reported). There is no reply: a
 cloud run has no session to continue, so a report that needs Jeremy is answered by a new run.
 
+## On the app's Runs page
+
+`GET /jesse/runs` (0.216.0) lists the cloud's queued, running and last 20 finished runs beside
+the Studio's, with `host: "cloud"`, `counts.cloud`, and `cloud_available` (false, with
+`cloud_unavailable`, when there is no cloud host or kc1 does not answer within 3 s). A cloud run
+is read only there: its detail and log answer (`?host=cloud`; 503 when kc1 fails or does not answer
+in 6 s, 404 only when it answers without the run), and every action is refused with "cloud runs
+are managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
+
+| The Job | Status |
+| --- | --- |
+| Suspended, waiting for a slot | `queued` |
+| Released, not finished (scheduling, running, being cancelled) | `running` |
+| Finished, cancelled | `cancelled` |
+| Finished, outcome `pull request opened` or `no changes` | `reported` |
+| Finished, outcome `failed` | `failed` |
+| Finished, not yet reported | `failed` if the Job failed; `running` if it completed |
+| Finished, an outcome this build does not know | `reported` if the Job completed, else `failed` |
+
 ## Failure modes
 
 | What | What happens |
@@ -135,6 +168,7 @@ cloud run has no session to continue, so a report that needs Jeremy is answered 
 | Secret missing | The pod stops at `CreateContainerConfigError` (`secret "jesse-dev-agent-keys" not found`), which `devjob_status` shows as its waiting reason; the Job fails at its deadline and is reported, or is cancelled sooner |
 | kubeconfig missing or unreadable | The bridge refuses to boot with `[devjob.cloud] enabled` |
 | Worker reaped mid run | The Job fails; the report says the pod was lost, with the log tail the bridge kept |
+| Out of memory | The pod is `OOMKilled`; the report's failure line says `killed at the N Gi memory limit (OOMKilled)` before the Job's `BackoffLimitExceeded` |
 | Rebase conflict, red CI, CI timeout | Pull request left open, not merged; the report's `merge:` line says why |
 
 ## Config
@@ -147,11 +181,15 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"
 # namespace = "jesse-dev"
 # max_concurrent = 2
 # kc_burst = "/usr/local/bin/kc-burst"
-# burst_size = "s-4vcpu-8gb-intel"
+# burst_size = "g-4vcpu-16gb"
 # burst_ttl_minutes = 240
 # idle_minutes = 10
 # daily_cost_cap_eur = 5.0
 # hourly_cost_eur = 0.0767
+# job_memory_gi = 14          # the pod's memory limit; size it to burst_size
+# job_memory_request_gi = 12  # at most job_memory_gi
+# job_cpu = 4                 # the CPU limit, and CARGO_BUILD_JOBS
+# job_cpu_request = 3         # at most job_cpu
 # merge_deny = []            # added to the seed list, never replacing it
 # ledger = "~/.jesse-bridge/devjob-cloud-ledger.json"
 # max_timeout_minutes = 315  # this host's timeout_minutes cap; see "How long a run may take"

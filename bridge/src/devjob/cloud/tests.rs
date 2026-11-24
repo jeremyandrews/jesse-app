@@ -47,6 +47,8 @@ fn view(name: &str, created: u64, suspended: bool, finished: Option<bool>) -> Jo
         failure_reason: None,
         run_id: Some(name.into()),
         cancelled: false,
+        strand: None,
+        strand_id: None,
     }
 }
 
@@ -81,7 +83,7 @@ fn the_cloud_is_off_by_default_and_the_deny_list_is_always_seeded() {
     assert!(!s.enabled);
     assert_eq!(s.namespace, "jesse-dev");
     assert_eq!(s.max_concurrent, 2);
-    assert_eq!(s.burst_size, "s-4vcpu-8gb-intel");
+    assert_eq!(s.burst_size, "g-4vcpu-16gb");
     assert_eq!(
         s.merge_deny,
         ["tag1consulting/scolta*", "tag1consulting/goose"]
@@ -117,8 +119,127 @@ fn the_cloud_is_off_by_default_and_the_deny_list_is_always_seeded() {
         s.ledger,
         PathBuf::from("/home/u/.jesse-bridge/devjob-cloud-ledger.json")
     );
+    // A config without the resource keys gets the defaults sized for the 16 GB worker.
+    assert_eq!(s.job_memory_gi, 14);
+    assert_eq!(s.job_memory_request_gi, 12);
+    assert_eq!(s.job_cpu, 4);
+    assert_eq!(s.job_cpu_request, 3);
+    assert_eq!(s.max_timeout_minutes, 315);
+    assert!(s.resource_problems().is_empty());
     // An unknown key is an error, as everywhere in [devjob].
     assert!(toml::from_str::<DevJobToml>("[cloud]\nnamespace_typo = 1\n").is_err());
+}
+
+#[test]
+fn the_job_resources_and_time_cap_are_read_from_config() {
+    let t: DevJobToml = toml::from_str(
+        "[cloud]\nburst_size = \"g-8vcpu-32gb\"\njob_memory_gi = 30\njob_memory_request_gi = 28\n\
+         job_cpu = 8\njob_cpu_request = 7\nmax_agent_minutes = 300\n",
+    )
+    .unwrap();
+    let s = CloudSettings::from_toml(t.cloud, "/home/u");
+    assert_eq!(
+        s.job_resources(),
+        JobResources {
+            memory_gi: 30,
+            memory_request_gi: 28,
+            cpu: 8,
+            cpu_request: 7,
+        }
+    );
+    // Bridge 0.219.0's name for the cap still sets it.
+    assert_eq!(s.max_timeout_minutes, 300);
+    assert!(s.resource_problems().is_empty());
+    // The cloud's cap, not the cluster's 240: absent is the default 120, more is capped.
+    let cap = |asked| cloud_capped_timeout_minutes(asked, s.max_timeout_minutes);
+    assert_eq!(cap(None), 120);
+    assert_eq!(cap(Some(280)), 280);
+    assert_eq!(cap(Some(900)), 300);
+    assert_eq!(
+        cloud_capped_timeout_minutes(Some(400), CloudSettings::default().max_timeout_minutes),
+        315
+    );
+}
+
+#[test]
+fn a_config_pinned_to_the_8gb_worker_keeps_a_job_that_fits_it() {
+    // Only burst_size, as configs written before the resources came from config.
+    let t: DevJobToml =
+        toml::from_str("[cloud]\nenabled = true\nburst_size = \"s-4vcpu-8gb-intel\"\n").unwrap();
+    let s = CloudSettings::from_toml(t.cloud, "/home/u");
+    assert_eq!(s.job_resources(), SMALL_WORKER_RESOURCES);
+    assert_eq!(s.job_memory_request_gi, 6);
+    assert_eq!(s.job_memory_gi, 7);
+    assert!(
+        s.resource_problems().is_empty(),
+        "{:?}",
+        s.resource_problems()
+    );
+    // The default size gets the 16 GB defaults.
+    assert_eq!(
+        CloudSettings::default().job_resources(),
+        JobResources {
+            memory_gi: 14,
+            memory_request_gi: 12,
+            cpu: 4,
+            cpu_request: 3,
+        }
+    );
+    // A request the named worker cannot hold is refused by name.
+    let t: DevJobToml = toml::from_str(
+        "[cloud]\nburst_size = \"s-4vcpu-8gb-intel\"\njob_memory_gi = 14\njob_memory_request_gi = 12\n\
+         job_cpu = 8\njob_cpu_request = 6\n",
+    )
+    .unwrap();
+    let p = CloudSettings::from_toml(t.cloud, "/home/u")
+        .resource_problems()
+        .join("\n");
+    assert!(
+        p.contains("job_memory_request_gi 12 does not fit burst_size \"s-4vcpu-8gb-intel\" (8 GB)"),
+        "{p}"
+    );
+    assert!(
+        p.contains("job_cpu_request 6 does not fit burst_size \"s-4vcpu-8gb-intel\" (4 vCPU)"),
+        "{p}"
+    );
+    assert_eq!(size_shape("g-4vcpu-16gb"), (Some(16), Some(4)));
+    assert_eq!(size_shape("custom"), (None, None));
+}
+
+#[test]
+fn the_job_resources_are_refused_when_inconsistent() {
+    let t: DevJobToml = toml::from_str(
+        "[cloud]\nenabled = true\njob_memory_gi = 8\njob_memory_request_gi = 10\n\
+         job_cpu = 2\njob_cpu_request = 3\n",
+    )
+    .unwrap();
+    let s = CloudSettings::from_toml(t.cloud, "/home/u");
+    let p = s.problems(true).join("\n");
+    for needle in [
+        "job_memory_request_gi 10 is above job_memory_gi 8",
+        "job_cpu_request 3 is above job_cpu 2",
+    ] {
+        assert!(p.contains(needle), "{needle} missing from:\n{p}");
+    }
+    let t: DevJobToml = toml::from_str(
+        "[cloud]\nenabled = true\njob_memory_gi = 0\njob_memory_request_gi = 0\n\
+         job_cpu = 0\njob_cpu_request = 0\n",
+    )
+    .unwrap();
+    let p = CloudSettings::from_toml(t.cloud, "/home/u")
+        .problems(true)
+        .join("\n");
+    for key in [
+        "job_memory_gi",
+        "job_memory_request_gi",
+        "job_cpu",
+        "job_cpu_request",
+    ] {
+        assert!(
+            p.contains(&format!("{key} must be at least 1")),
+            "{key} missing from:\n{p}"
+        );
+    }
 }
 
 #[test]
@@ -175,9 +296,11 @@ fn the_cloud_refuses_a_timeout_and_worker_life_combination_that_does_not_fit() {
     };
     let p = over.problems(true).join("\n");
     assert!(
-        p.contains("max_timeout_minutes (316) + the finish allowance (30) + the merge waits \
+        p.contains(
+            "max_timeout_minutes (316) + the finish allowance (30) + the merge waits \
                     (120) + a 15 minute boot allowance = 481 minutes, more than \
-                    worker_life_minutes (480)"),
+                    worker_life_minutes (480)"
+        ),
         "{p}"
     );
 }
@@ -439,6 +562,7 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
         run_id: "GD5".into(),
         merge,
         merge_deny: CloudSettings::default().merge_deny_env(),
+        resources: CloudSettings::default().job_resources(),
     };
     let image = format!(
         "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",
@@ -467,11 +591,30 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
     assert_eq!(pod["nodeSelector"][BURST_LABEL], "true");
     assert_eq!(pod["nodeSelector"][POOL_LABEL], "devjob");
     assert_eq!(pod["tolerations"][0]["key"], BURST_LABEL);
+    // One dev job per worker, whatever the requests: no two cloud pods share a node.
+    let anti =
+        &pod["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][0];
+    assert_eq!(anti["topologyKey"], "kubernetes.io/hostname");
+    assert_eq!(
+        anti["labelSelector"]["matchExpressions"][0]["key"],
+        LABEL_RUN_ID
+    );
+    assert_eq!(
+        anti["labelSelector"]["matchExpressions"][0]["operator"],
+        "Exists"
+    );
+    assert_eq!(
+        v["spec"]["template"]["metadata"]["labels"][LABEL_RUN_ID], "GD5",
+        "the pod carries the label its own rule selects"
+    );
     assert_eq!(pod["tolerations"][0]["effect"], "NoSchedule");
     let c = &pod["containers"][0];
     assert_eq!(c["image"], image);
+    // The defaults, sized for the 16 GB worker.
     assert_eq!(c["resources"]["requests"]["cpu"], "3");
-    assert_eq!(c["resources"]["requests"]["memory"], "6Gi");
+    assert_eq!(c["resources"]["requests"]["memory"], "12Gi");
+    assert_eq!(c["resources"]["limits"]["cpu"], "4");
+    assert_eq!(c["resources"]["limits"]["memory"], "14Gi");
     let env: BTreeMap<String, String> = c["env"]
         .as_array()
         .unwrap()
@@ -496,6 +639,10 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
     assert_eq!(env["RUN_ID"], "GD5");
     assert_eq!(env["JESSE_RUN_REPORT"], RUN_REPORT_FILE);
     assert_eq!(env["CARGO_PROFILE_DEV_DEBUG"], "0");
+    assert_eq!(
+        env["CARGO_BUILD_JOBS"], "4",
+        "no more rustcs than the pod has CPUs"
+    );
     // No cache claim on a disposable worker: one emptyDir, the caches under it.
     let vols = pod["volumes"].as_array().unwrap();
     assert!(vols
@@ -604,7 +751,10 @@ fn a_queued_cloud_job_starts_only_onto_an_idle_ready_worker() {
     let views = vec![view("old", 1, true, None), view("new", 2, true, None)];
     let life = 480;
     let one = [worker("w1", false, 0, Some(999))];
-    let two = [worker("w1", false, 0, Some(999)), worker("w2", false, 0, Some(999))];
+    let two = [
+        worker("w1", false, 0, Some(999)),
+        worker("w2", false, 0, Some(999)),
+    ];
     // No worker: nothing starts, however free the slots.
     assert!(cloud_resumable(&views, 2, &[], 0, life).is_empty());
     // One idle worker: the oldest only.
@@ -791,7 +941,8 @@ fn kc_bursts_json_lines_parse() {
     );
     assert!(parse_status(r#"{"workers":0}"#).is_empty());
     // No `age_seconds` at all: an older kc-burst, or a worker just up: unknown, not zero.
-    let no_age = r#"{"name":"kcb-abcdef-1","run":"abcdef","expires":1795440000,"cost_so_far_eur":0.0064}"#;
+    let no_age =
+        r#"{"name":"kcb-abcdef-1","run":"abcdef","expires":1795440000,"cost_so_far_eur":0.0064}"#;
     assert_eq!(parse_status(no_age)[0].age_seconds, None);
     let up =
         r#"{"name":"kcb-qwerty-1","run":"qwerty","public_ipv4":"1.2.3.4","node_status":"Ready"}"#;
@@ -854,7 +1005,7 @@ fn the_tools_name_the_cloud_only_when_it_is_attached() {
     };
     for base in [tool_descriptors(), tool_descriptors_with_studio()] {
         let before = base.clone();
-        let with = with_cloud(base);
+        let with = with_cloud(base, 315);
         let start = with.iter().find(|t| t["name"] == TOOL_START).unwrap();
         let hosts = start["inputSchema"]["properties"]["host"]["enum"]
             .as_array()
@@ -869,6 +1020,17 @@ fn the_tools_name_the_cloud_only_when_it_is_attached() {
             .as_str()
             .unwrap()
             .contains("host \"cloud\""));
+        // The cloud's time cap is the config's, and says so.
+        assert!(start["description"]
+            .as_str()
+            .unwrap()
+            .contains("capped at 315 by the bridge's [devjob.cloud] max_timeout_minutes"));
+        assert!(
+            start["inputSchema"]["properties"]["timeout_minutes"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("with host cloud, at 315 from [devjob.cloud] max_timeout_minutes")
+        );
         assert!(names(&with).contains(&TOOL_CANCEL.to_string()));
         // Every tool the base listed is still listed, in its order.
         let n = names(&with);
@@ -876,4 +1038,112 @@ fn the_tools_name_the_cloud_only_when_it_is_attached() {
     }
     // Without the cloud the cluster's three are exactly what they were.
     assert_eq!(names(&tool_descriptors()), crate::devjob::DEVJOB_TOOLS);
+}
+
+// ---- resources from config, and a memory kill ---------------------------------------------
+
+#[test]
+fn the_cloud_job_takes_its_resources_from_config_and_never_literals() {
+    let spec = DevJobSpec::validate(
+        args(json!({ "repo": "jeremyandrews/trovato", "prompt": "x", "branch_slug": "dj17-x" })),
+        Agent::Claude,
+    )
+    .unwrap();
+    let extras = CloudJobExtras {
+        run_id: "DJ17".into(),
+        merge: MergeDecision::No,
+        merge_deny: String::new(),
+        resources: JobResources {
+            memory_gi: 30,
+            memory_request_gi: 28,
+            cpu: 8,
+            cpu_request: 7,
+        },
+    };
+    let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
+    let v = serde_json::to_value(&job).unwrap();
+    let c = &v["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(c["resources"]["requests"]["memory"], "28Gi");
+    assert_eq!(c["resources"]["requests"]["cpu"], "7");
+    assert_eq!(c["resources"]["requests"]["ephemeral-storage"], "20Gi");
+    assert_eq!(c["resources"]["limits"]["memory"], "30Gi");
+    assert_eq!(c["resources"]["limits"]["cpu"], "8");
+    let jobs = c["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "CARGO_BUILD_JOBS")
+        .unwrap()["value"]
+        .clone();
+    assert_eq!(jobs, "8");
+}
+
+fn oom_pod(reason: &str, last: bool) -> k8s_openapi::api::core::v1::Pod {
+    let terminated = json!({ "terminated": { "exitCode": 137, "reason": reason } });
+    let (state, last_state) = if last {
+        (
+            json!({ "waiting": { "reason": "CrashLoopBackOff" } }),
+            terminated,
+        )
+    } else {
+        (terminated, json!({}))
+    };
+    serde_json::from_value(json!({
+        "metadata": { "name": "agent-dj17-x-abcde-xyz" },
+        "spec": { "containers": [{
+            "name": "agent",
+            "image": "img",
+            "resources": { "limits": { "cpu": "4", "memory": "14Gi" } },
+        }] },
+        "status": { "containerStatuses": [{
+            "name": "agent",
+            "image": "img",
+            "imageID": "",
+            "ready": false,
+            "restartCount": 0,
+            "state": state,
+            "lastState": last_state,
+        }] },
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_cloud_run_killed_for_memory_says_so_in_its_failure_line() {
+    let pod = oom_pod("OOMKilled", false);
+    let line = crate::devjob::oom_killed_line(&pod).unwrap();
+    assert_eq!(line, "killed at the 14 Gi memory limit (OOMKilled)");
+    assert_eq!(
+        crate::devjob::oom_killed_line(&oom_pod("OOMKilled", true)).as_deref(),
+        Some("killed at the 14 Gi memory limit (OOMKilled)"),
+        "the last state counts as well"
+    );
+    assert_eq!(
+        crate::devjob::oom_killed_line(&oom_pod("Error", false)),
+        None
+    );
+
+    // No report in the log, the Job failed at its backoff limit: the kill leads the line.
+    let mut report = DevJobReport::missing("no report in the log");
+    crate::devjob::explain_failure(
+        &mut report,
+        Some("BackoffLimitExceeded: Job has reached the specified backoff limit"),
+        Some(&line),
+    );
+    assert_eq!(report.status, "failed");
+    assert_eq!(
+        report.failure.as_deref(),
+        Some(
+            "killed at the 14 Gi memory limit (OOMKilled); the Job failed \
+             (BackoffLimitExceeded: Job has reached the specified backoff limit); \
+             no report in the log"
+        )
+    );
+    // Without a memory kill the line is exactly what it was.
+    let mut report = DevJobReport::missing("no report in the log");
+    crate::devjob::explain_failure(&mut report, Some("BackoffLimitExceeded"), None);
+    assert_eq!(
+        report.failure.as_deref(),
+        Some("the Job failed (BackoffLimitExceeded); no report in the log")
+    );
 }

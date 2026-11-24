@@ -73,8 +73,10 @@ pub const TOOL_CLOSE: &str = "devjob_close";
 pub const TOOL_REVIEW: &str = "devjob_review";
 /// Hand off a review that is waiting (`auto_reply: false`). Classed `write`.
 pub const TOOL_REVIEW_REPLY: &str = "devjob_review_reply";
-/// The eight tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
-pub const STUDIO_TOOLS: [&str; 8] = [
+/// Change a queued Studio run's priority. Classed `write`, beside `devjob_cancel`.
+pub const TOOL_PRIORITY: &str = "devjob_priority";
+/// The nine tools the server lists once `[hostrun]` is attached ([`DevJobs::attach_studio`]).
+pub const STUDIO_TOOLS: [&str; 9] = [
     TOOL_START,
     TOOL_STATUS,
     TOOL_LIST,
@@ -83,6 +85,7 @@ pub const STUDIO_TOOLS: [&str; 8] = [
     TOOL_CLOSE,
     TOOL_REVIEW,
     TOOL_REVIEW_REPLY,
+    TOOL_PRIORITY,
 ];
 
 /// On every object a run creates: the selector the watcher lists by.
@@ -230,6 +233,9 @@ pub struct DevJobArgs {
     /// `host: "cloud"`: merge the pull request once CI on its head is green. Absent: the
     /// draft's `devjob-merge`, else no.
     pub merge: Option<bool>,
+    /// `host: "studio"`: how soon the run wants a slot: `low`, `normal`, `high` or `urgent`.
+    /// Absent: the draft's `devjob-priority:`, else `normal`. Anything else is refused.
+    pub priority: Option<String>,
 }
 
 /// Where a `devjob_start` goes, decided from its arguments alone.
@@ -245,6 +251,8 @@ pub enum StartPlan {
         /// draft's, else the bridge's default.
         reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
+        /// How soon the run wants a slot; `None` is the draft's `devjob-priority:`, else `normal`.
+        priority: Option<crate::hostrun::Priority>,
     },
     /// `host: "cloud"`: a Job on kc1 ([`cloud`]).
     Cloud(CloudStart),
@@ -293,6 +301,13 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
         None | Some("cluster") | Some("studio") if args.merge.is_some() => Err(
             "merge applies only with host \"cloud\": a Studio run merges as its prompt \
                  says, and the cluster never merges"
+                .into(),
+        ),
+        // The cluster's and kc1's own queues have no priority: a priority there would be
+        // silently ignored, so it is refused.
+        None | Some("cluster") | Some("cloud") if args.priority.is_some() => Err(
+            "priority applies only with host \"studio\": the cluster and the cloud start their \
+             runs in the order they were asked for"
                 .into(),
         ),
         None | Some("cluster") => {
@@ -354,6 +369,11 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
             // Its shape now; whether the registry knows each id when the run is created.
             crate::hostrun::review::choose(reviewer.as_ref())?;
             let review_focus = args.review_focus.clone();
+            let priority = args
+                .priority
+                .as_deref()
+                .map(crate::hostrun::Priority::parse)
+                .transpose()?;
             let repo = match args.repo.as_deref().map(str::trim) {
                 None => None,
                 Some(r) if valid_repo(r) => Some(r.to_string()),
@@ -380,6 +400,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                     again,
                     reviewer: reviewer.clone(),
                     review_focus: review_focus.clone(),
+                    priority,
                 });
             }
             match (args.strand, args.item_id) {
@@ -401,6 +422,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                         again,
                         reviewer: reviewer.clone(),
                         review_focus: review_focus.clone(),
+                        priority,
                     })
                 }
                 (None, None) => {
@@ -419,6 +441,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                         again,
                         reviewer: reviewer.clone(),
                         review_focus: review_focus.clone(),
+                        priority,
                     })
                 }
                 _ => Err("strand and item_id go together".into()),
@@ -1250,17 +1273,24 @@ pub struct CloudJobExtras {
     pub merge: cloud::MergeDecision,
     /// `MERGE_DENY`: the deny list again, which the entrypoint checks itself.
     pub merge_deny: String,
+    /// The container's memory and CPU, from `[devjob.cloud]`.
+    pub resources: cloud::JobResources,
 }
 
 /// The Job for kc1: `cloud/infrastructure/jesse-dev/job-template.yaml` in the k3s repository,
 /// field for field. Against [`build_job`]: the dev job pool's node selector and toleration, one
-/// job per `s-4vcpu-8gb-intel` worker (3 CPU / 6Gi), no cache claim (the workers are disposable,
-/// so the caches live on the run's 60Gi `emptyDir`), debug info and incremental builds off, and
-/// the merge path's variables. The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout
-/// plus a finish allowance plus the merge path's longest wait, not the home cluster's twice the
-/// timeout — a cloud worker cannot live past [`cloud::CloudSettings::worker_life_minutes`], so
-/// doubling would already not fit. Always created suspended: it is released only onto an idle
-/// worker whose remaining life covers it ([`cloud::cloud_resumable`]).
+/// job per burst worker (a required pod anti-affinity on the hostname, whatever the requests),
+/// no cache claim (the workers are disposable, so the caches live on the
+/// run's 60Gi `emptyDir`), debug info and incremental builds off, and the merge path's variables.
+/// Memory and CPU, request and limit, come from `extras.resources`: `[devjob.cloud]`
+/// `job_memory_gi`, `job_memory_request_gi`, `job_cpu` and `job_cpu_request`, sized to its
+/// `burst_size`. `CARGO_BUILD_JOBS` is the CPU limit, so cargo never runs more rustc processes
+/// than the pod has CPUs: the parallel rustcs, not the CPU count, set a build's peak memory.
+/// The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout plus a finish allowance
+/// plus the merge path's longest wait, not the home cluster's twice the timeout — a cloud worker
+/// cannot live past [`cloud::CloudSettings::worker_life_minutes`], so doubling would already not
+/// fit. Always created suspended: it is released only onto an idle worker whose remaining life
+/// covers it ([`cloud::cloud_resumable`]).
 pub fn build_cloud_job(
     namespace: &str,
     job_name: &str,
@@ -1274,6 +1304,7 @@ pub fn build_cloud_job(
     let mut labels = run_labels(&spec.branch_slug);
     labels[cloud::LABEL_RUN_ID] = json!(extras.run_id);
     let deadline = cloud::cloud_deadline_secs(spec);
+    let res = extras.resources;
     serde_json::from_value(json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -1299,6 +1330,21 @@ pub fn build_cloud_job(
                     "nodeSelector": {
                         cloud::BURST_LABEL: "true",
                         cloud::POOL_LABEL: cloud::POOL_VALUE,
+                    },
+                    // One dev job per worker whatever the requests: no two cloud Jobs' pods
+                    // ever share a node, so a smaller configured request cannot pack them.
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": [{
+                                "labelSelector": {
+                                    "matchExpressions": [{
+                                        "key": cloud::LABEL_RUN_ID,
+                                        "operator": "Exists",
+                                    }],
+                                },
+                                "topologyKey": "kubernetes.io/hostname",
+                            }],
+                        },
                     },
                     "tolerations": [{
                         "key": cloud::BURST_LABEL,
@@ -1337,11 +1383,19 @@ pub fn build_cloud_job(
                             { "name": "CARGO_PROFILE_DEV_DEBUG", "value": "0" },
                             { "name": "CARGO_PROFILE_TEST_DEBUG", "value": "0" },
                             { "name": "CARGO_INCREMENTAL", "value": "0" },
+                            { "name": "CARGO_BUILD_JOBS", "value": res.cpu.to_string() },
                         ],
                         "envFrom": [{ "secretRef": { "name": "jesse-dev-agent-keys" } }],
                         "resources": {
-                            "requests": { "cpu": "3", "memory": "6Gi", "ephemeral-storage": "20Gi" },
-                            "limits": { "cpu": "4", "memory": "7Gi" },
+                            "requests": {
+                                "cpu": res.cpu_request.to_string(),
+                                "memory": format!("{}Gi", res.memory_request_gi),
+                                "ephemeral-storage": "20Gi",
+                            },
+                            "limits": {
+                                "cpu": res.cpu.to_string(),
+                                "memory": format!("{}Gi", res.memory_gi),
+                            },
                         },
                         "volumeMounts": [
                             { "name": "prompt", "mountPath": "/prompt", "readOnly": true },
@@ -1401,6 +1455,10 @@ pub struct JobView {
     pub run_id: Option<String>,
     /// A cloud run a person cancelled ([`cloud::ANN_CANCELLED`]).
     pub cancelled: bool,
+    /// The strand note and line a strand entry started it from ([`LABEL_STRAND`],
+    /// [`LABEL_STRAND_ID`]); `None` for a draft or a free prompt.
+    pub strand: Option<String>,
+    pub strand_id: Option<String>,
 }
 
 fn time_ms(t: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Time) -> u64 {
@@ -1458,6 +1516,8 @@ impl JobView {
             }),
             run_id: labels.get(cloud::LABEL_RUN_ID).cloned(),
             cancelled: ann.get(cloud::ANN_CANCELLED).map(String::as_str) == Some("true"),
+            strand: labels.get(LABEL_STRAND).cloned(),
+            strand_id: labels.get(LABEL_STRAND_ID).cloned(),
         }
     }
 
@@ -1468,6 +1528,40 @@ impl JobView {
 
     pub fn is_queued(&self) -> bool {
         self.finished.is_none() && self.suspended
+    }
+}
+
+/// What `devjob_list` lists: the running and queued runs, oldest first, and the last
+/// [`LIST_FINISHED`] finished ones, newest first.
+pub struct ListedViews<'a> {
+    pub running: Vec<&'a JobView>,
+    pub queued: Vec<&'a JobView>,
+    pub finished: Vec<&'a JobView>,
+}
+
+impl<'a> ListedViews<'a> {
+    pub fn of(views: &'a [JobView]) -> ListedViews<'a> {
+        let mut running = Vec::new();
+        let mut queued = Vec::new();
+        let mut finished: Vec<&JobView> = Vec::new();
+        for v in views {
+            if v.is_queued() {
+                queued.push(v);
+            } else if v.is_active() {
+                running.push(v);
+            } else {
+                finished.push(v);
+            }
+        }
+        queued.sort_by_key(|v| v.created_ms);
+        running.sort_by_key(|v| v.created_ms);
+        finished.sort_by_key(|v| std::cmp::Reverse(v.finished_ms.unwrap_or(v.created_ms)));
+        finished.truncate(LIST_FINISHED);
+        ListedViews {
+            running,
+            queued,
+            finished,
+        }
     }
 }
 
@@ -1489,6 +1583,57 @@ pub fn to_resume(views: &[JobView], max_concurrent: usize) -> Vec<String> {
         .take(free)
         .map(|v| v.name.clone())
         .collect()
+}
+
+/// When a pod's container was killed for memory (`OOMKilled`, in its terminated state or its
+/// last one), the failure line that says so: `killed at the 14 Gi memory limit (OOMKilled)`,
+/// the limit read from that container's spec. `None` when nothing was killed for memory.
+pub fn oom_killed_line(pod: &Pod) -> Option<String> {
+    let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
+    let killed = statuses.iter().find(|c| {
+        [c.state.as_ref(), c.last_state.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.terminated.as_ref())
+            .any(|t| t.reason.as_deref() == Some("OOMKilled"))
+    })?;
+    let limit = pod
+        .spec
+        .as_ref()
+        .and_then(|s| s.containers.iter().find(|c| c.name == killed.name))
+        .and_then(|c| c.resources.as_ref())
+        .and_then(|r| r.limits.as_ref())
+        .and_then(|l| l.get("memory"))
+        .map(|q| q.0.clone());
+    Some(match limit {
+        Some(q) => {
+            let shown = match q.strip_suffix("Gi") {
+                Some(n) => format!("{n} Gi"),
+                None => q,
+            };
+            format!("killed at the {shown} memory limit (OOMKilled)")
+        }
+        None => "killed at its memory limit (OOMKilled)".to_string(),
+    })
+}
+
+/// Put what Kubernetes knows into a finished run's failure line: the memory kill first, when
+/// there was one ([`oom_killed_line`]), then the Job's `Failed` reason when the agent never
+/// reported an exit. A run killed for memory is failed whatever its log said.
+pub fn explain_failure(report: &mut DevJobReport, failure_reason: Option<&str>, oom: Option<&str>) {
+    if report.failure.is_some() && report.agent_exit.is_none() {
+        if let Some(why) = failure_reason {
+            let f = report.failure.take().unwrap_or_default();
+            report.failure = Some(format!("the Job failed ({why}); {f}"));
+        }
+    }
+    if let Some(oom) = oom {
+        report.status = "failed".into();
+        report.failure = Some(match report.failure.take() {
+            Some(f) => format!("{oom}; {f}"),
+            None => oom.to_string(),
+        });
+    }
 }
 
 /// Why a pod is not running, from its status: the scheduler's reason while it is unscheduled (a
@@ -2380,25 +2525,36 @@ impl DevJobs {
         }
     }
 
+    /// Every run `devjob_list` lists ([`ListedViews::of`]), as views. What the app's Runs list
+    /// shows of the cloud (`GET /jesse/runs`), so the two keep the same window.
+    pub async fn listed(&self) -> Result<Vec<JobView>, String> {
+        let views: Vec<JobView> = self.views().await?.into_iter().map(|(_, v)| v).collect();
+        let l = ListedViews::of(&views);
+        Ok(l.running
+            .into_iter()
+            .chain(l.queued)
+            .chain(l.finished)
+            .cloned()
+            .collect())
+    }
+
+    /// The last [`REPORT_LOG_LINES`] of a running Job's log, as the watcher last kept them.
+    pub fn kept_tail(&self, job: &str) -> Option<Vec<String>> {
+        self.tails
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(job)
+            .cloned()
+    }
+
     /// Running, queued and the last [`LIST_FINISHED`] finished runs.
     pub async fn list(&self) -> Result<Value, String> {
         let views: Vec<JobView> = self.views().await?.into_iter().map(|(_, v)| v).collect();
-        let mut running = Vec::new();
-        let mut queued = Vec::new();
-        let mut finished: Vec<&JobView> = Vec::new();
-        for v in &views {
-            if v.is_queued() {
-                queued.push(v);
-            } else if v.is_active() {
-                running.push(v);
-            } else {
-                finished.push(v);
-            }
-        }
-        queued.sort_by_key(|v| v.created_ms);
-        running.sort_by_key(|v| v.created_ms);
-        finished.sort_by_key(|v| std::cmp::Reverse(v.finished_ms.unwrap_or(v.created_ms)));
-        finished.truncate(LIST_FINISHED);
+        let ListedViews {
+            running,
+            queued,
+            finished,
+        } = ListedViews::of(&views);
         let cloud_host = self.rt.is_some();
         let brief = |v: &JobView| {
             let mut b = json!({
@@ -2546,12 +2702,12 @@ impl DevJobs {
                         kept.clone().unwrap_or_default(),
                     ),
                 };
-                if report.failure.is_some() && report.agent_exit.is_none() {
-                    if let Some(why) = &v.failure_reason {
-                        let f = report.failure.take().unwrap_or_default();
-                        report.failure = Some(format!("the Job failed ({why}); {f}"));
-                    }
-                }
+                // A cloud run's pod is sized from config: say when it ran out of memory.
+                let oom = match cloud_run {
+                    Some(_) => pod.as_ref().and_then(oom_killed_line),
+                    None => None,
+                };
+                explain_failure(&mut report, v.failure_reason.as_deref(), oom.as_deref());
                 if v.cancelled {
                     let f = report.failure.take().unwrap_or_default();
                     report.status = "failed".into();
@@ -2832,7 +2988,9 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
              model id from the model picker: a Codex, Fireworks, local or Claude model), or a \
              list of up to three that review at once and are answered in one round, or \"none\" \
              for no review. A draft may say the same as devjob-reviewer:. The cluster's runs \
-             are never reviewed."
+             are never reviewed. priority (low, normal, high or urgent; a draft may say \
+             devjob-priority:) decides which queued Studio run takes a free slot first; \
+             devjob_priority changes it while the run waits."
         );
         if let Some(props) = start["inputSchema"]["properties"].as_object_mut() {
             props.insert(
@@ -2880,6 +3038,11 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
                 "review_focus".into(),
                 json!({ "type": "string",
                         "description": "host studio: what the reviewers should look at most closely, at most 4 KiB; refused when nothing reviews the run" }),
+            );
+            props.insert(
+                "priority".into(),
+                json!({ "type": "string", "enum": crate::hostrun::Priority::NAMES,
+                        "description": "host studio: how soon the run wants a slot while queued; queued runs start highest first, oldest first within a level, and a priority never stops a running run or bypasses a cap. Absent: the draft's devjob-priority:, else normal. Change it while queued with devjob_priority" }),
             );
         }
         start["inputSchema"]["required"] = json!([]);
@@ -2966,6 +3129,25 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
             "properties": { "run_id": { "type": "string" } },
         },
     }));
+    tools.push(json!({
+        "name": TOOL_PRIORITY,
+        "description": "Change the priority of a queued Studio run (one waiting for a slot, its \
+            repository, the disk or the usage limit), then run the queue once. Queued runs start \
+            highest priority first (urgent, high, normal, low), oldest first within a level; a \
+            run the usage limit or a restart stopped still goes first. A priority never stops \
+            or pauses a running run and never bypasses a cap: a high run in a busy repository \
+            leaves a free slot to a lower run in an idle one. Refused for a run that is \
+            running, finished, closed or cancelled.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "priority"],
+            "properties": {
+                "run_id": { "type": "string" },
+                "priority": { "type": "string", "enum": crate::hostrun::Priority::NAMES },
+            },
+        },
+    }));
     tools
 }
 
@@ -3005,6 +3187,13 @@ struct CancelArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PriorityArgs {
+    run_id: String,
+    priority: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CloseArgs {
     run_id: String,
     reason: Option<String>,
@@ -3027,6 +3216,8 @@ fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) 
     v["log_tail"] = json!(svc
         .log_lines(&r.run_id, STATUS_LOG_LINES)
         .unwrap_or_default());
+    // The record leaves out a `normal` priority; the tool always says it.
+    v["priority"] = json!(r.priority);
     v
 }
 
@@ -3046,6 +3237,7 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "branch": r.branch,
         "status": r.status,
         "waiting_for": r.waiting_for,
+        "priority": r.priority,
         "strand": r.strand,
         "item_id": r.item_id,
         "created_at": r.created_at,
@@ -3062,6 +3254,24 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
     })
 }
 
+/// `devjob_list`'s Studio `active`: the running, paused and reviewing runs, newest first as `runs` gives them, then the queued runs in the order the queue
+/// pass considers them ([`crate::hostrun::start_order`]), each with `queue_position`, its
+/// place among its repository's queued runs (from 1). Across repositories the caps still decide
+/// which starts next.
+fn studio_active(runs: &[crate::hostrun::RunRecord]) -> Vec<Value> {
+    let mut out: Vec<Value> = runs
+        .iter()
+        .filter(|r| !r.status.is_finished() && r.status != crate::hostrun::RunStatus::Queued)
+        .map(studio_brief)
+        .collect();
+    for (r, place) in crate::hostrun::start_order(runs) {
+        let mut v = studio_brief(r);
+        v["queue_position"] = json!(place);
+        out.push(v);
+    }
+    out
+}
+
 impl DevJobs {
     /// `devjob_start` with `host: "studio"`.
     async fn start_studio(
@@ -3070,6 +3280,7 @@ impl DevJobs {
         again: bool,
         reviewer: Option<crate::hostrun::review::ReviewerArg>,
         review_focus: Option<String>,
+        priority: Option<crate::hostrun::Priority>,
     ) -> Value {
         let Some(svc) = self.studio.get() else {
             return error_result("host \"studio\" needs [hostrun] enabled on this bridge");
@@ -3081,11 +3292,18 @@ impl DevJobs {
                 again,
                 reviewer,
                 review_focus,
+                priority,
             })
             .await
         {
             Ok(s) => text_result(
-                &json!({ "run_id": s.run_id, "host": "studio", "status": s.status, "waiting_for": s.waiting_for }),
+                &json!({
+                    "run_id": s.run_id,
+                    "host": "studio",
+                    "status": s.status,
+                    "waiting_for": s.waiting_for,
+                    "priority": svc.get(&s.run_id).map(|r| r.priority).unwrap_or_default(),
+                }),
                 false,
             ),
             Err(e) => error_result(e.message()),
@@ -3109,7 +3327,9 @@ impl DevJobs {
 /// The tools with the cloud host: `host` gains `cloud`, `devjob_start` gains `merge`, and
 /// `devjob_cancel` is listed (it cancels cloud runs as well as Studio ones). Without the cloud
 /// the tools are exactly [`tool_descriptors`] or [`tool_descriptors_with_studio`].
-pub fn with_cloud(mut tools: Vec<Value>) -> Vec<Value> {
+/// `max_timeout_minutes` is `[devjob.cloud] max_timeout_minutes`, the cloud's own cap on
+/// `timeout_minutes`.
+pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value> {
     if let Some(start) = tools.iter_mut().find(|t| t["name"] == TOOL_START) {
         let d = start["description"]
             .as_str()
@@ -3119,8 +3339,10 @@ pub fn with_cloud(mut tools: Vec<Value>) -> Vec<Value> {
             "{d} With host \"cloud\" it runs on kc1, two at a time, on burst workers the \
              bridge starts and stops: pass strand and item_id or draft (the draft must say \
              devjob-host: cloud or any) or prompt, branch_slug and repo, as on the Studio, with \
-             agent and test_command as on the cluster and its own, usually higher, \
-             timeout_minutes cap ([devjob.cloud] max_timeout_minutes). The agent has no GitHub \
+             agent and test_command as on the cluster, and timeout_minutes capped at \
+             {max_timeout_minutes} by the bridge's [devjob.cloud] max_timeout_minutes config, \
+             not the cluster's {MAX_TIMEOUT_MINUTES}; a reduced value is named in the reply's \
+             timeout_note. The agent has no GitHub \
              credential; the job rebases onto origin/main, pushes, opens a pull request titled \
              [<run_id>] and, with merge true (or devjob-merge: true in the draft), merges it once \
              every CI run on its exact head is green; repositories on the deny list never \
@@ -3144,6 +3366,13 @@ pub fn with_cloud(mut tools: Vec<Value>) -> Vec<Value> {
                 json!({ "type": "string", "description": "host cloud: the Drafts line's bold id" });
             props["draft"] = json!({ "type": "string", "description": "host cloud: a draft's path under Projects/drafts/" });
         }
+        props["timeout_minutes"] = json!({ "type": "integer", "minimum": 1,
+            "description": format!(
+                "the agent's time limit; default {DEFAULT_TIMEOUT_MINUTES}, capped at \
+                 {MAX_TIMEOUT_MINUTES} on the cluster and, with host cloud, at \
+                 {max_timeout_minutes} from [devjob.cloud] max_timeout_minutes; a reduced \
+                 value is named in the reply's timeout_note"
+            ) });
         start["inputSchema"]["required"] = json!([]);
     }
     if !tools.iter().any(|t| t["name"] == TOOL_CANCEL) {
@@ -3168,8 +3397,12 @@ impl crate::gateway::InProcessServer for DevJobs {
         } else {
             tool_descriptors()
         };
-        if self.cloud.get().is_some() {
-            with_cloud(tools)
+        if let Some(c) = self.cloud.get() {
+            let max =
+                c.rt.as_ref()
+                    .map(|rt| rt.settings.max_timeout_minutes)
+                    .unwrap_or(cloud::DEFAULT_MAX_TIMEOUT_MINUTES);
+            with_cloud(tools, max)
         } else {
             tools
         }
@@ -3195,8 +3428,11 @@ impl crate::gateway::InProcessServer for DevJobs {
                             again,
                             reviewer,
                             review_focus,
+                            priority,
                         }) => {
-                            return Ok(self.start_studio(kind, again, reviewer, review_focus).await)
+                            return Ok(self
+                                .start_studio(kind, again, reviewer, review_focus, priority)
+                                .await)
                         }
                         Ok(StartPlan::Cloud(req)) => {
                             let Some(c) = self.cloud.get() else {
@@ -3296,7 +3532,7 @@ impl crate::gateway::InProcessServer for DevJobs {
                         .map(studio_brief)
                         .collect();
                     v["studio"] = json!({
-                        "active": runs.iter().filter(|r| !r.status.is_finished()).map(studio_brief).collect::<Vec<_>>(),
+                        "active": studio_active(&runs),
                         "finished": finished,
                     });
                     self.list_cloud(&mut v).await;
@@ -3404,13 +3640,33 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Err(e) => Ok(error_result(e.message())),
                     }
                 }
+                TOOL_PRIORITY => {
+                    let Some(svc) = self.studio.get() else {
+                        return Err(format!("devjob has no tool {tool:?}"));
+                    };
+                    let args: PriorityArgs = match serde_json::from_value(arguments) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
+                    };
+                    let priority = match crate::hostrun::Priority::parse(&args.priority) {
+                        Ok(p) => p,
+                        Err(e) => return Ok(error_result(&e)),
+                    };
+                    match svc
+                        .set_priority_and_pump(args.run_id.trim(), priority)
+                        .await
+                    {
+                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                        Err(e) => Ok(error_result(e.message())),
+                    }
+                }
                 other => Err(format!("devjob has no tool {other:?}")),
             }
         })
     }
 }
 
-/// The containment battery's `devjob`: the eight tools, listed exactly as the real server lists
+/// The containment battery's `devjob`: the nine tools, listed exactly as the real server lists
 /// them on the Studio (with `[hostrun]` attached), and every call refused. Only in a
 /// `containment-probe` build.
 #[cfg(feature = "containment-probe")]

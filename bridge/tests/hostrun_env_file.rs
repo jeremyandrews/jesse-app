@@ -304,6 +304,7 @@ fn main() {
                     again: false,
                     reviewer: None,
                     review_focus: None,
+                    priority: None,
                 })
                 .await
                 .unwrap();

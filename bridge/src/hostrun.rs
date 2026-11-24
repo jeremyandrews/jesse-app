@@ -41,6 +41,7 @@
 //! outside `root` except the DerivedData folders a run recorded as its own, and never a run
 //! directory.
 
+pub mod cloud;
 pub mod git;
 pub mod review;
 pub mod runner;
@@ -59,7 +60,7 @@ use crate::strands::{parse_strand, resolve_target, StrandSection, ARCHIVE_SEGMEN
 use crate::*;
 
 use self::review::{Finding, Review, ReviewStatus, AUTO_REVIEW};
-use self::sys::{Forge, Launcher, PrState};
+use self::sys::{Forge, Launcher, PrState, PullMerge};
 
 // ---- CONSTANTS -----------------------------------------------------------------------
 
@@ -115,6 +116,19 @@ pub const BRANCH_TEXT_CHARS: usize = 40;
 
 /// The first line of a report that asks for a decision.
 pub const NEEDS_YOU_PREFIX: &str = "NEEDS YOU:";
+/// The first line of a report whose only blocker is Jeremy merging a pull request the run may
+/// not merge itself: the run is `awaiting_merge` and resumes by itself once it merges.
+pub const AWAITING_MERGE_PREFIX: &str = "AWAITING MERGE:";
+/// [`Round::auto`] of the round a merge of an `awaiting_merge` run's pull request queues.
+pub const AUTO_MERGE: &str = "merge";
+/// How often the watcher reads an `awaiting_merge` run's pull request.
+pub const MERGE_CHECK_EVERY_MS: u64 = 5 * 60 * 1000;
+/// How often a fresh "Merge needed" push goes out while the pull request stays open.
+pub const MERGE_PUSH_EVERY_MS: u64 = 24 * 60 * 60 * 1000;
+/// `MergeWait::ended` when Jeremy answers the run before the merge.
+pub const MERGE_WAIT_ANSWERED: &str = "answered";
+/// The title of the push that asks Jeremy for a merge.
+pub const MERGE_PUSH_TITLE: &str = "Merge needed";
 /// The reply that resumes a run from the app, and the round a run paused for the usage limit
 /// gets at its `resume_at`.
 pub const CONTINUE_TEXT: &str = "Continue where you left off.";
@@ -596,6 +610,102 @@ pub fn validate_hostrun(cfg: &Config) -> Vec<ConfigError> {
 
 // ---- THE RECORD ----------------------------------------------------------------------
 
+/// How soon a queued run wants a slot: four fixed levels, stored by name. The queue pass starts
+/// the highest eligible one first ([`queue_order`]); a priority never stops, pauses or overtakes
+/// a running run, and never bypasses a cap, the usage limit hold or the disk check.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Urgent,
+}
+
+/// The front matter key that sets a draft's run's priority.
+pub const PRIORITY_KEY: &str = "devjob-priority";
+
+impl Priority {
+    /// Every level, lowest first: the names a start, a draft and `devjob_priority` accept.
+    pub const NAMES: [&'static str; 4] = ["low", "normal", "high", "urgent"];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Priority::Low => "low",
+            Priority::Normal => "normal",
+            Priority::High => "high",
+            Priority::Urgent => "urgent",
+        }
+    }
+
+    /// A level by its name, case and surrounding space ignored. Anything else is refused,
+    /// never read as `normal`.
+    pub fn parse(s: &str) -> Result<Priority, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Priority::Low),
+            "normal" => Ok(Priority::Normal),
+            "high" => Ok(Priority::High),
+            "urgent" => Ok(Priority::Urgent),
+            _ => Err(format!(
+                "priority {:?} is not one of {}",
+                s.trim(),
+                Priority::NAMES.join(", ")
+            )),
+        }
+    }
+
+    pub fn is_normal(&self) -> bool {
+        *self == Priority::Normal
+    }
+}
+
+/// One change of a queued run's priority (`devjob_priority`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityChange {
+    /// When (RFC 3339).
+    pub at: String,
+    pub from: Priority,
+    pub to: Priority,
+}
+
+/// The order queued runs start in: the watcher's own resumed rounds first (a run the usage limit
+/// or a restart stopped gets its slot back before new work takes it), then priority, highest
+/// first, then the order of the wait (`queued_at`, else `created_at`), then the run id. With
+/// every run `normal` this is the order before priorities existed.
+pub fn queue_order(a: &RunRecord, b: &RunRecord) -> std::cmp::Ordering {
+    let resumed = |r: &RunRecord| r.round().is_some_and(|x| x.auto.is_some());
+    let qa = a.queued_at.as_deref().unwrap_or(&a.created_at);
+    let qb = b.queued_at.as_deref().unwrap_or(&b.created_at);
+    resumed(b)
+        .cmp(&resumed(a))
+        .then(b.priority.cmp(&a.priority))
+        .then(qa.cmp(qb))
+        .then(a.run_id.cmp(&b.run_id))
+}
+
+/// The queued runs among `runs` in the order the queue pass considers them ([`queue_order`]),
+/// each with its place, from 1, among its own repository's queued runs. Which of them starts
+/// next still depends on the caps: a run whose repository is full waits whatever its place.
+pub fn start_order(runs: &[RunRecord]) -> Vec<(&RunRecord, usize)> {
+    let mut queued: Vec<&RunRecord> = runs
+        .iter()
+        .filter(|r| r.status == RunStatus::Queued)
+        .collect();
+    queued.sort_by(|a, b| queue_order(a, b));
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    queued
+        .into_iter()
+        .map(|r| {
+            let n = seen.entry(r.repo.as_str()).or_default();
+            *n += 1;
+            (r, *n)
+        })
+        .collect()
+}
+
 /// How a run stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -617,6 +727,11 @@ pub enum RunStatus {
     /// A second model is reading the run's work ([`review`]); the bridge hands its findings to
     /// the run's session when it answers. Moving, like `running`: nothing to reply to yet.
     Reviewing,
+    /// Its report's first line was [`AWAITING_MERGE_PREFIX`]: the only thing left is Jeremy
+    /// merging the pull request in `merge_wait`. The watcher reads it every
+    /// [`MERGE_CHECK_EVERY_MS`] and resumes the run in its session when it merges. Waits on
+    /// Jeremy, like `needs_you`: a reply or a close ends the wait.
+    AwaitingMerge,
 }
 
 impl RunStatus {
@@ -632,6 +747,7 @@ impl RunStatus {
             RunStatus::Paused => "paused",
             RunStatus::Closed => "closed",
             RunStatus::Reviewing => "reviewing",
+            RunStatus::AwaitingMerge => "awaiting_merge",
         }
     }
 
@@ -639,6 +755,7 @@ impl RunStatus {
     pub fn outcome(self) -> &'static str {
         match self {
             RunStatus::NeedsYou => "needs you",
+            RunStatus::AwaitingMerge => "awaiting merge",
             other => other.label(),
         }
     }
@@ -653,6 +770,7 @@ impl RunStatus {
                 | RunStatus::NeedsYou
                 | RunStatus::Paused
                 | RunStatus::Reviewing
+                | RunStatus::AwaitingMerge
         )
     }
 
@@ -670,11 +788,15 @@ impl RunStatus {
         self.is_terminal()
     }
 
-    /// Needs Jeremy: waiting on him, cut off, or failed. The list's `needs_me` count.
+    /// Needs Jeremy: waiting on him (a question or a merge), cut off, or failed. The list's
+    /// `needs_me` count.
     pub fn needs_me(self) -> bool {
         matches!(
             self,
-            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+            RunStatus::NeedsYou
+                | RunStatus::AwaitingMerge
+                | RunStatus::Interrupted
+                | RunStatus::Failed
         )
     }
 
@@ -688,7 +810,10 @@ impl RunStatus {
     pub fn is_settleable(self) -> bool {
         matches!(
             self,
-            RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+            RunStatus::NeedsYou
+                | RunStatus::AwaitingMerge
+                | RunStatus::Interrupted
+                | RunStatus::Failed
         )
     }
 
@@ -706,7 +831,11 @@ impl RunStatus {
     pub fn is_active(self) -> bool {
         matches!(
             self,
-            RunStatus::Running | RunStatus::NeedsYou | RunStatus::Paused | RunStatus::Reviewing
+            RunStatus::Running
+                | RunStatus::NeedsYou
+                | RunStatus::AwaitingMerge
+                | RunStatus::Paused
+                | RunStatus::Reviewing
         )
     }
 }
@@ -865,6 +994,134 @@ pub struct RunRecord {
     /// Every review of the run, oldest first ([`review::Review`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<Review>,
+    /// How soon the run wants a slot while queued ([`Priority`]). Written only when not
+    /// `normal`, so a record from before 0.217.0 (no field) reads as `normal` and an all
+    /// `normal` record is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Priority::is_normal")]
+    pub priority: Priority,
+    /// Every change of `priority` while queued (`devjob_priority`), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority_changes: Vec<PriorityChange>,
+    /// The pull request an `awaiting_merge` run waits on, and how the watch stands; kept, with
+    /// `ended`, once the wait is over. Absent on every run that never waited (and on records
+    /// before 0.218.0), so their JSON is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_wait: Option<MergeWait>,
+}
+
+/// What an `awaiting_merge` run waits on ([`RunRecord::merge_wait`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeWait {
+    /// `https://github.com/<owner>/<repo>/pull/<number>`.
+    pub url: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    /// The pull request's title, once GitHub answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// When the wait began (RFC 3339).
+    #[serde(default)]
+    pub since: String,
+    /// When the watcher last asked GitHub, answered or not.
+    #[serde(default)]
+    pub last_check_at: Option<String>,
+    /// When the last "Merge needed" push went out.
+    #[serde(default)]
+    pub last_push_at: Option<String>,
+    /// How the wait ended: `merged at <time> as <sha>`, `<url> was closed without merging`,
+    /// [`MERGE_WAIT_ANSWERED`] or `closed (<reason>)`. Absent while it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+}
+
+impl MergeWait {
+    /// `owner/repo#number`: what stands for the title until GitHub gives one.
+    pub fn short(&self) -> String {
+        format!("{}/{}#{}", self.owner, self.repo, self.number)
+    }
+
+    /// End the wait, once: a later end does not overwrite the first.
+    fn end(&mut self, how: &str, at: &str) {
+        if self.ended.is_none() {
+            self.ended = Some(how.to_string());
+            self.ended_at = Some(at.to_string());
+        }
+    }
+}
+
+/// The pull request an `AWAITING MERGE:` first line names: the first `https://github.com/<owner>/
+/// <repo>/pull/<number>` on that line, canonical. `None` when the report does not start with the
+/// prefix or the line names no such URL (the run is then `needs_you`).
+pub fn awaiting_merge_pull(report: &str) -> Option<MergeWait> {
+    let line = first_line(report);
+    let rest = line.strip_prefix(AWAITING_MERGE_PREFIX)?;
+    // A copied link may carry a query or a fragment (`?diff=split`, `#issuecomment-1`) after
+    // the number: it still names the pull request.
+    let rest = rest.replace(['?', '#'], " ");
+    let url = pull_request_url(&rest)?;
+    let parts: Vec<&str> = url["https://github.com/".len()..].split('/').collect();
+    let (owner, repo) = (parts.first()?, parts.get(1)?);
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !ok(owner) || !ok(repo) {
+        return None;
+    }
+    Some(MergeWait {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number: parts.get(3)?.parse().ok()?,
+        url,
+        ..MergeWait::default()
+    })
+}
+
+/// The one message an `awaiting_merge` run is resumed with once its pull request merged.
+pub fn merged_text(url: &str, merged_at: &str, sha: &str) -> String {
+    format!(
+        "Jeremy merged {url} {}. Continue from the next step.",
+        merged_facts(merged_at, sha)
+    )
+}
+
+/// Whether the run still waits on the merge of `url`.
+fn still_waiting(r: &RunRecord, url: &str) -> bool {
+    r.status == RunStatus::AwaitingMerge && r.merge_wait.as_ref().is_some_and(|x| x.url == url)
+}
+
+/// `at <merged_at UTC> as <merge commit SHA>`.
+fn merged_facts(merged_at: &str, sha: &str) -> String {
+    let at = chrono::DateTime::parse_from_rfc3339(merged_at)
+        .map(|d| {
+            d.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_else(|_| merged_at.to_string());
+    format!("at {at} as {sha}")
+}
+
+/// `<run_id> (<strand ID>)`, or `<run_id>` for a run of no strand item.
+fn run_and_item(rec: &RunRecord) -> String {
+    match &rec.item_id {
+        Some(id) => format!("{} ({id})", rec.run_id),
+        None => rec.run_id.clone(),
+    }
+}
+
+/// The "Merge needed" push's body: `<run_id> (<strand ID>): <title>`, then the URL.
+pub fn merge_push_body(rec: &RunRecord, w: &MergeWait) -> String {
+    format!(
+        "{}: {}\n{}",
+        run_and_item(rec),
+        w.title.clone().unwrap_or_else(|| w.short()),
+        w.url
+    )
 }
 
 impl RunRecord {
@@ -1336,9 +1593,17 @@ pub fn generated_paragraph(run_id: &str, pr_title_tag: bool) -> String {
          report back, the same text you would answer with, to the file named in the \
          environment variable JESSE_RUN_REPORT, then answer as usual. If you need a decision \
          from Jeremy to continue, stop, make the first line of that report NEEDS YOU: followed \
-         by the one question, and end the run."
+         by the one question, and end the run. {AWAITING_MERGE_SENTENCE}"
     )
 }
+
+/// What every Studio run is told after the `NEEDS YOU:` rule, exactly: how to wait for a merge it
+/// may not make itself.
+pub const AWAITING_MERGE_SENTENCE: &str = "If the only thing left before your next step is \
+Jeremy merging a pull request you may not merge yourself, get CI green on that pull request's \
+head, then end the turn with a first line of AWAITING MERGE: followed by the pull request's full \
+https:// URL. Never poll for the merge yourself: the bridge watches it, and after the merge this \
+session is resumed with the merge commit SHA.";
 
 /// What a local repository's run is told in place of the push, pull request and fetch
 /// sentences, exactly.
@@ -1358,7 +1623,8 @@ pub fn generated_paragraph_local(run_id: &str) -> String {
          When you finish, or stop early, write your complete report back, the same text you \
          would answer with, to the file named in the environment variable JESSE_RUN_REPORT, \
          then answer as usual. If you need a decision from Jeremy to continue, stop, make the \
-         first line of that report NEEDS YOU: followed by the one question, and end the run."
+         first line of that report NEEDS YOU: followed by the one question, and end the run. \
+         {AWAITING_MERGE_SENTENCE}"
     )
 }
 
@@ -1406,6 +1672,8 @@ pub struct StudioItem {
     pub model: Option<String>,
     /// The draft's `devjob-reviewer:`, when it has one: an id, a list, or `none`.
     pub reviewer: Option<review::ReviewerArg>,
+    /// The draft's `devjob-priority:`, when it has one.
+    pub priority: Option<Priority>,
     /// The `## PROMPT` section, byte for byte.
     pub section: String,
 }
@@ -1427,6 +1695,25 @@ pub fn draft_reviewer(path: &str, src: &str) -> Result<Option<review::ReviewerAr
             "{path}: {REVIEWER_KEY} {}",
             e.strip_prefix("reviewer ").unwrap_or(&e)
         )),
+    }
+}
+
+/// A draft's `devjob-priority:` ([`PRIORITY_KEY`]): one of [`Priority::NAMES`]. `None` when the key
+/// is absent or empty; an unknown value is refused, never read as `normal`.
+pub fn draft_priority(path: &str, src: &str) -> Result<Option<Priority>, String> {
+    match fm(src, PRIORITY_KEY) {
+        None => Ok(None),
+        // The comment comes off before the quotes: in `"high" # release` the comment hides the
+        // closing quote from `fm`, which then hands the whole line back still quoted.
+        Some(v) => match unquote(strip_comment(&v)).as_str() {
+            "" => Ok(None),
+            v => Priority::parse(v).map(Some).map_err(|e| {
+                format!(
+                    "{path}: {PRIORITY_KEY} {}",
+                    e.trim_start_matches("priority ")
+                )
+            }),
+        },
     }
 }
 
@@ -1654,6 +1941,7 @@ pub fn studio_item_of(
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
     let reviewer = draft_reviewer(&path, &src)?;
+    let priority = draft_priority(&path, &src)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -1665,6 +1953,7 @@ pub fn studio_item_of(
         repo,
         model,
         reviewer,
+        priority,
         section,
     })
 }
@@ -1700,6 +1989,8 @@ pub struct StudioDraft {
     pub model: Option<String>,
     /// The draft's `devjob-reviewer:`, when it has one: an id, a list, or `none`.
     pub reviewer: Option<review::ReviewerArg>,
+    /// The draft's `devjob-priority:`, when it has one.
+    pub priority: Option<Priority>,
     pub section: String,
     /// The file's stem as a branch slug: the run is `s-<slug>`.
     pub slug: String,
@@ -1778,6 +2069,7 @@ fn studio_draft_with(
     let model = fm(&src, "devjob-model");
     check_model(&path, &model)?;
     let reviewer = draft_reviewer(&path, &src)?;
+    let priority = draft_priority(&path, &src)?;
     let Some(section) = prompt_section(&src) else {
         return Err(format!("{path} has no ## PROMPT section"));
     };
@@ -1795,6 +2087,7 @@ fn studio_draft_with(
         repo,
         model,
         reviewer,
+        priority,
         section,
         slug,
     })
@@ -1807,6 +2100,16 @@ pub trait TurnSender: Send + Sync {
     fn send(&self, text: String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
+/// The turn a Studio run event submits: a `tell` of `text` ([`start_turn_text`] or
+/// [`report_turn_text`]), folded away by the apps as a Studio run and marked with
+/// [`STUDIO_RUN_ORIGIN`], which is what wraps it in [`crate::prompt::RUN_EVENT_PREAMBLE`].
+pub fn run_turn_request(text: String) -> JesseRequest {
+    let mut req = JesseRequest::scheduled("tell", text, None);
+    req.set_sent_for("Studio run");
+    req.set_origin(STUDIO_RUN_ORIGIN);
+    req
+}
+
 /// The bridge's turn, as a [`TurnSender`]: a `tell`, marked as the bridge's own studio-run
 /// sender.
 pub struct AppTurns {
@@ -1817,10 +2120,7 @@ impl TurnSender for AppTurns {
     fn send(&self, text: String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let st = self.st.clone();
         Box::pin(async move {
-            let mut req = JesseRequest::scheduled("tell", text.clone(), None);
-            req.set_sent_for("Studio run");
-            req.set_origin(STUDIO_RUN_ORIGIN);
-            match start_turn(&st, req, None).await {
+            match start_turn(&st, run_turn_request(text.clone()), None).await {
                 Ok(TurnStart::Accepted { job_id, .. }) => {
                     eprintln!("jesse-bridge: hostrun TURN {text:?} job={job_id}");
                     Ok(())
@@ -2142,6 +2442,13 @@ pub fn round_status(round: &Round, exit: &ExitInfo, report: &str) -> RunStatus {
         RunStatus::Cancelled
     } else if first_line(report).starts_with(NEEDS_YOU_PREFIX) {
         RunStatus::NeedsYou
+    } else if first_line(report).starts_with(AWAITING_MERGE_PREFIX) {
+        // With no pull request URL to watch it is a question, never dropped.
+        if awaiting_merge_pull(report).is_some() {
+            RunStatus::AwaitingMerge
+        } else {
+            RunStatus::NeedsYou
+        }
     } else if exit.code == Some(0) {
         RunStatus::Reported
     } else {
@@ -2199,6 +2506,11 @@ fn close_run(
     let rec = update_run(dir, |r| {
         if !may(r.status) {
             return;
+        }
+        if r.status == RunStatus::AwaitingMerge {
+            if let Some(w) = r.merge_wait.as_mut() {
+                w.end(&format!("closed ({reason})"), &rfc(now));
+            }
         }
         r.status = RunStatus::Closed;
         r.closed_reason = Some(reason.to_string());
@@ -2386,6 +2698,9 @@ pub struct StartRequest {
     pub reviewer: Option<review::ReviewerArg>,
     /// What the reviewer should look at most closely; needs a reviewer.
     pub review_focus: Option<String>,
+    /// How soon the run wants a slot. Wins over the draft's `devjob-priority:`; with neither,
+    /// `normal`.
+    pub priority: Option<Priority>,
 }
 
 /// What a start answers.
@@ -2476,6 +2791,9 @@ pub struct HostRuns {
     /// The runs whose review task is running in this process. Not run state: a `reviewing` run
     /// with no task here (a restart) gets one at the next pass.
     reviewing: Mutex<HashSet<String>>,
+    /// Each `awaiting_merge` run's check in flight ([`HostRuns::start_merge_checks`]). Not run
+    /// state: a restart simply checks again.
+    merge_checks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -2510,6 +2828,7 @@ impl HostRuns {
             unarchived: Mutex::new(HashSet::new()),
             reviewer: OnceLock::new(),
             reviewing: Mutex::new(HashSet::new()),
+            merge_checks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2646,90 +2965,102 @@ impl HostRuns {
             .claude_path()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.settings.claude.clone());
-        let (base, repo, prompt_for, branch_text, model, step, prompt_path, draft_reviewer) =
-            match &req.kind {
-                StartKind::Item {
-                    strand,
-                    item_id,
+        let (
+            base,
+            repo,
+            prompt_for,
+            branch_text,
+            model,
+            step,
+            prompt_path,
+            draft_reviewer,
+            draft_priority,
+        ) = match &req.kind {
+            StartKind::Item {
+                strand,
+                item_id,
+                repo,
+                scheduled,
+            } => {
+                let opt_in = if *scheduled {
+                    OptIn::Schedule
+                } else {
+                    OptIn::RequestOrLocal {
+                        repo: repo.as_deref(),
+                    }
+                };
+                let item = studio_item(&self.notes_root, strand, item_id, opt_in)
+                    .map_err(Refusal::Invalid)?;
+                (
+                    item.item_id.clone(),
+                    item.repo.clone(),
+                    item.section.clone(),
+                    Some(item.item_text.clone()),
+                    item.model.clone(),
+                    Some((item.strand.clone(), item.item_id.clone())),
+                    Some(item.prompt_path.clone()),
+                    item.reviewer.clone(),
+                    item.priority,
+                )
+            }
+            StartKind::Draft { draft, repo } => {
+                let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
+                    .map_err(Refusal::Invalid)?;
+                (
+                    format!("s-{}", d.slug),
+                    d.repo,
+                    d.section,
+                    None,
+                    d.model,
+                    None,
+                    Some(d.prompt_path),
+                    d.reviewer,
+                    d.priority,
+                )
+            }
+            StartKind::Free {
+                repo,
+                prompt,
+                slug,
+                model,
+            } => {
+                // A free prompt that names no repository goes to `local/<branch_slug>`.
+                let repo = if repo.trim().is_empty() && valid_slug(slug) {
+                    local_repo(slug).unwrap_or_default()
+                } else {
+                    repo.clone()
+                };
+                if !valid_repo(&repo) {
+                    return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
+                }
+                if prompt.trim().is_empty() {
+                    return Err(Refusal::Invalid("prompt is empty".into()));
+                }
+                if prompt.len() > devjob::MAX_PROMPT_BYTES {
+                    return Err(Refusal::Invalid(format!(
+                        "prompt is {} bytes; the most is {}",
+                        prompt.len(),
+                        devjob::MAX_PROMPT_BYTES
+                    )));
+                }
+                if !valid_slug(slug) {
+                    return Err(Refusal::Invalid(format!(
+                        "branch_slug {slug:?} must be lowercase letters, digits and hyphens"
+                    )));
+                }
+                (
+                    format!("s-{slug}"),
                     repo,
-                    scheduled,
-                } => {
-                    let opt_in = if *scheduled {
-                        OptIn::Schedule
-                    } else {
-                        OptIn::RequestOrLocal {
-                            repo: repo.as_deref(),
-                        }
-                    };
-                    let item = studio_item(&self.notes_root, strand, item_id, opt_in)
-                        .map_err(Refusal::Invalid)?;
-                    (
-                        item.item_id.clone(),
-                        item.repo.clone(),
-                        item.section.clone(),
-                        Some(item.item_text.clone()),
-                        item.model.clone(),
-                        Some((item.strand.clone(), item.item_id.clone())),
-                        Some(item.prompt_path.clone()),
-                        item.reviewer.clone(),
-                    )
-                }
-                StartKind::Draft { draft, repo } => {
-                    let d = studio_draft_or_local(&self.notes_root, draft, repo.as_deref())
-                        .map_err(Refusal::Invalid)?;
-                    (
-                        format!("s-{}", d.slug),
-                        d.repo,
-                        d.section,
-                        None,
-                        d.model,
-                        None,
-                        Some(d.prompt_path),
-                        d.reviewer,
-                    )
-                }
-                StartKind::Free {
-                    repo,
-                    prompt,
-                    slug,
-                    model,
-                } => {
-                    // A free prompt that names no repository goes to `local/<branch_slug>`.
-                    let repo = if repo.trim().is_empty() && valid_slug(slug) {
-                        local_repo(slug).unwrap_or_default()
-                    } else {
-                        repo.clone()
-                    };
-                    if !valid_repo(&repo) {
-                        return Err(Refusal::Invalid(format!("repo {repo:?} is not owner/name")));
-                    }
-                    if prompt.trim().is_empty() {
-                        return Err(Refusal::Invalid("prompt is empty".into()));
-                    }
-                    if prompt.len() > devjob::MAX_PROMPT_BYTES {
-                        return Err(Refusal::Invalid(format!(
-                            "prompt is {} bytes; the most is {}",
-                            prompt.len(),
-                            devjob::MAX_PROMPT_BYTES
-                        )));
-                    }
-                    if !valid_slug(slug) {
-                        return Err(Refusal::Invalid(format!(
-                            "branch_slug {slug:?} must be lowercase letters, digits and hyphens"
-                        )));
-                    }
-                    (
-                        format!("s-{slug}"),
-                        repo,
-                        prompt.clone(),
-                        None,
-                        model.clone(),
-                        None,
-                        None,
-                        None,
-                    )
-                }
-            };
+                    prompt.clone(),
+                    None,
+                    model.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+        };
         // A REVIEWED run: the reviewers are resolved and checked now, before anything is
         // created ([`HostRuns::resolve_reviewers`]).
         let focus = review::checked_focus(req.review_focus.as_deref())
@@ -2802,6 +3133,7 @@ impl HostRuns {
             reviewers_source: Some(picked.source.to_string()),
             reviewers_skipped: picked.skipped.clone(),
             review_focus: focus,
+            priority: req.priority.or(draft_priority).unwrap_or_default(),
             ..RunRecord::default()
         };
         // `prompt.md` is rendered when the first round starts, once the worktree names the
@@ -2929,8 +3261,9 @@ impl HostRuns {
         sys::free_bytes(&self.settings.root).is_none_or(|f| f >= self.settings.min_free_bytes)
     }
 
-    /// Start every queued run the caps and the disk allow, oldest first, skipping any still
-    /// blocked; record why each other one waits.
+    /// Start every queued run the caps and the disk allow, in [`queue_order`] (resumed rounds,
+    /// then priority, then oldest first), skipping any still blocked; record why each other one
+    /// waits.
     pub fn pump(&self, now: u64) -> Vec<Effect> {
         let _gate = lock(&self.gate);
         let mut effects = Vec::new();
@@ -2947,18 +3280,10 @@ impl HostRuns {
             .iter()
             .filter(|(_, r)| r.status == RunStatus::Queued)
             .collect();
-        // The watcher's own rounds (a run that was running when the usage limit or a restart
-        // stopped it) go first, so it gets its slot back before new work takes it; then the
-        // order of the wait.
-        let resumed = |r: &RunRecord| r.round().is_some_and(|x| x.auto.is_some());
-        queued.sort_by(|a, b| {
-            let qa = a.1.queued_at.as_deref().unwrap_or(&a.1.created_at);
-            let qb = b.1.queued_at.as_deref().unwrap_or(&b.1.created_at);
-            resumed(&b.1)
-                .cmp(&resumed(&a.1))
-                .then(qa.cmp(qb))
-                .then(a.1.run_id.cmp(&b.1.run_id))
-        });
+        // Resumed rounds, then priority, then the order of the wait ([`queue_order`]). Each run
+        // is still checked on its own below, so a high run in a full repository leaves the slot
+        // to a lower one in an idle repository.
+        queued.sort_by(|a, b| queue_order(&a.1, &b.1));
         // While any run is paused for the usage limit, nothing new starts: only the paused runs'
         // own rounds, which find out whether the limit has passed.
         let limit_hold = runs.iter().any(|(_, r)| r.status == RunStatus::Paused);
@@ -3179,15 +3504,26 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
-        if text.trim() == CONTINUE_TEXT
-            && self
-                .get(run_id)
-                .is_some_and(|r| r.status == RunStatus::NeedsYou)
-        {
-            return Err(Refusal::State(format!(
-                "{run_id} asked a question and needs an answer: an empty \"{CONTINUE_TEXT}\" \
-                 would answer it blind. Reply with the answer."
-            )));
+        if text.trim() == CONTINUE_TEXT {
+            match self.get(run_id) {
+                Some(r) if r.status == RunStatus::NeedsYou => {
+                    return Err(Refusal::State(format!(
+                        "{run_id} asked a question and needs an answer: an empty \
+                         \"{CONTINUE_TEXT}\" would answer it blind. Reply with the answer."
+                    )));
+                }
+                // The run is waiting for a merge: a blind continue would carry on as if it
+                // had happened. Merging resumes it; a reply says what to do instead.
+                Some(r) if r.status == RunStatus::AwaitingMerge => {
+                    let url = r.merge_wait.map(|w| w.url).unwrap_or_default();
+                    return Err(Refusal::State(format!(
+                        "{run_id} is waiting for the merge of {url}: an empty \
+                         \"{CONTINUE_TEXT}\" would carry on as if it had merged. Merge it and \
+                         the run resumes by itself, or reply with what to do instead."
+                    )));
+                }
+                _ => {}
+            }
         }
         self.queue_round_locked(run_id, text, None)
     }
@@ -3221,6 +3557,7 @@ impl HostRuns {
             && !matches!(
                 rec.status,
                 RunStatus::NeedsYou
+                    | RunStatus::AwaitingMerge
                     | RunStatus::Reported
                     | RunStatus::Failed
                     | RunStatus::Interrupted
@@ -3259,6 +3596,12 @@ impl HostRuns {
                 auto: auto.map(str::to_string),
                 ..Round::default()
             });
+            // An answer ends a wait for a merge; the merge's own round says so in `also`.
+            if r.status == RunStatus::AwaitingMerge {
+                if let Some(w) = r.merge_wait.as_mut() {
+                    w.end(MERGE_WAIT_ANSWERED, &now);
+                }
+            }
             r.status = RunStatus::Queued;
             r.queued_at = Some(now.clone());
             r.waiting_for = None;
@@ -3305,6 +3648,219 @@ impl HostRuns {
                     x.resume_at = Some(at.clone())
                 });
             }
+        }
+    }
+
+    /// The merge watch, one step of the watcher's pass: every `awaiting_merge` run whose pull
+    /// request was not read in the last [`MERGE_CHECK_EVERY_MS`], and has no check still in
+    /// flight, gets a check of its own on its own task ([`HostRuns::check_merge`]). The pass
+    /// never waits for one, so a `gh` that hangs holds up only its own run's watch: every other
+    /// run's check, the usage limit resume, the queue and the next pass go on. No total cap:
+    /// the wait ends only on a merge, a close of the pull request, or the run leaving
+    /// `awaiting_merge` (a reply, a close, an archive).
+    pub fn start_merge_checks(self: &Arc<Self>, now: u64) {
+        let mut inflight = lock(&self.merge_checks);
+        inflight.retain(|_, h| !h.is_finished());
+        for (dir, r) in self.runs() {
+            if r.status != RunStatus::AwaitingMerge || inflight.contains_key(&r.run_id) {
+                continue;
+            }
+            let Some(w) = r.merge_wait.clone() else {
+                continue;
+            };
+            if ms_opt(&w.last_check_at)
+                .is_some_and(|t| now.saturating_sub(t) < MERGE_CHECK_EVERY_MS)
+            {
+                continue;
+            }
+            let this = self.clone();
+            let id = r.run_id.clone();
+            inflight.insert(
+                id,
+                tokio::spawn(async move { this.check_merge(dir, r, w, now).await }),
+            );
+        }
+    }
+
+    /// Wait for every merge check in flight, and for any it leads to. For tests, which need a
+    /// pass's checks to have answered before they look.
+    #[cfg(test)]
+    pub async fn merge_checks_settled(&self) {
+        loop {
+            let handles: Vec<_> = lock(&self.merge_checks).drain().map(|(_, h)| h).collect();
+            if handles.is_empty() {
+                return;
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+        }
+    }
+
+    /// One read of one waiting run's pull request. Open: nothing changes but the check time,
+    /// and a "Merge needed" push goes out on the first check and then once
+    /// [`MERGE_PUSH_EVERY_MS`] has passed since the last. Merged, with its time and commit:
+    /// the run's next round is queued exactly as a reply is ([`HostRuns::queue_round_with`]),
+    /// with [`merged_text`], and the queue is pumped as [`HostRuns::reply_and_pump`] pumps it.
+    /// Merged without them yet: asked again at the next check. Closed: the run is
+    /// `needs_you`, with one push. A read that fails is logged and asked again at the next
+    /// check; it never changes the run, though the first push still goes out so Jeremy hears.
+    async fn check_merge(self: Arc<Self>, dir: PathBuf, rec: RunRecord, w: MergeWait, now: u64) {
+        let run_id = rec.run_id.clone();
+        let forge = self.forge.clone();
+        let url = w.url.clone();
+        let got = tokio::task::spawn_blocking(move || forge.pull_merge(&url))
+            .await
+            .unwrap_or_else(|e| Err(format!("the check task failed: {e}")));
+        let checked = rfc(now);
+        let still = |r: &RunRecord| still_waiting(r, &w.url);
+        // Merged, with both facts the resume message carries: anything less is asked again.
+        let merged = match &got {
+            Ok(PullMerge {
+                state: PrState::Merged,
+                merged_at: Some(at),
+                merge_commit: Some(sha),
+                ..
+            }) => Some((at.clone(), sha.clone())),
+            _ => None,
+        };
+        let open_or_unread = match &got {
+            Ok(p) if p.state == PrState::Open => true,
+            Ok(p) if p.state == PrState::Merged && merged.is_none() => {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: {} is merged but GitHub gave no merge time \
+                     or commit yet (asking again in {} minutes)",
+                    w.url,
+                    MERGE_CHECK_EVERY_MS / 60_000
+                );
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: could not read {} (asking again in {} \
+                     minutes): {e}",
+                    w.url,
+                    MERGE_CHECK_EVERY_MS / 60_000
+                );
+                true
+            }
+        };
+        if open_or_unread {
+            let is_open = matches!(&got, Ok(p) if p.state == PrState::Open);
+            // The first push goes out whatever GitHub answered, unless it said merged; a later
+            // one only while it is known to be open.
+            let push_due = match ms_opt(&w.last_push_at) {
+                None => got.as_ref().map_or(true, |p| p.state != PrState::Merged),
+                Some(t) => is_open && now.saturating_sub(t) >= MERGE_PUSH_EVERY_MS,
+            };
+            let title = got.as_ref().ok().and_then(|p| p.title.clone());
+            let mut push = None;
+            {
+                let _gate = lock(&self.gate);
+                let _ = update_run(&dir, |r| {
+                    if !still(r) {
+                        return;
+                    }
+                    if let Some(x) = r.merge_wait.as_mut() {
+                        x.last_check_at = Some(checked.clone());
+                        if title.is_some() {
+                            x.title = title.clone();
+                        }
+                        if push_due {
+                            x.last_push_at = Some(checked.clone());
+                        }
+                    }
+                    if push_due {
+                        if let Some(x) = &r.merge_wait {
+                            push = Some(merge_push_body(r, x));
+                        }
+                    }
+                });
+            }
+            if let Some(body) = push {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id} AWAITING MERGE {}: push sent",
+                    w.url
+                );
+                self.send_effects(vec![Effect::Push {
+                    title: MERGE_PUSH_TITLE.into(),
+                    body,
+                    run_id: run_id.clone(),
+                }])
+                .await;
+            }
+            return;
+        }
+        if let Some((at, sha)) = merged {
+            let text = merged_text(&w.url, &at, &sha);
+            let ended = format!("merged {}", merged_facts(&at, &sha));
+            let this = self.clone();
+            let id = run_id.clone();
+            let url = w.url.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                let _gate = lock(&this.gate);
+                // Read again under the gate: a reply or a close since the check wins.
+                match this.get(&id) {
+                    Some(r) if still_waiting(&r, &url) => {}
+                    _ => return Ok(None),
+                }
+                this.queue_round_with(&id, &text, Some(AUTO_MERGE), |r, _| {
+                    if let Some(x) = r.merge_wait.as_mut() {
+                        x.last_check_at = Some(checked.clone());
+                        x.ended = Some(ended.clone());
+                        x.ended_at = Some(checked.clone());
+                    }
+                })
+                .map(Some)
+            })
+            .await
+            .unwrap_or_else(|e| Err(Refusal::Internal(e.to_string())));
+            match res {
+                Ok(Some(_)) => {
+                    eprintln!(
+                        "jesse-bridge: hostrun {run_id} MERGED {}: resuming in its session",
+                        w.url
+                    );
+                    let effects = self.pump_blocking().await;
+                    self.send_effects(effects).await;
+                    self.wake();
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "jesse-bridge: hostrun {run_id}: {} merged but the round could not be \
+                     queued (trying again at the next check): {}",
+                    w.url,
+                    e.message()
+                ),
+            }
+            return;
+        }
+        // Closed without merging.
+        let why = format!("{} was closed without merging", w.url);
+        let mut changed = None;
+        {
+            let _gate = lock(&self.gate);
+            let _ = update_run(&dir, |r| {
+                if !still(r) {
+                    return;
+                }
+                r.status = RunStatus::NeedsYou;
+                if let Some(x) = r.merge_wait.as_mut() {
+                    x.last_check_at = Some(checked.clone());
+                    x.end(&why, &checked);
+                }
+                changed = Some(format!("{}: {why}", run_and_item(r)));
+            });
+        }
+        if let Some(body) = changed {
+            eprintln!("jesse-bridge: hostrun {run_id} NEEDS YOU: {why}");
+            self.send_effects(vec![Effect::Push {
+                title: format!("Run {run_id} {}", RunStatus::NeedsYou.outcome()),
+                body,
+                run_id: run_id.clone(),
+            }])
+            .await;
         }
     }
 
@@ -3402,7 +3958,7 @@ impl HostRuns {
         self.runs().into_iter().map(|(_, r)| r.run_id).collect()
     }
 
-    /// The oldest queued run a free cloud slot may take, already taken: one that is waiting
+    /// The first queued run in [`queue_order`] a free cloud slot may take, already taken: one that is waiting
     /// (`waiting_for` set), has never started, runs a draft that says `devjob-host: any`, and is
     /// not on a local repository. It becomes `closed` ([`MOVED_TO_CLOUD`]) under the queue's
     /// gate, so the pump cannot start it as well. `None` when nothing qualifies.
@@ -3413,11 +3969,7 @@ impl HostRuns {
             .into_iter()
             .filter(|(_, r)| drainable(r))
             .collect();
-        queued.sort_by(|a, b| {
-            let qa = a.1.queued_at.as_deref().unwrap_or(&a.1.created_at);
-            let qb = b.1.queued_at.as_deref().unwrap_or(&b.1.created_at);
-            qa.cmp(qb).then(a.1.run_id.cmp(&b.1.run_id))
-        });
+        queued.sort_by(|a, b| queue_order(&a.1, &b.1));
         for (dir, r) in queued {
             let Some(path) = &r.prompt_path else { continue };
             let Ok(src) = std::fs::read_to_string(notes_root.join(path)) else {
@@ -3524,7 +4076,10 @@ impl HostRuns {
         let may = |s: RunStatus| {
             matches!(
                 s,
-                RunStatus::NeedsYou | RunStatus::Interrupted | RunStatus::Failed
+                RunStatus::NeedsYou
+                    | RunStatus::AwaitingMerge
+                    | RunStatus::Interrupted
+                    | RunStatus::Failed
             )
         };
         let _gate = lock(&self.gate);
@@ -3563,6 +4118,71 @@ impl HostRuns {
         tokio::task::spawn_blocking(move || this.close(&id, reason.as_deref()))
             .await
             .map_err(|e| Refusal::Internal(format!("the close task failed: {e}")))?
+    }
+
+    /// Change a queued run's priority (`devjob_priority`): the change is recorded in
+    /// `priority_changes` with its time. Only a queued run (waiting for a slot, its repository,
+    /// the disk or the limit) may change; any other is refused with its status. The same
+    /// priority again changes nothing and records nothing.
+    pub fn set_priority(&self, run_id: &str, priority: Priority) -> Result<RunRecord, Refusal> {
+        let _gate = lock(&self.gate);
+        let rec = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        let refused = |s: RunStatus| {
+            Refusal::State(format!(
+                "{run_id} is {}; only a queued run's priority can be changed",
+                s.label()
+            ))
+        };
+        if rec.status != RunStatus::Queued {
+            return Err(refused(rec.status));
+        }
+        if rec.priority == priority {
+            return Ok(rec);
+        }
+        let now = rfc(now_ms());
+        let mut status = RunStatus::Queued;
+        let updated = update_run(&self.settings.run_dir(run_id), |r| {
+            status = r.status;
+            if r.status != RunStatus::Queued {
+                return;
+            }
+            r.priority_changes.push(PriorityChange {
+                at: now.clone(),
+                from: r.priority,
+                to: priority,
+            });
+            r.priority = priority;
+        })
+        .map_err(Refusal::Internal)?;
+        if status != RunStatus::Queued {
+            return Err(refused(status));
+        }
+        eprintln!(
+            "jesse-bridge: hostrun PRIORITY {run_id} {} -> {}",
+            rec.priority.label(),
+            priority.label()
+        );
+        Ok(updated)
+    }
+
+    /// [`HostRuns::set_priority`], then one queue pass, so a run raised into a free slot starts
+    /// now. Answers the record as the pass left it.
+    pub async fn set_priority_and_pump(
+        self: &Arc<Self>,
+        run_id: &str,
+        priority: Priority,
+    ) -> Result<RunRecord, Refusal> {
+        let this = self.clone();
+        let id = run_id.to_string();
+        let rec = tokio::task::spawn_blocking(move || this.set_priority(&id, priority))
+            .await
+            .map_err(|e| Refusal::Internal(format!("the priority task failed: {e}")))??;
+        let effects = self.pump_blocking().await;
+        self.send_effects(effects).await;
+        self.wake();
+        Ok(self.get(run_id).unwrap_or(rec))
     }
 
     /// The watcher's settling: close every `needs_you`, `interrupted` or `failed` run whose
@@ -4678,6 +5298,11 @@ impl HostRuns {
         }
         let mut report = round_report(&dir, &round);
         let mut status = round_status(&round, &exit, &report);
+        // The pull request an `AWAITING MERGE:` report names, read before anything is put above
+        // its first line.
+        let wait = (status == RunStatus::AwaitingMerge)
+            .then(|| awaiting_merge_pull(&report))
+            .flatten();
         // THE ANSWERING ROUND of a review cycle that was handed off: when no review of it ran
         // the report leads with `UNREVIEWED:`, when only some did with `PARTLY REVIEWED:`, and
         // with any `REVIEW LEAK:` the check found over every review that ran.
@@ -4803,8 +5428,20 @@ impl HostRuns {
             .unwrap_or(0);
         let at = exit.ended_at.clone();
         let rel2 = rel.clone();
+        // An attribution hit made it `needs_you`: then nothing is watched. GitHub is not asked
+        // here: the watch's first check, off the pass, reads the pull request and sends the
+        // one "Merge needed" push only if it is still open.
+        let wait = wait
+            .filter(|_| status == RunStatus::AwaitingMerge)
+            .map(|w| MergeWait {
+                since: at.clone(),
+                ..w
+            });
         let rec = update_run(&dir, |r| {
             r.status = status;
+            if let Some(w) = &wait {
+                r.merge_wait = Some(w.clone());
+            }
             r.finished_at = Some(at.clone());
             r.stalled_since = None;
             r.pgid = None;
@@ -4839,7 +5476,10 @@ impl HostRuns {
                 }
             }
         })?;
-        if matches!(status, RunStatus::Reported | RunStatus::NeedsYou) {
+        if matches!(
+            status,
+            RunStatus::Reported | RunStatus::NeedsYou | RunStatus::AwaitingMerge
+        ) {
             self.lift_limit(now_ms());
         }
         if rec.round().is_some_and(|r| r.notified) {
@@ -4860,7 +5500,9 @@ impl HostRuns {
                 );
             }
         }
-        if let Some(n) = &sink.notifier {
+        // An `awaiting_merge` round's push is the watch's first check's to send.
+        let waiting = rec.status == RunStatus::AwaitingMerge && rec.merge_wait.is_some();
+        if let Some(n) = sink.notifier.as_ref().filter(|_| !waiting) {
             let title = format!("Run {run_id} {}", status.outcome());
             let body: String = first_line(&report).chars().take(180).collect();
             n.notify(title, body, run_id.to_string()).await;
@@ -5013,6 +5655,7 @@ impl HostRuns {
         let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.archive_settled(now)).await;
+        self.start_merge_checks(now);
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;
@@ -5231,7 +5874,10 @@ impl HostRuns {
             if wt.exists() {
                 if terminal && (gone || past_keep) {
                     self.remove_worktree(&dir, &rec, now);
-                } else if !terminal && age >= PAUSED_KEEP_DAYS * DAY_MS {
+                } else if !terminal
+                    && rec.status != RunStatus::AwaitingMerge
+                    && age >= PAUSED_KEEP_DAYS * DAY_MS
+                {
                     match &rec.cleanup.worktree_warned {
                         None => {
                             let at = rfc(now);
@@ -5717,7 +6363,8 @@ pub fn annotate_strands(
         let needs_you = runs
             .iter()
             .filter(|r| {
-                r.strand.as_deref() == Some(strand.slug.as_str()) && r.status == RunStatus::NeedsYou
+                r.strand.as_deref() == Some(strand.slug.as_str())
+                    && matches!(r.status, RunStatus::NeedsYou | RunStatus::AwaitingMerge)
             })
             .count();
         obj.insert("runs_needs_you".into(), json!(needs_you as u32));
@@ -5910,9 +6557,40 @@ pub struct ListQuery {
 #[derive(Deserialize)]
 pub struct LogQuery {
     pub tail: Option<usize>,
+    /// `cloud` for a cloud run ([`cloud`]).
+    pub host: Option<String>,
 }
 
-/// `GET /jesse/runs`.
+/// `?host=` on a per run route: `cloud` names a cloud run ([`cloud`]).
+#[derive(Deserialize, Default)]
+pub struct HostQuery {
+    pub host: Option<String>,
+}
+
+/// The cloud host's server, when this bridge has one.
+fn cloud_of(st: &AppState) -> Option<Arc<crate::devjob::DevJobs>> {
+    cloud::cloud_server(st.cfg.devjob.service())
+}
+
+/// Refuse a per run action on a cloud run ([`cloud::refuse_cloud`]).
+async fn refuse_cloud(
+    st: &AppState,
+    svc: &HostRuns,
+    run_id: &str,
+    q: &HostQuery,
+) -> Result<(), ApiError> {
+    let studio_has = svc.get(run_id).is_some();
+    cloud::refuse_cloud(
+        run_id,
+        q.host.as_deref(),
+        studio_has,
+        cloud::cloud_has(cloud_of(st), run_id),
+    )
+    .await
+}
+
+/// `GET /jesse/runs`: the Studio's runs and, beside them, the cloud's ([`cloud`]). The cloud is
+/// asked while the Studio's store is scanned, and for at most [`cloud::CLOUD_LIST_TIMEOUT`].
 pub async fn jesse_runs(
     State(st): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -5921,9 +6599,18 @@ pub async fn jesse_runs(
     let svc = guard(&st, &headers)?;
     let mode =
         ArchivedMode::parse(q.archived.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let v = tokio::task::spawn_blocking(move || svc.list_json_mode(mode))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let studio = svc.clone();
+    let (v, cloud) = tokio::join!(
+        tokio::task::spawn_blocking(move || studio.list_json_mode(mode)),
+        cloud::list_cloud(cloud_of(&st)),
+    );
+    let mut v = v.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let v = tokio::task::spawn_blocking(move || {
+        svc.add_cloud(&mut v, mode, &cloud);
+        v
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(v).into_response())
 }
 
@@ -5946,26 +6633,41 @@ pub async fn jesse_runs_start(
             again,
             reviewer,
             review_focus,
+            // The app sets no priority yet: the draft's `devjob-priority:`, else `normal`.
+            priority: None,
         })
         .await
         .map_err(refusal)?;
     Ok(Json(started_json(&started)).into_response())
 }
 
-/// `GET /jesse/runs/:run_id`.
+/// `GET /jesse/runs/:run_id[?host=cloud]`: a Studio run, else (or with `host=cloud`, only) a
+/// cloud run by its run id or Job name.
 pub async fn jesse_run(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
-    match svc.get(&run_id) {
-        Some(r) => Ok(Json(svc.served_one(&r)).into_response()),
-        None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
+    if !cloud::asked_cloud(q.host.as_deref())? {
+        if let Some(r) = svc.get(&run_id) {
+            return Ok(Json(svc.served_one(&r)).into_response());
+        }
     }
+    let (v, run) =
+        cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(cloud_of(&st), &run_id).await)?;
+    let (v, title) = tokio::task::spawn_blocking(move || {
+        let t = svc.cloud_title(&mut StrandNotes::default(), &v);
+        (v, t)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(cloud::cloud_detail_json(&v, &run, title)).into_response())
 }
 
-/// `GET /jesse/runs/:run_id/log?tail=N`.
+/// `GET /jesse/runs/:run_id/log?tail=N[&host=cloud]`: a Studio run's readable log, else (or
+/// with `host=cloud`, only) the last lines of a cloud run's.
 pub async fn jesse_run_log(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
@@ -5974,24 +6676,33 @@ pub async fn jesse_run_log(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let tail = q.tail.unwrap_or(LOG_DEFAULT);
-    let id = run_id.clone();
-    let lines = tokio::task::spawn_blocking(move || svc.log_lines(&id, tail))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    match lines {
-        Some(l) => Ok(Json(log_json(&run_id, l)).into_response()),
-        None => Err((StatusCode::NOT_FOUND, format!("no run {run_id:?}"))),
+    if !cloud::asked_cloud(q.host.as_deref())? {
+        let id = run_id.clone();
+        let lines = tokio::task::spawn_blocking(move || svc.log_lines(&id, tail))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(l) = lines {
+            return Ok(Json(log_json(&run_id, l)).into_response());
+        }
     }
+    let server = cloud_of(&st);
+    let (v, run) =
+        cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(server.clone(), &run_id).await)?;
+    let kept = server.and_then(|c| c.kept_tail(&v.name));
+    let lines = cloud::cloud_log_lines(kept, &run, tail.clamp(1, LOG_MAX));
+    Ok(Json(log_json(&run_id, lines)).into_response())
 }
 
 /// `POST /jesse/runs/:run_id/reply` with `{ text }`.
 pub async fn jesse_run_reply(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
     Json(body): Json<ReplyBody>,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc
         .reply_and_pump(&run_id, &body.text)
         .await
@@ -6004,10 +6715,12 @@ pub async fn jesse_run_reply(
 pub async fn jesse_run_review(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
     Json(body): Json<ReviewBody>,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc
         .request_review_and_start(
             &run_id,
@@ -6024,9 +6737,11 @@ pub async fn jesse_run_review(
 pub async fn jesse_run_cancel(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc.cancel_and_wake(&run_id).await.map_err(refusal)?;
     Ok(Json(svc.served_one(&r)).into_response())
 }
@@ -6035,10 +6750,12 @@ pub async fn jesse_run_cancel(
 pub async fn jesse_run_close(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let body = CloseBody::parse(&body).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let r = svc
         .close_blocking(&run_id, body.reason)
@@ -6052,9 +6769,11 @@ pub async fn jesse_run_close(
 pub async fn jesse_run_archive(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc.archive_blocking(&run_id, true).await.map_err(refusal)?;
     Ok(Json(svc.served_one(&r)).into_response())
 }
@@ -6063,9 +6782,11 @@ pub async fn jesse_run_archive(
 pub async fn jesse_run_unarchive(
     State(st): State<AppState>,
     UrlPath(run_id): UrlPath<String>,
+    Query(q): Query<HostQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
+    refuse_cloud(&st, &svc, &run_id, &q).await?;
     let r = svc
         .archive_blocking(&run_id, false)
         .await

@@ -496,12 +496,13 @@ pub fn cloud_deadline_secs(spec: &DevJobSpec) -> u64 {
     spec.agent_timeout_secs() + FINISH_ALLOWANCE_SECS + MERGE_WAIT_SECONDS * MERGE_ATTEMPTS
 }
 
-/// A cloud start's granted `timeout_minutes`: the default when none was asked, else the request
+/// A cloud start's granted `timeout_minutes`: the request, or the default when none was asked,
 /// capped at `max_timeout_minutes` — this host's own cap, not [`super::MAX_TIMEOUT_MINUTES`].
+/// The default is capped too, so a cap below it holds for a start that names no timeout.
 pub fn cloud_capped_timeout_minutes(requested: Option<u64>, max_timeout_minutes: u64) -> u64 {
-    requested.map_or(super::DEFAULT_TIMEOUT_MINUTES, |m| {
-        m.min(max_timeout_minutes)
-    })
+    requested
+        .unwrap_or(super::DEFAULT_TIMEOUT_MINUTES)
+        .min(max_timeout_minutes)
 }
 
 // ---- ROUTING ---------------------------------------------------------------------------
@@ -719,38 +720,72 @@ pub fn cloud_slot_free(views: &[super::JobView], max: usize) -> bool {
     live < max
 }
 
+/// Where queued cloud Jobs go this pass ([`cloud_resumable`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placement {
+    /// Each Job to resume with the worker (node name) it is pinned to, oldest Job first.
+    pub resume: Vec<(String, String)>,
+    /// Idle ready workers too old for every queued Job that found no worker: they do not count
+    /// as capacity for the queue, so [`plan_pass`] starts fresh workers in their place.
+    pub spent: Vec<String>,
+}
+
 /// The queued cloud Jobs to resume now, oldest first: as many as [`super::to_resume`] allows
 /// under the cap, each matched to an idle ready worker whose [`remaining_life`] covers the
 /// Job's own `activeDeadlineSeconds` — because Kubernetes starts that clock on resume, a worker
-/// that cannot live that long would be reaped mid run. Every released Job without a worker yet
-/// (`unplaced`) takes one of `idle_ready` first, by count. A Job no idle worker's remaining life
-/// covers stays queued: `plan_burst` starts it a fresh worker, and the too-old idle one is
-/// stopped by the existing idle rule, same as ever.
+/// that cannot live that long would be reaped mid run. The resume pins the Job's pod to that
+/// worker ([`pin_to_worker`]), since another idle worker, too old for it, is otherwise as
+/// eligible to the scheduler. Every released Job without a worker yet (`unplaced`) takes one of
+/// `idle_ready` first, by count. A Job no idle worker's remaining life covers stays queued, and
+/// the idle workers left unmatched are named [`Placement::spent`].
 pub fn cloud_resumable(
     views: &[super::JobView],
     max: usize,
     idle_ready: &[PoolWorker],
     unplaced: usize,
     worker_life_minutes: u64,
-) -> Vec<String> {
-    let mut lives: Vec<Duration> = idle_ready
+) -> Placement {
+    let mut lives: Vec<(&str, Duration)> = idle_ready
         .iter()
         .skip(unplaced)
-        .map(|w| remaining_life(w, worker_life_minutes))
+        .map(|w| (w.name.as_str(), remaining_life(w, worker_life_minutes)))
         .collect();
-    let mut out = Vec::new();
+    let mut out = Placement::default();
+    let mut short = false;
     for name in super::to_resume(views, max) {
         let Some(view) = views.iter().find(|v| v.name == name) else {
             continue;
         };
         let deadline = Duration::from_secs(view.active_deadline_secs.unwrap_or(0).max(0) as u64);
-        let Some(pos) = lives.iter().position(|life| *life >= deadline) else {
+        let Some(pos) = lives.iter().position(|(_, life)| *life >= deadline) else {
+            short = true;
             continue;
         };
-        lives.remove(pos);
-        out.push(name);
+        let (worker, _) = lives.remove(pos);
+        out.resume.push((name, worker.to_string()));
+    }
+    // Any worker still unmatched covers none of the Jobs that found no worker: each of them
+    // looked at every worker left.
+    if short {
+        out.spent = lives.into_iter().map(|(w, _)| w.to_string()).collect();
     }
     out
+}
+
+/// The merge patch that resumes a queued cloud Job onto `worker` alone: a required node affinity
+/// on the node's name. Kubernetes lets a suspended Job that never started change its pod
+/// template's node affinity, so the pin and the resume go in one patch.
+pub fn pin_to_worker(worker: &str) -> Value {
+    json!({ "spec": {
+        "suspend": false,
+        "template": { "spec": { "affinity": { "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
+                { "matchFields": [
+                    { "key": "metadata.name", "operator": "In", "values": [worker] }
+                ] }
+            ] }
+        } } } }
+    } })
 }
 
 // ---- BURST WORKERS -------------------------------------------------------------------------
@@ -832,6 +867,32 @@ pub fn plan_burst(
         .map(|w| w.run.clone())
         .collect();
     BurstPlan { up, down, extend }
+}
+
+/// [`plan_burst`] with the [`Placement::spent`] workers left out of the capacity it counts, so
+/// a queued Job too long for every idle worker gets a fresh one rather than waiting for an old
+/// one to expire. A spent worker is stopped once idle [`CloudSettings::idle_minutes`], like any
+/// other idle worker no run wants.
+pub fn plan_pass(
+    workers: &[PoolWorker],
+    spent: &[String],
+    starting: usize,
+    demand: usize,
+    max: usize,
+    idle_after: Duration,
+) -> BurstPlan {
+    let (spent, usable): (Vec<PoolWorker>, Vec<PoolWorker>) = workers
+        .iter()
+        .cloned()
+        .partition(|w| spent.contains(&w.name));
+    let mut plan = plan_burst(&usable, starting, demand, max, idle_after);
+    plan.down.extend(
+        spent
+            .iter()
+            .filter(|w| !w.busy && w.idle_for >= idle_after)
+            .map(|w| w.run.clone()),
+    );
+    plan
 }
 
 /// How long each worker has had no dev job pod, on tokio's clock (so a test pauses it). Memory
@@ -1668,33 +1729,35 @@ impl DevJobs {
             .iter()
             .filter(|v| v.is_active() || v.is_queued())
             .count();
-        let plan = plan_burst(
+        let idle_ready: Vec<PoolWorker> = workers
+            .iter()
+            .filter(|w| w.ready && !w.busy)
+            .cloned()
+            .collect();
+        let placement = cloud_resumable(
+            &views,
+            rt.settings.max_concurrent,
+            &idle_ready,
+            unplaced,
+            rt.settings.worker_life_minutes,
+        );
+        let plan = plan_pass(
             &workers,
+            &placement.spent,
             rt.starting.load(Ordering::SeqCst),
             demand,
             rt.settings.max_concurrent,
             Duration::from_secs(rt.settings.idle_minutes * 60),
         );
         self.carry_out(rt, &plan).await;
-        let idle_ready: Vec<PoolWorker> = workers
-            .iter()
-            .filter(|w| w.ready && !w.busy)
-            .cloned()
-            .collect();
-        for name in cloud_resumable(
-            &views,
-            rt.settings.max_concurrent,
-            &idle_ready,
-            unplaced,
-            rt.settings.worker_life_minutes,
-        ) {
-            let patch = json!({ "spec": { "suspend": false } });
+        for (name, worker) in placement.resume {
+            let patch = pin_to_worker(&worker);
             match self
                 .jobs()
                 .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
                 .await
             {
-                Ok(_) => eprintln!("jesse-bridge: devjob RESUME {name} (cloud)"),
+                Ok(_) => eprintln!("jesse-bridge: devjob RESUME {name} (cloud, on {worker})"),
                 Err(e) => eprintln!("jesse-bridge: devjob {name}: could not resume: {e}"),
             }
         }

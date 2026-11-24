@@ -75,6 +75,11 @@ fn aged_worker(name: &str, age_min: u64) -> PoolWorker {
 
 const IDLE: Duration = Duration::from_secs(10 * 60);
 
+/// The Jobs a [`Placement`] resumes, in order.
+fn jobs(p: &Placement) -> Vec<&str> {
+    p.resume.iter().map(|(j, _)| j.as_str()).collect()
+}
+
 // ---- settings ----------------------------------------------------------------------------
 
 #[test]
@@ -330,6 +335,8 @@ fn the_cloud_server_runs_with_kc1s_cluster_settings() {
 #[test]
 fn the_cloud_timeout_defaults_to_two_hours_and_is_capped_at_its_own_max_not_the_clusters() {
     assert_eq!(cloud_capped_timeout_minutes(None, 315), 120);
+    // A cap below the default holds for a start that names no timeout.
+    assert_eq!(cloud_capped_timeout_minutes(None, 60), 60);
     assert_eq!(cloud_capped_timeout_minutes(Some(200), 315), 200);
     // Over the cluster's 240 cap, but under the cloud's own 315: granted in full.
     assert_eq!(cloud_capped_timeout_minutes(Some(300), 315), 300);
@@ -756,17 +763,20 @@ fn a_queued_cloud_job_starts_only_onto_an_idle_ready_worker() {
         worker("w2", false, 0, Some(999)),
     ];
     // No worker: nothing starts, however free the slots.
-    assert!(cloud_resumable(&views, 2, &[], 0, life).is_empty());
+    assert!(jobs(&cloud_resumable(&views, 2, &[], 0, life)).is_empty());
     // One idle worker: the oldest only.
-    assert_eq!(cloud_resumable(&views, 2, &one, 0, life), ["old"]);
+    assert_eq!(jobs(&cloud_resumable(&views, 2, &one, 0, life)), ["old"]);
     // Two: both, oldest first.
-    assert_eq!(cloud_resumable(&views, 2, &two, 0, life), ["old", "new"]);
+    assert_eq!(
+        jobs(&cloud_resumable(&views, 2, &two, 0, life)),
+        ["old", "new"]
+    );
     // A released Job still waiting for its pod to be placed takes one of them.
-    assert_eq!(cloud_resumable(&views, 2, &two, 1, life), ["old"]);
+    assert_eq!(jobs(&cloud_resumable(&views, 2, &two, 1, life)), ["old"]);
     // The cap still holds: one running, cap two, two idle workers: one more.
     let mut v = views.clone();
     v.push(view("busy", 0, false, None));
-    assert_eq!(cloud_resumable(&v, 2, &two, 0, life), ["old"]);
+    assert_eq!(jobs(&cloud_resumable(&v, 2, &two, 0, life)), ["old"]);
 }
 
 #[test]
@@ -779,12 +789,70 @@ fn cloud_resumable_skips_a_worker_whose_remaining_life_is_short_of_the_jobs_dead
     // 470 of 480 minutes already spent: 10 minutes left, short of the Job's 60 minute deadline.
     let old = aged_worker("old", 470);
     assert!(
-        cloud_resumable(&views, 2, &[old], 0, 480).is_empty(),
+        jobs(&cloud_resumable(&views, 2, &[old], 0, 480)).is_empty(),
         "stays queued: no idle worker outlives it"
     );
     // 10 minutes old: 470 left, plenty.
     let young = aged_worker("young", 10);
-    assert_eq!(cloud_resumable(&views, 2, &[young], 0, 480), ["gd5"]);
+    assert_eq!(jobs(&cloud_resumable(&views, 2, &[young], 0, 480)), ["gd5"]);
+}
+
+#[test]
+fn a_resumed_job_is_pinned_to_the_worker_that_outlives_it() {
+    let job = JobView {
+        active_deadline_secs: Some(3600),
+        ..view("gd5", 1, true, None)
+    };
+    // Listed first, the old one has 10 minutes left; the young one 470.
+    let idle = [aged_worker("old", 470), aged_worker("young", 10)];
+    let p = cloud_resumable(&[job], 2, &idle, 0, 480);
+    assert_eq!(p.resume, [("gd5".to_string(), "kcb-young-1".to_string())]);
+    assert!(p.spent.is_empty(), "every Job found a worker");
+    // The resume carries the pin, so the scheduler cannot pick the old worker instead.
+    let patch = pin_to_worker("kcb-young-1");
+    assert_eq!(patch["spec"]["suspend"], false);
+    assert_eq!(
+        patch["spec"]["template"]["spec"]["affinity"]["nodeAffinity"]
+            ["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]
+            ["matchFields"][0],
+        json!({ "key": "metadata.name", "operator": "In", "values": ["kcb-young-1"] })
+    );
+}
+
+#[test]
+fn a_queued_job_too_long_for_the_only_idle_worker_gets_a_fresh_one() {
+    let job = JobView {
+        active_deadline_secs: Some(3600),
+        ..view("gd5", 1, true, None)
+    };
+    let old = aged_worker("old", 470);
+    let p = cloud_resumable(&[job], 2, std::slice::from_ref(&old), 0, 480);
+    assert!(p.resume.is_empty());
+    assert_eq!(p.spent, ["kcb-old-1"]);
+    // Plain plan_burst counts the old worker as the queue's capacity and starts nothing.
+    assert_eq!(plan_burst(std::slice::from_ref(&old), 0, 1, 2, IDLE).up, 0);
+    // Left out as spent, the queued Job gets a fresh worker at once.
+    let plan = plan_pass(std::slice::from_ref(&old), &p.spent, 0, 1, 2, IDLE);
+    assert_eq!(plan.up, 1);
+    assert!(plan.down.is_empty(), "not idle long enough yet");
+    // Once idle the configured minutes, the spent worker is stopped.
+    let idle_old = PoolWorker {
+        idle_for: IDLE,
+        ..old.clone()
+    };
+    assert_eq!(
+        plan_pass(&[idle_old], &p.spent, 0, 1, 2, IDLE).down,
+        ["old"]
+    );
+    // A worker that does cover a queued Job is never spent.
+    let young = aged_worker("young", 10);
+    let job = JobView {
+        active_deadline_secs: Some(3600),
+        ..view("gd5", 1, true, None)
+    };
+    assert!(cloud_resumable(&[job], 2, &[young], 0, 480)
+        .spent
+        .is_empty());
 }
 
 #[test]
@@ -796,10 +864,13 @@ fn an_idle_worker_with_no_known_age_is_sized_by_its_current_expiry() {
     let views = vec![job];
     // No age reported: 50 minutes left by kc-burst's own `expires`, short of the deadline.
     let short = worker("w", false, 0, Some(50));
-    assert!(cloud_resumable(&views, 2, &[short], 0, 480).is_empty());
+    assert!(jobs(&cloud_resumable(&views, 2, &[short], 0, 480)).is_empty());
     // 70 minutes left: covers it.
     let enough = worker("w2", false, 0, Some(70));
-    assert_eq!(cloud_resumable(&views, 2, &[enough], 0, 480), ["gd5"]);
+    assert_eq!(
+        jobs(&cloud_resumable(&views, 2, &[enough], 0, 480)),
+        ["gd5"]
+    );
 }
 
 #[test]
@@ -1038,6 +1109,11 @@ fn the_tools_name_the_cloud_only_when_it_is_attached() {
     }
     // Without the cloud the cluster's three are exactly what they were.
     assert_eq!(names(&tool_descriptors()), crate::devjob::DEVJOB_TOOLS);
+    // And none of them offers a host this bridge does not have.
+    for base in [tool_descriptors(), tool_descriptors_with_studio()] {
+        let text = serde_json::to_string(&base).unwrap();
+        assert!(!text.contains("cloud"), "{text}");
+    }
 }
 
 // ---- resources from config, and a memory kill ---------------------------------------------

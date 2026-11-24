@@ -14,6 +14,28 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.222.0] - 2026-11-24
+
+**A queued cloud Job now runs on the worker that outlives it, and gets a fresh worker at once
+when no idle one does.**
+
+- **The resume pins the Job to its worker.** `cloud_resumable` matched a Job to an idle worker
+  whose remaining life covers its deadline, but the resume only cleared `spec.suspend`, so with a
+  second, older idle worker the scheduler could still place the pod there and the worker would
+  be reaped mid run. The resume patch now also sets a required node affinity on the matched
+  node's name (`pin_to_worker`), which Kubernetes allows on a suspended Job that never started.
+- **A too-old idle worker no longer holds up the queue.** `plan_burst` counted every idle worker
+  as the queue's capacity, so a Job too long for the only idle worker waited until that worker
+  expired instead of getting a fresh one. `cloud_resumable` now names such workers spent, and
+  `plan_pass` leaves them out of the count (starting a replacement in the same pass) and stops
+  them once idle `idle_minutes`.
+- **A cloud cap below 120 minutes holds when no timeout is named.** `cloud_capped_timeout_minutes`
+  capped only an explicit request, so `max_timeout_minutes = 60` still granted the 120 minute
+  default; the default is capped too.
+- **The cluster-only `devjob_start` schema no longer mentions the cloud host.** Its
+  `timeout_minutes` description says only the 240 cap; a bridge with the cloud attached still
+  describes the cloud's own cap.
+
 ## [bridge 0.221.0] - 2026-11-24
 
 **Cloud dev jobs may run up to the burst worker's life, not a fixed 240 minutes.** The cluster

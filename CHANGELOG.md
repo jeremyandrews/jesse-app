@@ -26,7 +26,12 @@ all their work.
 - New `[devjob.cloud]` keys: `job_memory_gi` (default 14), `job_memory_request_gi` (12),
   `job_cpu` (4), `job_cpu_request` (3) and `max_agent_minutes` (480). The bridge refuses to boot
   when a request is above its limit, any of them is 0, or `max_agent_minutes` is past a worker's
-  8 hour life. A config without them gets the defaults.
+  8 hour life, or when a request does not fit the worker `burst_size` names (its GB and vCPUs,
+  read from the size's name). A config without them gets defaults that follow its `burst_size`:
+  14 / 12 Gi and 4 / 3 CPU on the 16 GB default, and the former 7 / 6 Gi and 4 / 3 CPU on an
+  8 GB worker, so a config pinned to `s-4vcpu-8gb-intel` keeps scheduling.
+- Two cloud Jobs never share a worker, whatever their requests: the pod carries a required
+  anti-affinity on the hostname against every other cloud run's pod.
 - `burst_size` defaults to `g-4vcpu-16gb` (4 vCPU, 16 GB), which the new defaults fit.
   `hourly_cost_eur` still defaults to the old 8 GB worker's price, which was not re-read: set it
   to the new size's price so the daily cost cap counts it.

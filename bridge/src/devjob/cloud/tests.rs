@@ -136,6 +136,51 @@ fn the_job_resources_and_time_cap_are_read_from_config() {
 }
 
 #[test]
+fn a_config_pinned_to_the_8gb_worker_keeps_a_job_that_fits_it() {
+    // Only burst_size, as configs written before the resources came from config.
+    let t: DevJobToml =
+        toml::from_str("[cloud]\nenabled = true\nburst_size = \"s-4vcpu-8gb-intel\"\n").unwrap();
+    let s = CloudSettings::from_toml(t.cloud, "/home/u");
+    assert_eq!(s.job_resources(), SMALL_WORKER_RESOURCES);
+    assert_eq!(s.job_memory_request_gi, 6);
+    assert_eq!(s.job_memory_gi, 7);
+    assert!(
+        s.resource_problems().is_empty(),
+        "{:?}",
+        s.resource_problems()
+    );
+    // The default size gets the 16 GB defaults.
+    assert_eq!(
+        CloudSettings::default().job_resources(),
+        JobResources {
+            memory_gi: 14,
+            memory_request_gi: 12,
+            cpu: 4,
+            cpu_request: 3,
+        }
+    );
+    // A request the named worker cannot hold is refused by name.
+    let t: DevJobToml = toml::from_str(
+        "[cloud]\nburst_size = \"s-4vcpu-8gb-intel\"\njob_memory_gi = 14\njob_memory_request_gi = 12\n\
+         job_cpu = 8\njob_cpu_request = 6\n",
+    )
+    .unwrap();
+    let p = CloudSettings::from_toml(t.cloud, "/home/u")
+        .resource_problems()
+        .join("\n");
+    assert!(
+        p.contains("job_memory_request_gi 12 does not fit burst_size \"s-4vcpu-8gb-intel\" (8 GB)"),
+        "{p}"
+    );
+    assert!(
+        p.contains("job_cpu_request 6 does not fit burst_size \"s-4vcpu-8gb-intel\" (4 vCPU)"),
+        "{p}"
+    );
+    assert_eq!(size_shape("g-4vcpu-16gb"), (Some(16), Some(4)));
+    assert_eq!(size_shape("custom"), (None, None));
+}
+
+#[test]
 fn the_job_resources_are_refused_when_inconsistent() {
     let t: DevJobToml = toml::from_str(
         "[cloud]\nenabled = true\njob_memory_gi = 8\njob_memory_request_gi = 10\n\
@@ -478,6 +523,22 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
     assert_eq!(pod["nodeSelector"][BURST_LABEL], "true");
     assert_eq!(pod["nodeSelector"][POOL_LABEL], "devjob");
     assert_eq!(pod["tolerations"][0]["key"], BURST_LABEL);
+    // One dev job per worker, whatever the requests: no two cloud pods share a node.
+    let anti =
+        &pod["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][0];
+    assert_eq!(anti["topologyKey"], "kubernetes.io/hostname");
+    assert_eq!(
+        anti["labelSelector"]["matchExpressions"][0]["key"],
+        LABEL_RUN_ID
+    );
+    assert_eq!(
+        anti["labelSelector"]["matchExpressions"][0]["operator"],
+        "Exists"
+    );
+    assert_eq!(
+        v["spec"]["template"]["metadata"]["labels"][LABEL_RUN_ID], "GD5",
+        "the pod carries the label its own rule selects"
+    );
     assert_eq!(pod["tolerations"][0]["effect"], "NoSchedule");
     let c = &pod["containers"][0];
     assert_eq!(c["image"], image);

@@ -1263,7 +1263,8 @@ pub struct CloudJobExtras {
 
 /// The Job for kc1: `cloud/infrastructure/jesse-dev/job-template.yaml` in the k3s repository,
 /// field for field. Against [`build_job`]: the dev job pool's node selector and toleration, one
-/// job per burst worker, no cache claim (the workers are disposable, so the caches live on the
+/// job per burst worker (a required pod anti-affinity on the hostname, whatever the requests),
+/// no cache claim (the workers are disposable, so the caches live on the
 /// run's 60Gi `emptyDir`), debug info and incremental builds off, and the merge path's variables.
 /// Memory and CPU, request and limit, come from `extras.resources`: `[devjob.cloud]`
 /// `job_memory_gi`, `job_memory_request_gi`, `job_cpu` and `job_cpu_request`, sized to its
@@ -1310,6 +1311,21 @@ pub fn build_cloud_job(
                     "nodeSelector": {
                         cloud::BURST_LABEL: "true",
                         cloud::POOL_LABEL: cloud::POOL_VALUE,
+                    },
+                    // One dev job per worker whatever the requests: no two cloud Jobs' pods
+                    // ever share a node, so a smaller configured request cannot pack them.
+                    "affinity": {
+                        "podAntiAffinity": {
+                            "requiredDuringSchedulingIgnoredDuringExecution": [{
+                                "labelSelector": {
+                                    "matchExpressions": [{
+                                        "key": cloud::LABEL_RUN_ID,
+                                        "operator": "Exists",
+                                    }],
+                                },
+                                "topologyKey": "kubernetes.io/hostname",
+                            }],
+                        },
                     },
                     "tolerations": [{
                         "key": cloud::BURST_LABEL,

@@ -59,6 +59,45 @@ pub const DEFAULT_JOB_MEMORY_REQUEST_GI: u32 = 12;
 pub const DEFAULT_JOB_CPU: u32 = 4;
 /// The default `[devjob.cloud] job_cpu_request`.
 pub const DEFAULT_JOB_CPU_REQUEST: u32 = 3;
+/// The resources a Job gets on DigitalOcean's 8 GB, 4 vCPU workers when the config names one as
+/// its `burst_size` and sets no resources of its own: what every cloud Job had before the
+/// resources came from config, so a config pinned to that size still schedules.
+pub const SMALL_WORKER_RESOURCES: JobResources = JobResources {
+    memory_gi: 7,
+    memory_request_gi: 6,
+    cpu: 4,
+    cpu_request: 3,
+};
+
+/// A size slug's memory in GB and its vCPUs, read from its name (`g-4vcpu-16gb` is 16 and 4;
+/// `s-4vcpu-8gb-intel` is 8 and 4). `None` for either part the name does not carry.
+pub fn size_shape(slug: &str) -> (Option<u32>, Option<u32>) {
+    let mut gb = None;
+    let mut vcpu = None;
+    for part in slug.split('-') {
+        if let Some(n) = part.strip_suffix("gb").and_then(|n| n.parse().ok()) {
+            gb = Some(n);
+        } else if let Some(n) = part.strip_suffix("vcpu").and_then(|n| n.parse().ok()) {
+            vcpu = Some(n);
+        }
+    }
+    (gb, vcpu)
+}
+
+/// The Job's default resources for a worker size: [`SMALL_WORKER_RESOURCES`] on an 8 GB worker
+/// or smaller, else the defaults sized for [`DEFAULT_BURST_SIZE`].
+pub fn default_resources_for(slug: &str) -> JobResources {
+    match size_shape(slug).0 {
+        Some(gb) if gb < 16 => SMALL_WORKER_RESOURCES,
+        _ => JobResources {
+            memory_gi: DEFAULT_JOB_MEMORY_GI,
+            memory_request_gi: DEFAULT_JOB_MEMORY_REQUEST_GI,
+            cpu: DEFAULT_JOB_CPU,
+            cpu_request: DEFAULT_JOB_CPU_REQUEST,
+        },
+    }
+}
+
 /// The default `[devjob.cloud] max_agent_minutes`: the longest agent time a cloud run may ask for.
 pub const DEFAULT_MAX_AGENT_MINUTES: u64 = 480;
 /// A worker with no dev job pod for this long is stopped, unless a queued run wants it.
@@ -201,6 +240,12 @@ impl CloudSettings {
                 merge_deny.push(p);
             }
         }
+        let burst_size = t
+            .burst_size
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| DEFAULT_BURST_SIZE.to_string());
+        // Absent keys follow the worker: a config pinned to a smaller size keeps fitting it.
+        let sized = default_resources_for(&burst_size);
         CloudSettings {
             enabled: t.enabled,
             kubeconfig: match t.kubeconfig {
@@ -217,20 +262,15 @@ impl CloudSettings {
                 .kc_burst
                 .map(|p| expand(&p, home))
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_KC_BURST)),
-            burst_size: t
-                .burst_size
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| DEFAULT_BURST_SIZE.to_string()),
+            burst_size,
             burst_ttl_minutes: t.burst_ttl_minutes.unwrap_or(DEFAULT_BURST_TTL_MINUTES),
             idle_minutes: t.idle_minutes.unwrap_or(DEFAULT_IDLE_MINUTES),
             daily_cost_cap_eur: t.daily_cost_cap_eur.unwrap_or(DEFAULT_DAILY_COST_CAP_EUR),
             hourly_cost_eur: t.hourly_cost_eur.unwrap_or(DEFAULT_HOURLY_COST_EUR),
-            job_memory_gi: t.job_memory_gi.unwrap_or(DEFAULT_JOB_MEMORY_GI),
-            job_memory_request_gi: t
-                .job_memory_request_gi
-                .unwrap_or(DEFAULT_JOB_MEMORY_REQUEST_GI),
-            job_cpu: t.job_cpu.unwrap_or(DEFAULT_JOB_CPU),
-            job_cpu_request: t.job_cpu_request.unwrap_or(DEFAULT_JOB_CPU_REQUEST),
+            job_memory_gi: t.job_memory_gi.unwrap_or(sized.memory_gi),
+            job_memory_request_gi: t.job_memory_request_gi.unwrap_or(sized.memory_request_gi),
+            job_cpu: t.job_cpu.unwrap_or(sized.cpu),
+            job_cpu_request: t.job_cpu_request.unwrap_or(sized.cpu_request),
             max_agent_minutes: t.max_agent_minutes.unwrap_or(DEFAULT_MAX_AGENT_MINUTES),
             merge_deny,
             ledger: match t.ledger {
@@ -335,6 +375,25 @@ impl CloudSettings {
                 "[devjob.cloud] job_cpu_request {} is above job_cpu {}",
                 self.job_cpu_request, self.job_cpu
             ));
+        }
+        // A request the worker cannot hold leaves every Job pending: the node keeps some of
+        // its memory, so the request must be below the worker's own.
+        let (gb, vcpu) = size_shape(&self.burst_size);
+        if let Some(gb) = gb {
+            if self.job_memory_request_gi >= gb {
+                out.push(format!(
+                    "[devjob.cloud] job_memory_request_gi {} does not fit burst_size {:?} ({gb} GB)",
+                    self.job_memory_request_gi, self.burst_size
+                ));
+            }
+        }
+        if let Some(vcpu) = vcpu {
+            if self.job_cpu_request > vcpu {
+                out.push(format!(
+                    "[devjob.cloud] job_cpu_request {} does not fit burst_size {:?} ({vcpu} vCPU)",
+                    self.job_cpu_request, self.burst_size
+                ));
+            }
         }
         if self.max_agent_minutes == 0 {
             out.push("[devjob.cloud] max_agent_minutes must be at least 1".into());

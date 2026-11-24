@@ -55,8 +55,11 @@ Each cloud slot is one `g-4vcpu-16gb` worker (4 vCPU, 16 GB), started by the bri
 with that label, so a dev job never lands on kc1 or a load test's worker.
 
 The Job's resources come from config, sized to `burst_size`: `job_memory_request_gi` /
-`job_memory_gi` (default 12 / 14 Gi) and `job_cpu_request` / `job_cpu` (default 3 / 4), so two
-never share a worker. `CARGO_BUILD_JOBS` is set to `job_cpu`, so cargo never runs more parallel
+`job_memory_gi` (default 12 / 14 Gi) and `job_cpu_request` / `job_cpu` (default 3 / 4). Absent
+keys follow `burst_size`: on an 8 GB worker they are the former 6 / 7 Gi and 3 / 4 CPU. A request
+the named worker cannot hold (its GB and vCPUs read from the size's name) refuses to boot. A
+required pod anti-affinity on the hostname keeps two cloud Jobs off one worker whatever the
+requests. `CARGO_BUILD_JOBS` is set to `job_cpu`, so cargo never runs more parallel
 rustc processes than the pod has CPUs: the parallel rustcs, not the CPU count, set a build's
 peak memory. A bigger `burst_size` needs these raised with it. Until 0.219.0 the pod was fixed at
 3 CPU / 6Gi request, 7Gi limit for the 8 GB worker, and trovato's builds were `OOMKilled` there.

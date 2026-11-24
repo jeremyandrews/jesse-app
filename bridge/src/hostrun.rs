@@ -60,7 +60,7 @@ use crate::strands::{parse_strand, resolve_target, StrandSection, ARCHIVE_SEGMEN
 use crate::*;
 
 use self::review::{Finding, Review, ReviewStatus, AUTO_REVIEW};
-use self::sys::{Forge, Launcher, PrState};
+use self::sys::{Forge, Launcher, PrState, PullMerge};
 
 // ---- CONSTANTS -----------------------------------------------------------------------
 
@@ -1058,7 +1058,10 @@ impl MergeWait {
 pub fn awaiting_merge_pull(report: &str) -> Option<MergeWait> {
     let line = first_line(report);
     let rest = line.strip_prefix(AWAITING_MERGE_PREFIX)?;
-    let url = pull_request_url(rest)?;
+    // A copied link may carry a query or a fragment (`?diff=split`, `#issuecomment-1`) after
+    // the number: it still names the pull request.
+    let rest = rest.replace(['?', '#'], " ");
+    let url = pull_request_url(&rest)?;
     let parts: Vec<&str> = url["https://github.com/".len()..].split('/').collect();
     let (owner, repo) = (parts.first()?, parts.get(1)?);
     let ok = |s: &str| {
@@ -1079,7 +1082,7 @@ pub fn awaiting_merge_pull(report: &str) -> Option<MergeWait> {
 }
 
 /// The one message an `awaiting_merge` run is resumed with once its pull request merged.
-pub fn merged_text(url: &str, merged_at: Option<&str>, sha: Option<&str>) -> String {
+pub fn merged_text(url: &str, merged_at: &str, sha: &str) -> String {
     format!(
         "Jeremy merged {url} {}. Continue from the next step.",
         merged_facts(merged_at, sha)
@@ -1092,19 +1095,15 @@ fn still_waiting(r: &RunRecord, url: &str) -> bool {
 }
 
 /// `at <merged_at UTC> as <merge commit SHA>`.
-fn merged_facts(merged_at: Option<&str>, sha: Option<&str>) -> String {
-    let at = merged_at
-        .map(|t| {
-            chrono::DateTime::parse_from_rfc3339(t)
-                .map(|d| {
-                    d.with_timezone(&chrono::Utc)
-                        .format("%Y-%m-%dT%H:%M:%SZ")
-                        .to_string()
-                })
-                .unwrap_or_else(|_| t.to_string())
+fn merged_facts(merged_at: &str, sha: &str) -> String {
+    let at = chrono::DateTime::parse_from_rfc3339(merged_at)
+        .map(|d| {
+            d.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
         })
-        .unwrap_or_else(|| "an unknown time".to_string());
-    format!("at {at} as {}", sha.unwrap_or("an unknown commit"))
+        .unwrap_or_else(|_| merged_at.to_string());
+    format!("at {at} as {sha}")
 }
 
 /// `<run_id> (<strand ID>)`, or `<run_id>` for a run of no strand item.
@@ -2785,6 +2784,9 @@ pub struct HostRuns {
     /// The runs whose review task is running in this process. Not run state: a `reviewing` run
     /// with no task here (a restart) gets one at the next pass.
     reviewing: Mutex<HashSet<String>>,
+    /// Each `awaiting_merge` run's check in flight ([`HostRuns::start_merge_checks`]). Not run
+    /// state: a restart simply checks again.
+    merge_checks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -2819,6 +2821,7 @@ impl HostRuns {
             unarchived: Mutex::new(HashSet::new()),
             reviewer: OnceLock::new(),
             reviewing: Mutex::new(HashSet::new()),
+            merge_checks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3494,15 +3497,26 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
-        if text.trim() == CONTINUE_TEXT
-            && self
-                .get(run_id)
-                .is_some_and(|r| r.status == RunStatus::NeedsYou)
-        {
-            return Err(Refusal::State(format!(
-                "{run_id} asked a question and needs an answer: an empty \"{CONTINUE_TEXT}\" \
-                 would answer it blind. Reply with the answer."
-            )));
+        if text.trim() == CONTINUE_TEXT {
+            match self.get(run_id) {
+                Some(r) if r.status == RunStatus::NeedsYou => {
+                    return Err(Refusal::State(format!(
+                        "{run_id} asked a question and needs an answer: an empty \
+                         \"{CONTINUE_TEXT}\" would answer it blind. Reply with the answer."
+                    )));
+                }
+                // The run is waiting for a merge: a blind continue would carry on as if it
+                // had happened. Merging resumes it; a reply says what to do instead.
+                Some(r) if r.status == RunStatus::AwaitingMerge => {
+                    let url = r.merge_wait.map(|w| w.url).unwrap_or_default();
+                    return Err(Refusal::State(format!(
+                        "{run_id} is waiting for the merge of {url}: an empty \
+                         \"{CONTINUE_TEXT}\" would carry on as if it had merged. Merge it and \
+                         the run resumes by itself, or reply with what to do instead."
+                    )));
+                }
+                _ => {}
+            }
         }
         self.queue_round_locked(run_id, text, None)
     }
@@ -3631,166 +3645,215 @@ impl HostRuns {
     }
 
     /// The merge watch, one step of the watcher's pass: every `awaiting_merge` run whose pull
-    /// request was not read in the last [`MERGE_CHECK_EVERY_MS`] is read now. Open: nothing
-    /// changes but the check time, and a fresh push goes out once [`MERGE_PUSH_EVERY_MS`] has
-    /// passed since the last. Merged: the run's next round is queued exactly as a reply is
-    /// ([`HostRuns::queue_round_with`]), with [`merged_text`]; the pass's pump then starts it
-    /// under the usual rules. Closed: the run is `needs_you`, with one push. A read that fails
-    /// is logged and asked again at the next check; it never changes the run. No total cap:
+    /// request was not read in the last [`MERGE_CHECK_EVERY_MS`], and has no check still in
+    /// flight, gets a check of its own on its own task ([`HostRuns::check_merge`]). The pass
+    /// never waits for one, so a `gh` that hangs holds up only its own run's watch: every other
+    /// run's check, the usage limit resume, the queue and the next pass go on. No total cap:
     /// the wait ends only on a merge, a close of the pull request, or the run leaving
     /// `awaiting_merge` (a reply, a close, an archive).
-    pub async fn watch_merges(self: &Arc<Self>, now: u64) {
-        let due: Vec<(PathBuf, RunRecord, MergeWait)> = self
-            .runs()
-            .into_iter()
-            .filter(|(_, r)| r.status == RunStatus::AwaitingMerge)
-            .filter_map(|(d, r)| {
-                let w = r.merge_wait.clone()?;
-                let recent = ms_opt(&w.last_check_at)
-                    .is_some_and(|t| now.saturating_sub(t) < MERGE_CHECK_EVERY_MS);
-                (!recent).then_some((d, r, w))
-            })
-            .collect();
-        for (dir, rec, w) in due {
-            let run_id = rec.run_id.clone();
-            let forge = self.forge.clone();
-            let url = w.url.clone();
-            let got = tokio::task::spawn_blocking(move || forge.pull_merge(&url))
-                .await
-                .unwrap_or_else(|e| Err(format!("the check task failed: {e}")));
-            let checked = rfc(now);
-            let still = |r: &RunRecord| still_waiting(r, &w.url);
-            let p = match got {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!(
-                        "jesse-bridge: hostrun {run_id}: could not read {} (asking again in \
-                         {} minutes): {e}",
-                        w.url,
-                        MERGE_CHECK_EVERY_MS / 60_000
-                    );
-                    let _gate = lock(&self.gate);
-                    let _ = update_run(&dir, |r| {
-                        if still(r) {
-                            if let Some(x) = r.merge_wait.as_mut() {
-                                x.last_check_at = Some(checked.clone());
-                            }
-                        }
-                    });
-                    continue;
-                }
-            };
-            match p.state {
-                PrState::Open => {
-                    let push_due = ms_opt(&w.last_push_at)
-                        .is_none_or(|t| now.saturating_sub(t) >= MERGE_PUSH_EVERY_MS);
-                    let mut push = None;
-                    {
-                        let _gate = lock(&self.gate);
-                        let _ = update_run(&dir, |r| {
-                            if !still(r) {
-                                return;
-                            }
-                            if let Some(x) = r.merge_wait.as_mut() {
-                                x.last_check_at = Some(checked.clone());
-                                if p.title.is_some() {
-                                    x.title = p.title.clone();
-                                }
-                                if push_due {
-                                    x.last_push_at = Some(checked.clone());
-                                }
-                            }
-                            if push_due {
-                                if let Some(x) = &r.merge_wait {
-                                    push = Some(merge_push_body(r, x));
-                                }
-                            }
-                        });
-                    }
-                    if let Some(body) = push {
-                        eprintln!(
-                            "jesse-bridge: hostrun {run_id} AWAITING MERGE {}: still open; \
-                             push sent",
-                            w.url
-                        );
-                        self.send_effects(vec![Effect::Push {
-                            title: MERGE_PUSH_TITLE.into(),
-                            body,
-                            run_id: run_id.clone(),
-                        }])
-                        .await;
-                    }
-                }
-                PrState::Merged => {
-                    let text =
-                        merged_text(&w.url, p.merged_at.as_deref(), p.merge_commit.as_deref());
-                    let ended = format!(
-                        "merged {}",
-                        merged_facts(p.merged_at.as_deref(), p.merge_commit.as_deref())
-                    );
-                    let this = self.clone();
-                    let id = run_id.clone();
-                    let url = w.url.clone();
-                    let res = tokio::task::spawn_blocking(move || {
-                        let _gate = lock(&this.gate);
-                        // Read again under the gate: a reply or a close since the check wins.
-                        match this.get(&id) {
-                            Some(r) if still_waiting(&r, &url) => {}
-                            _ => return Ok(None),
-                        }
-                        this.queue_round_with(&id, &text, Some(AUTO_MERGE), |r, _| {
-                            if let Some(x) = r.merge_wait.as_mut() {
-                                x.last_check_at = Some(checked.clone());
-                                x.ended = Some(ended.clone());
-                                x.ended_at = Some(checked.clone());
-                            }
-                        })
-                        .map(Some)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(Refusal::Internal(e.to_string())));
-                    match res {
-                        Ok(Some(_)) => eprintln!(
-                            "jesse-bridge: hostrun {run_id} MERGED {}: resuming in its session",
-                            w.url
-                        ),
-                        Ok(None) => {}
-                        Err(e) => eprintln!(
-                            "jesse-bridge: hostrun {run_id}: {} merged but the round could not \
-                             be queued (trying again at the next check): {}",
-                            w.url,
-                            e.message()
-                        ),
-                    }
-                }
-                PrState::Closed => {
-                    let why = format!("{} was closed without merging", w.url);
-                    let mut changed = None;
-                    {
-                        let _gate = lock(&self.gate);
-                        let _ = update_run(&dir, |r| {
-                            if !still(r) {
-                                return;
-                            }
-                            r.status = RunStatus::NeedsYou;
-                            if let Some(x) = r.merge_wait.as_mut() {
-                                x.last_check_at = Some(checked.clone());
-                                x.end(&why, &checked);
-                            }
-                            changed = Some(format!("{}: {why}", run_and_item(r)));
-                        });
-                    }
-                    if let Some(body) = changed {
-                        eprintln!("jesse-bridge: hostrun {run_id} NEEDS YOU: {why}");
-                        self.send_effects(vec![Effect::Push {
-                            title: format!("Run {run_id} {}", RunStatus::NeedsYou.outcome()),
-                            body,
-                            run_id: run_id.clone(),
-                        }])
-                        .await;
-                    }
-                }
+    pub fn start_merge_checks(self: &Arc<Self>, now: u64) {
+        let mut inflight = lock(&self.merge_checks);
+        inflight.retain(|_, h| !h.is_finished());
+        for (dir, r) in self.runs() {
+            if r.status != RunStatus::AwaitingMerge || inflight.contains_key(&r.run_id) {
+                continue;
             }
+            let Some(w) = r.merge_wait.clone() else {
+                continue;
+            };
+            if ms_opt(&w.last_check_at)
+                .is_some_and(|t| now.saturating_sub(t) < MERGE_CHECK_EVERY_MS)
+            {
+                continue;
+            }
+            let this = self.clone();
+            let id = r.run_id.clone();
+            inflight.insert(
+                id,
+                tokio::spawn(async move { this.check_merge(dir, r, w, now).await }),
+            );
+        }
+    }
+
+    /// Wait for every merge check in flight, and for any it leads to. For tests, which need a
+    /// pass's checks to have answered before they look.
+    #[cfg(test)]
+    pub async fn merge_checks_settled(&self) {
+        loop {
+            let handles: Vec<_> = lock(&self.merge_checks).drain().map(|(_, h)| h).collect();
+            if handles.is_empty() {
+                return;
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+        }
+    }
+
+    /// One read of one waiting run's pull request. Open: nothing changes but the check time,
+    /// and a "Merge needed" push goes out on the first check and then once
+    /// [`MERGE_PUSH_EVERY_MS`] has passed since the last. Merged, with its time and commit:
+    /// the run's next round is queued exactly as a reply is ([`HostRuns::queue_round_with`]),
+    /// with [`merged_text`], and the queue is pumped as [`HostRuns::reply_and_pump`] pumps it.
+    /// Merged without them yet: asked again at the next check. Closed: the run is
+    /// `needs_you`, with one push. A read that fails is logged and asked again at the next
+    /// check; it never changes the run, though the first push still goes out so Jeremy hears.
+    async fn check_merge(self: Arc<Self>, dir: PathBuf, rec: RunRecord, w: MergeWait, now: u64) {
+        let run_id = rec.run_id.clone();
+        let forge = self.forge.clone();
+        let url = w.url.clone();
+        let got = tokio::task::spawn_blocking(move || forge.pull_merge(&url))
+            .await
+            .unwrap_or_else(|e| Err(format!("the check task failed: {e}")));
+        let checked = rfc(now);
+        let still = |r: &RunRecord| still_waiting(r, &w.url);
+        // Merged, with both facts the resume message carries: anything less is asked again.
+        let merged = match &got {
+            Ok(PullMerge {
+                state: PrState::Merged,
+                merged_at: Some(at),
+                merge_commit: Some(sha),
+                ..
+            }) => Some((at.clone(), sha.clone())),
+            _ => None,
+        };
+        let open_or_unread = match &got {
+            Ok(p) if p.state == PrState::Open => true,
+            Ok(p) if p.state == PrState::Merged && merged.is_none() => {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: {} is merged but GitHub gave no merge time \
+                     or commit yet (asking again in {} minutes)",
+                    w.url,
+                    MERGE_CHECK_EVERY_MS / 60_000
+                );
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id}: could not read {} (asking again in {} \
+                     minutes): {e}",
+                    w.url,
+                    MERGE_CHECK_EVERY_MS / 60_000
+                );
+                true
+            }
+        };
+        if open_or_unread {
+            let is_open = matches!(&got, Ok(p) if p.state == PrState::Open);
+            // The first push goes out whatever GitHub answered, unless it said merged; a later
+            // one only while it is known to be open.
+            let push_due = match ms_opt(&w.last_push_at) {
+                None => got.as_ref().map_or(true, |p| p.state != PrState::Merged),
+                Some(t) => is_open && now.saturating_sub(t) >= MERGE_PUSH_EVERY_MS,
+            };
+            let title = got.as_ref().ok().and_then(|p| p.title.clone());
+            let mut push = None;
+            {
+                let _gate = lock(&self.gate);
+                let _ = update_run(&dir, |r| {
+                    if !still(r) {
+                        return;
+                    }
+                    if let Some(x) = r.merge_wait.as_mut() {
+                        x.last_check_at = Some(checked.clone());
+                        if title.is_some() {
+                            x.title = title.clone();
+                        }
+                        if push_due {
+                            x.last_push_at = Some(checked.clone());
+                        }
+                    }
+                    if push_due {
+                        if let Some(x) = &r.merge_wait {
+                            push = Some(merge_push_body(r, x));
+                        }
+                    }
+                });
+            }
+            if let Some(body) = push {
+                eprintln!(
+                    "jesse-bridge: hostrun {run_id} AWAITING MERGE {}: push sent",
+                    w.url
+                );
+                self.send_effects(vec![Effect::Push {
+                    title: MERGE_PUSH_TITLE.into(),
+                    body,
+                    run_id: run_id.clone(),
+                }])
+                .await;
+            }
+            return;
+        }
+        if let Some((at, sha)) = merged {
+            let text = merged_text(&w.url, &at, &sha);
+            let ended = format!("merged {}", merged_facts(&at, &sha));
+            let this = self.clone();
+            let id = run_id.clone();
+            let url = w.url.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                let _gate = lock(&this.gate);
+                // Read again under the gate: a reply or a close since the check wins.
+                match this.get(&id) {
+                    Some(r) if still_waiting(&r, &url) => {}
+                    _ => return Ok(None),
+                }
+                this.queue_round_with(&id, &text, Some(AUTO_MERGE), |r, _| {
+                    if let Some(x) = r.merge_wait.as_mut() {
+                        x.last_check_at = Some(checked.clone());
+                        x.ended = Some(ended.clone());
+                        x.ended_at = Some(checked.clone());
+                    }
+                })
+                .map(Some)
+            })
+            .await
+            .unwrap_or_else(|e| Err(Refusal::Internal(e.to_string())));
+            match res {
+                Ok(Some(_)) => {
+                    eprintln!(
+                        "jesse-bridge: hostrun {run_id} MERGED {}: resuming in its session",
+                        w.url
+                    );
+                    let effects = self.pump_blocking().await;
+                    self.send_effects(effects).await;
+                    self.wake();
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "jesse-bridge: hostrun {run_id}: {} merged but the round could not be \
+                     queued (trying again at the next check): {}",
+                    w.url,
+                    e.message()
+                ),
+            }
+            return;
+        }
+        // Closed without merging.
+        let why = format!("{} was closed without merging", w.url);
+        let mut changed = None;
+        {
+            let _gate = lock(&self.gate);
+            let _ = update_run(&dir, |r| {
+                if !still(r) {
+                    return;
+                }
+                r.status = RunStatus::NeedsYou;
+                if let Some(x) = r.merge_wait.as_mut() {
+                    x.last_check_at = Some(checked.clone());
+                    x.end(&why, &checked);
+                }
+                changed = Some(format!("{}: {why}", run_and_item(r)));
+            });
+        }
+        if let Some(body) = changed {
+            eprintln!("jesse-bridge: hostrun {run_id} NEEDS YOU: {why}");
+            self.send_effects(vec![Effect::Push {
+                title: format!("Run {run_id} {}", RunStatus::NeedsYou.outcome()),
+                body,
+                run_id: run_id.clone(),
+            }])
+            .await;
         }
     }
 
@@ -5358,24 +5421,15 @@ impl HostRuns {
             .unwrap_or(0);
         let at = exit.ended_at.clone();
         let rel2 = rel.clone();
-        // An attribution hit made it `needs_you`: then nothing is watched.
-        let wait = match wait.filter(|_| status == RunStatus::AwaitingMerge) {
-            Some(mut w) => {
-                let forge = self.forge.clone();
-                let url = w.url.clone();
-                match tokio::task::spawn_blocking(move || forge.pull_merge(&url)).await {
-                    Ok(Ok(p)) => w.title = p.title,
-                    Ok(Err(e)) => eprintln!(
-                        "jesse-bridge: hostrun {run_id}: the title of {} could not be read: {e}",
-                        w.url
-                    ),
-                    Err(e) => eprintln!("jesse-bridge: hostrun {run_id}: {e}"),
-                }
-                w.since = at.clone();
-                Some(w)
-            }
-            None => None,
-        };
+        // An attribution hit made it `needs_you`: then nothing is watched. GitHub is not asked
+        // here: the watch's first check, off the pass, reads the pull request and sends the
+        // one "Merge needed" push only if it is still open.
+        let wait = wait
+            .filter(|_| status == RunStatus::AwaitingMerge)
+            .map(|w| MergeWait {
+                since: at.clone(),
+                ..w
+            });
         let rec = update_run(&dir, |r| {
             r.status = status;
             if let Some(w) = &wait {
@@ -5439,43 +5493,19 @@ impl HostRuns {
                 );
             }
         }
-        let merge_wait = rec
-            .merge_wait
-            .clone()
-            .filter(|_| rec.status == RunStatus::AwaitingMerge);
-        if let Some(n) = &sink.notifier {
-            match &merge_wait {
-                Some(w) => {
-                    n.notify(
-                        MERGE_PUSH_TITLE.to_string(),
-                        merge_push_body(&rec, w),
-                        run_id.to_string(),
-                    )
-                    .await;
-                    eprintln!(
-                        "jesse-bridge: hostrun {run_id} AWAITING MERGE {}: push sent",
-                        w.url
-                    );
-                }
-                None => {
-                    let title = format!("Run {run_id} {}", status.outcome());
-                    let body: String = first_line(&report).chars().take(180).collect();
-                    n.notify(title, body, run_id.to_string()).await;
-                }
-            }
+        // An `awaiting_merge` round's push is the watch's first check's to send.
+        let waiting = rec.status == RunStatus::AwaitingMerge && rec.merge_wait.is_some();
+        if let Some(n) = sink.notifier.as_ref().filter(|_| !waiting) {
+            let title = format!("Run {run_id} {}", status.outcome());
+            let body: String = first_line(&report).chars().take(180).collect();
+            n.notify(title, body, run_id.to_string()).await;
         }
         if let Some(note) = &rec.strand {
             self.send_turn(report_turn_text(run_id, note, &rel)).await;
         }
-        let pushed_at = rfc(now_ms());
         update_run(&dir, |r| {
             if let Some(cur) = r.round_mut() {
                 cur.notified = true;
-            }
-            if merge_wait.is_some() && r.status == RunStatus::AwaitingMerge {
-                if let Some(w) = r.merge_wait.as_mut() {
-                    w.last_push_at = Some(pushed_at.clone());
-                }
             }
         })?;
         Ok(())
@@ -5618,7 +5648,7 @@ impl HostRuns {
         let _ = tokio::task::spawn_blocking(move || this.close_settled(now)).await;
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.archive_settled(now)).await;
-        self.watch_merges(now).await;
+        self.start_merge_checks(now);
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || this.resume_due(now)).await;
         let effects = self.pump_blocking().await;

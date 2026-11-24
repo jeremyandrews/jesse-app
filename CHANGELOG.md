@@ -14,6 +14,10 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.218.1] - 2026-11-24
+
+**The merge watch runs each check on its own task, so a `gh` that hangs holds up only its own run, never the watcher, the queue or the other runs; the one "Merge needed" push comes from the first check, so a pull request already merged or closed gets none; a merge missing its time or commit is asked again; a blind "Continue where you left off." is refused while a run waits for a merge; and a link with `?…` or `#…` after the number is watched.**
+
 ## [bridge 0.218.0] - 2026-11-24
 
 **A Studio run that only waits for your merge says `AWAITING MERGE: <pull request URL>`, pushes "Merge needed", and resumes itself in its session when that pull request merges.**

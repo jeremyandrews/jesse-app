@@ -50,6 +50,12 @@ fn pushes(r: &Rig) -> Vec<(String, String, String)> {
     lock(&r.rec.pushes).clone()
 }
 
+/// One watcher pass at `now`, then every merge check it started, answered.
+async fn step(r: &Rig, now: u64) {
+    r.svc.pass(now).await;
+    r.svc.merge_checks_settled().await;
+}
+
 const MERGE_REPORT: &str = "AWAITING MERGE: https://github.com/jeremyandrews/k3s/pull/412\n\n\
 The k3s change is green and needs your merge before the bridge side can land.\n";
 
@@ -62,7 +68,7 @@ async fn awaiting(s: &Scratch) -> Rig {
     set_pull(&r, open());
     r.svc.start(item("GD5")).await.unwrap();
     finish_round(&r, "GD5", 0, Some(MERGE_REPORT), "");
-    r.svc.pass(now_ms()).await;
+    step(&r, now_ms()).await;
     r
 }
 
@@ -119,8 +125,8 @@ async fn while_the_pull_request_is_open_a_pass_changes_nothing_and_a_push_repeat
     let before = r.svc.get("GD5").unwrap();
     // Passes inside the check interval do not even ask.
     let asked = pull_asks(&r);
-    r.svc.pass(t0 + 60_000).await;
-    r.svc.pass(t0 + 120_000).await;
+    step(&r, t0 + 60_000).await;
+    step(&r, t0 + 120_000).await;
     let after = r.svc.get("GD5").unwrap();
     assert_eq!(after.status, RunStatus::AwaitingMerge);
     assert_eq!(after.rounds, before.rounds);
@@ -129,7 +135,7 @@ async fn while_the_pull_request_is_open_a_pass_changes_nothing_and_a_push_repeat
     let mut t = t0;
     for _ in 0..12 {
         t += MERGE_CHECK_EVERY_MS;
-        r.svc.pass(t).await;
+        step(&r, t).await;
     }
     assert!(pull_asks(&r) >= asked + 12, "asked {}", pull_asks(&r));
     let rec = r.svc.get("GD5").unwrap();
@@ -138,15 +144,15 @@ async fn while_the_pull_request_is_open_a_pass_changes_nothing_and_a_push_repeat
     assert_eq!(pushes(&r).len(), 1, "no second push within a day");
     // A day on: one fresh push, the same one, and only one however many passes follow.
     let day = t0 + DAY_MS + 1000;
-    r.svc.pass(day).await;
-    r.svc.pass(day + MERGE_CHECK_EVERY_MS).await;
-    r.svc.pass(day + 2 * MERGE_CHECK_EVERY_MS).await;
+    step(&r, day).await;
+    step(&r, day + MERGE_CHECK_EVERY_MS).await;
+    step(&r, day + 2 * MERGE_CHECK_EVERY_MS).await;
     let p = pushes(&r);
     assert_eq!(p.len(), 2, "{p:?}");
     assert_eq!(p[1].0, "Merge needed");
     assert_eq!(p[1].1, the_push_body());
     // A second day, a third push.
-    r.svc.pass(day + DAY_MS + 1000).await;
+    step(&r, day + DAY_MS + 1000).await;
     assert_eq!(pushes(&r).len(), 3);
     assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::AwaitingMerge);
 }
@@ -158,7 +164,7 @@ async fn a_failed_check_is_logged_and_retried_and_never_changes_the_run() {
     set_pull(&r, Err("gh: API rate limit exceeded".into()));
     let t0 = now_ms();
     for i in 1..=4 {
-        r.svc.pass(t0 + i * MERGE_CHECK_EVERY_MS).await;
+        step(&r, t0 + i * MERGE_CHECK_EVERY_MS).await;
     }
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::AwaitingMerge);
@@ -166,7 +172,7 @@ async fn a_failed_check_is_logged_and_retried_and_never_changes_the_run() {
     assert_eq!(pushes(&r).len(), 1);
     // Then it merges, and the next check resumes it.
     set_pull(&r, merged());
-    r.svc.pass(t0 + 5 * MERGE_CHECK_EVERY_MS).await;
+    step(&r, t0 + 5 * MERGE_CHECK_EVERY_MS).await;
     assert_eq!(r.svc.get("GD5").unwrap().rounds.len(), 2);
 }
 
@@ -175,7 +181,7 @@ async fn on_merge_the_run_resumes_in_its_session_with_the_merge_facts() {
     let s = Scratch::new();
     let r = awaiting(&s).await;
     set_pull(&r, merged());
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::Running);
     assert_eq!(rec.rounds.len(), 2);
@@ -197,11 +203,11 @@ async fn on_merge_the_run_resumes_in_its_session_with_the_merge_facts() {
     assert!(w.ended.as_deref().unwrap().starts_with("merged"), "{w:?}");
     // No push for the resume itself; one message, once.
     assert_eq!(pushes(&r).len(), 1);
-    r.svc.pass(now_ms() + 2 * MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + 2 * MERGE_CHECK_EVERY_MS).await;
     assert_eq!(r.svc.get("GD5").unwrap().rounds.len(), 2);
     // Its next report is classified as any report is.
     finish_round(&r, "GD5", 0, Some("Done: the bridge side merged.\n"), "");
-    r.svc.pass(now_ms()).await;
+    step(&r, now_ms()).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::Reported);
     let p = pushes(&r);
@@ -219,13 +225,13 @@ async fn a_merge_resume_queues_for_a_slot_like_any_reply() {
     set_pull(&r, open());
     r.svc.start(item("GD5")).await.unwrap();
     finish_round(&r, "GD5", 0, Some(MERGE_REPORT), "");
-    r.svc.pass(now_ms()).await;
+    step(&r, now_ms()).await;
     assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::AwaitingMerge);
     // An awaiting run holds no slot: another run starts.
     let other = r.svc.start(free("other")).await.unwrap();
     assert_eq!(other.status, RunStatus::Running);
     set_pull(&r, merged());
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::Queued);
     assert!(rec.waiting_for.is_some(), "{rec:?}");
@@ -237,7 +243,7 @@ async fn a_pull_request_closed_without_merging_makes_the_run_need_jeremy() {
     let s = Scratch::new();
     let r = awaiting(&s).await;
     set_pull(&r, closed());
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::NeedsYou);
     assert_eq!(rec.rounds.len(), 1);
@@ -255,7 +261,7 @@ async fn a_pull_request_closed_without_merging_makes_the_run_need_jeremy() {
     );
     // The watch is over: later passes ask nothing and send nothing.
     let asked = pull_asks(&r);
-    r.svc.pass(now_ms() + 3 * MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + 3 * MERGE_CHECK_EVERY_MS).await;
     assert_eq!(pull_asks(&r), asked);
     assert_eq!(pushes(&r).len(), 2);
     // And it is answered as any needs_you run is.
@@ -283,19 +289,34 @@ async fn a_reply_to_an_awaiting_run_works_as_on_needs_you_and_stops_the_watch() 
     // A merge seen later starts nothing.
     set_pull(&r, merged());
     let asked = pull_asks(&r);
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
     assert_eq!(pull_asks(&r), asked);
     assert_eq!(r.svc.get("GD5").unwrap().rounds.len(), 2);
 }
 
 #[tokio::test]
-async fn an_empty_continue_is_taken_as_the_run_asked_no_question() {
-    // Refused on needs_you only (it would answer a question blind); an awaiting run asked none.
+async fn an_empty_continue_is_refused_as_on_needs_you_and_the_watch_goes_on() {
+    // A blind continue would carry on as if the merge had happened.
     let s = Scratch::new();
     let r = awaiting(&s).await;
-    let rec = r.svc.reply("GD5", CONTINUE_TEXT).unwrap();
-    assert_eq!(rec.status, RunStatus::Queued);
-    assert_eq!(rec.merge_wait.unwrap().ended.as_deref(), Some("answered"));
+    let e = r.svc.reply("GD5", CONTINUE_TEXT).unwrap_err();
+    assert!(matches!(e, Refusal::State(_)), "{e:?}");
+    assert_eq!(e.status(), StatusCode::CONFLICT);
+    assert!(e.message().contains(URL), "{}", e.message());
+    let e = r
+        .svc
+        .reply_and_pump("GD5", &format!("  {CONTINUE_TEXT}\n"))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, Refusal::State(_)), "{e:?}");
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::AwaitingMerge);
+    assert_eq!(rec.rounds.len(), 1);
+    assert_eq!(rec.merge_wait.unwrap().ended, None);
+    // The watch is intact: the merge still resumes it.
+    set_pull(&r, merged());
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
+    assert_eq!(r.svc.get("GD5").unwrap().rounds.len(), 2);
 }
 
 #[tokio::test]
@@ -327,7 +348,7 @@ async fn close_settles_an_awaiting_run_silently_and_ends_the_watch() {
     );
     set_pull(&r, merged());
     let asked = pull_asks(&r);
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
     assert_eq!(pull_asks(&r), asked);
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::Closed);
@@ -353,7 +374,7 @@ async fn an_awaiting_merge_line_with_no_pull_request_url_is_needs_you() {
     let line = "AWAITING MERGE: the k3s change, once CI is green";
     r.svc.start(item("GD5")).await.unwrap();
     finish_round(&r, "GD5", 0, Some(&format!("{line}\nmore\n")), "");
-    r.svc.pass(now_ms()).await;
+    step(&r, now_ms()).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::NeedsYou);
     assert_eq!(rec.merge_wait, None);
@@ -410,15 +431,15 @@ async fn the_wait_survives_a_bridge_restart() {
     // A new service over the same runs: the record on disk is the whole state.
     let r = rig_with(&s, settings(&s));
     set_pull(&r, open());
-    r.svc.pass(t0 + MERGE_CHECK_EVERY_MS).await;
+    step(&r, t0 + MERGE_CHECK_EVERY_MS).await;
     assert_eq!(pull_asks(&r), 1);
     assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::AwaitingMerge);
     // The daily push counts from the push before the restart, not from the restart.
     assert!(pushes(&r).is_empty());
-    r.svc.pass(t0 + DAY_MS + 1000).await;
+    step(&r, t0 + DAY_MS + 1000).await;
     assert_eq!(pushes(&r).len(), 1);
     set_pull(&r, merged());
-    r.svc.pass(t0 + DAY_MS + MERGE_CHECK_EVERY_MS + 2000).await;
+    step(&r, t0 + DAY_MS + MERGE_CHECK_EVERY_MS + 2000).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::Running);
     assert_eq!(rec.rounds.len(), 2);
@@ -433,7 +454,7 @@ async fn a_free_run_with_no_strand_id_names_only_itself() {
     set_pull(&r, Err("offline".into()));
     let id = r.svc.start(free("fix-it")).await.unwrap().run_id;
     finish_round(&r, &id, 0, Some(MERGE_REPORT), "");
-    r.svc.pass(now_ms()).await;
+    step(&r, now_ms()).await;
     let rec = r.svc.get(&id).unwrap();
     assert_eq!(rec.status, RunStatus::AwaitingMerge);
     let p = pushes(&r);
@@ -456,7 +477,7 @@ async fn a_run_with_neither_prefix_is_as_before() {
         Some("Done. Opened https://github.com/jeremyandrews/k3s/pull/412 for you.\n"),
         "",
     );
-    r.svc.pass(now_ms()).await;
+    step(&r, now_ms()).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::Reported);
     assert_eq!(rec.merge_wait, None);
@@ -471,7 +492,7 @@ async fn a_run_with_neither_prefix_is_as_before() {
         .as_object()
         .unwrap()
         .contains_key("merge_wait"));
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
     assert_eq!(pull_asks(&r), 0);
 }
 
@@ -503,17 +524,231 @@ fn the_url_is_read_from_the_first_line_only() {
     );
 }
 
-/// The app's `awaiting_merge` wire fixture has exactly the keys the run routes serve for such a
-/// run (`JESSE_RUN_FIXTURE_WRITE=1` rewrites it, as for the other fixtures).
+/// The app's `awaiting_merge` wire fixture, written by the run routes' serializer for a run
+/// waiting on jeremyandrews/jesse-app#362. `JESSE_RUN_FIXTURE_WRITE=1` rewrites it, as for the
+/// other fixtures, and the app's tests read only what this run always serves.
 #[tokio::test]
 async fn the_app_awaiting_merge_fixture_matches_what_the_routes_serve() {
+    const APP_URL: &str = "https://github.com/jeremyandrews/jesse-app/pull/362";
     let s = Scratch::new();
-    let r = awaiting(&s).await;
-    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    lock(&r.forge.pulls).insert(
+        APP_URL.into(),
+        Ok(PullMerge {
+            state: PrState::Open,
+            merged_at: None,
+            merge_commit: None,
+            title: Some(
+                "Bridge 0.217.1: read a quoted devjob-priority followed by a comment".into(),
+            ),
+        }),
+    );
+    r.svc.start(item("GD5")).await.unwrap();
+    let report = format!("AWAITING MERGE: {APP_URL}\n\nThe change is green; merge it.\n");
+    finish_round(&r, "GD5", 0, Some(&report), "");
+    step(&r, now_ms()).await;
     let rec = r.svc.get("GD5").unwrap();
     assert_eq!(rec.status, RunStatus::AwaitingMerge);
     let served = r.svc.served_one(&rec);
     assert_eq!(served["status"], "awaiting_merge");
-    assert_eq!(served["merge_wait"]["url"], URL);
+    assert_eq!(served["merge_wait"]["url"], APP_URL);
+    assert!(served["merge_wait"]["last_push_at"].is_string());
     pin_app_fixture(&s, "studio-run-awaiting-merge.json", &served);
+}
+
+#[tokio::test]
+async fn a_hung_check_holds_up_only_its_own_run() {
+    const OTHER: &str = "https://github.com/o/n/pull/9";
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let mut st = settings(&s);
+    st.max_per_repo = 2;
+    let r = rig_with(&s, st);
+    set_pull(&r, open());
+    lock(&r.forge.pulls).insert(OTHER.into(), merged());
+    // GD5's `gh` hangs from its first read.
+    lock(&r.forge.hold).insert(URL.into());
+    r.svc.start(item("GD5")).await.unwrap();
+    let other = r.svc.start(free("other")).await.unwrap().run_id;
+    finish_round(&r, "GD5", 0, Some(MERGE_REPORT), "");
+    finish_round(
+        &r,
+        &other,
+        0,
+        Some(&format!("AWAITING MERGE: {OTHER}\n")),
+        "",
+    );
+    // The pass comes back, and so does the next one, while GD5's check is stuck.
+    r.svc.pass(now_ms()).await;
+    r.svc.pass(now_ms()).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::AwaitingMerge);
+    // The other run's check answers, and its merge resumes it, beside the stuck one.
+    let mut resumed = false;
+    for _ in 0..400 {
+        if r.svc.get(&other).unwrap().status == RunStatus::Running {
+            resumed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(resumed, "{:?}", r.svc.get(&other).unwrap().status);
+    // Only one check of GD5 is ever in flight, however many passes come.
+    r.svc.pass(now_ms() + MERGE_CHECK_EVERY_MS).await;
+    let asked_gd5 = lock(&r.forge.pull_asks)
+        .iter()
+        .filter(|u| *u == URL)
+        .count();
+    assert_eq!(asked_gd5, 1);
+    // Unstuck, it answers like any other check.
+    lock(&r.forge.hold).clear();
+    r.svc.merge_checks_settled().await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::AwaitingMerge);
+    assert!(rec.merge_wait.unwrap().last_push_at.is_some());
+}
+
+#[tokio::test]
+async fn a_merge_without_its_time_or_commit_is_asked_again_and_resumes_once_complete() {
+    let s = Scratch::new();
+    let r = awaiting(&s).await;
+    let t0 = now_ms();
+    for partial in [
+        PullMerge {
+            state: PrState::Merged,
+            merged_at: Some(MERGED_AT.into()),
+            merge_commit: None,
+            title: Some(TITLE.into()),
+        },
+        PullMerge {
+            state: PrState::Merged,
+            merged_at: None,
+            merge_commit: Some(SHA.into()),
+            title: Some(TITLE.into()),
+        },
+    ] {
+        set_pull(&r, Ok(partial));
+        step(&r, t0 + MERGE_CHECK_EVERY_MS).await;
+        let rec = r.svc.get("GD5").unwrap();
+        assert_eq!(rec.status, RunStatus::AwaitingMerge);
+        assert_eq!(rec.rounds.len(), 1);
+        assert_eq!(rec.merge_wait.unwrap().ended, None);
+        // The next check asks again.
+        update_run(&r.svc.settings.run_dir("GD5"), |x| {
+            x.merge_wait.as_mut().unwrap().last_check_at = None
+        })
+        .unwrap();
+    }
+    // `gh` reads a null `mergeCommit` as no commit at all.
+    let p = sys::parse_pull_merge(&json!({
+        "state": "MERGED", "mergedAt": MERGED_AT, "mergeCommit": null, "title": TITLE
+    }))
+    .unwrap();
+    assert_eq!(p.merge_commit, None);
+    assert_eq!(pushes(&r).len(), 1, "no push for a merge");
+    set_pull(&r, merged());
+    step(&r, t0 + 2 * MERGE_CHECK_EVERY_MS).await;
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(
+        rec.round().unwrap().text.as_deref(),
+        Some(
+            "Jeremy merged https://github.com/jeremyandrews/k3s/pull/412 at 2026-11-24T09:12:31Z \
+             as 0123456789abcdef0123456789abcdef01234567. Continue from the next step."
+        )
+    );
+}
+
+#[tokio::test]
+async fn entering_the_wait_reads_the_pull_request_once() {
+    let s = Scratch::new();
+    let r = awaiting(&s).await;
+    assert_eq!(pull_asks(&r), 1);
+    // The next read is a check interval later, not in the same or the next pass.
+    step(&r, now_ms() + 60_000).await;
+    assert_eq!(pull_asks(&r), 1);
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS + 1000).await;
+    assert_eq!(pull_asks(&r), 2);
+}
+
+#[tokio::test]
+async fn a_pull_request_already_closed_gets_only_the_closing_push() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    set_pull(&r, closed());
+    r.svc.start(item("GD5")).await.unwrap();
+    finish_round(&r, "GD5", 0, Some(MERGE_REPORT), "");
+    step(&r, now_ms()).await;
+    assert_eq!(pull_asks(&r), 1);
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::NeedsYou);
+    let p = pushes(&r);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert_eq!(p[0].0, "Run GD5 needs you");
+}
+
+#[tokio::test]
+async fn a_pull_request_already_merged_resumes_with_no_merge_push() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    remote_fixture(&s);
+    let r = rig(&s);
+    set_pull(&r, merged());
+    r.svc.start(item("GD5")).await.unwrap();
+    finish_round(&r, "GD5", 0, Some(MERGE_REPORT), "");
+    step(&r, now_ms()).await;
+    assert_eq!(pull_asks(&r), 1);
+    let rec = r.svc.get("GD5").unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(rec.rounds.len(), 2);
+    assert!(pushes(&r).is_empty(), "{:?}", pushes(&r));
+}
+
+#[tokio::test]
+async fn filing_the_report_in_the_archive_does_not_drop_the_wait() {
+    let s = Scratch::new();
+    let r = awaiting(&s).await;
+    let rel = format!("Inbox/{}-run-GD5.md", today());
+    let archive = s.notes().join("Inbox/archive");
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::rename(
+        s.notes().join(&rel),
+        archive.join(format!("{}-run-GD5.md", today())),
+    )
+    .unwrap();
+    assert!(reports_archived(&s.notes(), &r.svc.get("GD5").unwrap()));
+    r.svc.close_settled(now_ms());
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::AwaitingMerge);
+    set_pull(&r, merged());
+    step(&r, now_ms() + MERGE_CHECK_EVERY_MS).await;
+    assert_eq!(r.svc.get("GD5").unwrap().status, RunStatus::Running);
+}
+
+#[test]
+fn a_query_or_fragment_after_the_number_still_names_the_pull_request() {
+    let round = Round::default();
+    let exit = ExitInfo {
+        round: 1,
+        code: Some(0),
+        signal: None,
+        ended_at: rfc(1),
+    };
+    for link in [
+        "https://github.com/jeremyandrews/k3s/pull/412#issuecomment-123",
+        "https://github.com/jeremyandrews/k3s/pull/412?diff=split",
+        "https://github.com/jeremyandrews/k3s/pull/412/files?w=1#diff-abc",
+    ] {
+        let report = format!("AWAITING MERGE: {link}\n");
+        assert_eq!(
+            round_status(&round, &exit, &report),
+            RunStatus::AwaitingMerge,
+            "{link}"
+        );
+        let w = awaiting_merge_pull(&report).unwrap();
+        assert_eq!(w.url, URL, "{link}");
+        assert_eq!(w.number, 412);
+    }
 }

@@ -182,6 +182,9 @@ struct FakeForge {
     pulls: Mutex<BTreeMap<String, Result<PullMerge, String>>>,
     /// Every pull request URL `pull_merge` was asked about, in order.
     pull_asks: Mutex<Vec<String>>,
+    /// Pull request URLs whose `pull_merge` hangs until they are taken out again: a `gh` stuck
+    /// on the network.
+    hold: Mutex<HashSet<String>>,
 }
 
 impl Forge for FakeForge {
@@ -192,6 +195,9 @@ impl Forge for FakeForge {
 
     fn pull_merge(&self, url: &str) -> Result<PullMerge, String> {
         lock(&self.pull_asks).push(url.to_string());
+        while lock(&self.hold).contains(url) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         lock(&self.pulls)
             .get(url)
             .cloned()

@@ -43,15 +43,70 @@ pub const DEFAULT_KUBECONFIG: &str = ".kube/kc1-devjob.yaml";
 pub const DEFAULT_MAX_CONCURRENT: usize = 2;
 /// Where `kc-burst` is installed on the Studio.
 pub const DEFAULT_KC_BURST: &str = "/usr/local/bin/kc-burst";
-/// The only size fra1 reliably offers; one dev job fits it, two do not.
-pub const DEFAULT_BURST_SIZE: &str = "s-4vcpu-8gb-intel";
-/// A worker's first TTL. Extended while it is busy, at most kc-burst's own 8 hours.
+/// DigitalOcean's 4 vCPU, 16 GB general purpose worker: one dev job per worker, with room for
+/// a Rust workspace the size of trovato to build and test ([`DEFAULT_JOB_MEMORY_GI`]).
+pub const DEFAULT_BURST_SIZE: &str = "g-4vcpu-16gb";
+/// A worker's first TTL. Extended while it is busy, at most [`MAX_BURST_LIFE_MINUTES`].
 pub const DEFAULT_BURST_TTL_MINUTES: u64 = 240;
+/// The longest a worker lives, extensions included: kc-burst's own 8 hours.
+pub const MAX_BURST_LIFE_MINUTES: u64 = 480;
+/// The default `[devjob.cloud] job_memory_gi`: the pod's memory limit, sized for a 16 GB worker
+/// less what the node itself keeps.
+pub const DEFAULT_JOB_MEMORY_GI: u32 = 14;
+/// The default `[devjob.cloud] job_memory_request_gi`.
+pub const DEFAULT_JOB_MEMORY_REQUEST_GI: u32 = 12;
+/// The default `[devjob.cloud] job_cpu`: the pod's CPU limit, and `CARGO_BUILD_JOBS`.
+pub const DEFAULT_JOB_CPU: u32 = 4;
+/// The default `[devjob.cloud] job_cpu_request`.
+pub const DEFAULT_JOB_CPU_REQUEST: u32 = 3;
+/// The resources a Job gets on DigitalOcean's 8 GB, 4 vCPU workers when the config names one as
+/// its `burst_size` and sets no resources of its own: what every cloud Job had before the
+/// resources came from config, so a config pinned to that size still schedules.
+pub const SMALL_WORKER_RESOURCES: JobResources = JobResources {
+    memory_gi: 7,
+    memory_request_gi: 6,
+    cpu: 4,
+    cpu_request: 3,
+};
+
+/// A size slug's memory in GB and its vCPUs, read from its name (`g-4vcpu-16gb` is 16 and 4;
+/// `s-4vcpu-8gb-intel` is 8 and 4). `None` for either part the name does not carry.
+pub fn size_shape(slug: &str) -> (Option<u32>, Option<u32>) {
+    let mut gb = None;
+    let mut vcpu = None;
+    for part in slug.split('-') {
+        if let Some(n) = part.strip_suffix("gb").and_then(|n| n.parse().ok()) {
+            gb = Some(n);
+        } else if let Some(n) = part.strip_suffix("vcpu").and_then(|n| n.parse().ok()) {
+            vcpu = Some(n);
+        }
+    }
+    (gb, vcpu)
+}
+
+/// The Job's default resources for a worker size: [`SMALL_WORKER_RESOURCES`] on an 8 GB worker
+/// or smaller, else the defaults sized for [`DEFAULT_BURST_SIZE`].
+pub fn default_resources_for(slug: &str) -> JobResources {
+    match size_shape(slug).0 {
+        Some(gb) if gb < 16 => SMALL_WORKER_RESOURCES,
+        _ => JobResources {
+            memory_gi: DEFAULT_JOB_MEMORY_GI,
+            memory_request_gi: DEFAULT_JOB_MEMORY_REQUEST_GI,
+            cpu: DEFAULT_JOB_CPU,
+            cpu_request: DEFAULT_JOB_CPU_REQUEST,
+        },
+    }
+}
+
+/// The default `[devjob.cloud] max_agent_minutes`: the longest agent time a cloud run may ask for.
+pub const DEFAULT_MAX_AGENT_MINUTES: u64 = 480;
 /// A worker with no dev job pod for this long is stopped, unless a queued run wants it.
 pub const DEFAULT_IDLE_MINUTES: u64 = 10;
 /// The hard daily cap on what the workers this bridge starts may cost.
 pub const DEFAULT_DAILY_COST_CAP_EUR: f64 = 5.0;
-/// `s-4vcpu-8gb-intel` in fra1: $0.08333 an hour on 2026-10-28, at kc-burst's 0.92.
+/// `s-4vcpu-8gb-intel` in fra1: $0.08333 an hour on 2026-10-28, at kc-burst's 0.92. Not yet
+/// re-read for [`DEFAULT_BURST_SIZE`] (`g-4vcpu-16gb` costs more): set `hourly_cost_eur` from
+/// `doctl compute size list -o json` so the daily cap counts the bigger worker's price.
 pub const DEFAULT_HOURLY_COST_EUR: f64 = 0.0767;
 /// The ledger of committed cost, under the bridge's state directory.
 pub const DEFAULT_LEDGER: &str = ".jesse-bridge/devjob-cloud-ledger.json";
@@ -106,10 +161,31 @@ pub struct CloudToml {
     pub idle_minutes: Option<u64>,
     pub daily_cost_cap_eur: Option<f64>,
     pub hourly_cost_eur: Option<f64>,
+    pub job_memory_gi: Option<u32>,
+    pub job_memory_request_gi: Option<u32>,
+    pub job_cpu: Option<u32>,
+    pub job_cpu_request: Option<u32>,
+    pub max_agent_minutes: Option<u64>,
     /// Added to [`DEFAULT_MERGE_DENY`], never replacing it.
     #[serde(default)]
     pub merge_deny: Vec<String>,
     pub ledger: Option<PathBuf>,
+}
+
+/// A cloud Job's container resources, from [`CloudSettings`]: what [`super::build_cloud_job`]
+/// writes, never literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobResources {
+    pub memory_gi: u32,
+    pub memory_request_gi: u32,
+    pub cpu: u32,
+    pub cpu_request: u32,
+}
+
+impl Default for JobResources {
+    fn default() -> Self {
+        CloudSettings::default().job_resources()
+    }
 }
 
 /// `[devjob.cloud]`, resolved.
@@ -127,6 +203,14 @@ pub struct CloudSettings {
     pub idle_minutes: u64,
     pub daily_cost_cap_eur: f64,
     pub hourly_cost_eur: f64,
+    /// The Job's memory limit and request, in GiB, and its CPU limit and request. Sized to
+    /// [`Self::burst_size`]: the worker runs one dev job.
+    pub job_memory_gi: u32,
+    pub job_memory_request_gi: u32,
+    pub job_cpu: u32,
+    pub job_cpu_request: u32,
+    /// The cap on a cloud run's agent time, in minutes.
+    pub max_agent_minutes: u64,
     /// [`DEFAULT_MERGE_DENY`] and then the config's own.
     pub merge_deny: Vec<String>,
     pub ledger: PathBuf,
@@ -156,6 +240,12 @@ impl CloudSettings {
                 merge_deny.push(p);
             }
         }
+        let burst_size = t
+            .burst_size
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| DEFAULT_BURST_SIZE.to_string());
+        // Absent keys follow the worker: a config pinned to a smaller size keeps fitting it.
+        let sized = default_resources_for(&burst_size);
         CloudSettings {
             enabled: t.enabled,
             kubeconfig: match t.kubeconfig {
@@ -172,14 +262,16 @@ impl CloudSettings {
                 .kc_burst
                 .map(|p| expand(&p, home))
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_KC_BURST)),
-            burst_size: t
-                .burst_size
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| DEFAULT_BURST_SIZE.to_string()),
+            burst_size,
             burst_ttl_minutes: t.burst_ttl_minutes.unwrap_or(DEFAULT_BURST_TTL_MINUTES),
             idle_minutes: t.idle_minutes.unwrap_or(DEFAULT_IDLE_MINUTES),
             daily_cost_cap_eur: t.daily_cost_cap_eur.unwrap_or(DEFAULT_DAILY_COST_CAP_EUR),
             hourly_cost_eur: t.hourly_cost_eur.unwrap_or(DEFAULT_HOURLY_COST_EUR),
+            job_memory_gi: t.job_memory_gi.unwrap_or(sized.memory_gi),
+            job_memory_request_gi: t.job_memory_request_gi.unwrap_or(sized.memory_request_gi),
+            job_cpu: t.job_cpu.unwrap_or(sized.cpu),
+            job_cpu_request: t.job_cpu_request.unwrap_or(sized.cpu_request),
+            max_agent_minutes: t.max_agent_minutes.unwrap_or(DEFAULT_MAX_AGENT_MINUTES),
             merge_deny,
             ledger: match t.ledger {
                 Some(p) => expand(&p, home),
@@ -235,7 +327,7 @@ impl CloudSettings {
                 self.burst_size
             ));
         }
-        if self.burst_ttl_minutes < 30 || self.burst_ttl_minutes > 480 {
+        if self.burst_ttl_minutes < 30 || self.burst_ttl_minutes > MAX_BURST_LIFE_MINUTES {
             out.push("[devjob.cloud] burst_ttl_minutes must be 30 to 480 (kc-burst's 8h)".into());
         }
         if self.idle_minutes == 0 {
@@ -247,6 +339,7 @@ impl CloudSettings {
         if !(self.hourly_cost_eur.is_finite() && self.hourly_cost_eur > 0.0) {
             out.push("[devjob.cloud] hourly_cost_eur must be above 0".into());
         }
+        out.extend(self.resource_problems());
         for p in &self.merge_deny {
             if !valid_deny_pattern(p) {
                 out.push(format!(
@@ -255,6 +348,82 @@ impl CloudSettings {
             }
         }
         out
+    }
+
+    /// Why the Job's resources or time cap are refused: each at least 1, each request at most
+    /// its limit, and no agent time past the longest a worker lives.
+    pub fn resource_problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (key, v) in [
+            ("job_memory_gi", self.job_memory_gi),
+            ("job_memory_request_gi", self.job_memory_request_gi),
+            ("job_cpu", self.job_cpu),
+            ("job_cpu_request", self.job_cpu_request),
+        ] {
+            if v == 0 {
+                out.push(format!("[devjob.cloud] {key} must be at least 1"));
+            }
+        }
+        if self.job_memory_request_gi > self.job_memory_gi {
+            out.push(format!(
+                "[devjob.cloud] job_memory_request_gi {} is above job_memory_gi {}",
+                self.job_memory_request_gi, self.job_memory_gi
+            ));
+        }
+        if self.job_cpu_request > self.job_cpu {
+            out.push(format!(
+                "[devjob.cloud] job_cpu_request {} is above job_cpu {}",
+                self.job_cpu_request, self.job_cpu
+            ));
+        }
+        // A request the worker cannot hold leaves every Job pending: the node keeps some of
+        // its memory, so the request must be below the worker's own.
+        let (gb, vcpu) = size_shape(&self.burst_size);
+        if let Some(gb) = gb {
+            if self.job_memory_request_gi >= gb {
+                out.push(format!(
+                    "[devjob.cloud] job_memory_request_gi {} does not fit burst_size {:?} ({gb} GB)",
+                    self.job_memory_request_gi, self.burst_size
+                ));
+            }
+        }
+        if let Some(vcpu) = vcpu {
+            if self.job_cpu_request > vcpu {
+                out.push(format!(
+                    "[devjob.cloud] job_cpu_request {} does not fit burst_size {:?} ({vcpu} vCPU)",
+                    self.job_cpu_request, self.burst_size
+                ));
+            }
+        }
+        if self.max_agent_minutes == 0 {
+            out.push("[devjob.cloud] max_agent_minutes must be at least 1".into());
+        }
+        if self.max_agent_minutes > MAX_BURST_LIFE_MINUTES {
+            out.push(format!(
+                "[devjob.cloud] max_agent_minutes {} is past a worker's longest life, \
+                 {MAX_BURST_LIFE_MINUTES} (kc-burst's 8h)",
+                self.max_agent_minutes
+            ));
+        }
+        out
+    }
+
+    /// The Job's resources.
+    pub fn job_resources(&self) -> JobResources {
+        JobResources {
+            memory_gi: self.job_memory_gi,
+            memory_request_gi: self.job_memory_request_gi,
+            cpu: self.job_cpu,
+            cpu_request: self.job_cpu_request,
+        }
+    }
+
+    /// A cloud run's agent time: what it asked for, else the default, capped at
+    /// `max_agent_minutes`.
+    pub fn agent_minutes(&self, asked: Option<u64>) -> u64 {
+        asked
+            .unwrap_or(super::DEFAULT_TIMEOUT_MINUTES)
+            .min(self.max_agent_minutes)
     }
 
     /// The `[devjob]` settings the cloud's own [`super::DevJobs`] runs with: kc1's kubeconfig,
@@ -1050,6 +1219,7 @@ impl DevJobs {
         };
         let branch = format!("jesse/{slug}");
         let prompt = cloud_prompt(&r.prompt, &run_id, &r.repo, &branch, &merge);
+        let timeout_minutes = rt.settings.agent_minutes(req.timeout_minutes);
         let mut spec = match req.kind {
             CloudKind::Free(spec) => spec,
             _ => DevJobSpec::validate(
@@ -1067,6 +1237,8 @@ impl DevJobs {
             )?,
         };
         spec.prompt = prompt;
+        // The cloud's own cap, from config, not the cluster's [`super::MAX_TIMEOUT_MINUTES`].
+        spec.timeout_minutes = timeout_minutes;
         Ok(CloudRun {
             spec,
             run_id,
@@ -1082,6 +1254,7 @@ impl DevJobs {
             run_id: run.run_id.clone(),
             merge: run.merge.clone(),
             merge_deny: rt.settings.merge_deny_env(),
+            resources: rt.settings.job_resources(),
         };
         self.create_run(&run.spec, origin, run.strand.as_ref(), Some(&extras))
             .await

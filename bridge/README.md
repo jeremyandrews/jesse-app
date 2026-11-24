@@ -943,7 +943,20 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 # daily_cost_cap_eur = 5.0
 # idle_minutes = 10
 # merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
+# burst_size = "g-4vcpu-16gb"                    # one worker per cloud run
+# job_memory_gi = 14                             # the pod's memory limit; size it to burst_size
+# job_memory_request_gi = 12
+# job_cpu = 4                                    # the CPU limit, and CARGO_BUILD_JOBS
+# job_cpu_request = 3
+# max_agent_minutes = 480                        # the cloud's timeout_minutes cap; at most 480
 ```
+
+**The cloud Job's size comes from config (0.219.0).** Its memory and CPU, request and limit, are
+`job_memory_request_gi` / `job_memory_gi` and `job_cpu_request` / `job_cpu`, sized by default
+for the 16 GB, 4 vCPU `g-4vcpu-16gb` worker (absent keys follow `burst_size`, so an 8 GB worker
+keeps the former 6 / 7 Gi), and a pod anti-affinity keeps one cloud Job per worker; `CARGO_BUILD_JOBS` is `job_cpu`. A cloud run's
+`timeout_minutes` is capped at `max_agent_minutes`, not the cluster's 240. A pod killed for
+memory is reported as `killed at the N Gi memory limit (OOMKilled)`.
 
 **The containment battery** registers a stand-in `devjob` (the same three tools, every call
 refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the

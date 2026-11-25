@@ -959,8 +959,9 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 # burst_size = "g-4vcpu-16gb"                    # one worker per cloud run
 # job_memory_gi = 14                             # the pod's memory limit; size it to burst_size
 # job_memory_request_gi = 12
-# job_cpu = 4                                    # the CPU limit, and CARGO_BUILD_JOBS
+# job_cpu = 4                                    # the CPU limit; CARGO_BUILD_JOBS is the agent's share
 # job_cpu_request = 3
+# services = true                                # Postgres 16 + Redis 7 sidecars; false = one container
 ```
 
 **The cloud Job's size comes from config (0.219.0).** Its memory and CPU, request and limit, are
@@ -970,6 +971,17 @@ keeps the former 6 / 7 Gi), and a pod anti-affinity keeps one cloud Job per work
 `timeout_minutes` is capped at `max_timeout_minutes` (0.219.0's `max_agent_minutes` still reads
 as it), not the cluster's 240. A pod killed for
 memory is reported as `killed at the N Gi memory limit (OOMKilled)`.
+
+**Every cloud pod runs Postgres 16 and Redis 7 beside the agent (0.223.0).** Two native sidecars
+(`initContainers` with `restartPolicy: Always`), started and probed before the agent, non-root,
+on the pod's loopback only, give the agent trovato CI's
+`DATABASE_URL=postgres://trovato:trovato@localhost:5432/trovato_test` and
+`REDIS_URL=redis://127.0.0.1:6379`. Their fixed sizes (Postgres 512Mi / 1Gi, 0.5 CPU; Redis
+128Mi / 256Mi, 0.25 CPU) come out of the agent's, so the pod's total, and the quota, are
+unchanged; `CARGO_BUILD_JOBS` follows the agent's CPU limit. The bridge refuses to boot when
+that leaves the agent under 2 Gi or 1 CPU. `services = false` keeps the single-container pod.
+The k3s Job template should mirror this. See `docs/devjob-cloud.md`, "Postgres and Redis beside
+the agent".
 
 **The containment battery** registers a stand-in `devjob` (the same three tools, every call
 refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the

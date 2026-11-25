@@ -1,0 +1,216 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "annotations": {
+      "jesse.dev/merge": "true",
+      "jesse.dev/origin": "turn",
+      "jesse.dev/spec": "{\"repo\":\"jeremyandrews/trovato\",\"agent\":\"claude\",\"model\":null,\"branch_slug\":\"dj25-x\",\"test_command\":null,\"timeout_minutes\":120}"
+    },
+    "labels": {
+      "jesse.dev/devjob": "true",
+      "jesse.dev/run-id": "DJ25",
+      "jesse.dev/slug": "dj25-x"
+    },
+    "name": "agent-dj25-x-abcde",
+    "namespace": "jesse-dev"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 16200,
+    "backoffLimit": 0,
+    "suspend": true,
+    "template": {
+      "metadata": {
+        "labels": {
+          "jesse.dev/devjob": "true",
+          "jesse.dev/run-id": "DJ25",
+          "jesse.dev/slug": "dj25-x"
+        }
+      },
+      "spec": {
+        "affinity": {
+          "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "labelSelector": {
+                  "matchExpressions": [
+                    {
+                      "key": "jesse.dev/run-id",
+                      "operator": "Exists"
+                    }
+                  ]
+                },
+                "topologyKey": "kubernetes.io/hostname"
+              }
+            ]
+          }
+        },
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "REPO",
+                "value": "jeremyandrews/trovato"
+              },
+              {
+                "name": "AGENT",
+                "value": "claude"
+              },
+              {
+                "name": "MODEL",
+                "value": ""
+              },
+              {
+                "name": "BRANCH_SLUG",
+                "value": "dj25-x"
+              },
+              {
+                "name": "PR_TITLE",
+                "value": "dj25-x"
+              },
+              {
+                "name": "TEST_COMMAND",
+                "value": ""
+              },
+              {
+                "name": "PROMPT_FILE",
+                "value": "/prompt/prompt.md"
+              },
+              {
+                "name": "AGENT_TIMEOUT_SECONDS",
+                "value": "7200"
+              },
+              {
+                "name": "RUN_ID",
+                "value": "DJ25"
+              },
+              {
+                "name": "JESSE_RUN_REPORT",
+                "value": "/home/agent/work/report.md"
+              },
+              {
+                "name": "PR_TITLE_FILE",
+                "value": "/home/agent/work/pr-title.txt"
+              },
+              {
+                "name": "AGENT_GITHUB",
+                "value": "none"
+              },
+              {
+                "name": "REBASE_ON_MAIN",
+                "value": "true"
+              },
+              {
+                "name": "AUTO_MERGE",
+                "value": "true"
+              },
+              {
+                "name": "MERGE_DENY",
+                "value": "tag1consulting/scolta* tag1consulting/goose"
+              },
+              {
+                "name": "MERGE_WAIT_SECONDS",
+                "value": "2400"
+              },
+              {
+                "name": "CARGO_PROFILE_DEV_DEBUG",
+                "value": "0"
+              },
+              {
+                "name": "CARGO_PROFILE_TEST_DEBUG",
+                "value": "0"
+              },
+              {
+                "name": "CARGO_INCREMENTAL",
+                "value": "0"
+              },
+              {
+                "name": "CARGO_BUILD_JOBS",
+                "value": "8"
+              }
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "jesse-dev-agent-keys"
+                }
+              }
+            ],
+            "image": "img",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "agent",
+            "resources": {
+              "limits": {
+                "cpu": "8",
+                "memory": "28Gi"
+              },
+              "requests": {
+                "cpu": "7",
+                "ephemeral-storage": "20Gi",
+                "memory": "26Gi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/prompt",
+                "name": "prompt",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/home/agent/work",
+                "name": "work"
+              },
+              {
+                "mountPath": "/home/agent/.cargo/registry",
+                "name": "work",
+                "subPath": "cargo-registry"
+              },
+              {
+                "mountPath": "/home/agent/.npm",
+                "name": "work",
+                "subPath": "npm"
+              }
+            ]
+          }
+        ],
+        "nodeSelector": {
+          "kc.pozza/burst": "true",
+          "kc.pozza/pool": "devjob"
+        },
+        "restartPolicy": "Never",
+        "securityContext": {
+          "fsGroup": 1000,
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000
+        },
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "kc.pozza/burst",
+            "operator": "Equal",
+            "value": "true"
+          }
+        ],
+        "volumes": [
+          {
+            "configMap": {
+              "name": "prompt-dj25-x-abcde"
+            },
+            "name": "prompt"
+          },
+          {
+            "emptyDir": {
+              "sizeLimit": "60Gi"
+            },
+            "name": "work"
+          }
+        ]
+      }
+    },
+    "ttlSecondsAfterFinished": 172800
+  }
+}

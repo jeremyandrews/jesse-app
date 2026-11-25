@@ -55,7 +55,8 @@ pub const MAX_BURST_LIFE_MINUTES: u64 = 480;
 pub const DEFAULT_JOB_MEMORY_GI: u32 = 14;
 /// The default `[devjob.cloud] job_memory_request_gi`.
 pub const DEFAULT_JOB_MEMORY_REQUEST_GI: u32 = 12;
-/// The default `[devjob.cloud] job_cpu`: the pod's CPU limit, and `CARGO_BUILD_JOBS`.
+/// The default `[devjob.cloud] job_cpu`: the pod's CPU limit. `CARGO_BUILD_JOBS` is the
+/// agent's share of it ([`AgentResources::build_jobs`]).
 pub const DEFAULT_JOB_CPU: u32 = 4;
 /// The default `[devjob.cloud] job_cpu_request`.
 pub const DEFAULT_JOB_CPU_REQUEST: u32 = 3;
@@ -95,6 +96,101 @@ pub fn default_resources_for(slug: &str) -> JobResources {
             cpu: DEFAULT_JOB_CPU,
             cpu_request: DEFAULT_JOB_CPU_REQUEST,
         },
+    }
+}
+
+// ---- THE SERVICES BESIDE THE AGENT ---------------------------------------------------
+
+/// A service sidecar's fixed requests and limits. Taken out of the agent's share, so the pod's
+/// total stays exactly what `[devjob.cloud]` configures and the namespace quota needs no edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidecarResources {
+    pub memory_request_mi: u32,
+    pub memory_limit_mi: u32,
+    /// Request and limit alike.
+    pub cpu_milli: u32,
+}
+
+/// `postgres:16`: trovato's integration tests on a small database.
+pub const POSTGRES_SIDECAR: SidecarResources = SidecarResources {
+    memory_request_mi: 512,
+    memory_limit_mi: 1024,
+    cpu_milli: 500,
+};
+/// `redis:7`, with no persistence.
+pub const REDIS_SIDECAR: SidecarResources = SidecarResources {
+    memory_request_mi: 128,
+    memory_limit_mi: 256,
+    cpu_milli: 250,
+};
+/// The sidecars' images, pinned by tag: the versions trovato's CI runs.
+pub const POSTGRES_IMAGE: &str = "postgres:16";
+pub const REDIS_IMAGE: &str = "redis:7";
+/// The uid and gid both images run their server as (`postgres` and `redis`, 999 in each).
+pub const SERVICE_UID: u32 = 999;
+/// The agent's environment, exactly as trovato's CI sets it.
+pub const DATABASE_URL: &str = "postgres://trovato:trovato@localhost:5432/trovato_test";
+pub const REDIS_URL: &str = "redis://127.0.0.1:6379";
+/// The least the agent may keep once the sidecars have theirs: below this the bridge refuses
+/// to boot rather than start runs that cannot build.
+pub const AGENT_MIN_MEMORY_MI: u32 = 2048;
+pub const AGENT_MIN_CPU_MILLI: u32 = 1000;
+
+/// The agent container's own requests and limits, in MiB and millicores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentResources {
+    pub memory_request_mi: u32,
+    pub memory_limit_mi: u32,
+    pub cpu_request_milli: u32,
+    pub cpu_limit_milli: u32,
+}
+
+impl AgentResources {
+    /// `CARGO_BUILD_JOBS`: the agent's CPU limit, rounded down, at least 1.
+    pub fn build_jobs(&self) -> u32 {
+        (self.cpu_limit_milli / 1000).max(1)
+    }
+}
+
+/// A memory quantity as Kubernetes reads it: whole GiB as `NGi`, else `NMi`.
+pub fn memory_quantity(mi: u32) -> String {
+    if mi.is_multiple_of(1024) {
+        format!("{}Gi", mi / 1024)
+    } else {
+        format!("{mi}Mi")
+    }
+}
+
+/// A CPU quantity: whole CPUs as `N`, else `Nm`.
+pub fn cpu_quantity(milli: u32) -> String {
+    if milli.is_multiple_of(1000) {
+        (milli / 1000).to_string()
+    } else {
+        format!("{milli}m")
+    }
+}
+
+impl JobResources {
+    /// What the agent container keeps: the pod's configured totals, less the sidecars' when
+    /// `services` is on. Saturates at zero; [`CloudSettings::resource_problems`] refuses a size
+    /// that would get there.
+    pub fn agent(&self, services: bool) -> AgentResources {
+        let (mem_req, mem_lim, cpu) = if services {
+            let s = [POSTGRES_SIDECAR, REDIS_SIDECAR];
+            (
+                s.iter().map(|x| x.memory_request_mi).sum(),
+                s.iter().map(|x| x.memory_limit_mi).sum(),
+                s.iter().map(|x| x.cpu_milli).sum(),
+            )
+        } else {
+            (0, 0, 0)
+        };
+        AgentResources {
+            memory_request_mi: (self.memory_request_gi * 1024).saturating_sub(mem_req),
+            memory_limit_mi: (self.memory_gi * 1024).saturating_sub(mem_lim),
+            cpu_request_milli: (self.cpu_request * 1000).saturating_sub(cpu),
+            cpu_limit_milli: (self.cpu * 1000).saturating_sub(cpu),
+        }
     }
 }
 
@@ -181,6 +277,8 @@ pub struct CloudToml {
     pub job_memory_request_gi: Option<u32>,
     pub job_cpu: Option<u32>,
     pub job_cpu_request: Option<u32>,
+    /// Postgres 16 and Redis 7 beside the agent; default on.
+    pub services: Option<bool>,
     /// Added to [`DEFAULT_MERGE_DENY`], never replacing it.
     #[serde(default)]
     pub merge_deny: Vec<String>,
@@ -230,6 +328,9 @@ pub struct CloudSettings {
     pub job_memory_request_gi: u32,
     pub job_cpu: u32,
     pub job_cpu_request: u32,
+    /// Postgres 16 and Redis 7 run as sidecars in every cloud pod, their sizes taken out of the
+    /// agent's ([`JobResources::agent`]). Off: the single container pod of 0.222.0.
+    pub services: bool,
     /// [`DEFAULT_MERGE_DENY`] and then the config's own.
     pub merge_deny: Vec<String>,
     pub ledger: PathBuf,
@@ -292,6 +393,7 @@ impl CloudSettings {
             job_memory_request_gi: t.job_memory_request_gi.unwrap_or(sized.memory_request_gi),
             job_cpu: t.job_cpu.unwrap_or(sized.cpu),
             job_cpu_request: t.job_cpu_request.unwrap_or(sized.cpu_request),
+            services: t.services.unwrap_or(true),
             merge_deny,
             ledger: match t.ledger {
                 Some(p) => expand(&p, home),
@@ -398,7 +500,8 @@ impl CloudSettings {
     }
 
     /// Why the Job's resources or time cap are refused: each at least 1, each request at most
-    /// its limit, and no agent time past the longest a worker lives.
+    /// its limit, a request the worker can hold, and with `services` on, at least
+    /// [`AGENT_MIN_MEMORY_MI`] and [`AGENT_MIN_CPU_MILLI`] left to the agent.
     pub fn resource_problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (key, v) in [
@@ -422,6 +525,47 @@ impl CloudSettings {
                 "[devjob.cloud] job_cpu_request {} is above job_cpu {}",
                 self.job_cpu_request, self.job_cpu
             ));
+        }
+        if self.services {
+            let a = self.job_resources().agent(true);
+            if a.memory_request_mi < AGENT_MIN_MEMORY_MI || a.memory_limit_mi < AGENT_MIN_MEMORY_MI
+            {
+                out.push(format!(
+                    "[devjob.cloud] job_memory_request_gi {} / job_memory_gi {} leave the agent \
+                     {} / {} once Postgres and Redis have theirs, less than {}; raise them or \
+                     set services = false",
+                    self.job_memory_request_gi,
+                    self.job_memory_gi,
+                    memory_quantity(a.memory_request_mi),
+                    memory_quantity(a.memory_limit_mi),
+                    memory_quantity(AGENT_MIN_MEMORY_MI),
+                ));
+            }
+            if a.cpu_request_milli < AGENT_MIN_CPU_MILLI || a.cpu_limit_milli < AGENT_MIN_CPU_MILLI
+            {
+                out.push(format!(
+                    "[devjob.cloud] job_cpu_request {} / job_cpu {} leave the agent {} / {} CPU \
+                     once Postgres and Redis have theirs, less than {}; raise them or set \
+                     services = false",
+                    self.job_cpu_request,
+                    self.job_cpu,
+                    cpu_quantity(a.cpu_request_milli),
+                    cpu_quantity(a.cpu_limit_milli),
+                    cpu_quantity(AGENT_MIN_CPU_MILLI),
+                ));
+            }
+            // The sidecars' memory requests sit below their limits, so the agent's request can
+            // pass its limit when the configured request equals the configured limit.
+            if a.memory_request_mi > a.memory_limit_mi {
+                out.push(format!(
+                    "[devjob.cloud] job_memory_request_gi {} must be below job_memory_gi {} \
+                     with services on: the agent would request {} under a {} limit",
+                    self.job_memory_request_gi,
+                    self.job_memory_gi,
+                    memory_quantity(a.memory_request_mi),
+                    memory_quantity(a.memory_limit_mi),
+                ));
+            }
         }
         // A request the worker cannot hold leaves every Job pending: the node keeps some of
         // its memory, so the request must be below the worker's own.
@@ -1407,6 +1551,7 @@ impl DevJobs {
             merge: run.merge.clone(),
             merge_deny: rt.settings.merge_deny_env(),
             resources: rt.settings.job_resources(),
+            services: rt.settings.services,
         };
         self.create_run(&run.spec, origin, run.strand.as_ref(), Some(&extras))
             .await

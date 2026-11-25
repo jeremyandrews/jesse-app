@@ -570,6 +570,7 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
         merge,
         merge_deny: CloudSettings::default().merge_deny_env(),
         resources: CloudSettings::default().job_resources(),
+        services: CloudSettings::default().services,
     };
     let image = format!(
         "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",
@@ -617,11 +618,11 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
     assert_eq!(pod["tolerations"][0]["effect"], "NoSchedule");
     let c = &pod["containers"][0];
     assert_eq!(c["image"], image);
-    // The defaults, sized for the 16 GB worker.
-    assert_eq!(c["resources"]["requests"]["cpu"], "3");
-    assert_eq!(c["resources"]["requests"]["memory"], "12Gi");
-    assert_eq!(c["resources"]["limits"]["cpu"], "4");
-    assert_eq!(c["resources"]["limits"]["memory"], "14Gi");
+    // The defaults, sized for the 16 GB worker, less Postgres's and Redis's share.
+    assert_eq!(c["resources"]["requests"]["cpu"], "2250m");
+    assert_eq!(c["resources"]["requests"]["memory"], "11648Mi");
+    assert_eq!(c["resources"]["limits"]["cpu"], "3250m");
+    assert_eq!(c["resources"]["limits"]["memory"], "13056Mi");
     let env: BTreeMap<String, String> = c["env"]
         .as_array()
         .unwrap()
@@ -647,8 +648,8 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
     assert_eq!(env["JESSE_RUN_REPORT"], RUN_REPORT_FILE);
     assert_eq!(env["CARGO_PROFILE_DEV_DEBUG"], "0");
     assert_eq!(
-        env["CARGO_BUILD_JOBS"], "4",
-        "no more rustcs than the pod has CPUs"
+        env["CARGO_BUILD_JOBS"], "3",
+        "no more rustcs than the agent has CPUs"
     );
     // No cache claim on a disposable worker: one emptyDir, the caches under it.
     let vols = pod["volumes"].as_array().unwrap();
@@ -1135,6 +1136,7 @@ fn the_cloud_job_takes_its_resources_from_config_and_never_literals() {
             cpu: 8,
             cpu_request: 7,
         },
+        services: false,
     };
     let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
     let v = serde_json::to_value(&job).unwrap();
@@ -1221,5 +1223,345 @@ fn a_cloud_run_killed_for_memory_says_so_in_its_failure_line() {
     assert_eq!(
         report.failure.as_deref(),
         Some("the Job failed (BackoffLimitExceeded); no report in the log")
+    );
+}
+
+// ---- Postgres and Redis beside the agent ------------------------------------------------
+
+/// The live kc1 size: 28 Gi and 8 CPU limits, 26 Gi and 7 CPU requests.
+fn live_resources() -> JobResources {
+    JobResources {
+        memory_gi: 28,
+        memory_request_gi: 26,
+        cpu: 8,
+        cpu_request: 7,
+    }
+}
+
+fn trovato_job(services: bool) -> Value {
+    let spec = DevJobSpec::validate(
+        args(json!({ "repo": "jeremyandrews/trovato", "prompt": "x", "branch_slug": "dj25-x" })),
+        Agent::Claude,
+    )
+    .unwrap();
+    let extras = CloudJobExtras {
+        run_id: "DJ25".into(),
+        merge: MergeDecision::AtGreen,
+        merge_deny: CloudSettings::default().merge_deny_env(),
+        resources: live_resources(),
+        services,
+    };
+    let job = build_cloud_job(
+        "jesse-dev",
+        "agent-dj25-x-abcde",
+        "prompt-dj25-x-abcde",
+        "img",
+        &spec,
+        &extras,
+        "turn",
+    );
+    serde_json::to_value(&job).unwrap()
+}
+
+fn mebibytes(q: &Value) -> u32 {
+    let q = q.as_str().unwrap();
+    match (q.strip_suffix("Gi"), q.strip_suffix("Mi")) {
+        (Some(n), _) => n.parse::<u32>().unwrap() * 1024,
+        (_, Some(n)) => n.parse().unwrap(),
+        _ => panic!("not Gi or Mi: {q}"),
+    }
+}
+
+fn millicores(q: &Value) -> u32 {
+    let q = q.as_str().unwrap();
+    match q.strip_suffix('m') {
+        Some(n) => n.parse().unwrap(),
+        None => q.parse::<u32>().unwrap() * 1000,
+    }
+}
+
+fn env_of(c: &Value) -> BTreeMap<String, String> {
+    c["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap().to_string(),
+                e["value"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_cloud_pod_runs_postgres_and_redis_as_native_sidecars_before_the_agent() {
+    let v = trovato_job(true);
+    let pod = &v["spec"]["template"]["spec"];
+    let init = pod["initContainers"].as_array().unwrap();
+    let names: Vec<&str> = init.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["postgres", "redis"], "Postgres first, then Redis");
+    for c in init {
+        assert_eq!(c["restartPolicy"], "Always", "a native sidecar");
+        assert_eq!(c["imagePullPolicy"], "IfNotPresent");
+        let sc = &c["securityContext"];
+        assert_eq!(sc["runAsUser"], 999);
+        assert_eq!(sc["runAsGroup"], 999);
+        assert_eq!(sc["runAsNonRoot"], true);
+        assert_eq!(sc["allowPrivilegeEscalation"], false);
+        assert_eq!(sc["capabilities"]["drop"], json!(["ALL"]));
+        assert_eq!(sc["seccompProfile"]["type"], "RuntimeDefault");
+        assert!(c.get("ports").is_none(), "nothing exposed outside the pod");
+        assert!(c["startupProbe"]["exec"]["command"].is_array());
+        assert!(c.get("envFrom").is_none(), "no secret reaches a sidecar");
+    }
+    let (pg, redis) = (&init[0], &init[1]);
+    assert_eq!(pg["image"], "postgres:16");
+    let pg_env = env_of(pg);
+    assert_eq!(pg_env["POSTGRES_USER"], "trovato");
+    assert_eq!(pg_env["POSTGRES_PASSWORD"], "trovato");
+    assert_eq!(pg_env["POSTGRES_DB"], "trovato_test");
+    assert_eq!(pg_env["PGDATA"], "/var/lib/postgresql/data/pgdata");
+    assert_eq!(
+        pg["volumeMounts"][0],
+        json!({ "name": "pgdata", "mountPath": "/var/lib/postgresql/data" })
+    );
+    assert_eq!(
+        pg["startupProbe"]["exec"]["command"],
+        json!([
+            "pg_isready",
+            "-h",
+            "127.0.0.1",
+            "-U",
+            "trovato",
+            "-d",
+            "trovato_test"
+        ])
+    );
+    assert_eq!(
+        pg["args"],
+        json!(["postgres", "-c", "listen_addresses=localhost"])
+    );
+    assert_eq!(redis["image"], "redis:7");
+    assert_eq!(
+        redis["args"],
+        json!([
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+            "--bind",
+            "127.0.0.1",
+            "-::1"
+        ])
+    );
+    assert_eq!(
+        redis["startupProbe"]["exec"]["command"],
+        json!(["redis-cli", "-h", "127.0.0.1", "ping"])
+    );
+    let vols = pod["volumes"].as_array().unwrap();
+    assert!(vols
+        .iter()
+        .any(|v| v["name"] == "pgdata" && v["emptyDir"].is_object()));
+
+    // The agent's env: today's, plus trovato CI's two URLs.
+    let agent = &pod["containers"][0];
+    assert_eq!(pod["containers"].as_array().unwrap().len(), 1);
+    let env = env_of(agent);
+    assert_eq!(
+        env["DATABASE_URL"],
+        "postgres://trovato:trovato@localhost:5432/trovato_test"
+    );
+    assert_eq!(env["REDIS_URL"], "redis://127.0.0.1:6379");
+    let today = env_of(&trovato_job(false)["spec"]["template"]["spec"]["containers"][0]);
+    let mut rest = env.clone();
+    rest.remove("DATABASE_URL");
+    rest.remove("REDIS_URL");
+    rest.remove("CARGO_BUILD_JOBS");
+    let mut today_rest = today.clone();
+    today_rest.remove("CARGO_BUILD_JOBS");
+    assert_eq!(rest, today_rest, "nothing else in the env changes");
+    assert_eq!(today["CARGO_BUILD_JOBS"], "8");
+    assert_eq!(
+        env["CARGO_BUILD_JOBS"], "7",
+        "the agent's 7.25 CPU limit, rounded down"
+    );
+
+    // Agent and sidecars together are exactly the configured pod.
+    let all: Vec<&Value> = std::iter::once(agent).chain(init.iter()).collect();
+    let sum = |kind: &str, res: &str, f: fn(&Value) -> u32| -> u32 {
+        all.iter().map(|c| f(&c["resources"][kind][res])).sum()
+    };
+    assert_eq!(sum("requests", "memory", mebibytes), 26 * 1024);
+    assert_eq!(sum("limits", "memory", mebibytes), 28 * 1024);
+    assert_eq!(sum("requests", "cpu", millicores), 7000);
+    assert_eq!(sum("limits", "cpu", millicores), 8000);
+    assert_eq!(agent["resources"]["limits"]["memory"], "27392Mi");
+    assert_eq!(agent["resources"]["requests"]["memory"], "25984Mi");
+    assert_eq!(agent["resources"]["limits"]["cpu"], "7250m");
+    assert_eq!(agent["resources"]["requests"]["cpu"], "6250m");
+    assert_eq!(agent["resources"]["requests"]["ephemeral-storage"], "20Gi");
+    // The scheduling rules are today's.
+    let off = trovato_job(false);
+    let off_pod = &off["spec"]["template"]["spec"];
+    for key in [
+        "affinity",
+        "nodeSelector",
+        "tolerations",
+        "securityContext",
+        "restartPolicy",
+    ] {
+        assert_eq!(pod[key], off_pod[key], "{key}");
+    }
+}
+
+#[test]
+fn with_services_off_the_cloud_job_is_byte_for_byte_the_single_container_pod() {
+    // Rendered by bridge 0.222.0's build_cloud_job for the same spec and extras.
+    let today = include_str!("../../../golden/cloud-job-single-container.json");
+    let now = serde_json::to_string_pretty(&trovato_job(false)).unwrap() + "\n";
+    assert_eq!(now, today);
+}
+
+#[test]
+fn services_are_on_by_default_and_one_switch_turns_them_off() {
+    assert!(CloudSettings::default().services);
+    let t: DevJobToml = toml::from_str("[cloud]\nservices = false\n").unwrap();
+    assert!(!CloudSettings::from_toml(t.cloud, "/home/u").services);
+    let t: DevJobToml = toml::from_str("[cloud]\nservices = true\n").unwrap();
+    assert!(CloudSettings::from_toml(t.cloud, "/home/u").services);
+    // The live size leaves the agent plenty.
+    let live = CloudSettings {
+        burst_size: "s-8vcpu-32gb-amd".into(),
+        job_memory_gi: 28,
+        job_memory_request_gi: 26,
+        job_cpu: 8,
+        job_cpu_request: 7,
+        ..CloudSettings::default()
+    };
+    assert!(
+        live.resource_problems().is_empty(),
+        "{:?}",
+        live.resource_problems()
+    );
+    assert_eq!(
+        live.job_resources().agent(true),
+        AgentResources {
+            memory_request_mi: 25984,
+            memory_limit_mi: 27392,
+            cpu_request_milli: 6250,
+            cpu_limit_milli: 7250,
+        }
+    );
+    // Off, the agent has the whole pod, as before.
+    assert_eq!(
+        live.job_resources().agent(false),
+        AgentResources {
+            memory_request_mi: 26 * 1024,
+            memory_limit_mi: 28 * 1024,
+            cpu_request_milli: 7000,
+            cpu_limit_milli: 8000,
+        }
+    );
+    // The 8 GB worker's defaults still fit beside the sidecars.
+    let small = CloudSettings {
+        burst_size: "s-4vcpu-8gb-intel".into(),
+        ..CloudSettings::from_toml(
+            toml::from_str::<DevJobToml>("[cloud]\nburst_size = \"s-4vcpu-8gb-intel\"\n")
+                .unwrap()
+                .cloud,
+            "/home/u",
+        )
+    };
+    assert!(
+        small.resource_problems().is_empty(),
+        "{:?}",
+        small.resource_problems()
+    );
+}
+
+#[test]
+fn the_bridge_refuses_a_size_that_leaves_the_agent_under_2gi_or_1_cpu() {
+    // A 3 Gi limit leaves the agent 1.75 Gi once the sidecars have their 1.25 Gi.
+    let t: DevJobToml = toml::from_str(
+        "[cloud]\nenabled = true\njob_memory_gi = 3\njob_memory_request_gi = 2\n\
+         job_cpu = 1\njob_cpu_request = 1\n",
+    )
+    .unwrap();
+    let s = CloudSettings::from_toml(t.cloud, "/home/u");
+    let p = s.problems(true).join("\n");
+    for needle in [
+        "job_memory_request_gi 2 / job_memory_gi 3 leave the agent 1408Mi / 1792Mi once \
+         Postgres and Redis have theirs, less than 2Gi",
+        "job_cpu_request 1 / job_cpu 1 leave the agent 250m / 250m CPU once Postgres and Redis \
+         have theirs, less than 1",
+    ] {
+        assert!(p.contains(needle), "{needle} missing from:\n{p}");
+    }
+    // At the floor exactly: 2 Gi and 1 CPU left to the agent's limits is allowed, a request
+    // under it is not.
+    let floor = CloudSettings {
+        job_memory_gi: 4,
+        job_memory_request_gi: 3,
+        job_cpu: 2,
+        job_cpu_request: 2,
+        ..CloudSettings::default()
+    };
+    assert_eq!(floor.job_resources().agent(true).memory_limit_mi, 2816);
+    assert!(
+        floor.resource_problems().is_empty(),
+        "{:?}",
+        floor.resource_problems()
+    );
+    let cpu_short = CloudSettings {
+        job_cpu: 2,
+        job_cpu_request: 1,
+        ..CloudSettings::default()
+    };
+    assert!(cpu_short
+        .resource_problems()
+        .join("\n")
+        .contains("job_cpu_request 1 / job_cpu 2 leave the agent 250m / 1250m CPU"));
+    // A request equal to its limit would give the agent a request above its own limit.
+    let equal = CloudSettings {
+        job_memory_gi: 14,
+        job_memory_request_gi: 14,
+        ..CloudSettings::default()
+    };
+    assert!(equal.resource_problems().join("\n").contains(
+        "job_memory_request_gi 14 must be below job_memory_gi 14 with services on: the agent \
+         would request 13696Mi under a 13056Mi limit"
+    ));
+    // Services off: the same sizes are today's, and boot.
+    for c in [&s, &equal] {
+        let off = CloudSettings {
+            services: false,
+            ..(*c).clone()
+        };
+        assert!(
+            off.resource_problems().is_empty(),
+            "{:?}",
+            off.resource_problems()
+        );
+    }
+}
+
+#[test]
+fn a_memory_kill_at_the_agents_share_reads_in_gi() {
+    let mut pod = oom_pod("OOMKilled", false);
+    pod.spec.as_mut().unwrap().containers[0]
+        .resources
+        .as_mut()
+        .unwrap()
+        .limits
+        .as_mut()
+        .unwrap()
+        .insert(
+            "memory".into(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("27392Mi".into()),
+        );
+    assert_eq!(
+        crate::devjob::oom_killed_line(&pod).as_deref(),
+        Some("killed at the 26.75 Gi memory limit (OOMKilled)")
     );
 }

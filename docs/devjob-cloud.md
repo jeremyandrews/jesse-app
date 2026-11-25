@@ -68,8 +68,8 @@ The Job's resources come from config, sized to `burst_size`: `job_memory_request
 keys follow `burst_size`: on an 8 GB worker they are the former 6 / 7 Gi and 3 / 4 CPU. A request
 the named worker cannot hold (its GB and vCPUs read from the size's name) refuses to boot. A
 required pod anti-affinity on the hostname keeps two cloud Jobs off one worker whatever the
-requests. `CARGO_BUILD_JOBS` is set to `job_cpu`, so cargo never runs more parallel
-rustc processes than the pod has CPUs: the parallel rustcs, not the CPU count, set a build's
+requests. `CARGO_BUILD_JOBS` is set to the agent's share of `job_cpu` (see "Postgres and Redis
+beside the agent"), so cargo never runs more parallel rustc processes than the agent has CPUs: the parallel rustcs, not the CPU count, set a build's
 peak memory. A bigger `burst_size` needs these raised with it. Until 0.219.0 the pod was fixed at
 3 CPU / 6Gi request, 7Gi limit for the 8 GB worker, and trovato's builds were `OOMKilled` there.
 
@@ -107,6 +107,53 @@ or extension that would pass the cap is not made: queued runs wait (`waiting_rea
 cap`) until the next day, and a running Job whose worker cannot be extended is reaped at its TTL
 and reported failed. The ledger counts the worst case, so the real spend (`kc-burst status`) is
 at most the cap.
+
+## Postgres and Redis beside the agent
+
+Since bridge 0.223.0 every cloud pod also runs Postgres 16 and Redis 7, so a run's database and
+cache integration tests run on the worker, not only in GitHub CI. They are native sidecars
+(`initContainers` with `restartPolicy: Always`, Kubernetes 1.29 or later; kc1 is 1.36): each
+passes its startup probe before the agent starts, and both stop when the agent exits.
+
+- `postgres`: `postgres:16`, user / password / database `trovato` / `trovato` / `trovato_test`,
+  `PGDATA` on its own 4Gi `emptyDir`, started once `pg_isready -h 127.0.0.1 -U trovato -d
+  trovato_test` answers (over TCP: the image's first-boot server answers on the socket alone,
+  then restarts).
+- `redis`: `redis:7 --save "" --appendonly no`, no persistence, started once `redis-cli ping`
+  answers.
+
+Both run as their image's own non-root user (uid and gid 999), with no privilege escalation, no
+capabilities and the runtime's default seccomp profile, and both listen on the pod's loopback
+only: no Service, no port. The agent's environment gains exactly what trovato's CI sets:
+
+```
+DATABASE_URL=postgres://trovato:trovato@localhost:5432/trovato_test
+REDIS_URL=redis://127.0.0.1:6379
+```
+
+**The pod's total is unchanged.** The sidecars have fixed sizes, taken out of the agent's
+requests and limits, so the agent plus the sidecars is exactly `job_memory_request_gi` /
+`job_memory_gi` and `job_cpu_request` / `job_cpu`, and the `jesse-dev` ResourceQuota needs no
+edit:
+
+| container | memory request / limit | CPU request / limit |
+|-----------|------------------------|---------------------|
+| postgres  | 512Mi / 1Gi            | 500m / 500m         |
+| redis     | 128Mi / 256Mi          | 250m / 250m         |
+| agent     | configured − 640Mi / configured − 1.25Gi | configured − 750m |
+
+On the live 28Gi / 8 CPU pod (26Gi / 7 CPU requests) the agent keeps 25984Mi / 27392Mi and
+6250m / 7250m. `CARGO_BUILD_JOBS` is the agent's CPU limit rounded down (7 there; 3 on the 4 CPU
+default). The bridge refuses to boot when the configured sizes leave the agent under 2Gi or
+1 CPU, request or limit, or when `job_memory_request_gi` is not below `job_memory_gi` (the
+sidecars' memory requests sit under their limits, so equal totals would give the agent a request
+above its limit).
+
+`[devjob.cloud] services = false` builds the single-container pod of 0.222.0, byte for byte, with
+the agent holding the whole pod.
+
+The k3s Job template (`cloud/infrastructure/jesse-dev/job-template.yaml`) should mirror this:
+the two sidecars, the `pgdata` volume, the two URLs and the agent's reduced share.
 
 ## Merging
 
@@ -190,8 +237,10 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"
 # hourly_cost_eur = 0.0767
 # job_memory_gi = 14          # the pod's memory limit; size it to burst_size
 # job_memory_request_gi = 12  # at most job_memory_gi
-# job_cpu = 4                 # the CPU limit, and CARGO_BUILD_JOBS
+# job_cpu = 4                 # the CPU limit; CARGO_BUILD_JOBS is the agent's share of it
 # job_cpu_request = 3         # at most job_cpu
+# services = true             # Postgres 16 + Redis 7 sidecars, their share out of the agent's;
+                              # false is the single-container pod
 # merge_deny = []            # added to the seed list, never replacing it
 # ledger = "~/.jesse-bridge/devjob-cloud-ledger.json"
 # max_timeout_minutes = 315  # this host's timeout_minutes cap; see "How long a run may take"

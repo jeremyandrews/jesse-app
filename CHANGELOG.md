@@ -14,6 +14,33 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.223.0] - 2026-11-25
+
+**Every cloud dev job pod runs Postgres 16 and Redis 7 beside the agent, so database and cache
+integration tests run on the worker instead of only in GitHub CI.**
+
+- **Two native sidecars.** `build_cloud_job` adds `postgres` (`postgres:16`, `trovato` /
+  `trovato` / `trovato_test`, `PGDATA` on its own `emptyDir`) and `redis` (`redis:7`, no
+  persistence) as `initContainers` with `restartPolicy: Always`, in that order, each with a
+  startup probe (`pg_isready` over TCP, `redis-cli ping`) so the agent starts only once both
+  answer. Both run as their image's non-root uid and gid 999 without privilege escalation or
+  capabilities, under the runtime's default seccomp profile, and listen on the pod's loopback
+  only.
+- **Trovato CI's URLs.** The agent's environment gains
+  `DATABASE_URL=postgres://trovato:trovato@localhost:5432/trovato_test` and
+  `REDIS_URL=redis://127.0.0.1:6379`; nothing else in it changes.
+- **The pod's total is unchanged.** The sidecars' fixed sizes (Postgres 512Mi request, 1Gi
+  limit, 0.5 CPU; Redis 128Mi / 256Mi, 0.25 CPU) come out of the agent's, so agent plus sidecars
+  is exactly what `[devjob.cloud]` configures and the `jesse-dev` quota needs no edit.
+  `CARGO_BUILD_JOBS` is the agent's CPU limit rounded down (7 on the 8 CPU pod). The bridge
+  refuses to boot when the sizes leave the agent under 2 Gi or 1 CPU, or when
+  `job_memory_request_gi` is not below `job_memory_gi`.
+- **One switch.** `[devjob.cloud] services` (default `true`); `false` builds 0.222.0's
+  single-container pod byte for byte, pinned by a golden file.
+- A pending pod held by a sidecar's image pull names the sidecar's reason, not the agent's
+  `PodInitializing`, and a memory kill at the agent's MiB-sized limit reads in Gi.
+- The k3s Job template should mirror this.
+
 ## [bridge 0.222.0] - 2026-11-24
 
 **A queued cloud Job now runs on the worker that outlives it, and gets a fresh worker at once

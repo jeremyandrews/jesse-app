@@ -967,7 +967,8 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 **The cloud Job's size comes from config (0.219.0).** Its memory and CPU, request and limit, are
 `job_memory_request_gi` / `job_memory_gi` and `job_cpu_request` / `job_cpu`, sized by default
 for the 16 GB, 4 vCPU `g-4vcpu-16gb` worker (absent keys follow `burst_size`, so an 8 GB worker
-keeps the former 6 / 7 Gi), and a pod anti-affinity keeps one cloud Job per worker; `CARGO_BUILD_JOBS` is `job_cpu`. A cloud run's
+keeps the former 6 / 7 Gi), and a pod anti-affinity keeps one cloud Job per worker; `CARGO_BUILD_JOBS` is the agent's CPU limit rounded down: `job_cpu`
+with `services = false`, `job_cpu` less the sidecars' 750m otherwise (3 on the default 4). A cloud run's
 `timeout_minutes` is capped at `max_timeout_minutes` (0.219.0's `max_agent_minutes` still reads
 as it), not the cluster's 240. A pod killed for
 memory is reported as `killed at the N Gi memory limit (OOMKilled)`.

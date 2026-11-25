@@ -1565,3 +1565,34 @@ fn a_memory_kill_at_the_agents_share_reads_in_gi() {
         Some("killed at the 26.75 Gi memory limit (OOMKilled)")
     );
 }
+
+#[test]
+fn the_largest_configured_sizes_convert_exactly_with_services_on_or_off() {
+    let huge = JobResources {
+        memory_gi: u32::MAX,
+        memory_request_gi: 12,
+        cpu: u32::MAX,
+        cpu_request: 3,
+    };
+    let on = huge.agent(true);
+    assert_eq!(on.memory_limit_mi, u64::from(u32::MAX) * 1024 - 1280);
+    assert_eq!(on.cpu_limit_milli, u64::from(u32::MAX) * 1000 - 750);
+    assert_eq!(on.build_jobs(), u64::from(u32::MAX) - 1);
+    let off = huge.agent(false);
+    assert_eq!(off.memory_limit_mi, u64::from(u32::MAX) * 1024);
+    assert_eq!(memory_quantity(off.memory_limit_mi), "4294967295Gi");
+    assert_eq!(cpu_quantity(off.cpu_limit_milli), "4294967295");
+    // The size that wrapped to 16 Gi in u32 keeps its full limit.
+    let wrapping = JobResources {
+        memory_gi: 4_194_320,
+        ..huge
+    };
+    assert_eq!(
+        memory_quantity(wrapping.agent(false).memory_limit_mi),
+        "4194320Gi"
+    );
+    assert_eq!(
+        wrapping.agent(true).memory_limit_mi,
+        4_194_320u64 * 1024 - 1280
+    );
+}

@@ -105,10 +105,10 @@ pub fn default_resources_for(slug: &str) -> JobResources {
 /// total stays exactly what `[devjob.cloud]` configures and the namespace quota needs no edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidecarResources {
-    pub memory_request_mi: u32,
-    pub memory_limit_mi: u32,
+    pub memory_request_mi: u64,
+    pub memory_limit_mi: u64,
     /// Request and limit alike.
-    pub cpu_milli: u32,
+    pub cpu_milli: u64,
 }
 
 /// `postgres:16`: trovato's integration tests on a small database.
@@ -127,33 +127,34 @@ pub const REDIS_SIDECAR: SidecarResources = SidecarResources {
 pub const POSTGRES_IMAGE: &str = "postgres:16";
 pub const REDIS_IMAGE: &str = "redis:7";
 /// The uid and gid both images run their server as (`postgres` and `redis`, 999 in each).
-pub const SERVICE_UID: u32 = 999;
+pub const SERVICE_UID: u64 = 999;
 /// The agent's environment, exactly as trovato's CI sets it.
 pub const DATABASE_URL: &str = "postgres://trovato:trovato@localhost:5432/trovato_test";
 pub const REDIS_URL: &str = "redis://127.0.0.1:6379";
 /// The least the agent may keep once the sidecars have theirs: below this the bridge refuses
 /// to boot rather than start runs that cannot build.
-pub const AGENT_MIN_MEMORY_MI: u32 = 2048;
-pub const AGENT_MIN_CPU_MILLI: u32 = 1000;
+pub const AGENT_MIN_MEMORY_MI: u64 = 2048;
+pub const AGENT_MIN_CPU_MILLI: u64 = 1000;
 
-/// The agent container's own requests and limits, in MiB and millicores.
+/// The agent container's own requests and limits, in MiB and millicores. `u64`, so every
+/// `u32` the config accepts converts exactly: `u32::MAX` GiB is a valid, if absurd, limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentResources {
-    pub memory_request_mi: u32,
-    pub memory_limit_mi: u32,
-    pub cpu_request_milli: u32,
-    pub cpu_limit_milli: u32,
+    pub memory_request_mi: u64,
+    pub memory_limit_mi: u64,
+    pub cpu_request_milli: u64,
+    pub cpu_limit_milli: u64,
 }
 
 impl AgentResources {
     /// `CARGO_BUILD_JOBS`: the agent's CPU limit, rounded down, at least 1.
-    pub fn build_jobs(&self) -> u32 {
+    pub fn build_jobs(&self) -> u64 {
         (self.cpu_limit_milli / 1000).max(1)
     }
 }
 
 /// A memory quantity as Kubernetes reads it: whole GiB as `NGi`, else `NMi`.
-pub fn memory_quantity(mi: u32) -> String {
+pub fn memory_quantity(mi: u64) -> String {
     if mi.is_multiple_of(1024) {
         format!("{}Gi", mi / 1024)
     } else {
@@ -162,7 +163,7 @@ pub fn memory_quantity(mi: u32) -> String {
 }
 
 /// A CPU quantity: whole CPUs as `N`, else `Nm`.
-pub fn cpu_quantity(milli: u32) -> String {
+pub fn cpu_quantity(milli: u64) -> String {
     if milli.is_multiple_of(1000) {
         (milli / 1000).to_string()
     } else {
@@ -186,10 +187,10 @@ impl JobResources {
             (0, 0, 0)
         };
         AgentResources {
-            memory_request_mi: (self.memory_request_gi * 1024).saturating_sub(mem_req),
-            memory_limit_mi: (self.memory_gi * 1024).saturating_sub(mem_lim),
-            cpu_request_milli: (self.cpu_request * 1000).saturating_sub(cpu),
-            cpu_limit_milli: (self.cpu * 1000).saturating_sub(cpu),
+            memory_request_mi: (u64::from(self.memory_request_gi) * 1024).saturating_sub(mem_req),
+            memory_limit_mi: (u64::from(self.memory_gi) * 1024).saturating_sub(mem_lim),
+            cpu_request_milli: (u64::from(self.cpu_request) * 1000).saturating_sub(cpu),
+            cpu_limit_milli: (u64::from(self.cpu) * 1000).saturating_sub(cpu),
         }
     }
 }

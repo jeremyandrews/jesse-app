@@ -603,6 +603,27 @@ fn a_pod_held_by_a_taint_says_so() {
         pod_pending_reason(&pulling).as_deref(),
         Some("ImagePullBackOff: back-off pulling")
     );
+    // A sidecar still pulling holds the agent at PodInitializing: the sidecar's reason shows.
+    let sidecar: Pod = serde_json::from_value(json!({
+        "status": {
+            "phase": "Pending",
+            "conditions": [{ "type": "PodScheduled", "status": "True" }],
+            "initContainerStatuses": [{
+                "name": "postgres", "image": "postgres:16", "imageID": "", "ready": false,
+                "restartCount": 0,
+                "state": { "waiting": { "reason": "ErrImagePull", "message": "rate limited" } },
+            }],
+            "containerStatuses": [{
+                "name": "agent", "image": "x", "imageID": "", "ready": false, "restartCount": 0,
+                "state": { "waiting": { "reason": "PodInitializing" } },
+            }],
+        },
+    }))
+    .unwrap();
+    assert_eq!(
+        pod_pending_reason(&sidecar).as_deref(),
+        Some("ErrImagePull: rate limited")
+    );
     let running: Pod = serde_json::from_value(json!({ "status": { "phase": "Running" } })).unwrap();
     assert_eq!(pod_pending_reason(&running), None);
 }

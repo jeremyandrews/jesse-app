@@ -1273,8 +1273,10 @@ pub struct CloudJobExtras {
     pub merge: cloud::MergeDecision,
     /// `MERGE_DENY`: the deny list again, which the entrypoint checks itself.
     pub merge_deny: String,
-    /// The container's memory and CPU, from `[devjob.cloud]`.
+    /// The pod's memory and CPU, from `[devjob.cloud]`.
     pub resources: cloud::JobResources,
+    /// `[devjob.cloud] services`: Postgres and Redis sidecars, their share out of the agent's.
+    pub services: bool,
 }
 
 /// The Job for kc1: `cloud/infrastructure/jesse-dev/job-template.yaml` in the k3s repository,
@@ -1284,8 +1286,12 @@ pub struct CloudJobExtras {
 /// run's 60Gi `emptyDir`), debug info and incremental builds off, and the merge path's variables.
 /// Memory and CPU, request and limit, come from `extras.resources`: `[devjob.cloud]`
 /// `job_memory_gi`, `job_memory_request_gi`, `job_cpu` and `job_cpu_request`, sized to its
-/// `burst_size`. `CARGO_BUILD_JOBS` is the CPU limit, so cargo never runs more rustc processes
-/// than the pod has CPUs: the parallel rustcs, not the CPU count, set a build's peak memory.
+/// `burst_size`. With `extras.services` the pod also runs Postgres 16 and Redis 7 as native
+/// sidecars ([`service_sidecars`]), their fixed sizes taken out of the agent's so the pod's total
+/// is still exactly the configured one, and the agent gets trovato CI's `DATABASE_URL` and
+/// `REDIS_URL`. `CARGO_BUILD_JOBS` is the agent's CPU limit, rounded down, so cargo never runs
+/// more rustc processes than the agent has CPUs: the parallel rustcs, not the CPU count, set a
+/// build's peak memory.
 /// The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout plus a finish allowance
 /// plus the merge path's longest wait, not the home cluster's twice the timeout — a cloud worker
 /// cannot live past [`cloud::CloudSettings::worker_life_minutes`], so doubling would already not
@@ -1304,8 +1310,8 @@ pub fn build_cloud_job(
     let mut labels = run_labels(&spec.branch_slug);
     labels[cloud::LABEL_RUN_ID] = json!(extras.run_id);
     let deadline = cloud::cloud_deadline_secs(spec);
-    let res = extras.resources;
-    serde_json::from_value(json!({
+    let agent = extras.resources.agent(extras.services);
+    let mut job = json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
@@ -1383,18 +1389,18 @@ pub fn build_cloud_job(
                             { "name": "CARGO_PROFILE_DEV_DEBUG", "value": "0" },
                             { "name": "CARGO_PROFILE_TEST_DEBUG", "value": "0" },
                             { "name": "CARGO_INCREMENTAL", "value": "0" },
-                            { "name": "CARGO_BUILD_JOBS", "value": res.cpu.to_string() },
+                            { "name": "CARGO_BUILD_JOBS", "value": agent.build_jobs().to_string() },
                         ],
                         "envFrom": [{ "secretRef": { "name": "jesse-dev-agent-keys" } }],
                         "resources": {
                             "requests": {
-                                "cpu": res.cpu_request.to_string(),
-                                "memory": format!("{}Gi", res.memory_request_gi),
+                                "cpu": cloud::cpu_quantity(agent.cpu_request_milli),
+                                "memory": cloud::memory_quantity(agent.memory_request_mi),
                                 "ephemeral-storage": "20Gi",
                             },
                             "limits": {
-                                "cpu": res.cpu.to_string(),
-                                "memory": format!("{}Gi", res.memory_gi),
+                                "cpu": cloud::cpu_quantity(agent.cpu_limit_milli),
+                                "memory": cloud::memory_quantity(agent.memory_limit_mi),
                             },
                         },
                         "volumeMounts": [
@@ -1411,8 +1417,92 @@ pub fn build_cloud_job(
                 },
             },
         },
-    }))
-    .expect("a Job literal deserialises")
+    });
+    if extras.services {
+        let pod = &mut job["spec"]["template"]["spec"];
+        pod["initContainers"] = service_sidecars();
+        let env = pod["containers"][0]["env"]
+            .as_array_mut()
+            .expect("the agent has an env");
+        env.push(json!({ "name": "DATABASE_URL", "value": cloud::DATABASE_URL }));
+        env.push(json!({ "name": "REDIS_URL", "value": cloud::REDIS_URL }));
+        pod["volumes"]
+            .as_array_mut()
+            .expect("the pod has volumes")
+            .push(json!({ "name": "pgdata", "emptyDir": { "sizeLimit": "4Gi" } }));
+    }
+    serde_json::from_value(job).expect("a Job literal deserialises")
+}
+
+/// Postgres 16 and Redis 7 as native sidecars (`initContainers` with `restartPolicy: Always`,
+/// Kubernetes 1.29 and later): each starts, and passes its startup probe, before the agent
+/// starts, and each stops when the agent has exited. Trovato CI's services, field for field:
+/// user, password and database `trovato` / `trovato` / `trovato_test`. Both run as the image's
+/// own non-root user (uid and gid [`cloud::SERVICE_UID`]) without privilege escalation, and both
+/// listen on the pod's loopback only: no Service, no port. The Postgres probe asks over TCP, not
+/// the socket, because the image's first-boot server answers on the socket alone and then
+/// restarts.
+pub fn service_sidecars() -> serde_json::Value {
+    let security = json!({
+        "runAsUser": cloud::SERVICE_UID,
+        "runAsGroup": cloud::SERVICE_UID,
+        "runAsNonRoot": true,
+        "allowPrivilegeEscalation": false,
+        "capabilities": { "drop": ["ALL"] },
+        "seccompProfile": { "type": "RuntimeDefault" },
+    });
+    let resources = |s: cloud::SidecarResources| {
+        json!({
+            "requests": {
+                "cpu": cloud::cpu_quantity(s.cpu_milli),
+                "memory": cloud::memory_quantity(s.memory_request_mi),
+            },
+            "limits": {
+                "cpu": cloud::cpu_quantity(s.cpu_milli),
+                "memory": cloud::memory_quantity(s.memory_limit_mi),
+            },
+        })
+    };
+    let probe = |command: &[&str]| {
+        json!({
+            "exec": { "command": command },
+            "periodSeconds": 2,
+            "timeoutSeconds": 5,
+            "failureThreshold": 150,
+        })
+    };
+    json!([
+        {
+            "name": "postgres",
+            "image": cloud::POSTGRES_IMAGE,
+            "imagePullPolicy": "IfNotPresent",
+            "restartPolicy": "Always",
+            "args": ["postgres", "-c", "listen_addresses=localhost"],
+            "env": [
+                { "name": "POSTGRES_USER", "value": "trovato" },
+                { "name": "POSTGRES_PASSWORD", "value": "trovato" },
+                { "name": "POSTGRES_DB", "value": "trovato_test" },
+                // A directory under the mount, so the entrypoint can create it as its own.
+                { "name": "PGDATA", "value": "/var/lib/postgresql/data/pgdata" },
+            ],
+            "securityContext": security,
+            "resources": resources(cloud::POSTGRES_SIDECAR),
+            "startupProbe": probe(&[
+                "pg_isready", "-h", "127.0.0.1", "-U", "trovato", "-d", "trovato_test",
+            ]),
+            "volumeMounts": [{ "name": "pgdata", "mountPath": "/var/lib/postgresql/data" }],
+        },
+        {
+            "name": "redis",
+            "image": cloud::REDIS_IMAGE,
+            "imagePullPolicy": "IfNotPresent",
+            "restartPolicy": "Always",
+            "args": ["--save", "", "--appendonly", "no", "--bind", "127.0.0.1", "-::1"],
+            "securityContext": security,
+            "resources": resources(cloud::REDIS_SIDECAR),
+            "startupProbe": probe(&["redis-cli", "-h", "127.0.0.1", "ping"]),
+        },
+    ])
 }
 
 // ---- A JOB, AS THE WATCHER SEES IT ---------------------------------------------------
@@ -1607,9 +1697,17 @@ pub fn oom_killed_line(pod: &Pod) -> Option<String> {
         .map(|q| q.0.clone());
     Some(match limit {
         Some(q) => {
-            let shown = match q.strip_suffix("Gi") {
-                Some(n) => format!("{n} Gi"),
-                None => q,
+            let shown = match (q.strip_suffix("Gi"), q.strip_suffix("Mi")) {
+                (Some(n), _) => format!("{n} Gi"),
+                // The agent's share beside the sidecars: 27392Mi is 26.75 Gi.
+                (_, Some(mi)) => match mi.parse::<f64>() {
+                    Ok(mi) => {
+                        let gi = format!("{:.2}", mi / 1024.0);
+                        format!("{} Gi", gi.trim_end_matches('0').trim_end_matches('.'))
+                    }
+                    Err(_) => q,
+                },
+                _ => q,
             };
             format!("killed at the {shown} memory limit (OOMKilled)")
         }
@@ -1653,10 +1751,12 @@ pub fn pod_pending_reason(pod: &Pod) -> Option<String> {
             None => reason,
         });
     }
-    let waiting = status
-        .container_statuses
-        .as_ref()
-        .and_then(|cs| cs.iter().find_map(|c| c.state.as_ref()?.waiting.clone()));
+    // A sidecar still pulling holds the agent at `PodInitializing`: its own reason comes first.
+    let waiting = [&status.init_container_statuses, &status.container_statuses]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find_map(|c| c.state.as_ref()?.waiting.clone());
     if let Some(w) = waiting {
         let reason = w.reason.unwrap_or_else(|| "Waiting".into());
         return Some(match w.message {

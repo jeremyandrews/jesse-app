@@ -40,6 +40,9 @@ integration tests run on the worker instead of only in GitHub CI.**
 - A pending pod held by a sidecar's image pull names the sidecar's reason, not the agent's
   `PodInitializing`, and a memory kill at the agent's MiB-sized limit reads in Gi.
 - The k3s Job template should mirror this.
+- `kube` moves from 4.2.0 to 4.2.1 (with `kube-client` and `kube-core`), the patched release for
+  RUSTSEC-2026-0600. That advisory concerns the `openssl-tls` feature, which the bridge does not
+  enable (it uses `rustls-tls`), but the dependency audit refuses the affected version.
 
 ## [bridge 0.222.0] - 2026-11-24
 

@@ -1,6 +1,6 @@
 [package]
 name = "jesse-bridge"
-version = "0.223.0"
+version = "0.224.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -94,6 +94,7 @@ json5 = "0.4"
 # layered under the environment; a missing/malformed file soft-fails to the
 # generic built-in defaults so a fresh clone needs no config at all.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+humantime = "2"
 # RFC 4180 CSV reader for the vault's `weight-log.csv` (GET /jesse/diet). Its Notes
 # column contains quoted commas, so a naive split(',') corrupts rows — the csv
 # crate handles quoting/escaping correctly.

@@ -81,6 +81,10 @@
                 "value": "7200"
               },
               {
+                "name": "JOB_DEADLINE_SECONDS",
+                "value": "16200"
+              },
+              {
                 "name": "RUN_ID",
                 "value": "DJ25"
               },

@@ -934,16 +934,22 @@ head is green, and never for a repository on the deny list. Only a draft that sa
 whichever of a Studio slot and a cloud slot frees first. The design, the failure modes and every
 key are in `docs/devjob-cloud.md`; `src/devjob/cloud.rs` is the code.
 
-**`timeout_minutes` has its own, usually higher, cap: `max_timeout_minutes` (default 315, not
+**`timeout_minutes` has its own, usually higher, cap: `max_timeout_minutes` (default 555, not
 the cluster's 240).** The Job's own deadline is the agent timeout plus a 30 minute finish
 allowance (the entrypoint's rebase, test command, push and pull request after the agent exits)
 plus the merge path's full wait, not the cluster's twice-the-timeout rule — a worker cannot live
-past `worker_life_minutes` (default 480, kc-burst's `max_ttl`), so doubling would already not
-fit one. `CloudSettings::problems` refuses a config where that sum, plus a 15 minute boot
-allowance, would exceed `worker_life_minutes`. A queued Job is resumed only onto an idle ready
-worker whose remaining life (`worker_life_minutes` minus its age) covers its own deadline;
-otherwise it stays queued for a fresh worker. A reduced `timeout_minutes` is named in the reply's
-`timeout_note`, on both hosts.
+past `worker_life_minutes` (default 720, the ceiling `MAX_WORKER_LIFE_MINUTES`: kc-burst's own
+`max_ttl` and the reaper's `--max-age`), so doubling would already not fit one. The same deadline
+is also passed to the agent container as `JOB_DEADLINE_SECONDS`, so the entrypoint knows its real
+wall-clock budget. `CloudSettings::problems` refuses a config where that sum, plus a 15 minute
+boot allowance, would exceed `worker_life_minutes`. That check is on the *configured* value only;
+live, `CloudSettings::effective_worker_life_minutes` and `effective_max_timeout_minutes` cap both
+further at whatever `[devjob.cloud] kc_burst_config` (kc-burst's own config, read once at boot for
+its `max_ttl`) actually allows — so a worker that still only lives 8 hours never gets promised a
+555 minute run. A queued Job is resumed only onto an idle ready worker whose remaining life (the
+effective `worker_life_minutes` minus its age) covers its own deadline; otherwise it stays queued
+for a fresh worker. A reduced `timeout_minutes` is named in the reply's `timeout_note`, on both
+hosts.
 
 ```toml
 [devjob.cloud]
@@ -953,8 +959,9 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 # max_concurrent = 2
 # daily_cost_cap_eur = 5.0
 # idle_minutes = 10
-# max_timeout_minutes = 315                      # the cloud's timeout_minutes cap
-# worker_life_minutes = 480                      # kc-burst's max_ttl; raise that first to go higher
+# max_timeout_minutes = 555                      # the cloud's timeout_minutes cap
+# worker_life_minutes = 720                      # the burst system's own ceiling; raise that first to go higher
+# kc_burst_config = "~/.config/kc-burst/config.toml"  # read once at boot for its live max_ttl
 # merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
 # burst_size = "g-4vcpu-16gb"                    # one worker per cloud run
 # job_memory_gi = 14                             # the pod's memory limit; size it to burst_size

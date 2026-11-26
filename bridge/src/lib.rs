@@ -29,6 +29,11 @@
 //! optional push path), [`state`] (shared `AppState`), [`handlers`]/[`sse`] (the
 //! Axum routes), and [`startup`] (pairing QR + binary/bind checks).
 
+// The cloud Job's `json!({...})` literal in `devjob.rs` (`build_cloud_job`) is deep enough,
+// field for field with the k3s template it mirrors, that the default limit of 128 macro
+// expansion steps is not enough.
+#![recursion_limit = "256"]
+
 // ---- Shared prelude -------------------------------------------------------
 //
 // The original bridge was one file, so every item saw every other by bare name.

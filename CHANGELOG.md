@@ -14,6 +14,30 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.224.0] - 2026-11-26
+
+**A cloud burst worker may now live up to 12 hours, so a dev job agent running there gets up to
+555 minutes — while the bridge still never promises a run more time than kc-burst's own `max_ttl`
+actually allows.**
+
+- **Behavior change:** `worker_life_minutes` default and ceiling raised from 480 to 720 (12
+  hours), matching the burst system's own limits (kc-burst's `max_ttl` and the reaper's
+  `--max-age`) once a companion change in `jeremyandrews/k3s` raises them to match.
+  `MAX_BURST_LIFE_MINUTES` is gone; `MAX_WORKER_LIFE_MINUTES` (720) replaces it.
+- **Behavior change:** `max_timeout_minutes` default raised from 315 to 555 (720 − 15 − 120 − 30),
+  the agent's cap on a cloud run's `timeout_minutes`.
+- **A new `[devjob.cloud] kc_burst_config` key** (default `~/.config/kc-burst/config.toml`) is
+  read once at boot for kc-burst's own `max_ttl`. `CloudSettings::effective_worker_life_minutes`
+  and `effective_max_timeout_minutes` cap the configured values at whatever that `max_ttl`
+  actually allows, live, so a worker that still only lives 8 hours never gets promised a 555
+  minute run; the configured values alone still gate whether the bridge boots. The file's
+  contents are never logged, only its path and the parsed `max_ttl` in minutes.
+- `burst_ttl_minutes` is now checked against `worker_life_minutes` itself (30 to
+  `worker_life_minutes`), not a fixed number.
+- The cloud Job's agent container now gets `JOB_DEADLINE_SECONDS`, the same value as
+  `activeDeadlineSeconds`, so the dev agent image's entrypoint knows its real wall-clock budget
+  instead of guessing one.
+
 ## [bridge 0.223.0] - 2026-11-25
 
 **Every cloud dev job pod runs Postgres 16 and Redis 7 beside the agent, so database and cache

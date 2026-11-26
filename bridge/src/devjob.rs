@@ -1294,9 +1294,11 @@ pub struct CloudJobExtras {
 /// build's peak memory.
 /// The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout plus a finish allowance
 /// plus the merge path's longest wait, not the home cluster's twice the timeout — a cloud worker
-/// cannot live past [`cloud::CloudSettings::worker_life_minutes`], so doubling would already not
-/// fit. Always created suspended: it is released only onto an idle worker whose remaining life
-/// covers it ([`cloud::cloud_resumable`]).
+/// cannot live past [`cloud::CloudSettings::effective_worker_life_minutes`], so doubling would
+/// already not fit. The same deadline is also passed to the agent container as
+/// `JOB_DEADLINE_SECONDS`, so the entrypoint knows its own wall-clock budget rather than
+/// guessing one from `AGENT_TIMEOUT_SECONDS` alone. Always created suspended: it is released
+/// only onto an idle worker whose remaining life covers it ([`cloud::cloud_resumable`]).
 pub fn build_cloud_job(
     namespace: &str,
     job_name: &str,
@@ -1378,6 +1380,7 @@ pub fn build_cloud_job(
                             { "name": "TEST_COMMAND", "value": spec.test_command.clone().unwrap_or_default() },
                             { "name": "PROMPT_FILE", "value": "/prompt/prompt.md" },
                             { "name": "AGENT_TIMEOUT_SECONDS", "value": spec.agent_timeout_secs().to_string() },
+                            { "name": "JOB_DEADLINE_SECONDS", "value": deadline.to_string() },
                             { "name": "RUN_ID", "value": extras.run_id },
                             { "name": "JESSE_RUN_REPORT", "value": cloud::RUN_REPORT_FILE },
                             { "name": "PR_TITLE_FILE", "value": cloud::PR_TITLE_FILE },
@@ -2198,12 +2201,18 @@ impl DevJobs {
     }
 
     /// The cloud host's server, from `[devjob.cloud]`: its own client, namespace, image and
-    /// cap, and kc-burst for its workers. Connects to nothing.
+    /// cap, and kc-burst for its workers. Connects to nothing. Reads kc-burst's own config once
+    /// for its `max_ttl` ([`cloud::read_kc_burst_max_ttl`]), so [`cloud::CloudSettings`]'s
+    /// effective caps follow whatever the burst system actually allows.
     pub async fn connect_cloud(home: &DevJobSettings) -> Result<DevJobs, String> {
+        let mut home = home.clone();
+        home.cloud.kc_burst_max_ttl_minutes =
+            cloud::read_kc_burst_max_ttl(&home.cloud.kc_burst_config);
+        home.cloud.log_effective_caps();
         let burst: Arc<dyn cloud::Burst> = Arc::new(cloud::KcBurstCli {
             path: home.cloud.kc_burst.clone(),
         });
-        DevJobs::connect_cloud_with(home, burst).await
+        DevJobs::connect_cloud_with(&home, burst).await
     }
 
     /// [`DevJobs::connect_cloud`] with the workers' driver named (a recorder in tests).
@@ -3425,8 +3434,9 @@ impl DevJobs {
 /// The tools with the cloud host: `host` gains `cloud`, `devjob_start` gains `merge`, and
 /// `devjob_cancel` is listed (it cancels cloud runs as well as Studio ones). Without the cloud
 /// the tools are exactly [`tool_descriptors`] or [`tool_descriptors_with_studio`].
-/// `max_timeout_minutes` is `[devjob.cloud] max_timeout_minutes`, the cloud's own cap on
-/// `timeout_minutes`.
+/// `max_timeout_minutes` is the cloud's own cap on `timeout_minutes`: `[devjob.cloud]
+/// max_timeout_minutes`, or less when kc-burst's own live `max_ttl` leaves less
+/// ([`cloud::CloudSettings::effective_max_timeout_minutes`]).
 pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value> {
     if let Some(start) = tools.iter_mut().find(|t| t["name"] == TOOL_START) {
         let d = start["description"]
@@ -3498,7 +3508,7 @@ impl crate::gateway::InProcessServer for DevJobs {
         if let Some(c) = self.cloud.get() {
             let max =
                 c.rt.as_ref()
-                    .map(|rt| rt.settings.max_timeout_minutes)
+                    .map(|rt| rt.settings.effective_max_timeout_minutes())
                     .unwrap_or(cloud::DEFAULT_MAX_TIMEOUT_MINUTES);
             with_cloud(tools, max)
         } else {

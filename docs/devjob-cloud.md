@@ -367,6 +367,30 @@ a checkpoint onto a fresh clone, the SIGTERM checkpoint push, `JESSE_PROGRESS_FI
 `stopped_at_limit` and `checkpoint:` report keys — lives in `jeremyandrews/k3s`, out of this
 repository's reach.
 
+## A killed pod retries once
+
+The Job's `backoffLimit` is 1, with a `podFailurePolicy` that fails it at once (`FailJob`) on
+any exit of the agent container other than 137 (out of memory) or 143 (SIGTERM: eviction or
+drain) — the kc1 template's own contract
+(`cloud/infrastructure/jesse-dev/job-template.yaml` in `jeremyandrews/k3s`). Only a pod killed
+from outside gets the one retry: a run that fails on its own merit (a test failure, an
+unhandled panic, anything else the agent itself ends with) fails the Job at once, exactly as
+before. A pod lost with its node leaves no exit code, so the policy's rule does not match it
+either, and it too counts against `backoffLimit` and is retried.
+
+The retried pod resumes from the companion entrypoint's own checkpoint push
+(`jesse/<slug>-wip`), the same push a capped run's continuation reads, but as the *same* run: no
+new Job, no new run id, no `-c2` link. `JOB_UID` (the pod's own
+`batch.kubernetes.io/controller-uid` label, set from the downward API) lets the retried pod
+count `JOB_DEADLINE_SECONDS` from the Job's own start, not from its own later one.
+
+The bridge reads a Job's pods by creation time and always reports from the newest, so a Job with
+two pods — the one it killed, and the one that replaced it — is read, finished or failed, from
+the second. A Job that still fails after its one retry is explained by both pods' own ends, not
+just the newest's. A retried pod that itself goes on to hit the Job's own time limit is a capped
+run exactly as if it had never retried (see "Continuing a capped run"): it may continue as
+`<run_id>-c2`.
+
 ## Failure modes
 
 | What | What happens |
@@ -376,8 +400,8 @@ repository's reach.
 | Quota (2 pods) | Cannot bite: a Job is resumed only onto an idle ready worker, at most `max_concurrent` |
 | Secret missing | The pod stops at `CreateContainerConfigError` (`secret "jesse-dev-agent-keys" not found`), which `devjob_status` shows as its waiting reason; the Job fails at its deadline and is reported, or is cancelled sooner |
 | kubeconfig missing or unreadable | The bridge refuses to boot with `[devjob.cloud] enabled` |
-| Worker reaped mid run | The Job fails; the report says the pod was lost, with the log tail the bridge kept |
-| Out of memory | The pod is `OOMKilled`; the report's failure line says `killed at the N Gi memory limit (OOMKilled)` before the Job's `BackoffLimitExceeded` |
+| Worker reaped mid run | The pod leaves no exit code, so it retries once (see "A killed pod retries once"); if the retry also dies the Job fails and the report names both pods' own ends, with the log tail the bridge kept |
+| Out of memory | The pod is `OOMKilled`; it retries once; a Job still `OOMKilled` after its retry has a failure line saying `killed at the N Gi memory limit (OOMKilled)` before the Job's `BackoffLimitExceeded` |
 | Rebase conflict, red CI, CI timeout | Pull request left open, not merged; the report's `merge:` line says why |
 
 ## Config

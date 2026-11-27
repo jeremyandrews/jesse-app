@@ -1381,7 +1381,14 @@ pub struct ChainExtras {
 /// `extras.chain` set (a continuation only) `RUN_ID` and `CONTINUATION` come from the chain's
 /// root and this new link's own number, not this Job's own run id label, so the pull request
 /// stays titled after the chain's first run; the chain annotations
-/// ([`cloud::ANN_CHAIN_ROOT`] and siblings) are set only then.
+/// ([`cloud::ANN_CHAIN_ROOT`] and siblings) are set only then. `backoffLimit` is 1, with a
+/// `podFailurePolicy` that fails the Job at once (`FailJob`) on any exit of the agent container
+/// other than 137 (out of memory) or 143 (SIGTERM: eviction or drain): only a pod killed from
+/// outside gets the one retry, never the run's own failing exit. A pod lost with its node
+/// leaves no exit code, so the policy's rule does not match it either, and it too counts
+/// against `backoffLimit` and is retried. `JOB_UID` is the pod's own
+/// `batch.kubernetes.io/controller-uid` label (the Job's UID), so a retried pod can read the
+/// Job's own start time and count `JOB_DEADLINE_SECONDS` from it, not from its own later start.
 pub fn build_cloud_job(
     namespace: &str,
     job_name: &str,
@@ -1422,7 +1429,17 @@ pub fn build_cloud_job(
         },
         "spec": {
             "suspend": true,
-            "backoffLimit": 0,
+            "backoffLimit": 1,
+            "podFailurePolicy": {
+                "rules": [{
+                    "action": "FailJob",
+                    "onExitCodes": {
+                        "containerName": "agent",
+                        "operator": "NotIn",
+                        "values": [137, 143],
+                    },
+                }],
+            },
             "activeDeadlineSeconds": deadline,
             "ttlSecondsAfterFinished": 172800,
             "template": {
@@ -1479,6 +1496,9 @@ pub fn build_cloud_job(
                             { "name": "PROMPT_FILE", "value": "/prompt/prompt.md" },
                             { "name": "AGENT_TIMEOUT_SECONDS", "value": spec.agent_timeout_secs().to_string() },
                             { "name": "JOB_DEADLINE_SECONDS", "value": deadline.to_string() },
+                            { "name": "JOB_UID", "valueFrom": { "fieldRef": {
+                                "fieldPath": "metadata.labels['batch.kubernetes.io/controller-uid']",
+                            } } },
                             { "name": "RUN_ID", "value": run_id_env },
                             { "name": "CONTINUATION", "value": continuation_env.to_string() },
                             { "name": "JESSE_RUN_REPORT", "value": cloud::RUN_REPORT_FILE },
@@ -1850,6 +1870,64 @@ pub fn explain_failure(report: &mut DevJobReport, failure_reason: Option<&str>, 
             None => oom.to_string(),
         });
     }
+}
+
+/// Why one pod of a multi-pod cloud Job ended, for [`explain_both_pods`]: the memory kill
+/// ([`oom_killed_line`]) when there was one, else the agent container's own terminated exit code
+/// and reason, else (no terminated state at all, the usual shape of a pod lost with its node)
+/// that it was lost with its node.
+fn pod_end_reason(pod: &Pod) -> String {
+    if let Some(oom) = oom_killed_line(pod) {
+        return oom;
+    }
+    let terminated = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| {
+            cs.iter().find_map(|c| {
+                [c.state.as_ref(), c.last_state.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|s| s.terminated.as_ref())
+            })
+        });
+    match terminated {
+        Some(t) => match &t.reason {
+            Some(r) => format!("exited {} ({r})", t.exit_code),
+            None => format!("exited {}", t.exit_code),
+        },
+        None => "lost with its node".to_string(),
+    }
+}
+
+/// `pods`, oldest first, by creation time: a Job's reader always wants its newest
+/// (`pods.last()`) — the one a retry (DJ22) replaced an earlier one with, or the only one there
+/// ever was.
+pub fn pods_oldest_first(mut pods: Vec<Pod>) -> Vec<Pod> {
+    pods.sort_by_key(|p| {
+        p.metadata
+            .creation_timestamp
+            .as_ref()
+            .map(time_ms)
+            .unwrap_or(0)
+    });
+    pods
+}
+
+/// When a cloud Job's retry also died, why each pod ended, oldest first: `None` with fewer than
+/// two pods, so a Job that never retried is explained exactly as before, by [`oom_killed_line`]
+/// on its one pod alone.
+pub fn explain_both_pods(pods: &[Pod]) -> Option<String> {
+    let (first, retry) = match pods {
+        [first, .., retry] if pods.len() > 1 => (first, retry),
+        _ => return None,
+    };
+    Some(format!(
+        "the first pod {}; the retry {}",
+        pod_end_reason(first),
+        pod_end_reason(retry)
+    ))
 }
 
 /// Why a pod is not running, from its status: the scheduler's reason while it is unscheduled (a
@@ -2626,20 +2704,21 @@ impl DevJobs {
         Ok(list.items)
     }
 
-    /// The newest pod of `job`.
-    async fn pod_of(&self, job: &str) -> Option<Pod> {
+    /// Every pod `job` has had, oldest first: with a retry (DJ22), the one it killed and then
+    /// the one that replaced it.
+    async fn pods_of(&self, job: &str) -> Vec<Pod> {
         let list = self
             .pods()
             .list(&ListParams::default().labels(&format!("{POD_JOB_LABEL}={job}")))
             .await
-            .ok()?;
-        list.items.into_iter().max_by_key(|p| {
-            p.metadata
-                .creation_timestamp
-                .as_ref()
-                .map(time_ms)
-                .unwrap_or(0)
-        })
+            .ok();
+        pods_oldest_first(list.map(|l| l.items).unwrap_or_default())
+    }
+
+    /// The newest pod of `job`: the one a retry replaced an earlier one with, or the only one
+    /// there ever was.
+    async fn pod_of(&self, job: &str) -> Option<Pod> {
+        self.pods_of(job).await.pop()
     }
 
     async fn log_of(&self, pod: &str, tail: i64) -> Result<String, String> {
@@ -2960,7 +3039,8 @@ impl DevJobs {
                 (rel, None, None, None, Vec::new())
             }
             None => {
-                let pod = self.pod_of(&v.name).await;
+                let pods = self.pods_of(&v.name).await;
+                let pod = pods.last().cloned();
                 let log = match pod.as_ref().and_then(|p| p.metadata.name.clone()) {
                     Some(p) => self.log_of(&p, LOG_TAIL_LINES).await,
                     None => Err("the Job has no pod left to read a log from".into()),
@@ -2987,12 +3067,27 @@ impl DevJobs {
                         kept.clone().unwrap_or_default(),
                     ),
                 };
-                // A cloud run's pod is sized from config: say when it ran out of memory.
-                let oom = match cloud_run {
+                // A cloud run's pod is sized from config: say when it ran out of memory. Only
+                // the newest pod's own kill decides whether a continuation is still worth
+                // trying (DJ29's `oom_killed`): an earlier pod that died is not this attempt's
+                // own verdict.
+                let newest_oom = match cloud_run {
                     Some(_) => pod.as_ref().and_then(oom_killed_line),
                     None => None,
                 };
-                explain_failure(&mut report, v.failure_reason.as_deref(), oom.as_deref());
+                // When the Job failed even after its one retry, name both pods' own ends
+                // (DJ22); a Job with just the one pod is explained exactly as before.
+                let failed = v.finished == Some(false);
+                let explained = if cloud_run.is_some() && failed && pods.len() > 1 {
+                    explain_both_pods(&pods).or_else(|| newest_oom.clone())
+                } else {
+                    newest_oom.clone()
+                };
+                explain_failure(
+                    &mut report,
+                    v.failure_reason.as_deref(),
+                    explained.as_deref(),
+                );
                 if v.cancelled {
                     let f = report.failure.take().unwrap_or_default();
                     report.status = "failed".into();
@@ -3026,7 +3121,7 @@ impl DevJobs {
                             job,
                             v,
                             &report,
-                            oom.is_some(),
+                            newest_oom.is_some(),
                             prompt.as_deref(),
                             id,
                             &predicted_rel,

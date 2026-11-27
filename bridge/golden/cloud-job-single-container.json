@@ -17,7 +17,22 @@
   },
   "spec": {
     "activeDeadlineSeconds": 16200,
-    "backoffLimit": 0,
+    "backoffLimit": 1,
+    "podFailurePolicy": {
+      "rules": [
+        {
+          "action": "FailJob",
+          "onExitCodes": {
+            "containerName": "agent",
+            "operator": "NotIn",
+            "values": [
+              137,
+              143
+            ]
+          }
+        }
+      ]
+    },
     "suspend": true,
     "template": {
       "metadata": {
@@ -83,6 +98,14 @@
               {
                 "name": "JOB_DEADLINE_SECONDS",
                 "value": "16200"
+              },
+              {
+                "name": "JOB_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.labels['batch.kubernetes.io/controller-uid']"
+                  }
+                }
               },
               {
                 "name": "RUN_ID",

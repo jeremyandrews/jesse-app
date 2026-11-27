@@ -14,6 +14,34 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.228.0] - 2026-11-27
+
+**A cloud Job retries a killed pod once, from its checkpoint, instead of ending the run with no
+report (DJ22).**
+
+- **Root cause.** `build_cloud_job`'s `backoffLimit: 0` had drifted from the kc1 Job template's
+  own `backoffLimit: 1` and its `podFailurePolicy`: any pod failure failed the Job at once, so a
+  pod killed from outside (out of memory, evicted or drained, or lost with its node) left no
+  retry, no report and no log.
+- **Behavior change.** The Job now carries the template's own contract: `backoffLimit: 1`, and
+  a `podFailurePolicy` that fails the Job at once (`FailJob`) on any exit of the agent container
+  other than 137 (out of memory) or 143 (SIGTERM: eviction or drain). A pod lost with its node
+  leaves no exit code, so the policy does not match it either, and it too is retried. A run's
+  own failure (a test failure, an unhandled panic, anything else the agent itself ends with)
+  still fails the Job at once, exactly as before. The retried pod resumes from the companion
+  entrypoint's own checkpoint push (`jesse/<slug>-wip`), as the *same* run — no new Job, no new
+  run id, no `-c2` link.
+- **`JOB_UID`** is now set on the agent container, from the pod's own
+  `batch.kubernetes.io/controller-uid` label (the downward API), so a retried pod can count
+  `JOB_DEADLINE_SECONDS` from the Job's own start rather than from its own later one.
+- **Multi-pod reading.** The bridge now reads every pod a Job has had and always reports from
+  the newest, so a Job with two pods — the one it killed, and the one that replaced it — is read
+  from the second, finished or failed. A Job that still fails after its one retry is explained by
+  both pods' own ends, not just the newest's (`DevJobs::finalize`, `explain_both_pods`). DJ29's
+  continuation decision is unchanged by this: a Job that succeeded on its retry is a normal
+  finished run, and one whose retry also hit the time limit is a capped run exactly as before —
+  it may continue as `<run_id>-c2`.
+
 ## [bridge 0.227.0] - 2026-11-27
 
 **A cloud run is reviewed as a Studio run is, and merges only after the review is answered

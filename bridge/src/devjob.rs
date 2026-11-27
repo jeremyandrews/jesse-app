@@ -286,6 +286,8 @@ pub struct CloudStart {
     pub agent: Option<String>,
     pub test_command: Option<String>,
     pub timeout_minutes: Option<u64>,
+    /// How soon the run wants a slot; `None` is the draft's `devjob-priority:`, else `normal`.
+    pub priority: Option<crate::hostrun::Priority>,
 }
 
 /// Decide a start. Without `host` (or with `cluster`) this is [`DevJobSpec::validate`] and
@@ -304,10 +306,10 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                  says, and the cluster never merges"
                 .into(),
         ),
-        // The cluster's and kc1's own queues have no priority: a priority there would be
-        // silently ignored, so it is refused.
-        None | Some("cluster") | Some("cloud") if args.priority.is_some() => Err(
-            "priority applies only with host \"studio\": the cluster and the cloud start their \
+        // The cluster's own queue has no priority: a priority there would be silently ignored,
+        // so it is refused. A cloud run waits in the Studio's queue, priority and all.
+        None | Some("cluster") if args.priority.is_some() => Err(
+            "priority applies only with host \"studio\" or \"cloud\": the cluster starts its \
              runs in the order they were asked for"
                 .into(),
         ),
@@ -486,6 +488,11 @@ fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, Stri
         return Err("timeout_minutes must be at least 1".into());
     }
     let merge = args.merge;
+    let priority = args
+        .priority
+        .as_deref()
+        .map(crate::hostrun::Priority::parse)
+        .transpose()?;
     let from_draft = |kind: CloudKind, args: &DevJobArgs| -> Result<CloudStart, String> {
         if args.prompt.is_some() || args.branch_slug.is_some() || args.model.is_some() {
             return Err(
@@ -500,6 +507,7 @@ fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, Stri
             agent: args.agent.clone(),
             test_command: args.test_command.clone(),
             timeout_minutes: args.timeout_minutes,
+            priority,
         })
     };
     if let Some(draft) = args.draft.clone() {
@@ -541,6 +549,7 @@ fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, Stri
                 agent,
                 test_command,
                 timeout_minutes,
+                priority,
             })
         }
         _ => Err("strand and item_id go together".into()),
@@ -2397,6 +2406,7 @@ impl DevJobs {
     pub fn attach_cloud(&self, cloud: Arc<DevJobs>) {
         if let Some(s) = self.studio.get() {
             cloud.attach_studio(s.clone());
+            s.attach_cloud(cloud.clone());
         }
         if let Some(sink) = self.sink.get() {
             cloud.attach(sink.clone());
@@ -2420,6 +2430,7 @@ impl DevJobs {
     pub fn attach_studio(&self, studio: Arc<crate::hostrun::HostRuns>) {
         if let Some(c) = self.cloud.get() {
             c.attach_studio(studio.clone());
+            studio.attach_cloud(c.clone());
         }
         let _ = self.studio.set(studio);
     }
@@ -3116,6 +3127,29 @@ impl DevJobs {
             )
             .await;
         }
+        // A cloud run's record ends its round with this report, or moves to its continuation.
+        if let (Some(_), Some(studio)) = (cloud_run, self.studio.get()) {
+            // The Job this link continues as, read from kc1 every time (also on a retried pass,
+            // which does not know `continued_as`). A lookup that fails, or misses the Job just
+            // created, leaves the Job unannotated so the next pass ends the record rightly.
+            let link = v.run_id.as_deref().unwrap_or(&v.name);
+            let continued_job = match self.views().await {
+                Ok(jobs) => cloud::continuation_job(&jobs, link),
+                Err(e) => return Err(format!("its continuation could not be looked up: {e}")),
+            };
+            if let (Some(id), None) = (&continued_as, &continued_job) {
+                return Err(format!("its continuation {id} is not listed yet"));
+            }
+            let end = crate::hostrun::CloudEnd {
+                job: v.name.clone(),
+                status: cloud_end_status(v, outcome),
+                report_path: Some(rel.clone()),
+                continued_as: continued_job,
+                error: report.as_ref().and_then(|r| r.failure.clone()),
+            };
+            let s = studio.clone();
+            let _ = tokio::task::spawn_blocking(move || s.cloud_ended(&end)).await;
+        }
         let mut ann = json!({ ANN_REPORTED: "true", ANN_REPORT_PATH: rel });
         if attribution.is_some() {
             ann[ANN_ATTRIBUTION] = json!("found");
@@ -3394,6 +3428,27 @@ impl DevJobs {
     /// The watcher's wake, for a task that outlives the call that spawned it.
     fn self_wake(&self) -> Arc<tokio::sync::Notify> {
         self.wake.clone()
+    }
+}
+
+/// The status a cloud run's record ends with once its Job is reported: the Runs page's own
+/// mapping ([`crate::hostrun::cloud::cloud_status`]) of the Job and the report's outcome (`None`
+/// when an earlier pass wrote the report). A Job that completed with no outcome known is
+/// `reported`, one that failed `failed`.
+pub fn cloud_end_status(v: &JobView, outcome: Option<RunOutcome>) -> crate::hostrun::RunStatus {
+    let mut seen = v.clone();
+    if let Some(o) = outcome {
+        seen.outcome = Some(o.label().to_string());
+    }
+    match crate::hostrun::cloud::cloud_status(&seen) {
+        crate::hostrun::RunStatus::Queued | crate::hostrun::RunStatus::Running => {
+            if v.finished == Some(true) {
+                crate::hostrun::RunStatus::Reported
+            } else {
+                crate::hostrun::RunStatus::Failed
+            }
+        }
+        s => s,
     }
 }
 
@@ -3748,7 +3803,8 @@ fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) 
     v
 }
 
-/// Whether a Studio run was taken by a cloud slot: its id now names a cloud run.
+/// Whether a Studio run was closed by a bridge before 0.226.0 when a cloud slot took it: its
+/// id names that bridge's cloud Job, which has no record of its own.
 fn moved_to_cloud(r: &crate::hostrun::RunRecord) -> bool {
     r.closed_reason
         .as_deref()
@@ -3757,9 +3813,9 @@ fn moved_to_cloud(r: &crate::hostrun::RunRecord) -> bool {
 
 /// One Studio run, as `devjob_list` names it.
 fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
-    json!({
+    let mut v = json!({
         "run_id": r.run_id,
-        "host": "studio",
+        "host": r.served_host(),
         "repo": r.repo,
         "branch": r.branch,
         "status": r.status,
@@ -3778,7 +3834,12 @@ fn studio_brief(r: &crate::hostrun::RunRecord) -> Value {
         "reviews": crate::hostrun::reviews_json(r, None),
         "report_paths": r.rounds.iter().filter_map(|x| x.report_path.clone()).collect::<Vec<_>>(),
         "desk_command": r.desk_command,
-    })
+    });
+    // A cloud run names its Job too; a Studio run's brief is what it was.
+    if let Some(job) = r.cloud.as_ref().and_then(|c| c.job_name.as_deref()) {
+        v["job_name"] = json!(job);
+    }
+    v
 }
 
 /// `devjob_list`'s Studio `active`: the running, paused and reviewing runs, newest first as `runs` gives them, then the queued runs in the order the queue
@@ -3875,8 +3936,11 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
              [<run_id>] and, with merge true (or devjob-merge: true in the draft), merges it once \
              every CI run on its exact head is green; repositories on the deny list never \
              merge. It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A \
-             queued Studio run whose draft says devjob-host: any is started by whichever of a \
-             Studio slot and a cloud slot frees first."
+             cloud run waits in the Studio's queue, as a run of its own on the Runs page: \
+             priority and devjob_priority order it as they order Studio runs, and \
+             devjob_cancel, devjob_close and devjob_status work on it by run id. A queued Studio \
+             run whose draft says devjob-host: any is started by whichever of a Studio slot and \
+             a cloud slot frees first, keeping its run id."
         ));
         let props = &mut start["inputSchema"]["properties"];
         let hosts = match props.get("host") {
@@ -3885,6 +3949,9 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
         };
         props["host"] = json!({ "type": "string", "enum": hosts,
                                 "description": "where the run goes; default cluster" });
+        if props.get("priority").is_some() {
+            props["priority"]["description"] = json!("host studio or cloud: how soon the run wants a slot while queued; queued runs start highest first, oldest first within a level, on either host, and a priority never stops a running run or bypasses a cap. Absent: the draft's devjob-priority:, else normal. Change it while queued with devjob_priority");
+        }
         props["merge"] = json!({ "type": "boolean",
                                  "description": "host cloud: merge the pull request once every CI run on its head is green; default the draft's devjob-merge, else false" });
         if props.get("strand").is_none() {
@@ -3902,6 +3969,12 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
                  value is named in the reply's timeout_note"
             ) });
         start["inputSchema"]["required"] = json!([]);
+    }
+    if let Some(p) = tools.iter_mut().find(|t| t["name"] == TOOL_PRIORITY) {
+        let d = p["description"].as_str().unwrap_or_default().to_string();
+        p["description"] = json!(format!(
+            "{d} A queued cloud run (host cloud) is in the same queue and changes the same way."
+        ));
     }
     if !tools.iter().any(|t| t["name"] == TOOL_CANCEL) {
         tools.push(json!({
@@ -3968,7 +4041,13 @@ impl crate::gateway::InProcessServer for DevJobs {
                                     "host \"cloud\" needs [devjob.cloud] enabled on this bridge",
                                 ));
                             };
-                            return Ok(match c.start_cloud(req, "turn").await {
+                            let Some(svc) = self.studio.get() else {
+                                return Ok(error_result(
+                                    "host \"cloud\" needs [hostrun] enabled on this bridge: a \
+                                     cloud run waits in the Studio's queue",
+                                ));
+                            };
+                            return Ok(match c.start_cloud(svc, req, "turn").await {
                                 Ok(v) => text_result(&v, false),
                                 Err(e) => error_result(&e),
                             });
@@ -3995,9 +4074,18 @@ impl crate::gateway::InProcessServer for DevJobs {
                     };
                     if let Some(svc) = self.studio.get() {
                         if let Some(r) = svc.get(args.job_name.trim()) {
-                            // A run the cloud took is answered by its Job, when there is one.
+                            // A run an earlier bridge gave the cloud is answered by its Job.
                             if !(moved_to_cloud(&r) && self.cloud.get().is_some()) {
-                                return Ok(text_result(&studio_status(svc, &r), false));
+                                let mut out = studio_status(svc, &r);
+                                // A run on the cloud: its Job's phase, wait and log.
+                                let job = r.cloud.as_ref().and_then(|c| c.job_name.clone());
+                                if let (Some(job), Some(c)) = (job, self.cloud.get()) {
+                                    if let Ok(Some(run)) = c.run(&job).await {
+                                        out["log_tail"] = json!(run.log_tail);
+                                        out["job"] = json!(run);
+                                    }
+                                }
+                                return Ok(text_result(&out, false));
                             }
                         }
                     }

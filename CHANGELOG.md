@@ -14,6 +14,50 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.226.0] - 2026-11-27
+
+**A cloud run is a run: one record, one queue and one priority order for the Studio and the
+cloud (DJ30, Part A).**
+
+- **Root cause.** Two run pipelines had drifted apart. A Studio run was a `HostRuns` record
+  with a queue place, a priority, reviewers and actions; a cloud run was only a Kubernetes Job,
+  queued in creation order, with no priority, no actions on the Runs page, and an `any` run the
+  cloud took lost its record (closed `moved to the cloud`), its priority and its reviewers.
+  Every rule had to be written twice, and several never were.
+- **Behavior change.** `devjob_start` with `host: "cloud"` creates a run record through the
+  Studio's own start (`HostRuns::create_on`): the same checks (one live run per item, the
+  draft's keys, the run id from `allocate_run_id`) plus the cloud's two (no `local/`
+  repository; a draft must say `devjob-host: cloud` or `any`). The run waits in the one queue
+  (`waiting_for: cloud`). A free cloud slot takes the first queued run in `queue_order` whose
+  host allows the cloud (`HostRuns::take_for_cloud`); a Studio slot never starts it. The run
+  keeps its id and its record on the cloud, which gains `cloud.job_name`; it moves to
+  `reported`, `failed` or `cancelled` with its Job's report (`HostRuns::cloud_ended`), and a
+  capped Job's continuation (0.225.0) is the same record's next round.
+- **`priority` and `devjob_priority` work for cloud runs.** `plan_start` no longer refuses
+  `priority` with `host: "cloud"`; a queued cloud run starts in priority order, oldest first
+  within a level, by the same `queue_order` as a Studio run.
+- **The Runs page treats a cloud run as a run.** Its record is the row (`host: "cloud"`,
+  `job_name`), counted under `counts.cloud`; `cancel` (a waiting Job is deleted, a running one
+  stopped through its deadline and reported), `close`, `archive` and `unarchive` act on it;
+  `reply` and `review` are refused by the record until Part B. `managed_through_jesse` now
+  applies only to a Job no record owns.
+- **`devjob-host: any`.** A queued `any` run the cloud takes is no longer closed as moved: it is
+  the same record, running on the cloud.
+- **Deleted.** `MOVED_TO_CLOUD` closing and `HostRuns::note_moved`; `DevJobs::resolve_cloud`,
+  `finish_resolve`, `moved_run`, `run_id_taken` and the old `start_cloud`; `cloud::unique_run_id`.
+- **Migration.** Jobs created by an earlier bridge have no owning record and finish under the
+  old path: released, reported, continued and listed read only as before; `devjob_cancel` and
+  `devjob_status` still reach them. No record is rewritten. A new run never takes the run id of
+  a Job kc1 lists (`allocate_run_id_except`, fed by the cloud's watcher).
+- **Edges.** A run taken by a cloud slot whose Job was never named (the bridge stopped in
+  between) is adopted by the Job carrying its run id, else queued again. A capped link's
+  continuation is found from kc1 on every pass (`cloud::continuation_job`); a lookup that fails
+  leaves the Job unreported for the next pass instead of ending the run. A cloud start whose
+  draft names a `devjob-reviewer:` is refused rather than run unreviewed, as is one whose draft
+  cannot be read again to check its `devjob-host`. An archived cloud run's Job is not listed
+  again as an unowned one.
+- Docs: `docs/design/one-run-pipeline.md` (new), `docs/devjob-cloud.md`, `bridge/README.md`.
+
 ## [bridge 0.225.0] - 2026-11-27
 
 **A cloud run capped by its time limit continues automatically from its checkpoint, as

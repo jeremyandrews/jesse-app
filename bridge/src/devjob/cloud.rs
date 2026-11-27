@@ -1197,18 +1197,6 @@ pub fn valid_run_id(id: &str) -> bool {
     valid_label_value(id)
 }
 
-/// `base`, or `base-2`, `base-3`, … : the first that `taken` refuses. A cloud run's id must not be
-/// any live Studio run's or cloud Job's, so its report has a name of its own.
-pub fn unique_run_id(base: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(base) {
-        return base.to_string();
-    }
-    (2..)
-        .map(|n| format!("{base}-{n}"))
-        .find(|id| !taken(id))
-        .expect("an unbounded range finds a free id")
-}
-
 // ---- SLOTS -----------------------------------------------------------------------------
 
 /// Whether a new cloud run may be added at all: active plus queued under `max`. Used by the drain,
@@ -1725,15 +1713,65 @@ pub fn cloud_slug(run_id: &str, item_text: Option<&str>) -> String {
     cut.trim_end_matches('-').to_string()
 }
 
-/// What a cloud run is made of before it has a unique id.
-struct Resolved {
-    base_id: String,
-    item_text: Option<String>,
-    repo: String,
-    prompt: String,
-    model: Option<String>,
-    asked_merge: bool,
-    strand: Option<StrandRef>,
+/// Whether a cloud run asked to merge: its start's `merge`, else its draft's `devjob-merge`.
+pub fn asked_merge(notes: &Path, rec: &crate::hostrun::RunRecord) -> bool {
+    if let Some(m) = rec.cloud.as_ref().and_then(|c| c.merge) {
+        return m;
+    }
+    rec.prompt_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(notes.join(p)).ok())
+        .is_some_and(|src| draft_merge(&src))
+}
+
+/// The branch slug of a run on the cloud: its record's `jesse/<slug>` when it was asked for
+/// the cloud, else (an `any` run the Studio named) the cloud's slug for its id and line.
+pub fn record_slug(rec: &crate::hostrun::RunRecord) -> String {
+    match rec.branch.strip_prefix("jesse/") {
+        Some(slug) if !slug.is_empty() => slug.to_string(),
+        _ => cloud_slug(&rec.run_id, rec.item_text.as_deref()),
+    }
+}
+
+/// The Job that continues the capped link `link_run_id` (its `jesse.dev/continuation-of`), the
+/// newest when a retried pass made two. `None` when the link did not continue.
+pub fn continuation_job(
+    jobs: &[(k8s_openapi::api::batch::v1::Job, JobView)],
+    link_run_id: &str,
+) -> Option<String> {
+    jobs.iter()
+        .filter(|(j, _)| {
+            j.metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(ANN_CONTINUATION_OF))
+                .is_some_and(|of| of == link_run_id)
+        })
+        .max_by_key(|(_, v)| v.created_ms)
+        .map(|(_, v)| v.name.clone())
+}
+
+/// How far a Job's creation time may read before the moment its run was taken, Kubernetes'
+/// clock and this Mac's being two clocks with whole second stamps.
+pub const ADOPT_SKEW_MS: u64 = 60_000;
+
+/// The Job a run taken but never named ([`crate::hostrun::HostRuns::unnamed_on_cloud`]) was
+/// made as before the bridge stopped: one carrying its run id, created no earlier than it was
+/// taken, owned by no other run. `None`: no Job was made, so it is queued again.
+pub fn adopted_job<'a>(
+    views: &'a [JobView],
+    rec: &crate::hostrun::RunRecord,
+) -> Option<&'a JobView> {
+    let taken = rec
+        .cloud
+        .as_ref()
+        .and_then(|c| c.taken_at.as_deref())
+        .and_then(crate::hostrun::ms_of)?;
+    views
+        .iter()
+        .filter(|v| v.run_id.as_deref() == Some(rec.run_id.as_str()))
+        .filter(|v| v.created_ms + ADOPT_SKEW_MS >= taken)
+        .max_by_key(|v| v.created_ms)
 }
 
 impl DevJobs {
@@ -1750,158 +1788,140 @@ impl DevJobs {
             .ok_or_else(|| "the bridge is still starting: no vault is attached yet".to_string())
     }
 
-    /// Whether a run id is taken: by any Studio run, or any Job in the cloud namespace.
-    async fn run_id_taken(&self) -> Result<HashSet<String>, String> {
-        let mut taken: HashSet<String> = self
-            .views()
-            .await?
-            .into_iter()
-            .filter_map(|(_, v)| v.run_id)
-            .collect();
-        if let Some(studio) = self.studio.get() {
-            let studio = studio.clone();
-            let ids = tokio::task::spawn_blocking(move || studio.run_ids())
-                .await
-                .unwrap_or_default();
-            taken.extend(ids);
-        }
-        Ok(taken)
-    }
-
-    /// Resolve a cloud start into a run: read its draft (refused unless it says `cloud` or
-    /// `any`), choose its id and wrap its prompt.
-    pub async fn resolve_cloud(&self, req: CloudStart) -> Result<CloudRun, String> {
+    /// `devjob_start` with `host: "cloud"`: a run record in the Studio's queue, through the
+    /// Studio's own start ([`crate::hostrun::HostRuns::start_on`]), which a cloud slot takes in
+    /// queue order ([`DevJobs::drain_studio`]).
+    pub async fn start_cloud(
+        &self,
+        studio: &Arc<crate::hostrun::HostRuns>,
+        req: CloudStart,
+        origin: &str,
+    ) -> Result<Value, String> {
         let rt = self.runtime()?;
-        let r = match &req.kind {
-            CloudKind::Free(spec) => Resolved {
-                base_id: format!("s-{}", spec.branch_slug),
-                item_text: None,
-                repo: spec.repo.clone(),
-                prompt: spec.prompt.clone(),
-                model: spec.model.clone(),
-                asked_merge: false,
-                strand: None,
-            },
+        let kind = match req.kind {
             CloudKind::Item {
                 strand,
                 item_id,
                 repo,
-            } => {
-                let notes = self.notes()?;
-                let (strand, item_id, repo) = (strand.clone(), item_id.clone(), repo.clone());
-                tokio::task::spawn_blocking(move || -> Result<Resolved, String> {
-                    let it = crate::hostrun::studio_item(
-                        &notes,
-                        &strand,
-                        &item_id,
-                        crate::hostrun::OptIn::Request {
-                            repo: repo.as_deref(),
-                        },
-                    )?;
-                    let src = std::fs::read_to_string(notes.join(&it.prompt_path))
-                        .map_err(|e| format!("{} is unreadable: {e}", it.prompt_path))?;
-                    check_cloud_capable(&it.prompt_path, &src)?;
-                    Ok(Resolved {
-                        base_id: it.item_id.clone(),
-                        item_text: Some(it.item_text.clone()),
-                        repo: it.repo.clone(),
-                        prompt: it.section.clone(),
-                        model: it.model.clone(),
-                        asked_merge: draft_merge(&src),
-                        strand: Some(StrandRef {
-                            note: it.strand.clone(),
-                            id: it.item_id.clone(),
-                            prompt: it.prompt_path.clone(),
-                        }),
-                    })
-                })
-                .await
-                .map_err(|e| format!("the resolve task failed: {e}"))??
-            }
-            CloudKind::Draft { draft, repo } => {
-                let notes = self.notes()?;
-                let (draft, repo) = (draft.clone(), repo.clone());
-                tokio::task::spawn_blocking(move || -> Result<Resolved, String> {
-                    let d = crate::hostrun::studio_draft(&notes, &draft, repo.as_deref())?;
-                    let src = std::fs::read_to_string(notes.join(&d.prompt_path))
-                        .map_err(|e| format!("{} is unreadable: {e}", d.prompt_path))?;
-                    check_cloud_capable(&d.prompt_path, &src)?;
-                    Ok(Resolved {
-                        base_id: format!("s-{}", d.slug),
-                        item_text: None,
-                        repo: d.repo.clone(),
-                        prompt: d.section.clone(),
-                        model: d.model.clone(),
-                        asked_merge: draft_merge(&src),
-                        strand: None,
-                    })
-                })
-                .await
-                .map_err(|e| format!("the resolve task failed: {e}"))??
-            }
+            } => crate::hostrun::StartKind::Item {
+                strand,
+                item_id,
+                repo,
+                scheduled: false,
+            },
+            CloudKind::Draft { draft, repo } => crate::hostrun::StartKind::Draft { draft, repo },
+            CloudKind::Free(spec) => crate::hostrun::StartKind::Free {
+                repo: spec.repo,
+                prompt: spec.prompt,
+                slug: spec.branch_slug,
+                model: spec.model,
+            },
         };
-        let taken = self.run_id_taken().await?;
-        let run_id = unique_run_id(&r.base_id, |id| taken.contains(id));
-        self.finish_resolve(rt, req, r, run_id)
-    }
-
-    fn finish_resolve(
-        &self,
-        rt: &CloudRuntime,
-        req: CloudStart,
-        r: Resolved,
-        run_id: String,
-    ) -> Result<CloudRun, String> {
-        if super::is_local_repo(&r.repo) {
-            return Err(super::LOCAL_ONLY_STUDIO.into());
+        let part = crate::hostrun::CloudPart {
+            merge: req.merge,
+            agent: req.agent,
+            test_command: req.test_command,
+            timeout_minutes: req.timeout_minutes,
+            ..crate::hostrun::CloudPart::default()
+        };
+        // A new run takes no id a cloud Job already carries.
+        if let Ok(views) = self.views().await {
+            studio.set_cloud_ids(views.into_iter().filter_map(|(_, v)| v.run_id).collect());
         }
-        if !valid_run_id(&run_id) {
-            return Err(format!("{run_id:?} cannot name a run"));
-        }
+        let started = studio
+            .start_on(
+                crate::hostrun::StartRequest {
+                    kind,
+                    origin: origin.to_string(),
+                    again: false,
+                    reviewer: None,
+                    review_focus: None,
+                    priority: req.priority,
+                },
+                Some(part),
+            )
+            .await
+            .map_err(|e| e.message().to_string())?;
+        self.wake();
+        let rec = studio
+            .get(&started.run_id)
+            .ok_or_else(|| format!("{} was created but cannot be read", started.run_id))?;
+        let notes = studio.notes_root().to_path_buf();
         let merge = merge_decision(
-            &r.repo,
-            req.merge.unwrap_or(r.asked_merge),
+            &rec.repo,
+            asked_merge(&notes, &rec),
             &rt.settings.merge_deny,
         );
-        let slug = match &req.kind {
-            CloudKind::Free(spec) => spec.branch_slug.clone(),
-            _ => cloud_slug(&run_id, r.item_text.as_deref()),
-        };
-        let branch = format!("jesse/{slug}");
-        let prompt = cloud_prompt(&r.prompt, &run_id, &r.repo, &branch, &merge);
-        let requested_timeout = req.timeout_minutes;
-        let mut spec = match req.kind {
-            CloudKind::Free(spec) => spec,
-            _ => DevJobSpec::validate(
-                DevJobArgs {
-                    repo: Some(r.repo.clone()),
-                    prompt: Some(r.prompt.clone()),
-                    agent: req.agent.clone(),
-                    model: r.model.clone(),
-                    branch_slug: Some(slug),
-                    test_command: req.test_command.clone(),
-                    timeout_minutes: req.timeout_minutes,
-                    ..DevJobArgs::default()
-                },
-                self.default_agent,
-            )?,
-        };
-        spec.prompt = prompt;
-        // The cluster's cap ([`super::MAX_TIMEOUT_MINUTES`]), already applied above (`Free`
-        // directly, the other two kinds through `DevJobSpec::validate`), does not apply in the
-        // cloud: its own, usually higher, cap does.
-        spec.timeout_minutes = cloud_capped_timeout_minutes(
-            requested_timeout,
+        let granted = cloud_capped_timeout_minutes(
+            req.timeout_minutes,
             rt.settings.effective_max_timeout_minutes(),
         );
-        let timeout_note =
-            super::timeout_reduced_note(requested_timeout, spec.timeout_minutes, "the cloud");
+        Ok(json!({
+            "run_id": rec.run_id,
+            "host": "cloud",
+            "status": rec.status,
+            "waiting_for": rec.waiting_for,
+            "priority": rec.priority,
+            "branch": rec.branch,
+            "merge": merge.annotation(),
+            "timeout_minutes": granted,
+            "timeout_note": super::timeout_reduced_note(req.timeout_minutes, granted, "the cloud"),
+        }))
+    }
+
+    /// The Job a run record executes as: its prompt (`section`, what the record was created
+    /// with) wrapped for the cloud, its branch, its merge decision and its strand step. Refused
+    /// for a `local/` repository.
+    pub fn record_run(
+        &self,
+        rt: &CloudRuntime,
+        notes: &Path,
+        rec: &crate::hostrun::RunRecord,
+        section: &str,
+    ) -> Result<CloudRun, String> {
+        if super::is_local_repo(&rec.repo) {
+            return Err(super::LOCAL_ONLY_STUDIO.into());
+        }
+        if !valid_run_id(&rec.run_id) {
+            return Err(format!("{:?} cannot name a run", rec.run_id));
+        }
+        let part = rec.cloud.clone().unwrap_or_default();
+        let merge = merge_decision(&rec.repo, asked_merge(notes, rec), &rt.settings.merge_deny);
+        let slug = record_slug(rec);
+        let branch = format!("jesse/{slug}");
+        let mut spec = DevJobSpec::validate(
+            DevJobArgs {
+                repo: Some(rec.repo.clone()),
+                prompt: Some(section.to_string()),
+                agent: part.agent.clone(),
+                model: rec.model.clone(),
+                branch_slug: Some(slug),
+                test_command: part.test_command.clone(),
+                timeout_minutes: part.timeout_minutes,
+                ..DevJobArgs::default()
+            },
+            self.default_agent,
+        )?;
+        spec.prompt = cloud_prompt(section, &rec.run_id, &rec.repo, &branch, &merge);
+        // The cluster's cap, applied by `validate`, does not apply in the cloud: its own does.
+        spec.timeout_minutes = cloud_capped_timeout_minutes(
+            part.timeout_minutes,
+            rt.settings.effective_max_timeout_minutes(),
+        );
+        let strand = match (&rec.strand, &rec.item_id, &rec.prompt_path) {
+            (Some(note), Some(id), Some(prompt)) => Some(StrandRef {
+                note: note.clone(),
+                id: id.clone(),
+                prompt: prompt.clone(),
+            }),
+            _ => None,
+        };
         Ok(CloudRun {
             spec,
-            run_id,
+            run_id: rec.run_id.clone(),
             merge,
-            strand: r.strand,
-            timeout_note,
+            strand,
+            timeout_note: None,
             chain: None,
         })
     }
@@ -1921,23 +1941,6 @@ impl DevJobs {
             .await
     }
 
-    /// `devjob_start` with `host: "cloud"`: resolve, create, answer.
-    pub async fn start_cloud(&self, req: CloudStart, origin: &str) -> Result<Value, String> {
-        let run = self.resolve_cloud(req).await?;
-        let started = self.create_cloud_run(&run, origin).await?;
-        Ok(json!({
-            "run_id": run.run_id,
-            "host": "cloud",
-            "job_name": started.job_name,
-            "queued": true,
-            "waiting_for": self.runtime()?.queued_reason().trim_start_matches("queued: "),
-            "branch": format!("jesse/{}", started.branch_slug),
-            "merge": run.merge.annotation(),
-            "timeout_minutes": started.timeout_minutes,
-            "timeout_note": run.timeout_note,
-        }))
-    }
-
     /// The labelled Job whose name, or whose run id, is `key`.
     pub async fn find_cloud_job(&self, key: &str) -> Result<Option<JobView>, String> {
         let views = self.views().await?;
@@ -1950,10 +1953,26 @@ impl DevJobs {
         Ok(hits.into_iter().next())
     }
 
-    /// `devjob_cancel` of a cloud run: a queued Job and its ConfigMap are deleted (nothing ran,
-    /// nothing is reported); a released one is marked cancelled and ended through its deadline,
-    /// and the watcher reports it from what it has.
+    /// `devjob_cancel` of a cloud Job no run record owns (one an earlier bridge created): a
+    /// queued Job and its ConfigMap are deleted (nothing ran, nothing is reported); a released one
+    /// is marked cancelled and ended through its deadline, and the watcher reports it from what
+    /// it has.
     pub async fn cancel_cloud(&self, key: &str) -> Result<Value, String> {
+        let (v, how) = self.stop_job(key).await?;
+        Ok(match how {
+            crate::hostrun::CloudCancel::Deleted => {
+                json!({ "run_id": v.run_id, "job_name": v.name, "host": "cloud", "status": "cancelled", "reported": false })
+            }
+            crate::hostrun::CloudCancel::Stopping => {
+                json!({ "run_id": v.run_id, "job_name": v.name, "host": "cloud", "status": "cancelling", "reported": "when the watcher next passes" })
+            }
+        })
+    }
+
+    /// Stop the Job `key` (its name or run id): delete it while it is suspended, else end it
+    /// through its deadline, marked cancelled. What [`DevJobs::cancel_cloud`] and a run record's
+    /// own cancel ([`crate::hostrun::CloudJobs`]) both do.
+    async fn stop_job(&self, key: &str) -> Result<(JobView, crate::hostrun::CloudCancel), String> {
         let Some(v) = self.find_cloud_job(key).await? else {
             return Err(format!("no cloud run is named {key:?}"));
         };
@@ -1978,9 +1997,7 @@ impl DevJobs {
             }
             eprintln!("jesse-bridge: devjob CANCEL {} (queued, deleted)", v.name);
             self.wake.notify_one();
-            return Ok(
-                json!({ "run_id": v.run_id, "job_name": v.name, "host": "cloud", "status": "cancelled", "reported": false }),
-            );
+            return Ok((v, crate::hostrun::CloudCancel::Deleted));
         }
         let patch = json!({
             "metadata": { "annotations": { ANN_CANCELLED: "true" } },
@@ -1992,13 +2009,13 @@ impl DevJobs {
             .map_err(|e| format!("could not stop the Job {}: {e}", v.name))?;
         eprintln!("jesse-bridge: devjob CANCEL {} (running, stopped)", v.name);
         self.wake.notify_one();
-        Ok(
-            json!({ "run_id": v.run_id, "job_name": v.name, "host": "cloud", "status": "cancelling", "reported": "when the watcher next passes" }),
-        )
+        Ok((v, crate::hostrun::CloudCancel::Stopping))
     }
 
-    /// Take queued Studio runs whose draft says `devjob-host: any` while a cloud slot is free and
-    /// a worker can be had. A run whose Job cannot be made goes back to the Studio's queue.
+    /// While a cloud slot is free and a worker can be had, take the first queued run whose host
+    /// allows the cloud, in the one queue's order ([`crate::hostrun::HostRuns::take_for_cloud`]),
+    /// and make its Job. The run keeps its record; its Job is named on it. A run whose Job
+    /// cannot be made now goes back to the queue; one the cloud can never run is refused.
     async fn drain_studio(&self, rt: &CloudRuntime, idle_ready: usize) {
         let Some(studio) = self.studio.get().cloned() else {
             return;
@@ -2006,6 +2023,35 @@ impl DevJobs {
         let Ok(notes) = self.notes() else {
             return;
         };
+        let Ok(all) = self.views().await else {
+            return;
+        };
+        let views: Vec<JobView> = all.into_iter().map(|(_, v)| v).collect();
+        studio.set_cloud_ids(views.iter().filter_map(|v| v.run_id.clone()).collect());
+        // A run taken but never named: the bridge stopped in between. Nothing is being taken
+        // now (this pass is the only taker), so each is adopted by its Job or queued again.
+        let s = studio.clone();
+        let unnamed = tokio::task::spawn_blocking(move || s.unnamed_on_cloud())
+            .await
+            .unwrap_or_default();
+        for rec in unnamed {
+            let s = studio.clone();
+            let id = rec.run_id.clone();
+            match adopted_job(&views, &rec) {
+                Some(v) => {
+                    let (job, branch) = (v.name.clone(), format!("jesse/{}", v.slug));
+                    eprintln!("jesse-bridge: devjob cloud: run {id} adopts its Job {job}");
+                    let _ =
+                        tokio::task::spawn_blocking(move || s.note_job(&id, &job, &branch)).await;
+                }
+                None => {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        s.return_from_cloud(&id, "the bridge stopped before its Job was made")
+                    })
+                    .await;
+                }
+            }
+        }
         loop {
             let views: Vec<JobView> = match self.views().await {
                 Ok(v) => v.into_iter().map(|(_, v)| v).collect(),
@@ -2028,24 +2074,68 @@ impl DevJobs {
                 return;
             };
             let id = rec.run_id.clone();
-            match self.moved_run(rt, &notes, &rec).await {
-                Ok(run) => match self.create_cloud_run(&run, "studio-queue").await {
-                    Ok(started) => {
-                        let s = studio.clone();
-                        let job = started.job_name.clone();
-                        let _ = tokio::task::spawn_blocking(move || s.note_moved(&id, &job)).await;
-                        eprintln!(
-                            "jesse-bridge: devjob cloud took Studio run {} as {}",
-                            run.run_id, started.job_name
-                        );
+            let run = studio
+                .section_of(&id)
+                .and_then(|section| self.record_run(rt, &notes, &rec, &section));
+            let run = match run {
+                Ok(run) => run,
+                Err(e) => {
+                    let s = studio.clone();
+                    let (i, why) = (id.clone(), e.clone());
+                    let after =
+                        tokio::task::spawn_blocking(move || s.refused_by_cloud(&i, &why)).await;
+                    let failed = after
+                        .ok()
+                        .flatten()
+                        .is_some_and(|r| r.status == crate::hostrun::RunStatus::Failed);
+                    if let (true, Some(n)) =
+                        (failed, self.sink.get().and_then(|s| s.notifier.clone()))
+                    {
+                        n.notify(
+                            "Failed".into(),
+                            format!("{id} in the cloud · {e}"),
+                            id.clone(),
+                        )
+                        .await;
                     }
-                    Err(e) => {
-                        let s = studio.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || s.return_from_cloud(&id, &e)).await;
-                        return;
+                    continue;
+                }
+            };
+            match self.create_cloud_run(&run, &rec.origin).await {
+                Ok(started) => {
+                    let s = studio.clone();
+                    let job = started.job_name.clone();
+                    let branch = format!("jesse/{}", started.branch_slug);
+                    let i = id.clone();
+                    let after =
+                        tokio::task::spawn_blocking(move || s.note_job(&i, &job, &branch)).await;
+                    eprintln!(
+                        "jesse-bridge: devjob cloud took run {id} as {}",
+                        started.job_name
+                    );
+                    // Cancelled while its Job was being made: stop the Job it now has.
+                    let cancelled = after.ok().flatten().is_some_and(|r| {
+                        r.round().is_some_and(|x| x.cancel_requested_at.is_some())
+                    });
+                    if cancelled {
+                        match self.stop_job(&started.job_name).await {
+                            Ok((_, crate::hostrun::CloudCancel::Deleted)) => {
+                                let s = studio.clone();
+                                let end = crate::hostrun::CloudEnd {
+                                    job: started.job_name.clone(),
+                                    status: crate::hostrun::RunStatus::Cancelled,
+                                    report_path: None,
+                                    continued_as: None,
+                                    error: None,
+                                };
+                                let _ =
+                                    tokio::task::spawn_blocking(move || s.cloud_ended(&end)).await;
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("jesse-bridge: devjob cloud {id}: {e}"),
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let s = studio.clone();
                     let _ = tokio::task::spawn_blocking(move || s.return_from_cloud(&id, &e)).await;
@@ -2053,51 +2143,6 @@ impl DevJobs {
                 }
             }
         }
-    }
-
-    /// A Studio run the cloud took, as a cloud run with the same id.
-    async fn moved_run(
-        &self,
-        rt: &CloudRuntime,
-        notes: &Path,
-        rec: &crate::hostrun::RunRecord,
-    ) -> Result<CloudRun, String> {
-        let path = rec
-            .prompt_path
-            .clone()
-            .ok_or_else(|| format!("{} has no draft", rec.run_id))?;
-        let src = std::fs::read_to_string(notes.join(&path))
-            .map_err(|e| format!("{path} is unreadable: {e}"))?;
-        let prompt = crate::hostrun::prompt_section(&src)
-            .ok_or_else(|| format!("{path} has no ## PROMPT section"))?;
-        let strand = match (&rec.strand, &rec.item_id) {
-            (Some(note), Some(id)) => Some(StrandRef {
-                note: note.clone(),
-                id: id.clone(),
-                prompt: path.clone(),
-            }),
-            _ => None,
-        };
-        let r = Resolved {
-            base_id: rec.run_id.clone(),
-            item_text: rec.item_text.clone(),
-            repo: rec.repo.clone(),
-            prompt,
-            model: rec.model.clone(),
-            asked_merge: draft_merge(&src),
-            strand,
-        };
-        let req = CloudStart {
-            kind: CloudKind::Draft {
-                draft: path,
-                repo: None,
-            },
-            merge: None,
-            agent: None,
-            test_command: None,
-            timeout_minutes: None,
-        };
-        self.finish_resolve(rt, req, r, rec.run_id.clone())
     }
 
     /// The dev job workers, as a pass sees them: the nodes in the pool, whether a dev job pod is
@@ -2354,6 +2399,26 @@ impl DevJobs {
                 Err(e) => eprintln!("jesse-bridge: devjob cloud: {e}"),
             }
         }
+    }
+}
+
+/// A run record's cancel reaches its Job through the cloud host's server.
+impl crate::hostrun::CloudJobs for DevJobs {
+    fn cancel<'a>(
+        &'a self,
+        job: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::hostrun::CloudCancel, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match self.stop_job(job).await {
+                Ok((_, how)) => Ok(how),
+                // Finished already: the watcher reports it and ends the run.
+                Err(e) if e.ends_with("has already finished") => {
+                    Ok(crate::hostrun::CloudCancel::Stopping)
+                }
+                Err(e) => Err(e),
+            }
+        })
     }
 }
 

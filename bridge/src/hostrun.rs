@@ -148,8 +148,9 @@ pub const TITLE_TAG_OWNER: &str = "jeremyandrews";
 pub const HOST_KEY: &str = "devjob-host";
 /// The `origin` of the agent turns this module sends.
 pub const STUDIO_RUN_ORIGIN: &str = "studio-run";
-/// `closed_reason` of a queued run a free cloud slot took (`devjob-host: any`), then ` as
-/// <job>` once its Job exists. See `docs/devjob-cloud.md`.
+/// `closed_reason` a bridge before 0.226.0 gave a queued run a free cloud slot took
+/// (`devjob-host: any`), then ` as <job>` once its Job existed. No run is closed so any more (the
+/// run keeps its record on the cloud); kept to read the records written then.
 pub const MOVED_TO_CLOUD: &str = "moved to the cloud";
 /// `closed_reason` when Jeremy closes a run and gives no reason.
 pub const CLOSED_BY_JEREMY: &str = "closed by Jeremy";
@@ -1007,7 +1008,73 @@ pub struct RunRecord {
     /// before 0.218.0), so their JSON is byte for byte what it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_wait: Option<MergeWait>,
+    /// Where the run may execute ([`RunHost`]). Written only when not the Studio, so every
+    /// record before 0.226.0 reads as a Studio run and a Studio record is byte for byte what it
+    /// was.
+    #[serde(default, skip_serializing_if = "RunHost::is_studio")]
+    pub host: RunHost,
+    /// The cloud half of a run that may execute on kc1 ([`CloudPart`]): what the start asked,
+    /// and once a cloud slot took it, its Jobs. Absent on every Studio run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudPart>,
 }
+
+/// Where a run may execute: the Studio (the default), the cloud (`host: "cloud"`), or either,
+/// whichever slot frees first (a draft's `devjob-host: any`). One queue serves all three
+/// ([`queue_order`]): a Studio slot takes the first queued run that allows the Studio, a cloud
+/// slot the first that allows the cloud ([`HostRuns::take_for_cloud`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunHost {
+    #[default]
+    Studio,
+    Cloud,
+    Any,
+}
+
+impl RunHost {
+    pub fn is_studio(&self) -> bool {
+        *self == RunHost::Studio
+    }
+
+    /// Whether a Studio slot may start the run.
+    pub fn allows_studio(self) -> bool {
+        self != RunHost::Cloud
+    }
+}
+
+/// What the run's cloud half holds ([`RunRecord::cloud`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudPart {
+    /// The start's `merge`; `None` defers to the draft's `devjob-merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<bool>,
+    /// The start's `agent`; `None` is the bridge's default agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_command: Option<String>,
+    /// The start's `timeout_minutes`, as asked; the cloud's cap applies when its Job is made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_minutes: Option<u64>,
+    /// When a cloud slot took the run (RFC 3339): from then on the run is on the cloud and the
+    /// Studio's own passes leave it alone ([`RunRecord::on_cloud`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_at: Option<String>,
+    /// The Job the run executes as now: its first, or the newest link of its continuation chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_name: Option<String>,
+    /// Every Job the run executed as, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
+}
+
+/// The automatic round a cloud run gets when its Job hit its time limit and continues from its
+/// checkpoint as a new Job ([`HostRuns::cloud_ended`]).
+pub const AUTO_CONTINUATION: &str = "continuation";
+
+/// Why a queued cloud run waits: for a free cloud slot ([`HostRuns::take_for_cloud`]).
+pub const WAITING_CLOUD: &str = "cloud";
 
 /// What an `awaiting_merge` run waits on ([`RunRecord::merge_wait`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1125,6 +1192,32 @@ pub fn merge_push_body(rec: &RunRecord, w: &MergeWait) -> String {
 }
 
 impl RunRecord {
+    /// Whether a cloud slot has taken the run: its Job, not a Studio runner, executes it.
+    pub fn on_cloud(&self) -> bool {
+        self.cloud.as_ref().is_some_and(|c| c.taken_at.is_some())
+    }
+
+    /// Whether the run is the cloud's: on it, or asked for it alone.
+    pub fn is_cloud(&self) -> bool {
+        self.on_cloud() || self.host == RunHost::Cloud
+    }
+
+    /// The host the routes and the tools name: `cloud` for a cloud run, else `studio`.
+    pub fn served_host(&self) -> &'static str {
+        if self.is_cloud() {
+            "cloud"
+        } else {
+            "studio"
+        }
+    }
+
+    /// Whether the run owns the Job `job`.
+    pub fn owns_job(&self, job: &str) -> bool {
+        self.cloud
+            .as_ref()
+            .is_some_and(|c| c.job_name.as_deref() == Some(job) || c.jobs.iter().any(|j| j == job))
+    }
+
     /// Every reviewer of a reviewed run, in order: `reviewers`, or a 0.211.0 record's one
     /// `reviewer`. Empty for a run that is not reviewed.
     pub fn reviewer_ids(&self) -> Vec<String> {
@@ -1427,10 +1520,23 @@ pub fn nth_run_id(base: &str, n: usize) -> String {
 /// never take the same one. Every earlier directory counts, whatever its status, so an id (and the
 /// branch, the Inbox file and the launchd label made from it) is never reused.
 pub fn allocate_run_id(runs_dir: &Path, base: &str) -> Result<String, String> {
+    allocate_run_id_except(runs_dir, base, |_| false)
+}
+
+/// [`allocate_run_id`], also passing over every id `taken` names: the run ids of cloud Jobs no
+/// record owns (an earlier bridge's), so a new run never shares an id with one.
+pub fn allocate_run_id_except(
+    runs_dir: &Path,
+    base: &str,
+    taken: impl Fn(&str) -> bool,
+) -> Result<String, String> {
     std::fs::create_dir_all(runs_dir)
         .map_err(|e| format!("could not create {}: {e}", runs_dir.display()))?;
     for n in 0..10_000 {
         let id = nth_run_id(base, n);
+        if taken(&id) {
+            continue;
+        }
         match std::fs::create_dir(runs_dir.join(&id)) {
             Ok(()) => return Ok(id),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2543,6 +2649,39 @@ pub fn drainable(r: &RunRecord) -> bool {
         && !is_local_repo(&r.repo)
 }
 
+/// The cloud's own opt in for a start: a draft must say `devjob-host: cloud` or `any`. A draft
+/// that cannot be read again (`src` `None`) is refused, never taken as opted in.
+pub fn cloud_opt_in(path: Option<&str>, src: Option<&str>) -> Result<(), String> {
+    match (path, src) {
+        (None, _) => Ok(()),
+        (Some(path), Some(src)) => crate::devjob::cloud::check_cloud_capable(path, src),
+        (Some(path), None) => Err(format!(
+            "{path} could not be read again to check its {HOST_KEY}"
+        )),
+    }
+}
+
+/// Whether a free cloud slot may take this queued run ([`HostRuns::take_for_cloud`]): one asked
+/// for the cloud, or a [`drainable`] one that may run on either host. A record from before
+/// 0.226.0 has no `host`, so its draft's `devjob-host: any` is read instead.
+fn cloud_may_take(r: &RunRecord, notes_root: &Path) -> bool {
+    if r.status != RunStatus::Queued {
+        return false;
+    }
+    match r.host {
+        RunHost::Cloud => true,
+        RunHost::Any => drainable(r),
+        RunHost::Studio => {
+            drainable(r)
+                && r.prompt_path.as_deref().is_some_and(|p| {
+                    std::fs::read_to_string(notes_root.join(p)).is_ok_and(|src| {
+                        crate::devjob::cloud::DraftHost::of(&src).drains_to_cloud()
+                    })
+                })
+        }
+    }
+}
+
 /// Archive the run in `dir` with `reason` if, read again under its lock, its status is one
 /// `may` accepts. An archived run keeps its first `archived_at` and reason. `Ok(Err(status))`
 /// when its status had moved to one `may` refuses.
@@ -2794,6 +2933,44 @@ pub struct HostRuns {
     /// Each `awaiting_merge` run's check in flight ([`HostRuns::start_merge_checks`]). Not run
     /// state: a restart simply checks again.
     merge_checks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Who runs the cloud's Jobs ([`HostRuns::attach_cloud`]), when this bridge has a cloud.
+    cloud_jobs: OnceLock<Arc<dyn CloudJobs>>,
+    /// The run ids the cloud's Jobs carry, as its watcher last listed them
+    /// ([`HostRuns::set_cloud_ids`]): a new run's id is none of them. Not run state.
+    cloud_ids: Mutex<HashSet<String>>,
+}
+
+/// How a cloud run's Job was stopped ([`CloudJobs::cancel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudCancel {
+    /// It had not started: deleted, nothing ran and nothing is reported.
+    Deleted,
+    /// It was running: ended through its deadline; the cloud's watcher reports it.
+    Stopping,
+}
+
+/// The cloud's Jobs, as the run record needs them: only stopping one. Everything else a cloud
+/// run's Job does (its creation, its report) the cloud's watcher drives. A test's fake, or the
+/// cloud host's [`crate::devjob::DevJobs`].
+pub trait CloudJobs: Send + Sync {
+    fn cancel<'a>(
+        &'a self,
+        job: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<CloudCancel, String>> + Send + 'a>>;
+}
+
+/// How a cloud run's Job ended, once its report is written ([`HostRuns::cloud_ended`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudEnd {
+    /// The Job's name.
+    pub job: String,
+    /// The run's status from the report: `reported`, `failed` or `cancelled`.
+    pub status: RunStatus,
+    /// The report's path under the notes directory.
+    pub report_path: Option<String>,
+    /// The Job the run continues as from its checkpoint, when it hit its time limit.
+    pub continued_as: Option<String>,
+    pub error: Option<String>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -2829,6 +3006,8 @@ impl HostRuns {
             reviewer: OnceLock::new(),
             reviewing: Mutex::new(HashSet::new()),
             merge_checks: Mutex::new(HashMap::new()),
+            cloud_jobs: OnceLock::new(),
+            cloud_ids: Mutex::new(HashSet::new()),
         }
     }
 
@@ -2960,6 +3139,19 @@ impl HostRuns {
     /// Create a run, queued, and try to start it. The caller wakes the watcher and sends the
     /// start turn ([`HostRuns::start`] does both).
     pub fn create(&self, req: &StartRequest) -> Result<StartedRun, Refusal> {
+        self.create_on(req, None)
+    }
+
+    /// [`HostRuns::create`], for the Studio (`cloud` `None`) or the cloud (`cloud` holds what
+    /// the start asked of it). One path for both: the same checks, the same run id, the same
+    /// queue. The cloud adds only its own two: no `local/` repository, and a draft must say
+    /// `devjob-host: cloud` or `any`. A cloud run waits for a cloud slot
+    /// ([`HostRuns::take_for_cloud`]); a Studio run whose draft says `any` may take either.
+    pub fn create_on(
+        &self,
+        req: &StartRequest,
+        cloud: Option<CloudPart>,
+    ) -> Result<StartedRun, Refusal> {
         let claude = self
             .settings
             .claude_path()
@@ -3061,11 +3253,35 @@ impl HostRuns {
                 )
             }
         };
+        // Where it may execute. A draft is read once more here for its `devjob-host`.
+        let draft_host = prompt_path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(self.notes_root.join(p)).ok())
+            .map(|src| (crate::devjob::cloud::DraftHost::of(&src), src));
+        let host = match (&cloud, &draft_host) {
+            (Some(_), _) => RunHost::Cloud,
+            (None, Some((h, _))) if h.drains_to_cloud() => RunHost::Any,
+            (None, _) => RunHost::Studio,
+        };
+        if cloud.is_some() {
+            if is_local_repo(&repo) {
+                return Err(Refusal::Invalid(devjob::LOCAL_ONLY_STUDIO.into()));
+            }
+            cloud_opt_in(
+                prompt_path.as_deref(),
+                draft_host.as_ref().map(|(_, src)| src.as_str()),
+            )
+            .map_err(Refusal::Invalid)?;
+        }
         // A REVIEWED run: the reviewers are resolved and checked now, before anything is
         // created ([`HostRuns::resolve_reviewers`]).
         let focus = review::checked_focus(req.review_focus.as_deref())
             .map_err(|e| Refusal::Invalid(format!("review_{e}")))?;
-        let picked = self.resolve_reviewers(req.reviewer.as_ref(), draft_reviewer.as_ref())?;
+        let picked = if cloud.is_some() {
+            Self::cloud_reviewers(req, prompt_path.as_deref(), draft_reviewer.as_ref())?
+        } else {
+            self.resolve_reviewers(req.reviewer.as_ref(), draft_reviewer.as_ref())?
+        };
         if picked.infos.is_empty() && picked.skipped.is_empty() && focus.is_some() {
             return Err(Refusal::Invalid(
                 "review_focus needs a reviewer: pass reviewer too".into(),
@@ -3073,7 +3289,10 @@ impl HostRuns {
         }
         // The repository's env file must be readable now; the runner reads it again at each
         // round. Its contents are dropped here: only the path is recorded.
-        let env_file = self.settings.env_file(&repo).map(Path::to_path_buf);
+        let env_file = match &cloud {
+            Some(_) => None,
+            None => self.settings.env_file(&repo).map(Path::to_path_buf),
+        };
         if let Some(p) = &env_file {
             read_env_file(p).map_err(|e| Refusal::Invalid(format!("{repo}: {e}")))?;
         }
@@ -3091,9 +3310,20 @@ impl HostRuns {
             }
         }
         let runs_dir = self.settings.runs_dir();
-        let run_id = allocate_run_id(&runs_dir, &base).map_err(Refusal::Internal)?;
+        let external = lock(&self.cloud_ids).clone();
+        let run_id = allocate_run_id_except(&runs_dir, &base, |id| external.contains(id))
+            .map_err(Refusal::Internal)?;
         let dir = runs_dir.join(&run_id);
         let now = rfc(now_ms());
+        // A cloud run's branch is the one its Job pushes: `jesse/<slug>`.
+        let branch = match (&cloud, &req.kind) {
+            (None, _) => branch_name(&run_id, branch_text.as_deref()),
+            (Some(_), StartKind::Free { slug, .. }) => format!("jesse/{slug}"),
+            (Some(_), _) => format!(
+                "jesse/{}",
+                crate::devjob::cloud::cloud_slug(&run_id, branch_text.as_deref())
+            ),
+        };
         let rec = RunRecord {
             run_id: run_id.clone(),
             strand: step.as_ref().map(|s| s.0.clone()),
@@ -3101,9 +3331,12 @@ impl HostRuns {
             prompt_path,
             item_text: branch_text.clone(),
             repo,
-            branch: branch_name(&run_id, branch_text.as_deref()),
+            branch,
             origin: req.origin.clone(),
             status: RunStatus::Queued,
+            waiting_for: cloud.as_ref().map(|_| WAITING_CLOUD.to_string()),
+            host,
+            cloud: cloud.clone(),
             created_at: now.clone(),
             queued_at: Some(now.clone()),
             rounds: vec![Round {
@@ -3145,9 +3378,14 @@ impl HostRuns {
             return Err(Refusal::Internal(e));
         }
         eprintln!(
-            "jesse-bridge: hostrun CREATE {run_id} repo={} origin={}{}{}",
+            "jesse-bridge: hostrun CREATE {run_id} repo={} origin={}{}{}{}",
             rec.repo,
             rec.origin,
+            match rec.host {
+                RunHost::Studio => "",
+                RunHost::Cloud => " host=cloud",
+                RunHost::Any => " host=any",
+            },
             step.as_ref()
                 .map(|(s, i)| format!(" strand={s} item={i}"))
                 .unwrap_or_default(),
@@ -3185,25 +3423,71 @@ impl HostRuns {
         Ok(StartedRun {
             run_id,
             status: RunStatus::Queued,
-            waiting_for: None,
+            waiting_for: rec.waiting_for.clone(),
             step,
+        })
+    }
+
+    /// Who reviews a cloud run: nobody yet. A reviewer the start names is refused; the draft's
+    /// `devjob-reviewer:` and `[hostrun] default_reviewers` do not apply.
+    fn cloud_reviewers(
+        req: &StartRequest,
+        path: Option<&str>,
+        draft: Option<&review::ReviewerArg>,
+    ) -> Result<Picked, Refusal> {
+        // A draft that asks for a review is not run unreviewed: it is refused, as a start's
+        // `reviewer` is, until cloud runs are reviewed.
+        if let Ok(review::ReviewerChoice::Ids(ids)) = review::choose(draft) {
+            return Err(Refusal::Invalid(format!(
+                "{} says {REVIEWER_KEY}: {}, and cloud runs are not reviewed yet: start it on \
+                 the Studio, or say {REVIEWER_KEY}: none",
+                path.unwrap_or("the draft"),
+                ids.join(", ")
+            )));
+        }
+        let off = matches!(
+            review::choose(req.reviewer.as_ref()),
+            Ok(review::ReviewerChoice::Off)
+        );
+        if (req.reviewer.is_some() && !off) || req.review_focus.is_some() {
+            return Err(Refusal::Invalid(
+                "reviewer and review_focus apply only with host \"studio\": cloud runs are not \
+                 reviewed"
+                    .into(),
+            ));
+        }
+        Ok(Picked {
+            infos: Vec::new(),
+            skipped: Vec::new(),
+            source: review::SOURCE_NONE,
         })
     }
 
     /// The id a further run of `base` would take now (for the "start it too?" question).
     fn next_free_id(&self, base: &str) -> String {
         let dir = self.settings.runs_dir();
+        let external = lock(&self.cloud_ids).clone();
         (0..10_000)
             .map(|n| nth_run_id(base, n))
-            .find(|id| !dir.join(id).exists())
+            .find(|id| !dir.join(id).exists() && !external.contains(id))
             .unwrap_or_else(|| base.to_string())
     }
 
     /// Create and queue a run, start what the queue allows, and send the start turn for a
     /// strand item. Every entry point (the route, the tool, a schedule entry) comes here.
     pub async fn start(self: &Arc<Self>, req: StartRequest) -> Result<StartedRun, Refusal> {
+        self.start_on(req, None).await
+    }
+
+    /// [`HostRuns::start`] on a host: `cloud` as [`HostRuns::create_on`] takes it. A cloud run
+    /// is started by the cloud's own watcher, which the caller wakes.
+    pub async fn start_on(
+        self: &Arc<Self>,
+        req: StartRequest,
+        cloud: Option<CloudPart>,
+    ) -> Result<StartedRun, Refusal> {
         let this = self.clone();
-        let created = tokio::task::spawn_blocking(move || this.create(&req))
+        let created = tokio::task::spawn_blocking(move || this.create_on(&req, cloud))
             .await
             .map_err(|e| Refusal::Internal(format!("the start task failed: {e}")))??;
         if let Some((strand, item)) = &created.step {
@@ -3268,17 +3552,17 @@ impl HostRuns {
         let _gate = lock(&self.gate);
         let mut effects = Vec::new();
         let runs = self.runs();
-        let mut running_total = runs
-            .iter()
-            .filter(|(_, r)| r.status == RunStatus::Running)
-            .count();
+        // A run on the cloud holds a cloud slot, not one of these.
+        let on_studio = |r: &RunRecord| r.status == RunStatus::Running && !r.on_cloud();
+        let mut running_total = runs.iter().filter(|(_, r)| on_studio(r)).count();
         let mut per_repo: BTreeMap<String, usize> = BTreeMap::new();
-        for (_, r) in runs.iter().filter(|(_, r)| r.status == RunStatus::Running) {
+        for (_, r) in runs.iter().filter(|(_, r)| on_studio(r)) {
             *per_repo.entry(r.repo.clone()).or_default() += 1;
         }
+        // One queue for both hosts: a Studio slot takes the first that allows the Studio.
         let mut queued: Vec<&(PathBuf, RunRecord)> = runs
             .iter()
-            .filter(|(_, r)| r.status == RunStatus::Queued)
+            .filter(|(_, r)| r.status == RunStatus::Queued && r.host.allows_studio())
             .collect();
         // Resumed rounds, then priority, then the order of the wait ([`queue_order`]). Each run
         // is still checked on its own below, so a high run in a full repository leaves the slot
@@ -3504,6 +3788,13 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
+        if let Some(r) = self.get(run_id).filter(RunRecord::is_cloud) {
+            return Err(Refusal::State(format!(
+                "{} is a cloud run: its agent ran in a pod that has no session to continue, so \
+                 it takes no reply; start it again, or close it",
+                r.run_id
+            )));
+        }
         if text.trim() == CONTINUE_TEXT {
             match self.get(run_id) {
                 Some(r) if r.status == RunStatus::NeedsYou => {
@@ -3925,6 +4216,17 @@ impl HostRuns {
                 eprintln!("jesse-bridge: hostrun CANCEL {run_id} (during its review)");
                 Ok(updated)
             }
+            // On the cloud: marked here; its Job is stopped by [`HostRuns::cancel_on_cloud`].
+            RunStatus::Running if rec.on_cloud() => {
+                let updated = update_run(&dir, |r| {
+                    if let Some(cur) = r.round_mut() {
+                        cur.cancel_requested_at.get_or_insert(now.clone());
+                    }
+                })
+                .map_err(Refusal::Internal)?;
+                eprintln!("jesse-bridge: hostrun CANCEL {run_id} (on the cloud)");
+                Ok(updated)
+            }
             RunStatus::Running => {
                 if rec.round().is_some_and(|r| r.cancel_requested_at.is_some()) {
                     return Ok(rec);
@@ -3958,87 +4260,267 @@ impl HostRuns {
         self.runs().into_iter().map(|(_, r)| r.run_id).collect()
     }
 
-    /// The first queued run in [`queue_order`] a free cloud slot may take, already taken: one that is waiting
-    /// (`waiting_for` set), has never started, runs a draft that says `devjob-host: any`, and is
-    /// not on a local repository. It becomes `closed` ([`MOVED_TO_CLOUD`]) under the queue's
-    /// gate, so the pump cannot start it as well. `None` when nothing qualifies.
+    /// The first queued run in [`queue_order`] a free cloud slot may take, already taken: one
+    /// asked for the cloud (`host: "cloud"`), or one that may run on either host (`any`) and
+    /// waits for a Studio slot without ever having started ([`drainable`]). A record from
+    /// before 0.226.0 has no `host`; its draft's `devjob-host: any` stands in. The run keeps its
+    /// id and its record: it becomes `running`, on the cloud (`cloud.taken_at`), under the
+    /// queue's gate, so the pump cannot start it as well. The caller names its Job
+    /// ([`HostRuns::note_job`]) or gives it back ([`HostRuns::return_from_cloud`]). `None` when
+    /// nothing qualifies.
     pub fn take_for_cloud(&self, notes_root: &Path) -> Option<RunRecord> {
         let _gate = lock(&self.gate);
         let mut queued: Vec<(PathBuf, RunRecord)> = self
             .runs()
             .into_iter()
-            .filter(|(_, r)| drainable(r))
+            .filter(|(_, r)| r.status == RunStatus::Queued)
             .collect();
         queued.sort_by(|a, b| queue_order(&a.1, &b.1));
         for (dir, r) in queued {
-            let Some(path) = &r.prompt_path else { continue };
-            let Ok(src) = std::fs::read_to_string(notes_root.join(path)) else {
-                continue;
-            };
-            if !crate::devjob::cloud::DraftHost::of(&src).drains_to_cloud() {
+            if !cloud_may_take(&r, notes_root) {
                 continue;
             }
             let now = rfc(now_ms());
             let mut took = false;
             let rec = update_run(&dir, |x| {
-                if !drainable(x) {
+                if x.status != RunStatus::Queued || !(x.host == RunHost::Cloud || drainable(x)) {
                     return;
                 }
-                x.status = RunStatus::Closed;
-                x.closed_reason = Some(MOVED_TO_CLOUD.to_string());
-                x.closed_at = Some(now.clone());
+                x.status = RunStatus::Running;
                 x.waiting_for = None;
-                x.finished_at = Some(now.clone());
+                x.started_at = Some(now.clone());
+                x.error = None;
                 if let Some(cur) = x.round_mut() {
-                    cur.outcome = Some(RunStatus::Closed);
-                    cur.finished_at = Some(now.clone());
-                    cur.notified = true;
+                    cur.started_at = Some(now.clone());
                 }
+                x.cloud.get_or_insert_with(CloudPart::default).taken_at = Some(now.clone());
                 took = true;
             })
             .ok()?;
             if took {
-                eprintln!("jesse-bridge: hostrun {}: {MOVED_TO_CLOUD}", rec.run_id);
+                eprintln!(
+                    "jesse-bridge: hostrun {}: taken by a cloud slot",
+                    rec.run_id
+                );
                 return Some(rec);
             }
         }
         None
     }
 
-    /// Name the Job a run [`HostRuns::take_for_cloud`] gave away became.
-    pub fn note_moved(&self, run_id: &str, job: &str) {
-        let _gate = lock(&self.gate);
-        let _ = update_run(&self.settings.run_dir(run_id), |x| {
-            if x.closed_reason.as_deref() == Some(MOVED_TO_CLOUD) {
-                x.closed_reason = Some(format!("{MOVED_TO_CLOUD} as {job}"));
-            }
-        });
+    /// The run ids the cloud's Jobs carry now: a new run takes none of them.
+    pub fn set_cloud_ids(&self, ids: HashSet<String>) {
+        *lock(&self.cloud_ids) = ids;
     }
 
-    /// Give a run back to the Studio's queue when the cloud could not make its Job: queued again
-    /// at its old place, with the reason in `error`.
+    /// Runs a cloud slot took whose Job was never named: the bridge stopped between taking one
+    /// and naming its Job. The cloud adopts the Job it finds for each, else queues it again.
+    pub fn unnamed_on_cloud(&self) -> Vec<RunRecord> {
+        self.runs()
+            .into_iter()
+            .map(|(_, r)| r)
+            .filter(|r| {
+                r.status == RunStatus::Running
+                    && r.on_cloud()
+                    && r.cloud.as_ref().is_some_and(|c| c.job_name.is_none())
+            })
+            .collect()
+    }
+
+    /// The prompt a run was created with (`section.md`): what a cloud run's Job is given.
+    pub fn section_of(&self, run_id: &str) -> Result<String, String> {
+        if !valid_run_id(run_id) {
+            return Err(format!("{run_id:?} cannot name a run"));
+        }
+        std::fs::read_to_string(self.settings.run_dir(run_id).join(SECTION_MD))
+            .map_err(|e| format!("{run_id}'s {SECTION_MD} is unreadable: {e}"))
+    }
+
+    /// Name the Job a run [`HostRuns::take_for_cloud`] took runs as, and the branch it pushes.
+    /// Answers the record: when a cancel came in meanwhile (`cancel_requested_at`), the caller
+    /// stops the Job it just made.
+    pub fn note_job(&self, run_id: &str, job: &str, branch: &str) -> Option<RunRecord> {
+        let _gate = lock(&self.gate);
+        update_run(&self.settings.run_dir(run_id), |x| {
+            if !x.on_cloud() {
+                return;
+            }
+            x.branch = branch.to_string();
+            if let Some(c) = x.cloud.as_mut() {
+                c.job_name = Some(job.to_string());
+                if !c.jobs.iter().any(|j| j == job) {
+                    c.jobs.push(job.to_string());
+                }
+            }
+        })
+        .ok()
+    }
+
+    /// Give a run back to the queue when the cloud could not make its Job (kc1 did not answer,
+    /// say): queued again at its old place, with the reason in `error`. A run already named a
+    /// Job is not given back.
     pub fn return_from_cloud(&self, run_id: &str, why: &str) {
         let _gate = lock(&self.gate);
         let res = update_run(&self.settings.run_dir(run_id), |x| {
-            if x.status != RunStatus::Closed || x.closed_reason.as_deref() != Some(MOVED_TO_CLOUD) {
+            let unnamed = x.cloud.as_ref().is_some_and(|c| c.job_name.is_none());
+            if x.status != RunStatus::Running || !x.on_cloud() || !unnamed {
                 return;
             }
             x.status = RunStatus::Queued;
-            x.closed_reason = None;
-            x.closed_at = None;
-            x.finished_at = None;
+            x.started_at = None;
+            x.waiting_for = Some(WAITING_CLOUD.to_string());
             x.error = Some(format!("the cloud could not take it: {why}"));
+            if let Some(c) = x.cloud.as_mut() {
+                c.taken_at = None;
+            }
             if let Some(cur) = x.round_mut() {
-                cur.outcome = None;
-                cur.finished_at = None;
-                cur.notified = false;
+                cur.started_at = None;
             }
         });
-        eprintln!("jesse-bridge: hostrun {run_id}: back in the Studio queue: {why}");
+        eprintln!("jesse-bridge: hostrun {run_id}: back in the queue: {why}");
         if let Err(e) = res {
             eprintln!("jesse-bridge: hostrun {run_id}: {e}");
         }
         self.wake();
+    }
+
+    /// A run the cloud took but can never run (its prompt is gone, its repository is refused):
+    /// a cloud run fails with the reason; an `any` run goes back to the queue as a Studio run.
+    pub fn refused_by_cloud(&self, run_id: &str, why: &str) -> Option<RunRecord> {
+        let _gate = lock(&self.gate);
+        let now = rfc(now_ms());
+        let rec = update_run(&self.settings.run_dir(run_id), |x| {
+            let unnamed = x.cloud.as_ref().is_some_and(|c| c.job_name.is_none());
+            if x.status != RunStatus::Running || !x.on_cloud() || !unnamed {
+                return;
+            }
+            x.error = Some(format!("the cloud cannot run it: {why}"));
+            if x.host == RunHost::Cloud {
+                x.status = RunStatus::Failed;
+                x.finished_at = Some(now.clone());
+                if let Some(cur) = x.round_mut() {
+                    cur.finished_at = Some(now.clone());
+                    cur.outcome = Some(RunStatus::Failed);
+                    cur.notified = true;
+                }
+            } else {
+                x.host = RunHost::Studio;
+                x.cloud = None;
+                x.status = RunStatus::Queued;
+                x.started_at = None;
+                if let Some(cur) = x.round_mut() {
+                    cur.started_at = None;
+                }
+            }
+        })
+        .ok();
+        eprintln!("jesse-bridge: hostrun {run_id}: the cloud cannot run it: {why}");
+        self.wake();
+        rec
+    }
+
+    /// A Job the cloud ran for a run has ended and been reported ([`CloudEnd`]): the run's round
+    /// ends with the report's path and outcome, and the run takes the outcome as its status. A
+    /// capped Job that continues as a new one is the same run's next round, still running, on
+    /// the new Job. `None` when no run owns the Job (one an earlier bridge created).
+    pub fn cloud_ended(&self, end: &CloudEnd) -> Option<RunRecord> {
+        let _gate = lock(&self.gate);
+        let (dir, _) = self
+            .runs()
+            .into_iter()
+            .find(|(_, r)| r.owns_job(&end.job))?;
+        let now = rfc(now_ms());
+        let mut changed = false;
+        let rec = update_run(&dir, |x| {
+            if x.status != RunStatus::Running
+                || x.cloud.as_ref().and_then(|c| c.job_name.as_deref()) != Some(end.job.as_str())
+            {
+                return;
+            }
+            changed = true;
+            if let Some(cur) = x.round_mut() {
+                cur.finished_at = Some(now.clone());
+                cur.report_path = end.report_path.clone();
+                cur.outcome = Some(if end.continued_as.is_some() {
+                    RunStatus::Failed
+                } else {
+                    end.status
+                });
+                cur.notified = true;
+            }
+            match &end.continued_as {
+                Some(next) => {
+                    let n = x.rounds.len() as u32 + 1;
+                    x.rounds.push(Round {
+                        n,
+                        queued_at: now.clone(),
+                        started_at: Some(now.clone()),
+                        auto: Some(AUTO_CONTINUATION.to_string()),
+                        ..Round::default()
+                    });
+                    if let Some(c) = x.cloud.as_mut() {
+                        c.job_name = Some(next.clone());
+                        if !c.jobs.iter().any(|j| j == next) {
+                            c.jobs.push(next.clone());
+                        }
+                    }
+                }
+                None => {
+                    x.status = end.status;
+                    x.finished_at = Some(now.clone());
+                    if end.error.is_some() {
+                        x.error = end.error.clone();
+                    }
+                }
+            }
+        })
+        .ok()?;
+        if changed {
+            eprintln!(
+                "jesse-bridge: hostrun {}: its Job {} ended: {}",
+                rec.run_id,
+                end.job,
+                match &end.continued_as {
+                    Some(next) => format!("continuing as {next}"),
+                    None => end.status.label().to_string(),
+                }
+            );
+        }
+        Some(rec)
+    }
+
+    /// Who runs cloud Jobs for this bridge's cloud runs. Until it is attached a cloud run's
+    /// Job cannot be cancelled from here.
+    pub fn attach_cloud(&self, cloud: Arc<dyn CloudJobs>) {
+        let _ = self.cloud_jobs.set(cloud);
+    }
+
+    /// The Job half of cancelling a cloud run [`HostRuns::cancel`] marked: a Job that never
+    /// started is deleted and the run is cancelled now; a running one is ended through its
+    /// deadline and reported by the cloud's watcher, which ends the run.
+    async fn cancel_on_cloud(&self, rec: &RunRecord) -> Result<(), Refusal> {
+        let Some(job) = rec.cloud.as_ref().and_then(|c| c.job_name.clone()) else {
+            // Being taken: the taker sees the cancel when it names the Job.
+            return Ok(());
+        };
+        let Some(cloud) = self.cloud_jobs.get().cloned() else {
+            return Err(Refusal::Internal(
+                "the cloud host ([devjob.cloud]) is not attached to this bridge".into(),
+            ));
+        };
+        match cloud.cancel(&job).await.map_err(Refusal::Internal)? {
+            CloudCancel::Stopping => Ok(()),
+            CloudCancel::Deleted => {
+                self.cloud_ended(&CloudEnd {
+                    job,
+                    status: RunStatus::Cancelled,
+                    report_path: None,
+                    continued_as: None,
+                    error: None,
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Cancel, then wake the watcher now and again once the grace has passed.
@@ -4048,6 +4530,11 @@ impl HostRuns {
         let rec = tokio::task::spawn_blocking(move || this.cancel(&id))
             .await
             .map_err(|e| Refusal::Internal(format!("the cancel task failed: {e}")))??;
+        if rec.on_cloud() && rec.status == RunStatus::Running {
+            self.cancel_on_cloud(&rec).await?;
+            self.wake();
+            return Ok(self.get(run_id).unwrap_or(rec));
+        }
         self.wake();
         let this = self.clone();
         tokio::spawn(async move {
@@ -4932,6 +5419,12 @@ impl HostRuns {
         let rec = self
             .get(run_id)
             .ok_or_else(|| Refusal::NotFound(format!("{run_id:?} is not a Studio run")))?;
+        if rec.is_cloud() {
+            return Err(Refusal::State(format!(
+                "{run_id} is a cloud run: its work is a pushed branch, not a worktree here, so \
+                 it cannot be reviewed yet"
+            )));
+        }
         match rec.status {
             RunStatus::Queued | RunStatus::Running | RunStatus::Paused => {
                 return Err(Refusal::State(format!(
@@ -5160,7 +5653,8 @@ impl HostRuns {
         let mut effects = Vec::new();
         let mut finished = Vec::new();
         for (dir, r) in self.runs() {
-            if r.status != RunStatus::Running {
+            // A run on the cloud has no runner here: the cloud's watcher follows its Job.
+            if r.status != RunStatus::Running || r.on_cloud() {
                 continue;
             }
             let Some(round) = r.round().cloned() else {
@@ -6065,9 +6559,12 @@ impl HostRuns {
         let all: Vec<RunRecord> = self.runs().into_iter().map(|(_, r)| r).collect();
         let (archived, open): (Vec<&RunRecord>, Vec<&RunRecord>) =
             all.iter().partition(|r| r.is_archived());
-        let count = |s: RunStatus| open.iter().filter(|r| r.status == s).count();
-        let needs_me = open.iter().filter(|r| r.status.needs_me()).count();
-        let moving = open.iter().filter(|r| r.status.is_moving()).count();
+        // The Studio's tallies are the Studio's runs; a cloud run counts under `counts.cloud`
+        // ([`HostRuns::add_cloud`]).
+        let studio: Vec<&&RunRecord> = open.iter().filter(|r| !r.is_cloud()).collect();
+        let count = |s: RunStatus| studio.iter().filter(|r| r.status == s).count();
+        let needs_me = studio.iter().filter(|r| r.status.needs_me()).count();
+        let moving = studio.iter().filter(|r| r.status.is_moving()).count();
         let counts = json!({
             "running": count(RunStatus::Running),
             "queued": count(RunStatus::Queued),
@@ -6075,7 +6572,7 @@ impl HostRuns {
             "paused": count(RunStatus::Paused),
             "needs_me": needs_me,
             "moving": moving,
-            "finished": open.len() - needs_me - moving,
+            "finished": studio.len() - needs_me - moving,
             "archived": archived.len(),
         });
         let mut runs: Vec<&RunRecord> = match mode {
@@ -6285,7 +6782,11 @@ pub fn reviews_json(r: &RunRecord, notes_root: Option<&Path>) -> Value {
 pub fn run_json(r: &RunRecord) -> Value {
     let mut v = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
     if let Some(o) = v.as_object_mut() {
-        o.insert("host".into(), json!("studio"));
+        o.insert("host".into(), json!(r.served_host()));
+        // A cloud run names its Job, as a cloud row always has.
+        if let Some(job) = r.cloud.as_ref().and_then(|c| c.job_name.as_deref()) {
+            o.insert("job_name".into(), json!(job));
+        }
         o.insert(
             "report_paths".into(),
             json!(r
@@ -6572,13 +7073,28 @@ fn cloud_of(st: &AppState) -> Option<Arc<crate::devjob::DevJobs>> {
     cloud::cloud_server(st.cfg.devjob.service())
 }
 
-/// Refuse a per run action on a cloud run ([`cloud::refuse_cloud`]).
+/// The run record a per run route is about: any record when `?host=` is absent or `studio`;
+/// with `host=cloud`, only a cloud run's record (a Studio run of the same id is not it).
+fn record_for(
+    svc: &HostRuns,
+    run_id: &str,
+    q_host: Option<&str>,
+) -> Result<Option<RunRecord>, ApiError> {
+    let cloud = cloud::asked_cloud(q_host)?;
+    Ok(svc.get(run_id).filter(|r| !cloud || r.is_cloud()))
+}
+
+/// Refuse a per run action on a cloud Job no run record owns ([`cloud::refuse_cloud`]). A cloud
+/// run with a record is a run: the action goes on to its record, which answers for itself.
 async fn refuse_cloud(
     st: &AppState,
     svc: &HostRuns,
     run_id: &str,
     q: &HostQuery,
 ) -> Result<(), ApiError> {
+    if record_for(svc, run_id, q.host.as_deref())?.is_some_and(|r| r.is_cloud()) {
+        return Ok(());
+    }
     let studio_has = svc.get(run_id).is_some();
     cloud::refuse_cloud(
         run_id,
@@ -6650,10 +7166,19 @@ pub async fn jesse_run(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
-    if !cloud::asked_cloud(q.host.as_deref())? {
-        if let Some(r) = svc.get(&run_id) {
-            return Ok(Json(svc.served_one(&r)).into_response());
+    if let Some(r) = record_for(&svc, &run_id, q.host.as_deref())? {
+        let mut v = svc.served_one(&r);
+        // A run on the cloud: what its Job is doing now, when kc1 answers in time.
+        if let Some(job) = r.cloud.as_ref().and_then(|c| c.job_name.clone()) {
+            if r.status == RunStatus::Running {
+                if let Ok(Some((_, run))) = cloud::cloud_detail(cloud_of(&st), &job).await {
+                    v["waiting_for"] = json!(run.waiting_reason);
+                    v["last_line"] = json!(work::last_line_of(&run.log_tail));
+                    v["elapsed_secs"] = json!(run.elapsed_secs);
+                }
+            }
         }
+        return Ok(Json(v).into_response());
     }
     let (v, run) =
         cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(cloud_of(&st), &run_id).await)?;
@@ -6676,18 +7201,25 @@ pub async fn jesse_run_log(
 ) -> Result<Response, ApiError> {
     let svc = guard(&st, &headers)?;
     let tail = q.tail.unwrap_or(LOG_DEFAULT);
-    if !cloud::asked_cloud(q.host.as_deref())? {
-        let id = run_id.clone();
-        let lines = tokio::task::spawn_blocking(move || svc.log_lines(&id, tail))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if let Some(l) = lines {
-            return Ok(Json(log_json(&run_id, l)).into_response());
+    let record = record_for(&svc, &run_id, q.host.as_deref())?;
+    // A cloud run's log is its current Job's; with no Job yet it has none.
+    let key = match &record {
+        Some(r) if r.is_cloud() => match r.cloud.as_ref().and_then(|c| c.job_name.clone()) {
+            Some(job) => job,
+            None => return Ok(Json(log_json(&run_id, Vec::new())).into_response()),
+        },
+        Some(_) => {
+            let id = run_id.clone();
+            let lines = tokio::task::spawn_blocking(move || svc.log_lines(&id, tail))
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            return Ok(Json(log_json(&run_id, lines.unwrap_or_default())).into_response());
         }
-    }
+        None => run_id.clone(),
+    };
     let server = cloud_of(&st);
     let (v, run) =
-        cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(server.clone(), &run_id).await)?;
+        cloud::cloud_lookup_answer(&run_id, cloud::cloud_detail(server.clone(), &key).await)?;
     let kept = server.and_then(|c| c.kept_tail(&v.name));
     let lines = cloud::cloud_log_lines(kept, &run, tail.clamp(1, LOG_MAX));
     Ok(Json(log_json(&run_id, lines)).into_response())

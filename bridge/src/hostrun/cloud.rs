@@ -1,25 +1,25 @@
-//! Cloud dev jobs on the app's Runs page (0.216.0).
+//! Cloud dev jobs on the app's Runs page (0.216.0; one run pipeline, 0.226.0).
 //!
-//! `GET /jesse/runs` lists the Studio's runs. The cloud's runs (`host: "cloud"`, Jobs in the
-//! cloud namespace on kc1, `[devjob.cloud]`) are a separate [`DevJobs`] and were visible only
-//! through `devjob_list`. This module puts them in the same list, read only:
+//! Since 0.226.0 a cloud run is a run record like a Studio run's (`host: "cloud"`, see
+//! `docs/design/one-run-pipeline.md`): it is listed, read and acted on as a run, with
+//! `host: "cloud"` and its `job_name`, and counted under `counts.cloud`. This module covers the
+//! cloud's Jobs no record owns (those an earlier bridge created), read only beside them:
 //!
 //! * **The list.** The cloud's queued, running and last [`crate::devjob::LIST_FINISHED`]
-//!   finished Jobs (`devjob_list`'s window, [`DevJobs::listed`]) join `runs` in the run JSON
-//!   shape with `host: "cloud"` ([`cloud_run_json`]), sorted with the Studio's rows by the same
-//!   rule. `counts` gains `cloud`, its own tallies, so no Studio count changes meaning.
-//!   `cloud_available` says whether the cloud was listed; when it is false,
-//!   `cloud_unavailable` says why. The cloud lookup is bounded by [`CLOUD_LIST_TIMEOUT`] and
-//!   runs beside the Studio's scan, so it never fails or slows the Studio list.
-//! * **One run.** `GET /jesse/runs/:id` and `/log` answer for a cloud run: with `?host=cloud`
-//!   only the cloud is asked; without it the Studio is asked first, as before, and the cloud
-//!   only for an id the Studio does not know.
+//!   finished Jobs (`devjob_list`'s window, [`DevJobs::listed`]) that no run record owns join
+//!   `runs` in the run JSON shape with `host: "cloud"` ([`cloud_run_json`]), sorted with the
+//!   Studio's rows by the same rule. `counts` gains `cloud`, the tallies of both. `cloud_available`
+//!   says whether the cloud was listed; when it is false, `cloud_unavailable` says why. The
+//!   cloud lookup is bounded by [`CLOUD_LIST_TIMEOUT`] and runs beside the Studio's scan, so it
+//!   never fails or slows the Studio list.
+//! * **One run.** `GET /jesse/runs/:id` and `/log` answer for a cloud Job: with `?host=cloud`
+//!   a cloud run's record first, else the cloud; without it any record first, as before, and the
+//!   cloud only for an id no record has.
 //! * **Every other action** (`reply`, `review`, `cancel`, `close`, `archive`, `unarchive`) on a
-//!   cloud run is refused with [`managed_through_jesse`], never carried out on a Studio run of
-//!   the same id (a queued Studio run the cloud took keeps its id; see
-//!   [`super::MOVED_TO_CLOUD`]).
+//!   Job no record owns is refused with [`managed_through_jesse`], never carried out on a Studio
+//!   run of the same id. On a cloud run's record it goes to the record.
 //!
-//! The status a cloud run is shown with is [`cloud_status`]; `docs/devjob-cloud.md` lists the
+//! The status a cloud Job is shown with is [`cloud_status`]; `docs/devjob-cloud.md` lists the
 //! mapping.
 
 use std::future::Future;
@@ -28,7 +28,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
-use super::{rfc, work, ArchivedMode, HostRuns, RunStatus, StrandNotes};
+use super::{rfc, work, ArchivedMode, HostRuns, RunRecord, RunStatus, StrandNotes};
 use crate::auth::ApiError;
 use crate::devjob::{DevJobRun, DevJobs, JobView, RunOutcome};
 
@@ -353,10 +353,58 @@ impl HostRuns {
     }
 
     /// [`merge_cloud`] into a [`HostRuns::list_json_mode`] value, each row titled by its strand
-    /// line.
+    /// line. A Job a run record owns is that run's, already a row: only the Jobs no record owns
+    /// (an earlier bridge's) are merged in. `counts.cloud` covers both: the cloud runs among the
+    /// records and those Jobs.
     pub fn add_cloud(&self, list: &mut Value, mode: ArchivedMode, cloud: &CloudRuns) {
+        // Every cloud record owns its Jobs, archived or not; only the unarchived are counted.
+        let (archived, records): (Vec<RunRecord>, Vec<RunRecord>) = self
+            .runs()
+            .into_iter()
+            .map(|(_, r)| r)
+            .filter(|r| r.is_cloud())
+            .partition(|r| r.is_archived());
+        let unowned = match cloud {
+            CloudRuns::Listed(views) => CloudRuns::Listed(
+                views
+                    .iter()
+                    .filter(|v| !records.iter().chain(&archived).any(|r| r.owns_job(&v.name)))
+                    .cloned()
+                    .collect(),
+            ),
+            other => other.clone(),
+        };
         let mut notes = StrandNotes::default();
-        merge_cloud(list, cloud, mode, |job| self.cloud_title(&mut notes, job));
+        merge_cloud(list, &unowned, mode, |job| {
+            self.cloud_title(&mut notes, job)
+        });
+        if records.is_empty() {
+            return;
+        }
+        let Some(counts) = list.get_mut("counts").and_then(Value::as_object_mut) else {
+            return;
+        };
+        let tally = counts.entry("cloud").or_insert_with(|| cloud_counts(&[]));
+        for r in &records {
+            let s = r.status;
+            let mut add = |k: &str| {
+                if let Some(n) = tally.get_mut(k) {
+                    *n = json!(n.as_u64().unwrap_or(0) + 1);
+                }
+            };
+            match s {
+                RunStatus::Running => add("running"),
+                RunStatus::Queued => add("queued"),
+                _ => {}
+            }
+            if s.needs_me() {
+                add("needs_me");
+            } else if s.is_moving() {
+                add("moving");
+            } else {
+                add("finished");
+            }
+        }
     }
 }
 

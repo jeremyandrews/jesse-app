@@ -1520,10 +1520,23 @@ pub fn nth_run_id(base: &str, n: usize) -> String {
 /// never take the same one. Every earlier directory counts, whatever its status, so an id (and the
 /// branch, the Inbox file and the launchd label made from it) is never reused.
 pub fn allocate_run_id(runs_dir: &Path, base: &str) -> Result<String, String> {
+    allocate_run_id_except(runs_dir, base, |_| false)
+}
+
+/// [`allocate_run_id`], also passing over every id `taken` names: the run ids of cloud Jobs no
+/// record owns (an earlier bridge's), so a new run never shares an id with one.
+pub fn allocate_run_id_except(
+    runs_dir: &Path,
+    base: &str,
+    taken: impl Fn(&str) -> bool,
+) -> Result<String, String> {
     std::fs::create_dir_all(runs_dir)
         .map_err(|e| format!("could not create {}: {e}", runs_dir.display()))?;
     for n in 0..10_000 {
         let id = nth_run_id(base, n);
+        if taken(&id) {
+            continue;
+        }
         match std::fs::create_dir(runs_dir.join(&id)) {
             Ok(()) => return Ok(id),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2636,6 +2649,18 @@ pub fn drainable(r: &RunRecord) -> bool {
         && !is_local_repo(&r.repo)
 }
 
+/// The cloud's own opt in for a start: a draft must say `devjob-host: cloud` or `any`. A draft
+/// that cannot be read again (`src` `None`) is refused, never taken as opted in.
+pub fn cloud_opt_in(path: Option<&str>, src: Option<&str>) -> Result<(), String> {
+    match (path, src) {
+        (None, _) => Ok(()),
+        (Some(path), Some(src)) => crate::devjob::cloud::check_cloud_capable(path, src),
+        (Some(path), None) => Err(format!(
+            "{path} could not be read again to check its {HOST_KEY}"
+        )),
+    }
+}
+
 /// Whether a free cloud slot may take this queued run ([`HostRuns::take_for_cloud`]): one asked
 /// for the cloud, or a [`drainable`] one that may run on either host. A record from before
 /// 0.226.0 has no `host`, so its draft's `devjob-host: any` is read instead.
@@ -2910,6 +2935,9 @@ pub struct HostRuns {
     merge_checks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// Who runs the cloud's Jobs ([`HostRuns::attach_cloud`]), when this bridge has a cloud.
     cloud_jobs: OnceLock<Arc<dyn CloudJobs>>,
+    /// The run ids the cloud's Jobs carry, as its watcher last listed them
+    /// ([`HostRuns::set_cloud_ids`]): a new run's id is none of them. Not run state.
+    cloud_ids: Mutex<HashSet<String>>,
 }
 
 /// How a cloud run's Job was stopped ([`CloudJobs::cancel`]).
@@ -2979,6 +3007,7 @@ impl HostRuns {
             reviewing: Mutex::new(HashSet::new()),
             merge_checks: Mutex::new(HashMap::new()),
             cloud_jobs: OnceLock::new(),
+            cloud_ids: Mutex::new(HashSet::new()),
         }
     }
 
@@ -3238,16 +3267,18 @@ impl HostRuns {
             if is_local_repo(&repo) {
                 return Err(Refusal::Invalid(devjob::LOCAL_ONLY_STUDIO.into()));
             }
-            if let (Some(path), Some((_, src))) = (&prompt_path, &draft_host) {
-                crate::devjob::cloud::check_cloud_capable(path, src).map_err(Refusal::Invalid)?;
-            }
+            cloud_opt_in(
+                prompt_path.as_deref(),
+                draft_host.as_ref().map(|(_, src)| src.as_str()),
+            )
+            .map_err(Refusal::Invalid)?;
         }
         // A REVIEWED run: the reviewers are resolved and checked now, before anything is
         // created ([`HostRuns::resolve_reviewers`]).
         let focus = review::checked_focus(req.review_focus.as_deref())
             .map_err(|e| Refusal::Invalid(format!("review_{e}")))?;
         let picked = if cloud.is_some() {
-            Self::cloud_reviewers(req)?
+            Self::cloud_reviewers(req, prompt_path.as_deref(), draft_reviewer.as_ref())?
         } else {
             self.resolve_reviewers(req.reviewer.as_ref(), draft_reviewer.as_ref())?
         };
@@ -3279,7 +3310,9 @@ impl HostRuns {
             }
         }
         let runs_dir = self.settings.runs_dir();
-        let run_id = allocate_run_id(&runs_dir, &base).map_err(Refusal::Internal)?;
+        let external = lock(&self.cloud_ids).clone();
+        let run_id = allocate_run_id_except(&runs_dir, &base, |id| external.contains(id))
+            .map_err(Refusal::Internal)?;
         let dir = runs_dir.join(&run_id);
         let now = rfc(now_ms());
         // A cloud run's branch is the one its Job pushes: `jesse/<slug>`.
@@ -3397,7 +3430,21 @@ impl HostRuns {
 
     /// Who reviews a cloud run: nobody yet. A reviewer the start names is refused; the draft's
     /// `devjob-reviewer:` and `[hostrun] default_reviewers` do not apply.
-    fn cloud_reviewers(req: &StartRequest) -> Result<Picked, Refusal> {
+    fn cloud_reviewers(
+        req: &StartRequest,
+        path: Option<&str>,
+        draft: Option<&review::ReviewerArg>,
+    ) -> Result<Picked, Refusal> {
+        // A draft that asks for a review is not run unreviewed: it is refused, as a start's
+        // `reviewer` is, until cloud runs are reviewed.
+        if let Ok(review::ReviewerChoice::Ids(ids)) = review::choose(draft) {
+            return Err(Refusal::Invalid(format!(
+                "{} says {REVIEWER_KEY}: {}, and cloud runs are not reviewed yet: start it on \
+                 the Studio, or say {REVIEWER_KEY}: none",
+                path.unwrap_or("the draft"),
+                ids.join(", ")
+            )));
+        }
         let off = matches!(
             review::choose(req.reviewer.as_ref()),
             Ok(review::ReviewerChoice::Off)
@@ -3419,9 +3466,10 @@ impl HostRuns {
     /// The id a further run of `base` would take now (for the "start it too?" question).
     fn next_free_id(&self, base: &str) -> String {
         let dir = self.settings.runs_dir();
+        let external = lock(&self.cloud_ids).clone();
         (0..10_000)
             .map(|n| nth_run_id(base, n))
-            .find(|id| !dir.join(id).exists())
+            .find(|id| !dir.join(id).exists() && !external.contains(id))
             .unwrap_or_else(|| base.to_string())
     }
 
@@ -4258,6 +4306,25 @@ impl HostRuns {
             }
         }
         None
+    }
+
+    /// The run ids the cloud's Jobs carry now: a new run takes none of them.
+    pub fn set_cloud_ids(&self, ids: HashSet<String>) {
+        *lock(&self.cloud_ids) = ids;
+    }
+
+    /// Runs a cloud slot took whose Job was never named: the bridge stopped between taking one
+    /// and naming its Job. The cloud adopts the Job it finds for each, else queues it again.
+    pub fn unnamed_on_cloud(&self) -> Vec<RunRecord> {
+        self.runs()
+            .into_iter()
+            .map(|(_, r)| r)
+            .filter(|r| {
+                r.status == RunStatus::Running
+                    && r.on_cloud()
+                    && r.cloud.as_ref().is_some_and(|c| c.job_name.is_none())
+            })
+            .collect()
     }
 
     /// The prompt a run was created with (`section.md`): what a cloud run's Job is given.

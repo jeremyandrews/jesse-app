@@ -3129,10 +3129,17 @@ impl DevJobs {
         }
         // A cloud run's record ends its round with this report, or moves to its continuation.
         if let (Some(_), Some(studio)) = (cloud_run, self.studio.get()) {
-            let continued_job = match &continued_as {
-                Some(id) => self.find_cloud_job(id).await.ok().flatten().map(|j| j.name),
-                None => None,
+            // The Job this link continues as, read from kc1 every time (also on a retried pass,
+            // which does not know `continued_as`). A lookup that fails, or misses the Job just
+            // created, leaves the Job unannotated so the next pass ends the record rightly.
+            let link = v.run_id.as_deref().unwrap_or(&v.name);
+            let continued_job = match self.views().await {
+                Ok(jobs) => cloud::continuation_job(&jobs, link),
+                Err(e) => return Err(format!("its continuation could not be looked up: {e}")),
             };
+            if let (Some(id), None) = (&continued_as, &continued_job) {
+                return Err(format!("its continuation {id} is not listed yet"));
+            }
             let end = crate::hostrun::CloudEnd {
                 job: v.name.clone(),
                 status: cloud_end_status(v, outcome),

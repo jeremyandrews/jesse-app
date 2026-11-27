@@ -572,3 +572,122 @@ async fn the_runs_list_serves_a_cloud_run_once_and_counts_it_as_the_clouds() {
     assert!(rows.contains(&("OLD1".into(), "cloud".into())));
     assert_eq!(list["counts"]["cloud"]["running"], 2, "{}", list["counts"]);
 }
+
+// ---- edges: archive, ids, a draft that cannot be read, a draft that asks for review ----------
+
+#[tokio::test]
+async fn an_archived_cloud_runs_job_is_not_listed_again_as_an_unowned_one() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    let r = rig_any(&s);
+    let id = taken(&r, &s, "gone", "agent-gone-abcde");
+    r.svc
+        .cloud_ended(&ended(
+            "agent-gone-abcde",
+            RunStatus::Reported,
+            "Inbox/x.md",
+        ))
+        .unwrap();
+    r.svc.archive(&id).unwrap();
+    let mut job = crate::devjob::JobView::of(&k8s_openapi::api::batch::v1::Job::default());
+    job.name = "agent-gone-abcde".into();
+    job.run_id = Some(id.clone());
+    job.finished = Some(true);
+    job.outcome = Some("pull request opened".into());
+    let mut list = r.svc.list_json();
+    r.svc.add_cloud(
+        &mut list,
+        ArchivedMode::Hide,
+        &cloud::CloudRuns::Listed(vec![job]),
+    );
+    let rows = list["runs"].as_array().unwrap();
+    assert!(rows.iter().all(|x| x["run_id"] != id.as_str()), "{rows:?}");
+    assert_eq!(list["counts"]["cloud"]["finished"], 0, "{}", list["counts"]);
+}
+
+#[tokio::test]
+async fn a_new_run_never_takes_the_id_of_a_cloud_job_an_earlier_bridge_made() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    let r = rig_any(&s);
+    r.svc
+        .set_cloud_ids(["s-dup".to_string()].into_iter().collect());
+    let a = r.svc.create_on(&free_in("o/n", "dup"), on_cloud()).unwrap();
+    assert_eq!(a.run_id, "s-dupb");
+    // The Studio's own start passes over it too.
+    let b = r.svc.create(&free_in("o/n", "dup")).unwrap();
+    assert_eq!(b.run_id, "s-dupc");
+}
+
+#[test]
+fn a_cloud_start_whose_draft_cannot_be_read_again_is_refused() {
+    let e = cloud_opt_in(Some("Projects/drafts/x.md"), None).unwrap_err();
+    assert!(e.contains("could not be read again"), "{e}");
+    assert!(
+        cloud_opt_in(None, None).is_ok(),
+        "a free prompt has no draft"
+    );
+    assert!(cloud_opt_in(
+        Some("Projects/drafts/x.md"),
+        Some("---\ndevjob-host: studio\n---\n")
+    )
+    .is_err());
+    assert!(cloud_opt_in(
+        Some("Projects/drafts/x.md"),
+        Some("---\ndevjob-host: cloud\n---\n")
+    )
+    .is_ok());
+}
+
+#[tokio::test]
+async fn a_cloud_start_of_a_draft_that_asks_for_a_reviewer_is_refused_not_run_unreviewed() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    let d = s.notes().join("Projects/drafts");
+    std::fs::write(
+        d.join("rev.md"),
+        loose("devjob-host: cloud\ndevjob-reviewer: codex\ndevjob-merge: true\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("norev.md"),
+        loose("devjob-host: cloud\ndevjob-reviewer: none\n"),
+    )
+    .unwrap();
+    let r = rig_any(&s);
+    let e = r
+        .svc
+        .create_on(&by_draft("Projects/drafts/rev.md"), on_cloud())
+        .unwrap_err();
+    assert!(e.message().contains("not reviewed yet"), "{}", e.message());
+    assert!(r.svc.get("s-rev").is_none(), "nothing was queued");
+    assert!(r
+        .svc
+        .create_on(&by_draft("Projects/drafts/norev.md"), on_cloud())
+        .is_ok());
+}
+
+#[tokio::test]
+async fn a_run_taken_but_never_named_is_found_after_a_restart() {
+    let s = Scratch::new();
+    vault_fixture(&s);
+    let r = rig_any(&s);
+    let id = queue_on(&r, free_at("o/n", "mid", None), on_cloud(), 1);
+    let took = r.svc.take_for_cloud(&s.notes()).unwrap();
+    // The bridge stops here: no Job name. A new bridge's cloud pass sees it.
+    let unnamed = r.svc.unnamed_on_cloud();
+    assert_eq!(
+        unnamed.iter().map(|x| x.run_id.clone()).collect::<Vec<_>>(),
+        vec![id.clone()]
+    );
+    assert_eq!(unnamed[0], took);
+    // No Job was made: queued again, and taken by the next free slot.
+    r.svc
+        .return_from_cloud(&id, "the bridge stopped before its Job was made");
+    assert_eq!(r.svc.get(&id).unwrap().status, RunStatus::Queued);
+    assert!(r.svc.unnamed_on_cloud().is_empty());
+    assert_eq!(r.svc.take_for_cloud(&s.notes()).unwrap().run_id, id);
+    // Its Job was made: adopted, and no longer unnamed.
+    r.svc.note_job(&id, "agent-mid-abcde", "jesse/mid");
+    assert!(r.svc.unnamed_on_cloud().is_empty());
+}

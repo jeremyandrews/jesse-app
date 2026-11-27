@@ -1733,6 +1733,47 @@ pub fn record_slug(rec: &crate::hostrun::RunRecord) -> String {
     }
 }
 
+/// The Job that continues the capped link `link_run_id` (its `jesse.dev/continuation-of`), the
+/// newest when a retried pass made two. `None` when the link did not continue.
+pub fn continuation_job(
+    jobs: &[(k8s_openapi::api::batch::v1::Job, JobView)],
+    link_run_id: &str,
+) -> Option<String> {
+    jobs.iter()
+        .filter(|(j, _)| {
+            j.metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(ANN_CONTINUATION_OF))
+                .is_some_and(|of| of == link_run_id)
+        })
+        .max_by_key(|(_, v)| v.created_ms)
+        .map(|(_, v)| v.name.clone())
+}
+
+/// How far a Job's creation time may read before the moment its run was taken, Kubernetes'
+/// clock and this Mac's being two clocks with whole second stamps.
+pub const ADOPT_SKEW_MS: u64 = 60_000;
+
+/// The Job a run taken but never named ([`crate::hostrun::HostRuns::unnamed_on_cloud`]) was
+/// made as before the bridge stopped: one carrying its run id, created no earlier than it was
+/// taken, owned by no other run. `None`: no Job was made, so it is queued again.
+pub fn adopted_job<'a>(
+    views: &'a [JobView],
+    rec: &crate::hostrun::RunRecord,
+) -> Option<&'a JobView> {
+    let taken = rec
+        .cloud
+        .as_ref()
+        .and_then(|c| c.taken_at.as_deref())
+        .and_then(crate::hostrun::ms_of)?;
+    views
+        .iter()
+        .filter(|v| v.run_id.as_deref() == Some(rec.run_id.as_str()))
+        .filter(|v| v.created_ms + ADOPT_SKEW_MS >= taken)
+        .max_by_key(|v| v.created_ms)
+}
+
 impl DevJobs {
     fn runtime(&self) -> Result<&CloudRuntime, String> {
         self.rt
@@ -1783,6 +1824,10 @@ impl DevJobs {
             timeout_minutes: req.timeout_minutes,
             ..crate::hostrun::CloudPart::default()
         };
+        // A new run takes no id a cloud Job already carries.
+        if let Ok(views) = self.views().await {
+            studio.set_cloud_ids(views.into_iter().filter_map(|(_, v)| v.run_id).collect());
+        }
         let started = studio
             .start_on(
                 crate::hostrun::StartRequest {
@@ -1978,6 +2023,35 @@ impl DevJobs {
         let Ok(notes) = self.notes() else {
             return;
         };
+        let Ok(all) = self.views().await else {
+            return;
+        };
+        let views: Vec<JobView> = all.into_iter().map(|(_, v)| v).collect();
+        studio.set_cloud_ids(views.iter().filter_map(|v| v.run_id.clone()).collect());
+        // A run taken but never named: the bridge stopped in between. Nothing is being taken
+        // now (this pass is the only taker), so each is adopted by its Job or queued again.
+        let s = studio.clone();
+        let unnamed = tokio::task::spawn_blocking(move || s.unnamed_on_cloud())
+            .await
+            .unwrap_or_default();
+        for rec in unnamed {
+            let s = studio.clone();
+            let id = rec.run_id.clone();
+            match adopted_job(&views, &rec) {
+                Some(v) => {
+                    let (job, branch) = (v.name.clone(), format!("jesse/{}", v.slug));
+                    eprintln!("jesse-bridge: devjob cloud: run {id} adopts its Job {job}");
+                    let _ =
+                        tokio::task::spawn_blocking(move || s.note_job(&id, &job, &branch)).await;
+                }
+                None => {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        s.return_from_cloud(&id, "the bridge stopped before its Job was made")
+                    })
+                    .await;
+                }
+            }
+        }
         loop {
             let views: Vec<JobView> = match self.views().await {
                 Ok(v) => v.into_iter().map(|(_, v)| v).collect(),

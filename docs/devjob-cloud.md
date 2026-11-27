@@ -60,7 +60,11 @@ run whose draft says `devjob-host: any` that waits for a Studio slot and never s
 (`cloud.job_name`). The run keeps its id, its record, its priority and its place on the Runs
 page; nothing is closed. If the Job cannot be created the record goes back to `queued`; if the
 cloud can never run it (its prompt is gone) a cloud run fails with the reason and an `any` run
-goes back to the queue as a Studio run. The Studio's pump only starts runs whose host allows
+goes back to the queue as a Studio run. A run taken whose Job was never named (the bridge
+stopped between the two) is adopted at the next cloud pass by the Job carrying its run id made
+since the take, else queued again. A new run never takes the run id of a Job kc1 lists. A
+cloud start whose draft names a `devjob-reviewer:` is refused until cloud runs are reviewed
+(say `devjob-reviewer: none` to run it unreviewed). The Studio's pump only starts runs whose host allows
 the Studio, and never counts a run on the cloud against its slots. `devjob_priority` changes a
 queued cloud run's place exactly as a Studio run's.
 

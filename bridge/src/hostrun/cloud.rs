@@ -357,17 +357,18 @@ impl HostRuns {
     /// (an earlier bridge's) are merged in. `counts.cloud` covers both: the cloud runs among the
     /// records and those Jobs.
     pub fn add_cloud(&self, list: &mut Value, mode: ArchivedMode, cloud: &CloudRuns) {
-        let records: Vec<RunRecord> = self
+        // Every cloud record owns its Jobs, archived or not; only the unarchived are counted.
+        let (archived, records): (Vec<RunRecord>, Vec<RunRecord>) = self
             .runs()
             .into_iter()
             .map(|(_, r)| r)
-            .filter(|r| r.is_cloud() && !r.is_archived())
-            .collect();
+            .filter(|r| r.is_cloud())
+            .partition(|r| r.is_archived());
         let unowned = match cloud {
             CloudRuns::Listed(views) => CloudRuns::Listed(
                 views
                     .iter()
-                    .filter(|v| !records.iter().any(|r| r.owns_job(&v.name)))
+                    .filter(|v| !records.iter().chain(&archived).any(|r| r.owns_job(&v.name)))
                     .cloned()
                     .collect(),
             ),

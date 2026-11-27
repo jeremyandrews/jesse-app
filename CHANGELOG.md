@@ -47,7 +47,15 @@ cloud (DJ30, Part A).**
   `finish_resolve`, `moved_run`, `run_id_taken` and the old `start_cloud`; `cloud::unique_run_id`.
 - **Migration.** Jobs created by an earlier bridge have no owning record and finish under the
   old path: released, reported, continued and listed read only as before; `devjob_cancel` and
-  `devjob_status` still reach them. No record is rewritten.
+  `devjob_status` still reach them. No record is rewritten. A new run never takes the run id of
+  a Job kc1 lists (`allocate_run_id_except`, fed by the cloud's watcher).
+- **Edges.** A run taken by a cloud slot whose Job was never named (the bridge stopped in
+  between) is adopted by the Job carrying its run id, else queued again. A capped link's
+  continuation is found from kc1 on every pass (`cloud::continuation_job`); a lookup that fails
+  leaves the Job unreported for the next pass instead of ending the run. A cloud start whose
+  draft names a `devjob-reviewer:` is refused rather than run unreviewed, as is one whose draft
+  cannot be read again to check its `devjob-host`. An archived cloud run's Job is not listed
+  again as an unowned one.
 - Docs: `docs/design/one-run-pipeline.md` (new), `docs/devjob-cloud.md`, `bridge/README.md`.
 
 ## [bridge 0.225.0] - 2026-11-27

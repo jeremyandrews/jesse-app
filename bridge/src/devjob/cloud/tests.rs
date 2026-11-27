@@ -2218,3 +2218,67 @@ fn job_deadline_seconds_always_equals_active_deadline_seconds() {
     spec555.timeout_minutes = 555;
     assert_eq!(cloud_deadline_secs(&spec555), 42300);
 }
+
+// ---- one run pipeline: a continuation and an unnamed take, found from kc1's Jobs ----------
+
+fn annotated(
+    name: &str,
+    created: u64,
+    continuation_of: Option<&str>,
+) -> (k8s_openapi::api::batch::v1::Job, JobView) {
+    let mut job = k8s_openapi::api::batch::v1::Job::default();
+    if let Some(of) = continuation_of {
+        job.metadata.annotations = Some(
+            [(ANN_CONTINUATION_OF.to_string(), of.to_string())]
+                .into_iter()
+                .collect(),
+        );
+    }
+    (job, view(name, created, true, None))
+}
+
+#[test]
+fn a_capped_links_continuation_is_found_by_its_annotation_on_every_pass() {
+    let jobs = vec![
+        annotated("agent-b248-1", 1, None),
+        annotated("agent-b248-2", 5, Some("B248")),
+        annotated("agent-x-2", 6, Some("X1")),
+    ];
+    assert_eq!(
+        continuation_job(&jobs, "B248").as_deref(),
+        Some("agent-b248-2")
+    );
+    assert_eq!(continuation_job(&jobs, "B248-c2"), None);
+    // A retried pass that made it twice: the newest.
+    let mut two = jobs.clone();
+    two.push(annotated("agent-b248-3", 9, Some("B248")));
+    assert_eq!(
+        continuation_job(&two, "B248").as_deref(),
+        Some("agent-b248-3")
+    );
+}
+
+#[test]
+fn a_run_taken_before_a_restart_adopts_only_its_own_job_made_after_the_take() {
+    let taken_ms = 1_794_000_000_000u64;
+    let rec = crate::hostrun::RunRecord {
+        run_id: "GD5".into(),
+        cloud: Some(crate::hostrun::CloudPart {
+            taken_at: Some(crate::hostrun::rfc(taken_ms)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut older = view("agent-gd5-old", taken_ms - 10 * 60_000, false, Some(true));
+    older.run_id = Some("GD5".into());
+    let mut other = view("agent-gd6-new", taken_ms + 1000, true, None);
+    other.run_id = Some("GD6".into());
+    assert!(adopted_job(&[older.clone(), other.clone()], &rec).is_none());
+    // Kubernetes stamps whole seconds: a Job a moment "before" the take is still its own.
+    let mut own = view("agent-gd5-new", taken_ms - 500, true, None);
+    own.run_id = Some("GD5".into());
+    assert_eq!(
+        adopted_job(&[older, own, other], &rec).map(|v| v.name.as_str()),
+        Some("agent-gd5-new")
+    );
+}

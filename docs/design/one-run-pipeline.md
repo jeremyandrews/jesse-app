@@ -71,6 +71,14 @@ Access forces them; nothing else does.
   Part B, `reply` and `review` on a cloud run are refused with the record's own refusal, not a
   "managed through Jesse" one.
 
+### Restarts
+
+The take and the Job's name are two writes. A run left `running` on the cloud with no Job name
+(the bridge stopped between them) is adopted at the next cloud pass by the Job carrying its run
+id created since the take, else queued again; the pass is the only taker, so nothing is being
+taken at that moment. A capped link's continuation is read from kc1 on every pass, including a
+retried one, so a lookup that fails never ends the run early.
+
 ## Migration (0.226.0)
 
 Jobs created by an earlier bridge have no record, or a Studio record closed as moved to the

@@ -366,6 +366,89 @@ pub trait Forge: Send + Sync {
     fn pull_merge(&self, url: &str) -> Result<PullMerge, String> {
         Err(format!("this forge cannot read {url}"))
     }
+
+    /// The tip of `jesse/<slug>-wip` on `repo`, for a cloud run to continue from. `Ok(None)`
+    /// when the ref does not exist. Whether the tip actually looks like one of the entrypoint's
+    /// checkpoints ([`Checkpoint::is_valid_for`]) is for the caller to decide: this answers only
+    /// what GitHub holds. `Err` says why it could not be read.
+    fn checkpoint(&self, repo: &str, slug: &str) -> Result<Option<Checkpoint>, String> {
+        Err(format!(
+            "this forge cannot read a checkpoint for {repo} jesse/{slug}-wip"
+        ))
+    }
+}
+
+/// The tip commit of a `jesse/<slug>-wip` ref, as [`Forge::checkpoint`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub sha: String,
+    /// The commit's tree, so two checkpoints that changed nothing compare equal
+    /// ([`crate::devjob::cloud::continuation_decision`]'s "no progress" rule).
+    pub tree: String,
+    /// The commit message's first line.
+    pub subject: String,
+    pub parent_count: usize,
+}
+
+impl Checkpoint {
+    /// Whether this is one of the entrypoint's own checkpoints of `jesse/<slug>`: its subject is
+    /// `checkpoint of jesse/<slug> at <UTC time> [skip ci]` and it has exactly one parent.
+    pub fn is_valid_for(&self, slug: &str) -> bool {
+        self.parent_count == 1
+            && self
+                .subject
+                .starts_with(&format!("checkpoint of jesse/{slug} at "))
+            && self.subject.ends_with(" [skip ci]")
+    }
+
+    /// Why this ref is not usable, when [`Checkpoint::is_valid_for`] says so; `None` when it is.
+    pub fn invalid_reason(&self, slug: &str) -> Option<String> {
+        if self.is_valid_for(slug) {
+            return None;
+        }
+        Some(format!(
+            "jesse/{slug}-wip exists but is not a checkpoint of jesse/{slug} (subject {:?}, \
+             {} parent(s))",
+            self.subject, self.parent_count
+        ))
+    }
+}
+
+/// [`Forge::checkpoint`]'s answer, built from `gh api repos/<repo>/git/ref/heads/<ref>`'s JSON
+/// (for the sha) and `gh api repos/<repo>/git/commits/<sha>`'s (for the tree, subject and
+/// parent count). Split out so it is tested with fixture JSON, with no `gh` to run.
+pub fn checkpoint_of(
+    ref_json: &serde_json::Value,
+    commit_json: &serde_json::Value,
+) -> Result<Checkpoint, String> {
+    let sha = ref_json
+        .get("object")
+        .and_then(|o| o.get("sha"))
+        .and_then(|s| s.as_str())
+        .ok_or("the ref answer has no object.sha")?
+        .to_string();
+    let tree = commit_json
+        .get("tree")
+        .and_then(|t| t.get("sha"))
+        .and_then(|s| s.as_str())
+        .ok_or("the commit answer has no tree.sha")?
+        .to_string();
+    let message = commit_json
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    let subject = message.lines().next().unwrap_or("").to_string();
+    let parent_count = commit_json
+        .get("parents")
+        .and_then(|p| p.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    Ok(Checkpoint {
+        sha,
+        tree,
+        subject,
+        parent_count,
+    })
 }
 
 /// What `gh pr view <url> --json state,mergedAt,mergeCommit,title` says.
@@ -455,6 +538,50 @@ impl Forge for GhForge {
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("gh pr view answered something unreadable: {e}"))?;
         parse_pull_merge(&v)
+    }
+
+    fn checkpoint(&self, repo: &str, slug: &str) -> Result<Option<Checkpoint>, String> {
+        let ref_path = format!("repos/{repo}/git/ref/heads/jesse/{slug}-wip");
+        let out = Command::new("gh")
+            .args(["api", &ref_path])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run gh: {e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.to_lowercase().contains("not found") || err.contains("404") {
+                return Ok(None);
+            }
+            return Err(format!(
+                "gh api {ref_path} exited {}: {}",
+                out.status,
+                err.trim().lines().next().unwrap_or("")
+            ));
+        }
+        let ref_json: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("gh api {ref_path} answered something unreadable: {e}"))?;
+        let sha = ref_json
+            .get("object")
+            .and_then(|o| o.get("sha"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| format!("gh api {ref_path} answered no object.sha"))?;
+        let commit_path = format!("repos/{repo}/git/commits/{sha}");
+        let out = Command::new("gh")
+            .args(["api", &commit_path])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run gh: {e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "gh api {commit_path} exited {}: {}",
+                out.status,
+                err.trim().lines().next().unwrap_or("")
+            ));
+        }
+        let commit_json: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("gh api {commit_path} answered something unreadable: {e}"))?;
+        checkpoint_of(&ref_json, &commit_json).map(Some)
     }
 }
 

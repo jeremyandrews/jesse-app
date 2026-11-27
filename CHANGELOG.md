@@ -14,6 +14,31 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.225.0] - 2026-11-27
+
+**A cloud run capped by its time limit continues automatically from its checkpoint, as
+`<run_id>-c2`, `-c3`, and so on, up to `[devjob.cloud] max_continuations`.**
+
+- **Behavior change.** When a cloud run hits `AGENT_TIMEOUT_SECONDS` and the entrypoint
+  checkpoints its work to `jesse/<slug>-wip`, `DevJobs::finalize` now reads that checkpoint back
+  and, unless it was cancelled, killed for memory, already pushed a pull request, failed for any
+  other reason, asked a question (`NEEDS YOU`), has no usable checkpoint, is already at
+  `max_continuations` (default 3), or made no progress since its own last link, creates the next
+  link as a new suspended Job on a fresh worker (`continuation_decision`, `ChainInfo`,
+  `DevJobs::plan_continuation`, `DevJobs::create_continuation`). The pull request stays titled
+  after the chain's first run (`RUN_ID` is the chain root, not the new link's own id);
+  `CONTINUATION` names the new link. The capped link's report names the checkpoint and the run it
+  continues as, or why it did not; each continuation's report has a `## Chain` section.
+- **`terminationGracePeriodSeconds`** is 120s (`cloud::CHECKPOINT_GRACE_SECS`), not Kubernetes'
+  default 30s, so the entrypoint's SIGTERM checkpoint push and its report have time to finish
+  between the deadline's SIGTERM and the SIGKILL, matching the k3s Job template.
+- **`[devjob.cloud] max_continuations`** (default 3, refused above 10; `0` turns continuations
+  off) caps a chain's length.
+- The `Forge` trait gains `checkpoint`, reading a branch's `jesse/<slug>-wip` ref and its tip
+  commit from GitHub; `GhForge` implements it, `Checkpoint::is_valid_for` checks the entrypoint's
+  own checkpoint shape (subject, one parent).
+- Docs: `docs/devjob-cloud.md` ("Continuing a capped run") and `bridge/README.md`.
+
 ## [bridge 0.224.0] - 2026-11-26
 
 **A cloud burst worker may now live up to 12 hours, so a dev job agent running there gets up to

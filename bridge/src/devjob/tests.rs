@@ -1131,3 +1131,89 @@ fn a_scheduled_devjob_outcome_comes_from_its_report_and_its_contract() {
     assert_eq!(o, Outcome::FiredNoOutput);
     assert!(r.contains("Inbox/2026-10-24-dev-job-*.md"));
 }
+
+// ---- continuations: chain info, report lines ----------------------------------------------
+
+#[test]
+fn a_job_with_no_chain_annotations_is_link_0_of_its_own_chain() {
+    let job: Job = serde_json::from_value(json!({
+        "metadata": { "name": "agent-gd5-x-abcde" },
+    }))
+    .unwrap();
+    let ci = ChainInfo::of(&job, "GD5");
+    assert_eq!(ci.root, "GD5");
+    assert_eq!(ci.link, 0);
+    assert_eq!(ci.continuation_of, None);
+    assert!(ci.chain.is_empty());
+}
+
+#[test]
+fn a_continuations_chain_info_reads_its_annotations() {
+    let chain = vec![ChainLink {
+        run_id: "GD5".into(),
+        report_path: "Inbox/2026-11-26-run-GD5.md".into(),
+        outcome: "hit its 315 minute limit".into(),
+        wall_seconds: Some(18900),
+        checkpoint_sha: Some("deadbeef".into()),
+        checkpoint_tree: Some("tree1".into()),
+    }];
+    let job: Job = serde_json::from_value(json!({
+        "metadata": {
+            "name": "agent-gd5-x-c2-abcde",
+            "annotations": {
+                cloud::ANN_CHAIN_ROOT: "GD5",
+                cloud::ANN_CONTINUATION: "1",
+                cloud::ANN_CONTINUATION_OF: "GD5",
+                cloud::ANN_CHAIN: serde_json::to_string(&chain).unwrap(),
+            },
+        },
+    }))
+    .unwrap();
+    let ci = ChainInfo::of(&job, "GD5-c2");
+    assert_eq!(ci.root, "GD5");
+    assert_eq!(ci.link, 1);
+    assert_eq!(ci.continuation_of.as_deref(), Some("GD5"));
+    assert_eq!(ci.chain, chain);
+}
+
+#[test]
+fn the_capped_report_lines_are_pinned() {
+    assert_eq!(
+        capped_continued_line(315, "gd5-x", "deadbeef", "GD5-c2", 1, 3),
+        "Hit its 315 minute time limit; its work is saved on jesse/gd5-x-wip at deadbeef and \
+         continues as GD5-c2 (continuation 1 of 3)."
+    );
+    assert_eq!(
+        capped_not_continued_line(315, "no checkpoint was found"),
+        "Hit its 315 minute time limit and was not continued: no checkpoint was found."
+    );
+    assert_eq!(
+        checkpoint_visibility_line("gd5-x", "deadbeef"),
+        "Its work is saved on jesse/gd5-x-wip at deadbeef."
+    );
+}
+
+#[test]
+fn the_chain_section_lists_every_link_and_is_inserted_before_the_log() {
+    let chain = vec![ChainLink {
+        run_id: "GD5".into(),
+        report_path: "Inbox/2026-11-26-run-GD5.md".into(),
+        outcome: "hit its 315 minute limit".into(),
+        wall_seconds: Some(18900),
+        checkpoint_sha: Some("deadbeef".into()),
+        checkpoint_tree: Some("tree1".into()),
+    }];
+    let section = render_chain_section(&chain);
+    assert!(section.starts_with("## Chain\n\n"));
+    assert!(section.contains("GD5"));
+    assert!(section.contains("Inbox/2026-11-26-run-GD5.md"));
+    assert!(section.contains("hit its 315 minute limit"));
+    assert!(section.contains("5h 15m"));
+    assert!(section.contains("deadbeef"));
+
+    let text = "---\nfront: matter\n---\n\n# Title\n\n## Report\n\n...\n\n## Log (last 0 lines)\n\n```text\n```\n";
+    let with_section = insert_chain_section(text, &section);
+    let chain_at = with_section.find("## Chain").unwrap();
+    let log_at = with_section.find("## Log").unwrap();
+    assert!(chain_at < log_at, "the chain section comes before the log");
+}

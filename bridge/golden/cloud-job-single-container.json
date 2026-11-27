@@ -89,6 +89,10 @@
                 "value": "DJ25"
               },
               {
+                "name": "CONTINUATION",
+                "value": "0"
+              },
+              {
                 "name": "JESSE_RUN_REPORT",
                 "value": "/home/agent/work/report.md"
               },
@@ -191,6 +195,7 @@
           "runAsNonRoot": true,
           "runAsUser": 1000
         },
+        "terminationGracePeriodSeconds": 120,
         "tolerations": [
           {
             "effect": "NoSchedule",

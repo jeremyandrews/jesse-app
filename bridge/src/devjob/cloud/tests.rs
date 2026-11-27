@@ -2,8 +2,8 @@ use super::*;
 use crate::devjob::{
     build_cloud_job, plan_start, render_report_for, render_report_with, report_rel_path,
     report_rel_path_stem, timeout_reduced_note, tool_descriptors, tool_descriptors_with_studio,
-    with_cloud, Agent, DevJobReport, DevJobToml, JobView, ReportInput, SpecAnnotation, StartPlan,
-    TOOL_CANCEL, TOOL_START,
+    with_cloud, Agent, ChainExtras, DevJobReport, DevJobToml, JobView, ReportInput, SpecAnnotation,
+    StartPlan, TOOL_CANCEL, TOOL_START,
 };
 use crate::random_hex;
 
@@ -645,6 +645,7 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
         merge_deny: CloudSettings::default().merge_deny_env(),
         resources: CloudSettings::default().job_resources(),
         services: CloudSettings::default().services,
+        chain: None,
     };
     let image = format!(
         "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",
@@ -1211,6 +1212,7 @@ fn the_cloud_job_takes_its_resources_from_config_and_never_literals() {
             cpu_request: 7,
         },
         services: false,
+        chain: None,
     };
     let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
     let v = serde_json::to_value(&job).unwrap();
@@ -1324,6 +1326,7 @@ fn trovato_job(services: bool) -> Value {
         merge_deny: CloudSettings::default().merge_deny_env(),
         resources: live_resources(),
         services,
+        chain: None,
     };
     let job = build_cloud_job(
         "jesse-dev",
@@ -1491,10 +1494,372 @@ fn a_cloud_pod_runs_postgres_and_redis_as_native_sidecars_before_the_agent() {
 
 #[test]
 fn with_services_off_the_cloud_job_is_byte_for_byte_the_single_container_pod() {
-    // Rendered by bridge 0.224.0's build_cloud_job for the same spec and extras.
+    // Rendered by bridge 0.222.0's build_cloud_job for the same spec and extras, updated for
+    // DJ28's and DJ29's JOB_DEADLINE_SECONDS, CONTINUATION and terminationGracePeriodSeconds.
     let today = include_str!("../../../golden/cloud-job-single-container.json");
     let now = serde_json::to_string_pretty(&trovato_job(false)).unwrap() + "\n";
     assert_eq!(now, today);
+}
+
+// ---- continuations: the Job JSON ----------------------------------------------------------
+
+fn job_env_of(job: &Value) -> BTreeMap<String, String> {
+    env_of(&job["spec"]["template"]["spec"]["containers"][0])
+}
+
+/// A spec and extras for the continuation JSON tests, a timeout named.
+fn chain_spec(timeout_minutes: u64) -> (DevJobSpec, CloudJobExtras) {
+    let mut spec = DevJobSpec::validate(
+        args(json!({ "repo": "o/n", "prompt": "x", "branch_slug": "gd5-x" })),
+        Agent::Claude,
+    )
+    .unwrap();
+    spec.timeout_minutes = timeout_minutes;
+    let extras = CloudJobExtras {
+        run_id: "GD5".into(),
+        merge: MergeDecision::No,
+        merge_deny: String::new(),
+        resources: CloudSettings::default().job_resources(),
+        services: false,
+        chain: None,
+    };
+    (spec, extras)
+}
+
+// `job_deadline_seconds_always_equals_active_deadline_seconds`, further down, covers
+// JOB_DEADLINE_SECONDS == activeDeadlineSeconds for two timeouts (now also a drift guard on the
+// named 555 minute deadline, from the worker life change beside this one).
+
+#[test]
+fn the_pods_termination_grace_period_is_the_checkpoint_grace() {
+    let (spec, extras) = chain_spec(120);
+    let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
+    let v = serde_json::to_value(&job).unwrap();
+    assert_eq!(
+        v["spec"]["template"]["spec"]["terminationGracePeriodSeconds"],
+        CHECKPOINT_GRACE_SECS
+    );
+}
+
+#[test]
+fn a_continuations_run_id_env_is_the_chain_root_while_its_label_is_the_new_link() {
+    let (spec, mut extras) = chain_spec(120);
+    extras.run_id = "B248-c2".into();
+    extras.chain = Some(ChainExtras {
+        root: "B248".into(),
+        link: 1,
+        continuation_of: "B248".into(),
+        chain_json: "[]".into(),
+    });
+    let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
+    let v = serde_json::to_value(&job).unwrap();
+    assert_eq!(v["metadata"]["labels"][LABEL_RUN_ID], "B248-c2");
+    let env = job_env_of(&v);
+    assert_eq!(env["RUN_ID"], "B248", "the pull request stays [B248]");
+    assert_eq!(env["CONTINUATION"], "1");
+    let ann = &v["metadata"]["annotations"];
+    assert_eq!(ann[ANN_CHAIN_ROOT], "B248");
+    assert_eq!(ann[ANN_CONTINUATION], "1");
+    assert_eq!(ann[ANN_CONTINUATION_OF], "B248");
+    assert_eq!(ann[ANN_CHAIN], "[]");
+}
+
+#[test]
+fn link_0_carries_no_chain_annotations_and_its_continuation_env_is_0() {
+    let (spec, extras) = chain_spec(120);
+    let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
+    let v = serde_json::to_value(&job).unwrap();
+    assert_eq!(job_env_of(&v)["RUN_ID"], "GD5");
+    assert_eq!(job_env_of(&v)["CONTINUATION"], "0");
+    let ann = v["metadata"]["annotations"].as_object().unwrap();
+    for key in [
+        ANN_CHAIN_ROOT,
+        ANN_CONTINUATION,
+        ANN_CONTINUATION_OF,
+        ANN_CHAIN,
+    ] {
+        assert!(!ann.contains_key(key), "{key}");
+    }
+}
+
+// ---- continuation create-or-reuse, and stopped_at_time_limit ------------------------------
+
+#[test]
+fn a_continuation_is_created_once_and_reused_on_a_retried_pass() {
+    let existing = ["GD5".to_string(), "GD5-c2".to_string()];
+    assert_eq!(
+        continuation_create_or_reuse(&existing, "GD5-c3"),
+        ContinuationCreate::Create,
+        "no Job named GD5-c3 yet"
+    );
+    assert_eq!(
+        continuation_create_or_reuse(&existing, "GD5-c2"),
+        ContinuationCreate::Reuse,
+        "a retried finalize pass must not create a second Job for the same link"
+    );
+}
+
+#[test]
+fn stopped_at_time_limit_reads_the_companion_keys_or_the_agents_own_wording() {
+    let mut report = DevJobReport::default();
+    assert!(!stopped_at_time_limit(&report, None), "nothing said so");
+
+    report
+        .extra
+        .insert("stopped_at_limit".into(), "agent".into());
+    assert!(stopped_at_time_limit(&report, None));
+
+    let report = DevJobReport {
+        failure: Some("agent hit the 18900s wall clock limit".into()),
+        ..DevJobReport::default()
+    };
+    assert!(stopped_at_time_limit(&report, None));
+
+    let report = DevJobReport {
+        failure: Some(
+            "the pod was stopped (SIGTERM) before the run finished; its work as of the SIGTERM \
+             is checkpointed to jesse/gd5-x-wip on origin"
+                .into(),
+        ),
+        ..DevJobReport::default()
+    };
+    assert!(
+        !stopped_at_time_limit(&report, Some("OOMKilled")),
+        "a SIGTERM the Job's own deadline does not explain is not the time limit"
+    );
+    assert!(stopped_at_time_limit(
+        &report,
+        Some("DeadlineExceeded: Job was active longer than specified deadline")
+    ));
+
+    let report = DevJobReport {
+        failure: Some("cargo test exited 101".into()),
+        ..DevJobReport::default()
+    };
+    assert!(!stopped_at_time_limit(&report, None));
+}
+
+// ---- continuation_decision --------------------------------------------------------------
+
+fn checkpoint(tree: &str) -> crate::hostrun::sys::Checkpoint {
+    crate::hostrun::sys::Checkpoint {
+        sha: "deadbeef".into(),
+        tree: tree.into(),
+        subject: "checkpoint of jesse/gd5-x at 2026-11-26T10:00:00Z [skip ci]".into(),
+        parent_count: 1,
+    }
+}
+
+/// [`continuation_decision`]'s defaults: nothing cancelled or killed, no pull request, stopped
+/// at the limit, no question, a usable checkpoint, link 0 of at most 3, no previous to compare.
+struct Case<'a> {
+    cancelled: bool,
+    oom_killed: bool,
+    has_pull_request: bool,
+    stopped_at_limit: bool,
+    needs_you: bool,
+    checkpoint: Result<crate::hostrun::sys::Checkpoint, &'a str>,
+    current_link: u32,
+    max_continuations: u32,
+    previous: Option<(&'a str, &'a str)>,
+}
+
+impl Default for Case<'_> {
+    fn default() -> Self {
+        Case {
+            cancelled: false,
+            oom_killed: false,
+            has_pull_request: false,
+            stopped_at_limit: true,
+            needs_you: false,
+            checkpoint: Ok(checkpoint("tree1")),
+            current_link: 0,
+            max_continuations: 3,
+            previous: None,
+        }
+    }
+}
+
+fn decide(c: Case) -> ContinuationDecision {
+    continuation_decision(
+        c.cancelled,
+        c.oom_killed,
+        c.has_pull_request,
+        c.stopped_at_limit,
+        c.needs_you,
+        c.checkpoint.as_ref().map_err(|e| *e),
+        c.current_link,
+        c.max_continuations,
+        c.previous,
+    )
+}
+
+fn stops(d: &ContinuationDecision, needle: &str) -> bool {
+    matches!(d, ContinuationDecision::Stop(why) if why.contains(needle))
+}
+
+#[test]
+fn continuation_decision_follows_its_rules_in_order() {
+    // The B248 shape: capped, checkpoint present, link 0, max 3: continue as link 1.
+    assert_eq!(
+        decide(Case::default()),
+        ContinuationDecision::Continue { link: 1 }
+    );
+    // The B247 shape: capped, no checkpoint: stop, naming why.
+    assert!(stops(
+        &decide(Case {
+            checkpoint: Err("jesse/gd5-x-wip does not exist on origin"),
+            ..Case::default()
+        }),
+        "does not exist"
+    ));
+    // Rule 1: cancelled, first match, whatever else is true.
+    assert!(stops(
+        &decide(Case {
+            cancelled: true,
+            ..Case::default()
+        }),
+        "cancelled"
+    ));
+    // Rule 2: killed for memory.
+    assert!(stops(
+        &decide(Case {
+            oom_killed: true,
+            ..Case::default()
+        }),
+        "memory"
+    ));
+    // Rule 3: a pull request already.
+    assert!(stops(
+        &decide(Case {
+            has_pull_request: true,
+            ..Case::default()
+        }),
+        "already on GitHub"
+    ));
+    // Rule 4: did not stop at its time limit.
+    assert!(stops(
+        &decide(Case {
+            stopped_at_limit: false,
+            ..Case::default()
+        }),
+        "did not stop"
+    ));
+    // Rule 5: the agent asked a question.
+    assert!(stops(
+        &decide(Case {
+            needs_you: true,
+            ..Case::default()
+        }),
+        "NEEDS YOU"
+    ));
+    // Rule 6: the checkpoint could not be read (collapsed with "no checkpoint" by the caller).
+    assert!(stops(
+        &decide(Case {
+            checkpoint: Err("the checkpoint could not be read: rate limited"),
+            ..Case::default()
+        }),
+        "rate limited"
+    ));
+    // Rule 7: already at the cap.
+    assert!(stops(
+        &decide(Case {
+            current_link: 3,
+            max_continuations: 3,
+            ..Case::default()
+        }),
+        "max_continuations"
+    ));
+    assert_eq!(
+        decide(Case {
+            current_link: 2,
+            max_continuations: 3,
+            ..Case::default()
+        }),
+        ContinuationDecision::Continue { link: 3 }
+    );
+    // 0 turns continuations off outright, even at link 0.
+    assert!(stops(
+        &decide(Case {
+            max_continuations: 0,
+            ..Case::default()
+        }),
+        "max_continuations"
+    ));
+    // Rule 8: no progress since the checkpoint this run itself resumed from.
+    assert!(stops(
+        &decide(Case {
+            previous: Some(("GD5", "tree1")),
+            ..Case::default()
+        }),
+        "no progress since GD5"
+    ));
+    // Different tree: real progress, continues.
+    assert_eq!(
+        decide(Case {
+            previous: Some(("GD5", "tree0")),
+            ..Case::default()
+        }),
+        ContinuationDecision::Continue { link: 1 }
+    );
+}
+
+#[test]
+fn max_continuations_defaults_to_3_0_parses_and_11_is_refused() {
+    assert_eq!(CloudSettings::default().max_continuations, 3);
+    let s = |max: u32| {
+        CloudSettings::from_toml(
+            Some(CloudToml {
+                enabled: true,
+                max_continuations: Some(max),
+                ..CloudToml::default()
+            }),
+            "",
+        )
+    };
+    assert_eq!(s(0).max_continuations, 0);
+    assert!(s(0)
+        .problems(true)
+        .iter()
+        .all(|p| !p.contains("max_continuations")));
+    assert!(s(11)
+        .problems(true)
+        .iter()
+        .any(|p| p.contains("max_continuations")));
+}
+
+// ---- the continuation prompt --------------------------------------------------------------
+
+#[test]
+fn the_continuation_prompt_is_pinned_and_strips_any_earlier_section() {
+    let base = "Do the thing.\n";
+    let input = ContinuationPromptInput {
+        link: 1,
+        max: 3,
+        root: "B248",
+        previous: "B248",
+        minutes: 315,
+        branch: "jesse/gd5-x",
+        sha: "deadbeef",
+    };
+    let want = "Do the thing.\n\n### Continuation\n\n\
+        This is continuation 1 of at most 3 of cloud run B248. The attempt before this one \
+        (B248) reached its 315 minute time limit before it finished, and its work was saved: \
+        your branch jesse/gd5-x starts from its checkpoint deadbeef, with its commits on the \
+        branch and its uncommitted changes in the work tree. If the environment variable \
+        JESSE_PROGRESS_FILE names a file that exists, read it first: it says what the earlier \
+        attempts finished and what they meant to do next. Continue the task above from there. \
+        Do not start over, and do not redo work that is already committed and passing. Keep \
+        that file up to date as you go (what is done, what is next), never put this prompt's \
+        text or any secret in it, because it is pushed to the repository with your checkpoints, \
+        and commit after each step you finish: you have the same time limit.\n";
+    assert_eq!(continuation_prompt(base, &input), want);
+
+    // A prompt that already has one section keeps exactly one, with the pinned text.
+    let already = "Do the thing.\n\n### Continuation\n\nstale text here.\n";
+    let again = continuation_prompt(already, &input);
+    assert_eq!(again, want);
+    assert_eq!(again.matches("### Continuation").count(), 1);
 }
 
 #[test]
@@ -1817,6 +2182,7 @@ fn job_deadline_seconds_always_equals_active_deadline_seconds() {
             merge_deny: CloudSettings::default().merge_deny_env(),
             resources: CloudSettings::default().job_resources(),
             services: CloudSettings::default().services,
+            chain: None,
         };
         let image = format!(
             "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",

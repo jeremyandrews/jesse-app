@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    valid_label_value, CloudJobExtras, CloudKind, CloudStart, DevJobArgs, DevJobSettings,
-    DevJobSlot, DevJobSpec, DevJobs, JobView, Started, StrandRef,
+    valid_label_value, ChainExtras, CloudJobExtras, CloudKind, CloudStart, DevJobArgs,
+    DevJobSettings, DevJobSlot, DevJobSpec, DevJobs, JobView, Started, StrandRef,
 };
 
 // ---- DEFAULTS ------------------------------------------------------------------------
@@ -239,6 +239,15 @@ pub const DEFAULT_WORKER_LIFE_MINUTES: u64 = 720;
 /// Time from `kc-burst up` to a worker being ready and idle, before any Job can resume onto it
 /// and start its own `activeDeadlineSeconds` clock. [`CloudSettings::problems`]'s margin.
 pub const BOOT_ALLOWANCE_MINUTES: u64 = 15;
+/// The pod's `terminationGracePeriodSeconds`: the entrypoint's time, between the deadline's
+/// SIGTERM and the SIGKILL, to push its SIGTERM checkpoint to `jesse/<slug>-wip` and print its
+/// report. Kubernetes' own default (30s) is not enough; the k3s Job template uses this value.
+pub const CHECKPOINT_GRACE_SECS: u64 = 120;
+/// The default `[devjob.cloud] max_continuations`: how many times a capped run may be continued
+/// as `<run_id>-c2`, `-c3`, and so on before the chain stops on its own. `0` turns continuations off.
+pub const DEFAULT_MAX_CONTINUATIONS: u32 = 3;
+/// The most `max_continuations` may be set to ([`CloudSettings::problems`]).
+pub const MAX_MAX_CONTINUATIONS: u32 = 10;
 
 /// The node label `kc-burst up --label` puts on a dev job worker; the admission policy in
 /// `jesse-dev` requires pods to select it.
@@ -265,6 +274,16 @@ pub const MERGE_KEY: &str = "devjob-merge";
 pub const PR_TITLE_FILE: &str = "/home/agent/work/pr-title.txt";
 /// Where the agent writes its report, inside the Job.
 pub const RUN_REPORT_FILE: &str = "/home/agent/work/report.md";
+/// On a continuation Job only: the chain's first run's id. Absent on link 0 ([`ChainInfo::of`]).
+pub const ANN_CHAIN_ROOT: &str = "jesse.dev/chain-root";
+/// On a continuation Job only: its own link number (link 0 is the first run).
+pub const ANN_CONTINUATION: &str = "jesse.dev/continuation";
+/// On a continuation Job only: the previous link's run id.
+pub const ANN_CONTINUATION_OF: &str = "jesse.dev/continuation-of";
+/// On a continuation Job only: every earlier link, as JSON ([`ChainLink`]).
+pub const ANN_CHAIN: &str = "jesse.dev/chain";
+/// On a finished cloud Job that continued: the new run's id.
+pub const ANN_CONTINUED_AS: &str = "jesse.dev/continued-as";
 
 // ---- SETTINGS ------------------------------------------------------------------------
 
@@ -300,6 +319,9 @@ pub struct CloudToml {
     pub max_timeout_minutes: Option<u64>,
     /// How long a burst worker may live, kc-burst's own `max_ttl`.
     pub worker_life_minutes: Option<u64>,
+    /// How many times a capped run may continue as `<run_id>-c2`, `-c3`, and so on. `0` turns
+    /// continuations off.
+    pub max_continuations: Option<u32>,
     /// Where kc-burst's own config lives, for its `max_ttl` ([`read_kc_burst_max_ttl`]).
     pub kc_burst_config: Option<PathBuf>,
 }
@@ -349,6 +371,7 @@ pub struct CloudSettings {
     pub ledger: PathBuf,
     pub max_timeout_minutes: u64,
     pub worker_life_minutes: u64,
+    pub max_continuations: u32,
     /// Where kc-burst's own config lives: its `max_ttl` is read from here, once, into
     /// [`Self::kc_burst_max_ttl_minutes`]. The bridge never opens it for anything else.
     pub kc_burst_config: PathBuf,
@@ -422,6 +445,7 @@ impl CloudSettings {
             },
             max_timeout_minutes: t.max_timeout_minutes.unwrap_or(DEFAULT_MAX_TIMEOUT_MINUTES),
             worker_life_minutes: t.worker_life_minutes.unwrap_or(DEFAULT_WORKER_LIFE_MINUTES),
+            max_continuations: t.max_continuations.unwrap_or(DEFAULT_MAX_CONTINUATIONS),
             kc_burst_config: match t.kc_burst_config {
                 Some(p) => expand(&p, home),
                 None => Path::new(home).join(DEFAULT_KC_BURST_CONFIG),
@@ -502,6 +526,11 @@ impl CloudSettings {
         }
         if self.max_timeout_minutes == 0 {
             out.push("[devjob.cloud] max_timeout_minutes must be at least 1".into());
+        }
+        if self.max_continuations > MAX_MAX_CONTINUATIONS {
+            out.push(format!(
+                "[devjob.cloud] max_continuations must be at most {MAX_MAX_CONTINUATIONS}"
+            ));
         }
         if self.worker_life_minutes > MAX_WORKER_LIFE_MINUTES {
             out.push(format!(
@@ -903,6 +932,19 @@ impl MergeDecision {
             MergeDecision::Denied(p) => format!("denied: {p}"),
         }
     }
+
+    /// [`MergeDecision::annotation`], read back: a continuation copies the finished Job's own
+    /// decision rather than deciding again (the deny list, or what was asked, might have since
+    /// changed). An annotation this does not recognise is `No`, same as one never asked for.
+    pub fn from_annotation(s: &str) -> MergeDecision {
+        match s {
+            "true" => MergeDecision::AtGreen,
+            s if s.starts_with("denied: ") => {
+                MergeDecision::Denied(s["denied: ".len()..].to_string())
+            }
+            _ => MergeDecision::No,
+        }
+    }
 }
 
 /// The merge decision: `asked` (the tool's `merge`, else the draft's `devjob-merge`) and the deny
@@ -915,6 +957,181 @@ pub fn merge_decision(repo: &str, asked: bool, deny: &[String]) -> MergeDecision
         Some(p) => MergeDecision::Denied(p.to_string()),
         None => MergeDecision::AtGreen,
     }
+}
+
+// ---- CONTINUATIONS ---------------------------------------------------------------------
+
+/// Whether a capped run's continuation is made new, or one already exists to reuse: a crash or
+/// a retried [`super::DevJobs::reconcile`] pass between creating the Job and annotating the
+/// finished one as reported must not create two Jobs for one continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationCreate {
+    Create,
+    Reuse,
+}
+
+/// [`ContinuationCreate`]: whether `new_run_id` is already the run id of a live or finished Job.
+pub fn continuation_create_or_reuse(
+    existing_run_ids: &[String],
+    new_run_id: &str,
+) -> ContinuationCreate {
+    if existing_run_ids.iter().any(|id| id == new_run_id) {
+        ContinuationCreate::Reuse
+    } else {
+        ContinuationCreate::Create
+    }
+}
+
+/// What a capped run's finalize decides about continuing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationDecision {
+    /// Make (or reuse) the next link, numbered `link`.
+    Continue { link: u32 },
+    /// Do not continue, and why.
+    Stop(String),
+}
+
+/// The rules, first match wins (`docs/devjob-cloud.md` and the DJ29 prompt's step 6):
+///
+/// 1. `cancelled`: a person cancelled the run.
+/// 2. `oom_killed`: the pod was killed for memory.
+/// 3. `has_pull_request`: the report already names a pull request — the work is on GitHub, and a
+///    new Job would refuse to start (`jesse/<slug>` already exists).
+/// 4. `!stopped_at_limit`: the run did not fail by hitting its time limit (a missing report, a
+///    test failure, an unexplained `BackoffLimitExceeded`, out of memory already covered above).
+/// 5. `needs_you`: the agent's final message began `NEEDS YOU`.
+/// 6. `checkpoint`: `Err(reason)` when the checkpoint could not be read, or none was found, or
+///    the one found does not look like the entrypoint's own.
+/// 7. `current_link >= max_continuations`: this link is already at the cap (the first run is
+///    link 0).
+/// 8. `previous`: `Some((run id, tree))` the checkpoint resumed from; stop when its tree equals
+///    the checkpoint just read (no progress was made).
+///
+/// Otherwise, continue as the next link (`current_link + 1`).
+#[allow(clippy::too_many_arguments)]
+pub fn continuation_decision(
+    cancelled: bool,
+    oom_killed: bool,
+    has_pull_request: bool,
+    stopped_at_limit: bool,
+    needs_you: bool,
+    checkpoint: Result<&crate::hostrun::sys::Checkpoint, &str>,
+    current_link: u32,
+    max_continuations: u32,
+    previous: Option<(&str, &str)>,
+) -> ContinuationDecision {
+    use ContinuationDecision::{Continue, Stop};
+    if cancelled {
+        return Stop("the run was cancelled".into());
+    }
+    if oom_killed {
+        return Stop("the pod was killed for memory".into());
+    }
+    if has_pull_request {
+        return Stop(
+            "the report already names a pull request: the work is already on GitHub".into(),
+        );
+    }
+    if !stopped_at_limit {
+        return Stop("did not stop at its time limit".into());
+    }
+    if needs_you {
+        return Stop("the agent asked a question (NEEDS YOU)".into());
+    }
+    let cp = match checkpoint {
+        Ok(cp) => cp,
+        Err(reason) => return Stop(reason.to_string()),
+    };
+    if current_link >= max_continuations {
+        return Stop(format!(
+            "link {current_link} is already max_continuations ({max_continuations})"
+        ));
+    }
+    if let Some((previous_id, previous_tree)) = previous {
+        if previous_tree == cp.tree {
+            return Stop(format!("no progress since {previous_id}"));
+        }
+    }
+    Continue {
+        link: current_link + 1,
+    }
+}
+
+/// Whether `report` says the run stopped at its time limit: the companion entrypoint change's
+/// own `stopped_at_limit` key, else the agent timeout's own failure wording, else a SIGTERM the
+/// Job's own deadline explains (`DeadlineExceeded`).
+pub fn stopped_at_time_limit(report: &super::DevJobReport, failure_reason: Option<&str>) -> bool {
+    if report.extra.contains_key("stopped_at_limit") {
+        return true;
+    }
+    let Some(f) = &report.failure else {
+        return false;
+    };
+    if f.starts_with("agent hit the") && f.contains("wall clock limit") {
+        return true;
+    }
+    f.contains("stopped (SIGTERM)")
+        && failure_reason.is_some_and(|r| r.starts_with("DeadlineExceeded"))
+}
+
+/// `### Continuation`, as a whole line: where [`strip_continuation_section`] cuts.
+pub const CONTINUATION_HEADER: &str = "### Continuation";
+
+/// `prompt` with any `### Continuation` section (that line to the end) removed, so a resumed
+/// prompt never carries two.
+pub fn strip_continuation_section(prompt: &str) -> String {
+    let mut offset = 0;
+    for line in prompt.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        if trimmed == CONTINUATION_HEADER {
+            return prompt[..offset].trim_end().to_string();
+        }
+        offset += line.len();
+    }
+    prompt.trim_end().to_string()
+}
+
+/// What [`continuation_prompt`] fills into its pinned text.
+pub struct ContinuationPromptInput<'a> {
+    /// The new Job's own link number (the next one after the run that capped).
+    pub link: u32,
+    pub max: u32,
+    /// The chain's first run's id.
+    pub root: &'a str,
+    /// The run id of the attempt that just hit its limit.
+    pub previous: &'a str,
+    /// The previous attempt's own `timeout_minutes`.
+    pub minutes: u64,
+    pub branch: &'a str,
+    /// The checkpoint commit's sha.
+    pub sha: &'a str,
+}
+
+/// The continuation's prompt: `base_prompt` (the ConfigMap's `prompt.md`, already the full cloud
+/// prompt) with any earlier `### Continuation` section stripped, then this one appended. Exactly
+/// this text (the DJ29 prompt's step 9), so the tests pin it.
+pub fn continuation_prompt(base_prompt: &str, p: &ContinuationPromptInput) -> String {
+    let stripped = strip_continuation_section(base_prompt);
+    format!(
+        "{stripped}\n\n{CONTINUATION_HEADER}\n\n\
+         This is continuation {link} of at most {max} of cloud run {root}. The attempt before \
+         this one ({previous}) reached its {minutes} minute time limit before it finished, and \
+         its work was saved: your branch {branch} starts from its checkpoint {sha}, with its \
+         commits on the branch and its uncommitted changes in the work tree. If the environment \
+         variable JESSE_PROGRESS_FILE names a file that exists, read it first: it says what the \
+         earlier attempts finished and what they meant to do next. Continue the task above from \
+         there. Do not start over, and do not redo work that is already committed and passing. \
+         Keep that file up to date as you go (what is done, what is next), never put this \
+         prompt's text or any secret in it, because it is pushed to the repository with your \
+         checkpoints, and commit after each step you finish: you have the same time limit.\n",
+        link = p.link,
+        max = p.max,
+        root = p.root,
+        previous = p.previous,
+        minutes = p.minutes,
+        branch = p.branch,
+        sha = p.sha,
+    )
 }
 
 // ---- WHAT THE AGENT IS TOLD ---------------------------------------------------------------
@@ -1495,6 +1712,9 @@ pub struct CloudRun {
     /// Set when a requested `timeout_minutes` was reduced to [`CloudSettings::max_timeout_minutes`]
     /// ([`super::timeout_reduced_note`]): what `devjob_start`'s reply tells the caller.
     pub timeout_note: Option<String>,
+    /// Set only when this run is a continuation ([`DevJobs::finalize`]'s own creation path);
+    /// `None` for every run `devjob_start` or the Studio drain creates: those are always link 0.
+    pub chain: Option<ChainExtras>,
 }
 
 /// The branch slug of a cloud run: the Studio's branch name for the same run, cut to the
@@ -1682,6 +1902,7 @@ impl DevJobs {
             merge,
             strand: r.strand,
             timeout_note,
+            chain: None,
         })
     }
 
@@ -1694,6 +1915,7 @@ impl DevJobs {
             merge_deny: rt.settings.merge_deny_env(),
             resources: rt.settings.job_resources(),
             services: rt.settings.services,
+            chain: run.chain.clone(),
         };
         self.create_run(&run.spec, origin, run.strand.as_ref(), Some(&extras))
             .await

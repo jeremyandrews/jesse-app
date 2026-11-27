@@ -4155,3 +4155,61 @@ fn only_a_waiting_never_started_draft_run_on_github_is_drainable() {
         assert!(!drainable(&r), "{why}");
     }
 }
+
+// ---- CHECKPOINTS (cloud continuations) --------------------------------------------------
+
+#[test]
+fn a_checkpoint_is_valid_only_with_the_entrypoints_exact_subject_and_one_parent() {
+    let cp = |subject: &str, parents: usize| sys::Checkpoint {
+        sha: "abc".into(),
+        tree: "tree1".into(),
+        subject: subject.to_string(),
+        parent_count: parents,
+    };
+    let good = cp(
+        "checkpoint of jesse/gd5-x at 2026-11-26T10:00:00Z [skip ci]",
+        1,
+    );
+    assert!(good.is_valid_for("gd5-x"));
+    assert!(good.invalid_reason("gd5-x").is_none());
+
+    let wrong_slug = cp(
+        "checkpoint of jesse/other at 2026-11-26T10:00:00Z [skip ci]",
+        1,
+    );
+    assert!(!wrong_slug.is_valid_for("gd5-x"));
+    assert!(wrong_slug.invalid_reason("gd5-x").is_some());
+
+    let two_parents = cp(
+        "checkpoint of jesse/gd5-x at 2026-11-26T10:00:00Z [skip ci]",
+        2,
+    );
+    assert!(!two_parents.is_valid_for("gd5-x"));
+
+    let no_marker = cp("wip", 1);
+    assert!(!no_marker.is_valid_for("gd5-x"));
+}
+
+#[test]
+fn checkpoint_of_reads_the_sha_tree_subject_and_parent_count() {
+    let ref_json = serde_json::json!({ "object": { "sha": "deadbeef" } });
+    let commit_json = serde_json::json!({
+        "tree": { "sha": "treesha" },
+        "message": "checkpoint of jesse/gd5-x at 2026-11-26T10:00:00Z [skip ci]\n\nmore",
+        "parents": [{ "sha": "parent1" }],
+    });
+    let cp = sys::checkpoint_of(&ref_json, &commit_json).unwrap();
+    assert_eq!(cp.sha, "deadbeef");
+    assert_eq!(cp.tree, "treesha");
+    assert_eq!(
+        cp.subject,
+        "checkpoint of jesse/gd5-x at 2026-11-26T10:00:00Z [skip ci]"
+    );
+    assert_eq!(cp.parent_count, 1);
+    assert!(cp.is_valid_for("gd5-x"));
+
+    let bad_ref = serde_json::json!({});
+    assert!(sys::checkpoint_of(&bad_ref, &commit_json).is_err());
+    let bad_commit = serde_json::json!({ "message": "x" });
+    assert!(sys::checkpoint_of(&ref_json, &bad_commit).is_err());
+}

@@ -720,6 +720,112 @@ fn the_report_holds_the_spec_the_table_the_link_and_the_log() {
     assert!(text.contains("JESSE-DEV-REPORT-END"));
 }
 
+// ---- several pull requests in order ---------------------------------------------------------
+
+const SHA_1: &str = "1111111111111111111111111111111111111111";
+const SHA_2: &str = "2222222222222222222222222222222222222222";
+const SHA_3: &str = "3333333333333333333333333333333333333333";
+
+/// The report of a run that shipped two parts and then its own pull request: the entrypoint's
+/// `part_pull_request` lines, `pull_request` (its own) and `pull_requests` (all three, in order).
+fn three_part_log() -> String {
+    format!(
+        "noise\nJESSE-DEV-REPORT\nstatus: ok\nrepo: jeremyandrews/k3s\nbranch: jesse/three\n\
+         part_pull_request: https://github.com/jeremyandrews/k3s/pull/4 merged {SHA_1}\n\
+         part_pull_request: https://github.com/jeremyandrews/k3s/pull/5 merged {SHA_2}\n\
+         pull_request: https://github.com/jeremyandrews/k3s/pull/6\n\
+         merge: merged aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+         pull_requests: https://github.com/jeremyandrews/k3s/pull/4 {SHA_1}, \
+         https://github.com/jeremyandrews/k3s/pull/5 {SHA_2}, \
+         https://github.com/jeremyandrews/k3s/pull/6 {SHA_3}\n\
+         wall_seconds: 900\nagent_final_message: |\n  Done.\nJESSE-DEV-REPORT-END\n"
+    )
+}
+
+fn pr(n: u32, squash: Option<&str>) -> ReportPullRequest {
+    ReportPullRequest {
+        url: format!("https://github.com/jeremyandrews/k3s/pull/{n}"),
+        squash: squash.map(str::to_string),
+    }
+}
+
+#[test]
+fn a_report_with_pull_requests_lists_every_one_in_order() {
+    let r = parse_report(&three_part_log()).unwrap();
+    assert_eq!(
+        r.pull_requests(),
+        vec![pr(4, Some(SHA_1)), pr(5, Some(SHA_2)), pr(6, Some(SHA_3))]
+    );
+    // pull_request is still the run's own.
+    assert_eq!(
+        r.pull_request_url(),
+        Some("https://github.com/jeremyandrews/k3s/pull/6")
+    );
+    assert_eq!(RunOutcome::of(&r), RunOutcome::PullRequestOpened);
+}
+
+#[test]
+fn a_report_without_pull_requests_falls_back_to_pull_request() {
+    let r = parse_report(GOOD_LOG).unwrap();
+    assert_eq!(r.pull_requests, None);
+    assert_eq!(r.pull_requests(), vec![pr(7, None)]);
+    // No pull request at all: an empty list.
+    let none = parse_report(FAKE_MARKER_LOG).unwrap();
+    assert_eq!(none.pull_requests(), Vec::new());
+}
+
+#[test]
+fn a_pull_requests_entry_without_a_squash_commit_is_kept_and_junk_is_dropped() {
+    let r = DevJobReport {
+        pull_request: Some("https://github.com/o/r/pull/2".into()),
+        pull_requests: Some(
+            "https://github.com/o/r/pull/1, not-a-url abc, https://github.com/o/r/pull/2 zz".into(),
+        ),
+        ..DevJobReport::default()
+    };
+    assert_eq!(
+        r.pull_requests(),
+        vec![
+            ReportPullRequest {
+                url: "https://github.com/o/r/pull/1".into(),
+                squash: None
+            },
+            ReportPullRequest {
+                url: "https://github.com/o/r/pull/2".into(),
+                squash: None
+            },
+        ]
+    );
+}
+
+#[test]
+fn the_report_names_every_pull_request_in_order() {
+    let r = parse_report(&three_part_log()).unwrap();
+    let text = report_text(&r, &[], None);
+    let list = format!(
+        "Pull requests, in order, the run's own last:\n\n\
+         1. [https://github.com/jeremyandrews/k3s/pull/4](https://github.com/jeremyandrews/k3s/pull/4), squash commit `{SHA_1}`\n\
+         2. [https://github.com/jeremyandrews/k3s/pull/5](https://github.com/jeremyandrews/k3s/pull/5), squash commit `{SHA_2}`\n\
+         3. [https://github.com/jeremyandrews/k3s/pull/6](https://github.com/jeremyandrews/k3s/pull/6), squash commit `{SHA_3}`\n\n"
+    );
+    assert!(text.contains(&list), "{text}");
+    assert!(!text.contains("Pull request: ["), "{text}");
+    assert!(text.contains(&format!(
+        "| pull_requests | https://github.com/jeremyandrews/k3s/pull/4 {SHA_1}, "
+    )));
+    assert!(text.contains(&format!(
+        "| part_pull_request | https://github.com/jeremyandrews/k3s/pull/5 merged {SHA_2} |"
+    )));
+}
+
+#[test]
+fn the_push_names_every_pull_request_in_order_only_when_there_are_several() {
+    let r = parse_report(&three_part_log()).unwrap();
+    assert_eq!(pull_requests_push_suffix(&r), " · pull requests #4, #5, #6");
+    let one = parse_report(GOOD_LOG).unwrap();
+    assert_eq!(pull_requests_push_suffix(&one), "");
+}
+
 #[test]
 fn an_unparseable_log_is_reported_as_a_failure_with_its_tail() {
     let e = parse_report(NO_BLOCK_LOG).unwrap_err();

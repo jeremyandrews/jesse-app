@@ -1218,6 +1218,88 @@ impl RunRecord {
             .is_some_and(|c| c.job_name.as_deref() == Some(job) || c.jobs.iter().any(|j| j == job))
     }
 
+    /// Whether a round that ended `status` is a reviewed run's implementing round, so the run
+    /// goes `reviewing` ([`RunRecord::open_start_review`]) instead of reporting: it reported, the
+    /// run has reviewers, and its own review has not begun. Asked of a Studio round
+    /// ([`HostRuns::finalize`]) and of a cloud Job's end ([`HostRuns::cloud_ended`]) alike.
+    pub fn starts_review(&self, status: RunStatus) -> bool {
+        status == RunStatus::Reported
+            && !self.reviewer_ids().is_empty()
+            && !self
+                .reviews
+                .iter()
+                .any(|v| v.origin == review::ORIGIN_START)
+    }
+
+    /// The run's implementing round ended at `at` and the run goes `reviewing` with its one
+    /// review cycle: one review per reviewer, tagged `A`, `B`, … when there are several. The
+    /// round is recorded as finished and nothing is sent for it.
+    fn open_start_review(&mut self, at: &str, code: Option<i32>, signal: Option<i32>, now: &str) {
+        self.status = RunStatus::Reviewing;
+        self.finished_at = Some(at.to_string());
+        self.stalled_since = None;
+        self.pgid = None;
+        self.restart_resumed = false;
+        self.limit_pushed = false;
+        self.resume_at = None;
+        if let Some(cur) = self.round_mut() {
+            cur.finished_at = Some(at.to_string());
+            cur.outcome = Some(RunStatus::Reported);
+            cur.exit_code = code;
+            cur.signal = signal;
+            // Nothing is sent for this round, ever: its push is the answering round's.
+            cur.notified = true;
+        }
+        let ids = self.reviewer_ids();
+        let first = self.reviews.len() as u32 + 1;
+        let many = ids.len() > 1;
+        for (i, id) in ids.iter().enumerate() {
+            let label = self.reviewer_label_of(i);
+            self.reviews.push(Review {
+                n: first + i as u32,
+                reviewer: id.clone(),
+                reviewer_label: label,
+                origin: review::ORIGIN_START.into(),
+                status: ReviewStatus::Running,
+                focus: self.review_focus.clone(),
+                auto_reply: true,
+                requested_at: now.to_string(),
+                cycle: many.then_some(first),
+                tag: many.then(|| review::tag_for(i)),
+                ..Review::default()
+            });
+        }
+    }
+
+    /// The reviews the round `n` answers ([`Review::answers`]) are answered at `at`, with what
+    /// the leak check found.
+    fn mark_answered(&mut self, n: u32, at: &str, leaks: &[String]) {
+        let answering: Vec<usize> = self
+            .reviews
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.answers(n))
+            .map(|(i, _)| i)
+            .collect();
+        self.mark_answered_at(&answering, at, leaks);
+    }
+
+    /// The reviews at `answering` are answered at `at`: one handed off is `answered`, and every
+    /// one that ran keeps what the leak check found in the answer.
+    fn mark_answered_at(&mut self, answering: &[usize], at: &str, leaks: &[String]) {
+        for &i in answering {
+            if let Some(v) = self.reviews.get_mut(i) {
+                if v.status == ReviewStatus::HandedOff {
+                    v.status = ReviewStatus::Answered;
+                }
+                v.answered_at = Some(at.to_string());
+                if !leaks.is_empty() && v.status != ReviewStatus::Failed {
+                    v.leaks = leaks.to_vec();
+                }
+            }
+        }
+    }
+
     /// Every reviewer of a reviewed run, in order: `reviewers`, or a 0.211.0 record's one
     /// `reviewer`. Empty for a run that is not reviewed.
     pub fn reviewer_ids(&self) -> Vec<String> {
@@ -1319,6 +1401,12 @@ pub const EXIT_JSON: &str = "exit.json";
 pub const JOB_PLIST: &str = "job.plist";
 pub const TARGET_DIR: &str = "target";
 pub const WORKTREE_DIR: &str = "worktree";
+/// The scratch checkout of what a cloud run's answering Job pushed, read for the leak check
+/// ([`HostRuns::cloud_report_marks`]) and removed at once.
+pub const REVIEW_ANSWER_DIR: &str = "review-answer";
+/// The scratch checkout of a cloud run's pushed branch a review cycle reads its range from,
+/// in the run's directory, removed as soon as the range is read ([`HostRuns::cycle_range`]).
+pub const REVIEW_RANGE_DIR: &str = "review-range";
 /// Where a run clones any further repository it needs. Removed with the build artifacts.
 pub const EXTRA_DIR: &str = "extra";
 /// The prompt as the caller gave it (a draft's `## PROMPT` section or a free prompt), until
@@ -2424,6 +2512,26 @@ pub fn find_existing_report(notes_root: &Path, run_id: &str, round: u32) -> Opti
 }
 
 /// The first `https://github.com/<owner>/<name>/pull/<n>` the report names.
+/// The number at the end of a pull request URL.
+pub fn pull_number(url: &str) -> Option<u64> {
+    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+}
+
+/// `text`, then a link to each review note in `notes`, as an answering round's report ends.
+pub fn with_note_links(mut text: String, notes: &[String]) -> String {
+    if notes.is_empty() {
+        return text;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    for note in notes {
+        text.push_str(&format!("{}\n", review::note_link(note)));
+    }
+    text
+}
+
 pub fn pull_request_url(report: &str) -> Option<String> {
     let mut from = 0;
     while let Some(i) = report[from..].find("https://github.com/") {
@@ -2667,6 +2775,10 @@ pub fn cloud_opt_in(path: Option<&str>, src: Option<&str>) -> Result<(), String>
 fn cloud_may_take(r: &RunRecord, notes_root: &Path) -> bool {
     if r.status != RunStatus::Queued {
         return false;
+    }
+    // A further round of a run on the cloud (a review's hand off, a reply): its Job comes next.
+    if r.on_cloud() {
+        return true;
     }
     match r.host {
         RunHost::Cloud => true,
@@ -2971,6 +3083,8 @@ pub struct CloudEnd {
     /// The Job the run continues as from its checkpoint, when it hit its time limit.
     pub continued_as: Option<String>,
     pub error: Option<String>,
+    /// What the leak check found in the answer to a review ([`HostRuns::cloud_report_marks`]).
+    pub leaks: Vec<String>,
 }
 
 impl std::fmt::Debug for HostRuns {
@@ -3277,11 +3391,7 @@ impl HostRuns {
         // created ([`HostRuns::resolve_reviewers`]).
         let focus = review::checked_focus(req.review_focus.as_deref())
             .map_err(|e| Refusal::Invalid(format!("review_{e}")))?;
-        let picked = if cloud.is_some() {
-            Self::cloud_reviewers(req, prompt_path.as_deref(), draft_reviewer.as_ref())?
-        } else {
-            self.resolve_reviewers(req.reviewer.as_ref(), draft_reviewer.as_ref())?
-        };
+        let picked = self.resolve_reviewers(req.reviewer.as_ref(), draft_reviewer.as_ref())?;
         if picked.infos.is_empty() && picked.skipped.is_empty() && focus.is_some() {
             return Err(Refusal::Invalid(
                 "review_focus needs a reviewer: pass reviewer too".into(),
@@ -3428,41 +3538,6 @@ impl HostRuns {
         })
     }
 
-    /// Who reviews a cloud run: nobody yet. A reviewer the start names is refused; the draft's
-    /// `devjob-reviewer:` and `[hostrun] default_reviewers` do not apply.
-    fn cloud_reviewers(
-        req: &StartRequest,
-        path: Option<&str>,
-        draft: Option<&review::ReviewerArg>,
-    ) -> Result<Picked, Refusal> {
-        // A draft that asks for a review is not run unreviewed: it is refused, as a start's
-        // `reviewer` is, until cloud runs are reviewed.
-        if let Ok(review::ReviewerChoice::Ids(ids)) = review::choose(draft) {
-            return Err(Refusal::Invalid(format!(
-                "{} says {REVIEWER_KEY}: {}, and cloud runs are not reviewed yet: start it on \
-                 the Studio, or say {REVIEWER_KEY}: none",
-                path.unwrap_or("the draft"),
-                ids.join(", ")
-            )));
-        }
-        let off = matches!(
-            review::choose(req.reviewer.as_ref()),
-            Ok(review::ReviewerChoice::Off)
-        );
-        if (req.reviewer.is_some() && !off) || req.review_focus.is_some() {
-            return Err(Refusal::Invalid(
-                "reviewer and review_focus apply only with host \"studio\": cloud runs are not \
-                 reviewed"
-                    .into(),
-            ));
-        }
-        Ok(Picked {
-            infos: Vec::new(),
-            skipped: Vec::new(),
-            source: review::SOURCE_NONE,
-        })
-    }
-
     /// The id a further run of `base` would take now (for the "start it too?" question).
     fn next_free_id(&self, base: &str) -> String {
         let dir = self.settings.runs_dir();
@@ -3562,7 +3637,9 @@ impl HostRuns {
         // One queue for both hosts: a Studio slot takes the first that allows the Studio.
         let mut queued: Vec<&(PathBuf, RunRecord)> = runs
             .iter()
-            .filter(|(_, r)| r.status == RunStatus::Queued && r.host.allows_studio())
+            .filter(|(_, r)| {
+                r.status == RunStatus::Queued && r.host.allows_studio() && !r.on_cloud()
+            })
             .collect();
         // Resumed rounds, then priority, then the order of the wait ([`queue_order`]). Each run
         // is still checked on its own below, so a high run in a full repository leaves the slot
@@ -3775,7 +3852,9 @@ impl HostRuns {
         }
     }
 
-    /// A new round on a finished run: the same worktree and session, the reply on stdin.
+    /// A new round on a finished run: the same worktree and session, the reply on stdin. A
+    /// cloud run's next round is its next Job, on the same branch and pull request, with the
+    /// reply after its prompt ([`crate::devjob::cloud::record_job`]).
     pub fn reply(&self, run_id: &str, text: &str) -> Result<RunRecord, Refusal> {
         if text.trim().is_empty() {
             return Err(Refusal::Invalid("the reply is empty".into()));
@@ -3788,13 +3867,6 @@ impl HostRuns {
             )));
         }
         let _gate = lock(&self.gate);
-        if let Some(r) = self.get(run_id).filter(RunRecord::is_cloud) {
-            return Err(Refusal::State(format!(
-                "{} is a cloud run: its agent ran in a pod that has no session to continue, so \
-                 it takes no reply; start it again, or close it",
-                r.run_id
-            )));
-        }
         if text.trim() == CONTINUE_TEXT {
             match self.get(run_id) {
                 Some(r) if r.status == RunStatus::NeedsYou => {
@@ -3868,6 +3940,13 @@ impl HostRuns {
             )));
         }
         let dir = self.settings.run_dir(run_id);
+        if rec.on_cloud() {
+            // A cloud run's work is its pushed branch; the bridge may never have cloned the
+            // repository to ask origin about it.
+            let (root, url) = (self.settings.root.clone(), self.clone_url(&rec.repo));
+            let _ = git::lock_repo(&root, &rec.repo)
+                .and_then(|_l| git::ensure_bare(&git::bare_path(&root, &rec.repo), &url));
+        }
         if !dir.join(WORKTREE_DIR).exists()
             && git::branch_on_origin(&self.settings.root, &rec.repo, &rec.branch) != Some(true)
         {
@@ -3895,7 +3974,8 @@ impl HostRuns {
             }
             r.status = RunStatus::Queued;
             r.queued_at = Some(now.clone());
-            r.waiting_for = None;
+            // A run on the cloud takes its next round there.
+            r.waiting_for = r.on_cloud().then(|| WAITING_CLOUD.to_string());
             r.stalled_since = None;
             r.disk_pushed = false;
             r.resume_at = None;
@@ -4283,7 +4363,9 @@ impl HostRuns {
             let now = rfc(now_ms());
             let mut took = false;
             let rec = update_run(&dir, |x| {
-                if x.status != RunStatus::Queued || !(x.host == RunHost::Cloud || drainable(x)) {
+                if x.status != RunStatus::Queued
+                    || !(x.host == RunHost::Cloud || drainable(x) || x.on_cloud())
+                {
                     return;
                 }
                 x.status = RunStatus::Running;
@@ -4293,7 +4375,10 @@ impl HostRuns {
                 if let Some(cur) = x.round_mut() {
                     cur.started_at = Some(now.clone());
                 }
-                x.cloud.get_or_insert_with(CloudPart::default).taken_at = Some(now.clone());
+                let part = x.cloud.get_or_insert_with(CloudPart::default);
+                part.taken_at = Some(now.clone());
+                // A further round runs as a Job of its own, named once it is made.
+                part.job_name = None;
                 took = true;
             })
             .ok()?;
@@ -4370,7 +4455,9 @@ impl HostRuns {
             x.started_at = None;
             x.waiting_for = Some(WAITING_CLOUD.to_string());
             x.error = Some(format!("the cloud could not take it: {why}"));
-            if let Some(c) = x.cloud.as_mut() {
+            // A run whose earlier rounds ran on the cloud stays there: its branch, pull request
+            // and checkpoint are the cloud's.
+            if let Some(c) = x.cloud.as_mut().filter(|c| c.jobs.is_empty()) {
                 c.taken_at = None;
             }
             if let Some(cur) = x.round_mut() {
@@ -4395,7 +4482,8 @@ impl HostRuns {
                 return;
             }
             x.error = Some(format!("the cloud cannot run it: {why}"));
-            if x.host == RunHost::Cloud {
+            let ran = x.cloud.as_ref().is_some_and(|c| !c.jobs.is_empty());
+            if x.host == RunHost::Cloud || ran {
                 x.status = RunStatus::Failed;
                 x.finished_at = Some(now.clone());
                 if let Some(cur) = x.round_mut() {
@@ -4431,6 +4519,7 @@ impl HostRuns {
             .find(|(_, r)| r.owns_job(&end.job))?;
         let now = rfc(now_ms());
         let mut changed = false;
+        let mut reviewing = false;
         let rec = update_run(&dir, |x| {
             if x.status != RunStatus::Running
                 || x.cloud.as_ref().and_then(|c| c.job_name.as_deref()) != Some(end.job.as_str())
@@ -4438,6 +4527,20 @@ impl HostRuns {
                 return;
             }
             changed = true;
+            // A reviewed run's implementing Job reported, its pull request still a draft: the
+            // run goes `reviewing`, as a Studio round does.
+            if end.continued_as.is_none() && x.starts_review(end.status) {
+                reviewing = true;
+                x.open_start_review(&now, None, None, &now);
+                if let Some(cur) = x.round_mut() {
+                    cur.report_path = end.report_path.clone();
+                }
+                return;
+            }
+            if end.continued_as.is_none() {
+                let n = x.rounds.len() as u32;
+                x.mark_answered(n, &now, &end.leaks);
+            }
             if let Some(cur) = x.round_mut() {
                 cur.finished_at = Some(now.clone());
                 cur.report_path = end.report_path.clone();
@@ -4482,9 +4585,14 @@ impl HostRuns {
                 end.job,
                 match &end.continued_as {
                     Some(next) => format!("continuing as {next}"),
+                    None if reviewing =>
+                        format!("REVIEWING (reviewers {})", rec.reviewer_ids().join(", ")),
                     None => end.status.label().to_string(),
                 }
             );
+        }
+        if reviewing {
+            self.wake();
         }
         Some(rec)
     }
@@ -4517,6 +4625,7 @@ impl HostRuns {
                     report_path: None,
                     continued_as: None,
                     error: None,
+                    leaks: Vec::new(),
                 });
                 Ok(())
             }
@@ -4859,40 +4968,7 @@ impl HostRuns {
             if r.reviews.iter().any(|v| v.origin == review::ORIGIN_START) {
                 return;
             }
-            r.status = RunStatus::Reviewing;
-            r.finished_at = Some(at.clone());
-            r.stalled_since = None;
-            r.pgid = None;
-            r.restart_resumed = false;
-            r.limit_pushed = false;
-            r.resume_at = None;
-            if let Some(cur) = r.round_mut() {
-                cur.finished_at = Some(at.clone());
-                cur.outcome = Some(RunStatus::Reported);
-                cur.exit_code = code;
-                cur.signal = signal;
-                // Nothing is sent for this round, ever: its push is the answering round's.
-                cur.notified = true;
-            }
-            let ids = r.reviewer_ids();
-            let first = r.reviews.len() as u32 + 1;
-            let many = ids.len() > 1;
-            for (i, id) in ids.iter().enumerate() {
-                let label = r.reviewer_label_of(i);
-                r.reviews.push(Review {
-                    n: first + i as u32,
-                    reviewer: id.clone(),
-                    reviewer_label: label,
-                    origin: review::ORIGIN_START.into(),
-                    status: ReviewStatus::Running,
-                    focus: r.review_focus.clone(),
-                    auto_reply: true,
-                    requested_at: now.clone(),
-                    cycle: many.then_some(first),
-                    tag: many.then(|| review::tag_for(i)),
-                    ..Review::default()
-                });
-            }
+            r.open_start_review(&at, code, signal, &now);
         })?;
         eprintln!(
             "jesse-bridge: hostrun {} round {} REVIEWING (reviewers {})",
@@ -5139,30 +5215,48 @@ impl HostRuns {
     }
 
     /// The range a review cycle reads, once for every reviewer in it: the default branch
-    /// fetched, the merge base and head of the run's worktree, and the diff between them.
+    /// fetched, the merge base and head of the run's work, and the diff between them. A Studio
+    /// run's work is its worktree; a cloud run's is its pushed branch, fetched read only into the
+    /// bridge's bare clone and read from a scratch checkout ([`REVIEW_RANGE_DIR`]) the bridge
+    /// makes for this and removes at once.
     async fn cycle_range(&self, dir: &Path, rec: &RunRecord) -> Result<ReviewRange, String> {
         let worktree = dir.join(WORKTREE_DIR);
-        if !worktree.exists() {
+        let cloud = rec.on_cloud();
+        if !cloud && !worktree.exists() {
             return Err("the run's worktree was removed, so there is nothing to read".into());
         }
         let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+        let (url, branch) = (self.clone_url(&rec.repo), rec.branch.clone());
+        let scratch = dir.join(REVIEW_RANGE_DIR);
         let base_sha = rec.base_sha.clone();
         let default_branch = rec.default_branch.clone();
         tokio::task::spawn_blocking(move || {
-            let main_ref = if is_local_repo(&repo) {
-                git::LOCAL_DEFAULT_BRANCH.to_string()
+            let (main_ref, checkout) = if cloud {
+                let (default, head) = git::fetch_branch_head(&root, &repo, &url, &branch)?;
+                git::add_detached_worktree(&root, &repo, &scratch, &head)?;
+                (format!("origin/{default}"), scratch.clone())
+            } else if is_local_repo(&repo) {
+                (git::LOCAL_DEFAULT_BRANCH.to_string(), worktree)
             } else {
                 let bare = git::bare_path(&root, &repo);
                 let fetched =
                     git::lock_repo(&root, &repo).and_then(|_lock| git::fetch_default(&bare));
-                format!(
+                let main_ref = format!(
                     "origin/{}",
                     fetched.unwrap_or_else(|_| default_branch.unwrap_or_else(|| "main".into()))
-                )
+                );
+                (main_ref, worktree)
             };
-            let (base, head) = review::review_range(&worktree, &main_ref, base_sha.as_deref())?;
-            let diff = review::diff(&worktree, &base, &head)?;
-            Ok::<_, String>(ReviewRange { base, head, diff })
+            let range = review::review_range(&checkout, &main_ref, base_sha.as_deref()).and_then(
+                |(base, head)| {
+                    let diff = review::diff(&checkout, &base, &head)?;
+                    Ok(ReviewRange { base, head, diff })
+                },
+            );
+            if cloud {
+                git::remove_detached_worktree(&root, &repo, &scratch);
+            }
+            range
         })
         .await
         .map_err(|e| format!("the review task failed: {e}"))?
@@ -5419,12 +5513,6 @@ impl HostRuns {
         let rec = self
             .get(run_id)
             .ok_or_else(|| Refusal::NotFound(format!("{run_id:?} is not a Studio run")))?;
-        if rec.is_cloud() {
-            return Err(Refusal::State(format!(
-                "{run_id} is a cloud run: its work is a pushed branch, not a worktree here, so \
-                 it cannot be reviewed yet"
-            )));
-        }
         match rec.status {
             RunStatus::Queued | RunStatus::Running | RunStatus::Paused => {
                 return Err(Refusal::State(format!(
@@ -5586,13 +5674,173 @@ impl HostRuns {
         }
     }
 
+    /// The notes of the reviews at `answering` move to `Inbox/archive/` as the answer's report
+    /// is written; their paths now.
+    fn archive_answered_notes(&self, rec: &RunRecord, answering: &[usize]) -> Vec<String> {
+        answering
+            .iter()
+            .filter_map(|&i| rec.reviews.get(i).and_then(|v| v.path.as_deref()))
+            .map(|p| archive_note(&self.notes_root, p).unwrap_or_else(|| p.to_string()))
+            .collect()
+    }
+
+    /// A cloud Job's report, before it is written ([`crate::devjob::DevJobs`]'s finalize), marked
+    /// for its review as a Studio round's is ([`HostRuns::review_marks`]): the Job that answers
+    /// a review cycle is checked for leaks in what it pushed (pull request `pull`'s head, fetched
+    /// read only into a scratch checkout the bridge removes at once) and in the run's pull
+    /// requests, and the cycle's notes are archived and linked. `status` is what the Job ended
+    /// as. A Job no run owns, or not its run's current one, gets the report back unchanged.
+    /// Returns the report and what the leak check found.
+    pub async fn cloud_report_marks(
+        &self,
+        job: &str,
+        report: String,
+        status: RunStatus,
+        pull: Option<&str>,
+    ) -> (String, Vec<String>) {
+        let found = self.runs().into_iter().find(|(_, r)| {
+            r.status == RunStatus::Running
+                && r.cloud.as_ref().and_then(|c| c.job_name.as_deref()) == Some(job)
+        });
+        let Some((dir, rec)) = found else {
+            return (report, Vec::new());
+        };
+        let Some(round) = rec.round().cloned() else {
+            return (report, Vec::new());
+        };
+        let scratch = dir.join(REVIEW_ANSWER_DIR);
+        let number = pull.and_then(pull_number);
+        let head = match number.filter(|_| rec.reviews.iter().any(|v| v.answers(round.n))) {
+            Some(n) => {
+                let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+                let (url, at) = (self.clone_url(&rec.repo), scratch.clone());
+                tokio::task::spawn_blocking(move || {
+                    let head = git::fetch_pull_head(&root, &repo, &url, n)?;
+                    git::add_detached_worktree(&root, &repo, &at, &head)?;
+                    Ok::<_, String>(head)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+                .map_err(|e| {
+                    eprintln!(
+                        "jesse-bridge: hostrun {}: the answer's commits could not be read: {e}",
+                        rec.run_id
+                    )
+                })
+                .ok()
+            }
+            None => None,
+        };
+        let (text, answering, leaks) = self
+            .review_marks(
+                &rec,
+                round.n,
+                round.report_path.is_none(),
+                status,
+                report,
+                &scratch,
+                head.as_deref().unwrap_or("HEAD"),
+            )
+            .await;
+        if head.is_some() {
+            let (root, repo) = (self.settings.root.clone(), rec.repo.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                git::remove_detached_worktree(&root, &repo, &scratch)
+            })
+            .await;
+        }
+        let notes = self.archive_answered_notes(&rec, &answering);
+        (with_note_links(text, &notes), leaks)
+    }
+
+    /// What a finished round's report says of its review, first: the ANSWERING ROUND of a
+    /// review cycle that was handed off leads with `UNREVIEWED:` when no review of it ran, with
+    /// `PARTLY REVIEWED:` when only some did, and with any `REVIEW LEAK:` the check found over
+    /// every review that ran, reading the answer's commits in `checkout` from the head that was
+    /// reviewed to `head`; a run none of whose default reviewers could review at the start ran
+    /// as an ordinary run, and its reported rounds say so. `fresh` is a round whose report is not
+    /// yet written. A Studio round ([`HostRuns::finalize`], its worktree at `HEAD`) and a cloud
+    /// Job ([`HostRuns::cloud_report_marks`], a scratch checkout of what it pushed) both come
+    /// here. Returns the report, the reviews the round answers and what the leak check found.
+    #[allow(clippy::too_many_arguments)]
+    async fn review_marks(
+        &self,
+        rec: &RunRecord,
+        round_n: u32,
+        fresh: bool,
+        status: RunStatus,
+        mut report: String,
+        checkout: &Path,
+        head: &str,
+    ) -> (String, Vec<usize>, Vec<String>) {
+        let run_id = rec.run_id.as_str();
+        // THE ANSWERING ROUND of a review cycle that was handed off: when no review of it ran
+        // the report leads with `UNREVIEWED:`, when only some did with `PARTLY REVIEWED:`, and
+        // with any `REVIEW LEAK:` the check found over every review that ran.
+        let answering: Vec<usize> = rec
+            .reviews
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.answers(round_n))
+            .map(|(i, _)| i)
+            .collect();
+        let mut leaks = Vec::new();
+        if !answering.is_empty() && fresh {
+            let members: Vec<Review> = answering.iter().map(|&i| rec.reviews[i].clone()).collect();
+            let ran: Vec<Review> = members
+                .iter()
+                .filter(|v| v.status != ReviewStatus::Failed)
+                .cloned()
+                .collect();
+            if ran.is_empty() {
+                report =
+                    review::ensure_unreviewed(&report, &Self::unreviewed_reason(rec, &members));
+            } else {
+                let failed = Self::cycle_failures(rec, &members);
+                if !failed.is_empty() {
+                    report = review::ensure_partly(&report, &failed);
+                }
+                leaks = self
+                    .review_leaks(checkout, head, rec, &members, &report)
+                    .await;
+                if let Some(line) = review::leak_line(&leaks) {
+                    eprintln!("jesse-bridge: hostrun {run_id} round {round_n}: {line}");
+                    // `PARTLY REVIEWED:` stays the first line; the leak follows it.
+                    report = if failed.is_empty() {
+                        format!("{line}\n\n{report}")
+                    } else {
+                        review::with_second_line(&report, &line)
+                    };
+                }
+            }
+        }
+        // A run whose default reviewers could none of them review at the start ran as an
+        // ordinary run: its finished reports say so first.
+        if answering.is_empty()
+            && fresh
+            && rec.reviewer_ids().is_empty()
+            && !rec.reviewers_skipped.is_empty()
+            && status == RunStatus::Reported
+        {
+            let why = rec
+                .reviewers_skipped
+                .iter()
+                .map(review::Skipped::line)
+                .collect::<Vec<_>>()
+                .join("; ");
+            report = review::ensure_unreviewed(&report, &why);
+        }
+        (report, answering, leaks)
+    }
+
     /// The leak check of an answering round: its new commit messages, the added lines of its
     /// diff (both from the head that was reviewed to the worktree's head), and the title and
     /// body of the run's pull requests, for [`review::leak_terms_all`] of every review of the
     /// cycle, the ones that failed included (the hand off named them). Never blocks anything.
     async fn review_leaks(
         &self,
-        dir: &Path,
+        checkout: &Path,
+        head: &str,
         rec: &RunRecord,
         members: &[Review],
         report: &str,
@@ -5601,17 +5849,18 @@ impl HostRuns {
             return Vec::new();
         };
         let terms = review::leak_terms_all(members);
-        let worktree = dir.join(WORKTREE_DIR);
+        let worktree = checkout.to_path_buf();
+        let head = head.to_string();
         let forge = self.forge.clone();
         let url = pull_request_url(report);
         let (repo, branch) = (rec.repo.clone(), rec.branch.clone());
         tokio::task::spawn_blocking(move || {
             let mut places: Vec<(String, String)> = Vec::new();
             if worktree.exists() {
-                for (id, msg) in review::commit_messages(&worktree, &from, "HEAD") {
+                for (id, msg) in review::commit_messages(&worktree, &from, &head) {
                     places.push((format!("commit {id} message"), msg));
                 }
-                if let Ok(d) = review::diff(&worktree, &from, "HEAD") {
+                if let Ok(d) = review::diff(&worktree, &from, &head) {
                     let mut by_file: BTreeMap<String, String> = BTreeMap::new();
                     for (file, line) in review::added_lines(&d) {
                         let t = by_file.entry(file).or_default();
@@ -5790,67 +6039,25 @@ impl HostRuns {
                 return self.pause_for_limit(&dir, &rec, &exit, hit, &sink).await;
             }
         }
-        let mut report = round_report(&dir, &round);
+        let report = round_report(&dir, &round);
         let mut status = round_status(&round, &exit, &report);
         // The pull request an `AWAITING MERGE:` report names, read before anything is put above
         // its first line.
         let wait = (status == RunStatus::AwaitingMerge)
             .then(|| awaiting_merge_pull(&report))
             .flatten();
-        // THE ANSWERING ROUND of a review cycle that was handed off: when no review of it ran
-        // the report leads with `UNREVIEWED:`, when only some did with `PARTLY REVIEWED:`, and
-        // with any `REVIEW LEAK:` the check found over every review that ran.
-        let answering: Vec<usize> = rec
-            .reviews
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v.answers(round.n))
-            .map(|(i, _)| i)
-            .collect();
-        let mut leaks = Vec::new();
-        if !answering.is_empty() && round.report_path.is_none() {
-            let members: Vec<Review> = answering.iter().map(|&i| rec.reviews[i].clone()).collect();
-            let ran: Vec<Review> = members
-                .iter()
-                .filter(|v| v.status != ReviewStatus::Failed)
-                .cloned()
-                .collect();
-            if ran.is_empty() {
-                report =
-                    review::ensure_unreviewed(&report, &Self::unreviewed_reason(&rec, &members));
-            } else {
-                let failed = Self::cycle_failures(&rec, &members);
-                if !failed.is_empty() {
-                    report = review::ensure_partly(&report, &failed);
-                }
-                leaks = self.review_leaks(&dir, &rec, &members, &report).await;
-                if let Some(line) = review::leak_line(&leaks) {
-                    eprintln!("jesse-bridge: hostrun {run_id} round {}: {line}", round.n);
-                    // `PARTLY REVIEWED:` stays the first line; the leak follows it.
-                    report = if failed.is_empty() {
-                        format!("{line}\n\n{report}")
-                    } else {
-                        review::with_second_line(&report, &line)
-                    };
-                }
-            }
-        }
-        // A run whose default reviewers could none of them review at the start ran as an
-        // ordinary run: its finished reports say so first.
-        if answering.is_empty()
-            && round.report_path.is_none()
-            && rec.reviewer_ids().is_empty()
-            && !rec.reviewers_skipped.is_empty()
-            && status == RunStatus::Reported
-        {
-            let why = rec
-                .reviewers_skipped
-                .iter()
-                .map(review::Skipped::line)
-                .collect::<Vec<_>>()
-                .join("; ");
-            report = review::ensure_unreviewed(&report, &why);
-        }
+        let worktree = dir.join(WORKTREE_DIR);
+        let (mut report, answering, leaks) = self
+            .review_marks(
+                &rec,
+                round.n,
+                round.report_path.is_none(),
+                status,
+                report,
+                &worktree,
+                "HEAD",
+            )
+            .await;
         // NO AI ATTRIBUTION, the backstop: what the round pushed is read back, and a hit makes
         // the run `needs_you` with the `ATTRIBUTION:` line first, so the Inbox report and the
         // push both lead with it.
@@ -5862,20 +6069,12 @@ impl HostRuns {
         }
         // A REVIEWED run's implementing round: nothing is posted and nobody is told. The run
         // goes `reviewing`, once, and the watcher runs the review and hands it off.
-        if status == RunStatus::Reported
-            && round.report_path.is_none()
-            && !rec.reviewer_ids().is_empty()
-            && !rec.reviews.iter().any(|v| v.origin == review::ORIGIN_START)
-        {
+        if round.report_path.is_none() && rec.starts_review(status) {
             return self.begin_start_review(&dir, &exit).await;
         }
         // The answering round's note moves to `Inbox/archive/` as its report is written, and
         // the report links it where it now is.
-        let notes_now: Vec<String> = answering
-            .iter()
-            .filter_map(|&i| rec.reviews[i].path.as_deref())
-            .map(|p| archive_note(&self.notes_root, p).unwrap_or_else(|| p.to_string()))
-            .collect();
+        let notes_now = self.archive_answered_notes(&rec, &answering);
         let rel = match round
             .report_path
             .clone()
@@ -5894,17 +6093,10 @@ impl HostRuns {
                 } else {
                     None
                 };
-                let mut text =
-                    render_inbox_with(&rec, round.n, status, &report, local_main.as_deref());
-                if !notes_now.is_empty() {
-                    if !text.ends_with('\n') {
-                        text.push('\n');
-                    }
-                    text.push('\n');
-                    for note in &notes_now {
-                        text.push_str(&format!("{}\n", review::note_link(note)));
-                    }
-                }
+                let text = with_note_links(
+                    render_inbox_with(&rec, round.n, status, &report, local_main.as_deref()),
+                    &notes_now,
+                );
                 write_report(&self.notes_root, &sink.broker, run_id, &rel, &text).await?;
                 eprintln!(
                     "jesse-bridge: hostrun REPORT {run_id} round {} {} at {rel}",
@@ -5958,17 +6150,7 @@ impl HostRuns {
                 cur.exit_code = exit.code;
                 cur.signal = exit.signal;
             }
-            for &i in &answering {
-                if let Some(v) = r.reviews.get_mut(i) {
-                    if v.status == ReviewStatus::HandedOff {
-                        v.status = ReviewStatus::Answered;
-                    }
-                    v.answered_at = Some(at.clone());
-                    if !leaks.is_empty() && v.status != ReviewStatus::Failed {
-                        v.leaks = leaks.clone();
-                    }
-                }
-            }
+            r.mark_answered_at(&answering, &at, &leaks);
         })?;
         if matches!(
             status,

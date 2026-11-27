@@ -1,6 +1,6 @@
 # One run pipeline: a cloud run is a Studio run that executes elsewhere
 
-DJ30. Bridge 0.226.0 (Part A), then Part B.
+DJ30. Bridge 0.226.0 (Part A), 0.227.0 (Part B).
 
 ## Why
 
@@ -66,10 +66,12 @@ Access forces them; nothing else does.
 - **The report's body.** It is built from the pod's log (`render_report_with`), not from a
   session's stream. Its path and front matter are the Studio's (`Inbox/<date>-run-<run_id>.md`,
   `run: <run_id>`).
-- **Reply.** A Studio round resumes the agent's session. A pod has no session to resume; a
-  cloud run's next round is a continuation Job (Part B uses this for review findings). Until
-  Part B, `reply` and `review` on a cloud run are refused with the record's own refusal, not a
-  "managed through Jesse" one.
+- **A further round.** A Studio round resumes the agent's session in its worktree. A pod has no
+  session to resume and no worktree here: a cloud run's further round (a review's hand off, a
+  reply) is the next Job of its chain, on the same branch and pull request, whose prompt is the
+  run's prompt with the round's text after it.
+- **What the review reads.** A Studio run's work is its worktree; a cloud run's is its pushed
+  branch, fetched read only into a scratch checkout the bridge removes at once.
 
 ### Restarts
 
@@ -88,11 +90,45 @@ only (`managed_through_jesse`), because nothing owns them. `devjob_cancel` and `
 still reach them by run id or Job name. They count against the cloud's slots, so a new run
 waits for them. No record is rewritten.
 
-## Part B: review the same way
+## Part B: review the same way (0.227.0)
 
-Host cloud takes `reviewer`, `reviewers`, `review_focus` and `devjob-reviewer:`, with the
-Studio's validation and default. A reviewed cloud run's Job opens its pull request as a draft
-and does not merge; the bridge reviews the pushed branch's diff with the same `perform_review`
-from a scratch checkout it owns; the findings go to the run's agent as the next link of its
-continuation chain with the same `handoff_reply` text; the merge happens only when that link
-ends green, under the same merge decision.
+| Rule | One implementation | What the cloud adds |
+| --- | --- | --- |
+| Who reviews | `HostRuns::resolve_reviewers` (start, draft `devjob-reviewer:`, `[hostrun] default_reviewers`), `merge_spellings`, `choose`, `checked_focus` | nothing; `plan_cloud` and `plan_start` share `start_reviewer` |
+| A reviewed run's implementing round goes `reviewing` | `RunRecord::starts_review`, `RunRecord::open_start_review` | asked in `HostRuns::cloud_ended` when the held Job reports |
+| The range and diff | `HostRuns::cycle_range` (`review_range`, `diff`) | the pushed branch fetched read only (`git::fetch_branch_head`) into a scratch checkout, `review-range`, removed at once |
+| The review | `perform_review`, `reviewer_prompt`, the note | nothing |
+| The hand off | `HostRuns::handoff_text`, `hand_off`, `queue_round_with` | the queued round goes back to a cloud slot (`take_for_cloud`), never a Studio one (`pump` skips a run on the cloud) |
+| The answer's report | `HostRuns::review_marks` (`UNREVIEWED:`, `PARTLY REVIEWED:`, `review_leaks`), `archive_answered_notes`, `RunRecord::mark_answered` | the answer's commits read from the pull request's head in a scratch checkout, `review-answer` (`HostRuns::cloud_report_marks`) |
+| The merge decision | `merge_decision` (`merge`, `devjob-merge`, the deny list) and the entrypoint's `merge-guard.sh` (CI green on the exact head) | the held Job never merges (`REVIEW=hold`); the answer merges by the same decision (`REVIEW=answer`) |
+
+What the Job does is the k3s half: `REVIEW=hold` pushes and opens the draft and stops, keeping
+its checkpoint; `REVIEW=answer` continues the run's branch and open pull request from that
+checkpoint and progress file and merges as any Job does (`images/dev-agent/run.sh`, DJ30's k3s
+pull request).
+
+### What is deleted
+
+- `HostRuns::cloud_reviewers` and its two refusals (a start's `reviewer` or `review_focus`; a
+  draft's `devjob-reviewer:`), and `plan_cloud`'s own reviewer refusal.
+- The `reply` and `request_review` refusals of a cloud run.
+- The "Nobody can reply to this run" sentence of the cloud paragraph.
+
+### Tests that hold it to one implementation
+
+`hostrun/tests/cloud_review.rs`: the same starts resolve the same reviewers on both hosts, or
+are refused with the same words; a Studio run and a cloud run with the same task and change are
+reviewed with the same prompt (but for the head's id) and handed the same text; a reviewed cloud
+run is not merged before its review is answered, then is; an unreviewed one merges as before; a
+leak in a cloud answer leads its report as on the Studio.
+
+### Migration (0.227.0)
+
+A cloud run started before 0.227.0 has no reviewer (the start refused one), so it runs and
+merges as it did. A Job in flight carries no `REVIEW` and behaves as before; nothing is
+rewritten. A reply to a cloud run finished before 0.227.0 makes its next link like any other,
+if its branch and pull request are still open. The answer needs the k3s entrypoint with
+`REVIEW`, so `[devjob.cloud] image` names that image before the bridge is deployed. On an older
+image a held Job still never merges (its `AUTO_MERGE` is empty), but it marks its pull request
+ready at green and does not keep its checkpoint, and the answer fails at its start, the branch
+being on origin already.

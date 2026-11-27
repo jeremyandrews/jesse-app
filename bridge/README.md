@@ -1129,6 +1129,36 @@ written to a note.
 - `POST /jesse/runs/:id/reply` with exactly `Continue where you left off.` on a `needs_you` run is
   refused with 409: the run asked a question, and an empty continue would answer it blind.
 
+**A message to a running run (0.230.0, `src/hostrun/mailbox.rs`).** `devjob_reply` (and
+`POST /jesse/runs/:id/reply`) on a `running` run does not wait for the round to end. The text
+becomes one message in the run's mailbox, `<run dir>/mailbox/<UTC time>-<id>.json`, and one
+entry in `run.json`'s `messages` (`id`, `text`, `queued_at`, `delivered_at`, `channel`, `round`,
+`carried_to_round`). The answer says "queued for delivery after the agent's current tool call".
+The runner gives the agent `JESSE_RUN_MAILBOX` and a settings file of the run's own,
+`<run dir>/agent-settings.json`: the attribution settings plus one `PostToolUse` hook on every
+tool, `jesse-hook steer`. After each tool call the hook claims every undelivered message (it
+creates `<id>.claim` exclusively, so parallel tool calls never deliver a message twice), prints
+it as `hookSpecificOutput.additionalContext`, and only then writes `<id>.delivered` with the
+time. A hook killed between the claim and the mark leaves the message undelivered, so it is
+carried into the next round: a crash can repeat a message, never lose one. Claude Code 2.1.331 adds
+that context to the model's next turn (checked live). Each message reads `Message from Jeremy
+while you were running:`, the text, then `Act on this now; it overrides the prompt where they
+conflict.` The tool call itself is never interrupted. The run takes messages this way only when
+`jesse-hook` sits beside the runner; otherwise the answer is "queued for the next round only".
+Two messages sent in the same millisecond keep their order: `queued_at` strictly increases
+within a run. The watcher, and `devjob_status`, read the
+markers into `delivered_at`.
+
+Nothing is lost. A message still undelivered when its round ends (a report, a failure, an
+interruption, a pause, the start of a review) is named in that round's report under
+`UNDELIVERED MESSAGES:`, which leads the report and its push unless the first line is `NEEDS
+YOU:` or `AWAITING MERGE:`. It also goes at the head of the next round's text, whoever queues
+that round (a reply, the automatic restart, the usage limit's resume, a review's hand off, a
+merge), and leaves the mailbox. Every other status takes a reply exactly as before. A run never
+messaged has no `messages` key; its argv differs only in the `--settings` path, and its
+environment only by `JESSE_RUN_MAILBOX`. A cloud run uses the same hook and the same message
+format; see `docs/devjob-cloud.md`.
+
 **Waiting for Jeremy's merge (0.218.0).** A run reaches Jeremy mid work with the first line of its
 report: `NEEDS YOU: <question>` makes it `needs_you` and pushes `Run <id> needs you`, and it
 continues when he replies. When the only thing left is Jeremy merging a pull request the run may not

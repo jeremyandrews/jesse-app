@@ -38,7 +38,13 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn runner_bin() -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/jesse-runner");
+    // `JESSE_RUNNER_BIN` names a runner built elsewhere (a release build, or a `CARGO_TARGET_DIR`
+    // outside the crate); `jesse-hook` must sit beside it for the steer hook.
+    let p = std::env::var("JESSE_RUNNER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/jesse-runner")
+        });
     assert!(
         p.is_file(),
         "build it first: cargo build --bin jesse-runner"
@@ -381,4 +387,165 @@ async fn smoke_real_claude() {
         "RUNNER LOG {}",
         std::fs::read_to_string(dir.join("runner.log")).unwrap_or_default()
     );
+}
+
+/// THE STEER SMOKE (DJ33): the real runner and the real `claude` on a scratch repository, told
+/// to run `sleep 20` three times. During the first sleep a reply is sent; it is queued as a
+/// message, and the steer hook hands it over after that tool call. The stream shows what the
+/// agent did with it: the `echo` it asks for, between the sleeps. Needs `jesse-hook` beside
+/// the runner (`JESSE_RUNNER_BIN`).
+///
+///   cargo build --release --bin jesse-runner --bin jesse-hook
+///   JESSE_RUNNER_BIN=<target>/release/jesse-runner \
+///     cargo test --test it hostrun_live::steer_real_claude -- --ignored --nocapture
+#[tokio::test]
+#[ignore = "runs the real claude CLI; spends agent credits"]
+async fn steer_real_claude() {
+    let base = live_dir().join("steer");
+    let _ = std::fs::remove_dir_all(&base);
+    let (mut st, notes) = setup(&base, "unused-stub");
+    st.claude = "claude".into();
+    let svc = Arc::new(HostRuns::new(
+        st,
+        notes,
+        Arc::new(Manual),
+        Arc::new(jesse_bridge::hostrun::sys::NoForge),
+    ));
+    svc.attach(RunSink {
+        broker: Arc::new(jesse_bridge::LockBroker::new()),
+        notifier: None,
+        turns: None,
+    });
+    let req = StartRequest {
+        kind: StartKind::Free {
+            repo: "o/n".into(),
+            prompt: "Run the shell command `sleep 20` three times, one Bash tool call each, one \
+                     after another. Then write a one line report. Make no changes to the \
+                     repository."
+                .into(),
+            slug: "steer".into(),
+            model: Some("haiku".into()),
+        },
+        ..free("steer")
+    };
+    let started = svc.start(req).await.unwrap();
+    let dir = svc.settings.run_dir(&started.run_id);
+    let d2 = dir.clone();
+    let runner = std::thread::spawn(move || run_runner(&d2));
+    // Wait for the first `sleep 20` to start, then send the message during it.
+    let stream_has = |needle: &str| {
+        std::fs::read_to_string(dir.join("stream.jsonl"))
+            .unwrap_or_default()
+            .contains(needle)
+    };
+    let mut waited = 0;
+    while !stream_has("sleep 20") {
+        assert!(waited < 240, "the agent never started its first sleep");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        waited += 1;
+    }
+    let out = svc
+        .reply_full_and_pump(
+            &started.run_id,
+            "Before your next sleep, run the shell command `echo steered-DJ33`.",
+        )
+        .await
+        .unwrap();
+    println!("SENT {:?}", out.message);
+    println!("DELIVERY {:?}", out.delivery());
+    runner.join().unwrap();
+    let rec = svc.sync_messages(&started.run_id).unwrap();
+    println!("MESSAGES {:?}", rec.messages);
+    let stream = std::fs::read_to_string(dir.join("stream.jsonl")).unwrap();
+    for line in stream.lines() {
+        if line.contains("sleep 20") || line.contains("steered-DJ33") {
+            let short: String = line.chars().take(400).collect();
+            println!("STREAM {short}");
+        }
+    }
+    assert!(
+        rec.messages[0].delivered_at.is_some(),
+        "the hook delivered it"
+    );
+    let cmds = bash_commands(&stream);
+    assert!(
+        acted_between_sleeps(&cmds, "echo steered-DJ33"),
+        "the agent ran the message's command between its first and second sleep: {cmds:?}"
+    );
+}
+
+/// The `command` of every Bash tool call the agent made, in the order it made them. Only the
+/// agent's own `tool_use` blocks count: the message's text also reaches the stream as the
+/// hook's added context, and that is not the agent acting on it.
+fn bash_commands(stream: &str) -> Vec<String> {
+    stream
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["type"] == "assistant")
+        .flat_map(|v| {
+            v["message"]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|b| b["type"] == "tool_use" && b["name"] == "Bash")
+        .filter_map(|b| b["input"]["command"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Whether `cmd` ran after the first `sleep 20` and before the second: the message arrived
+/// during the first, so acting on it at the next tool call puts it right there.
+fn acted_between_sleeps(cmds: &[String], cmd: &str) -> bool {
+    let sleeps: Vec<usize> = (0..cmds.len()).filter(|&i| cmds[i] == "sleep 20").collect();
+    let Some(&first) = sleeps.first() else {
+        return false;
+    };
+    let second = sleeps.get(1).copied().unwrap_or(cmds.len());
+    cmds[first + 1..second].iter().any(|c| c == cmd)
+}
+
+#[test]
+fn the_live_check_counts_only_the_command_the_agent_ran_where_it_was_steered() {
+    let call = |c: &str| {
+        serde_json::json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "name": "Bash", "input": { "command": c } } ] } })
+        .to_string()
+    };
+    let context = serde_json::json!({ "type": "system", "subtype": "hook_response",
+        "output": "Message from Jeremy while you were running: run `echo steered-DJ33`." })
+    .to_string();
+    let stream = |lines: &[String]| lines.join("\n");
+    let steered = stream(&[
+        call("sleep 20"),
+        context.clone(),
+        call("echo steered-DJ33"),
+        call("sleep 20"),
+        call("sleep 20"),
+    ]);
+    let cmds = bash_commands(&steered);
+    assert!(acted_between_sleeps(&cmds, "echo steered-DJ33"), "{cmds:?}");
+    // The text arrived but the agent never ran it: the raw stream still names it.
+    let ignored = stream(&[
+        call("sleep 20"),
+        context.clone(),
+        call("sleep 20"),
+        call("sleep 20"),
+    ]);
+    assert!(ignored.contains("echo steered-DJ33"));
+    assert!(!acted_between_sleeps(
+        &bash_commands(&ignored),
+        "echo steered-DJ33"
+    ));
+    // It ran, but only after every sleep: the next round's text, not the next tool call.
+    let late = stream(&[
+        call("sleep 20"),
+        context,
+        call("sleep 20"),
+        call("sleep 20"),
+        call("echo steered-DJ33"),
+    ]);
+    assert!(!acted_between_sleeps(
+        &bash_commands(&late),
+        "echo steered-DJ33"
+    ));
 }

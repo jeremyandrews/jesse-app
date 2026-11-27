@@ -1611,7 +1611,8 @@ fn a_cloud_pod_runs_postgres_and_redis_as_native_sidecars_before_the_agent() {
 #[test]
 fn with_services_off_the_cloud_job_is_byte_for_byte_the_single_container_pod() {
     // Rendered by bridge 0.222.0's build_cloud_job for the same spec and extras, updated for
-    // DJ28's and DJ29's JOB_DEADLINE_SECONDS, CONTINUATION and terminationGracePeriodSeconds.
+    // DJ28's and DJ29's JOB_DEADLINE_SECONDS, CONTINUATION and terminationGracePeriodSeconds,
+    // and DJ33's mailbox (the optional `steer` ConfigMap mount and JESSE_RUN_MAILBOX).
     let today = include_str!("../../../golden/cloud-job-single-container.json");
     let now = serde_json::to_string_pretty(&trovato_job(false)).unwrap() + "\n";
     assert_eq!(now, today);
@@ -2426,4 +2427,346 @@ fn devjob_list_lists_a_cloud_run_once_as_its_record_not_again_as_its_job() {
             "finished": [{ "job_name": "agent-old", "run_id": "s-old" }, { "run_id": "x" }],
         })
     );
+}
+
+// ---- the mailbox (DJ33) ----------------------------------------------------------------------
+
+#[test]
+fn the_cloud_job_mounts_the_runs_mailbox_read_only_and_optional() {
+    let v = trovato_job(false);
+    let pod = &v["spec"]["template"]["spec"];
+    let vols = pod["volumes"].as_array().unwrap();
+    let steer = vols
+        .iter()
+        .find(|v| v["name"] == "steer")
+        .expect("a mailbox volume");
+    assert_eq!(steer["configMap"]["name"], "steer-dj25");
+    assert_eq!(
+        steer["configMap"]["optional"], true,
+        "a Job whose ConfigMap is gone still starts"
+    );
+    let agent = &pod["containers"][0];
+    let mount = agent["volumeMounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "steer")
+        .expect("the agent mounts it");
+    assert_eq!(
+        mount["mountPath"],
+        crate::hostrun::mailbox::CLOUD_MAILBOX_PATH
+    );
+    assert_eq!(mount["readOnly"], true);
+    assert_eq!(
+        env_of(agent)[crate::hostrun::mailbox::MAILBOX_ENV],
+        crate::hostrun::mailbox::CLOUD_MAILBOX_PATH
+    );
+}
+
+#[test]
+fn a_continuation_mounts_the_mailbox_of_the_chains_run() {
+    let spec = DevJobSpec::validate(
+        args(json!({ "repo": "jeremyandrews/trovato", "prompt": "x", "branch_slug": "dj25-x" })),
+        Agent::Claude,
+    )
+    .unwrap();
+    let extras = CloudJobExtras {
+        run_id: "DJ25-c2".into(),
+        merge: MergeDecision::AtGreen,
+        merge_deny: CloudSettings::default().merge_deny_env(),
+        resources: live_resources(),
+        services: false,
+        chain: Some(ChainExtras {
+            root: "DJ25".into(),
+            link: 1,
+            continuation_of: "DJ25".into(),
+            chain_json: "[]".into(),
+        }),
+        review: None,
+    };
+    let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
+    let v = serde_json::to_value(&job).unwrap();
+    let vols = v["spec"]["template"]["spec"]["volumes"].as_array().unwrap();
+    assert!(vols
+        .iter()
+        .any(|v| v["name"] == "steer" && v["configMap"]["name"] == "steer-dj25"));
+}
+
+#[test]
+fn the_mailbox_config_map_holds_the_waiting_messages_and_drops_the_settled() {
+    use crate::hostrun::{mailbox, RunMessage, RunRecord};
+    let m = |id: &str, delivered: Option<&str>, channel: &str| RunMessage {
+        id: id.into(),
+        text: format!("text {id}"),
+        queued_at: "2026-11-27T15:00:00.000Z".into(),
+        delivered_at: delivered.map(str::to_string),
+        channel: channel.into(),
+        round: 1,
+        carried_to_round: None,
+    };
+    let rec = RunRecord {
+        run_id: "DJ33".into(),
+        messages: vec![
+            m("ma", None, mailbox::CHANNEL_TOOL_CALL),
+            m(
+                "mb",
+                Some("2026-11-27T15:01:00.000Z"),
+                mailbox::CHANNEL_TOOL_CALL,
+            ),
+            m("mc", None, mailbox::CHANNEL_NEXT_ROUND),
+        ],
+        ..RunRecord::default()
+    };
+    let waiting = waiting_steer(&rec);
+    assert_eq!(waiting.len(), 1, "only what the hook is to hand over");
+    let (key, body) = waiting.iter().next().unwrap();
+    assert_eq!(key, &rec.messages[0].file_name());
+    let back: mailbox::MailMessage = serde_json::from_str(body).unwrap();
+    assert_eq!(back.text, "text ma");
+    assert_eq!(settled_steer(&rec), vec![rec.messages[1].file_name()]);
+    let cm = steer_config_map("jesse-dev", "DJ33", &waiting);
+    assert_eq!(cm["metadata"]["name"], "steer-dj33");
+    assert_eq!(cm["metadata"]["labels"][LABEL_RUN_ID], "DJ33");
+    let parsed: k8s_openapi::api::core::v1::ConfigMap = serde_json::from_value(cm).unwrap();
+    assert_eq!(parsed.data.unwrap().len(), 1);
+}
+
+// ---- the mailbox against a fake API server ---------------------------------------------------
+
+/// Every request the fake API server saw: `METHOD path?query`.
+type Seen = Arc<Mutex<Vec<String>>>;
+
+/// A Kubernetes API that answers each request with `answer(method, path)`.
+fn fake_kube(answer: fn(&str, &str) -> (u16, String)) -> (kube::Client, Seen) {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let svc = tower::service_fn(move |req: axum::http::Request<kube::client::Body>| {
+        let (method, uri) = (req.method().to_string(), req.uri().clone());
+        log.lock().unwrap().push(format!(
+            "{method} {}{}",
+            uri.path(),
+            uri.query()
+                .filter(|q| !q.is_empty())
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default()
+        ));
+        let (code, body) = answer(&method, uri.path());
+        async move {
+            Ok::<_, std::convert::Infallible>(
+                axum::http::Response::builder()
+                    .status(code)
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        }
+    });
+    (kube::Client::new(svc, "jesse-dev"), seen)
+}
+
+fn status(code: u16) -> (u16, String) {
+    (
+        code,
+        json!({ "kind": "Status", "apiVersion": "v1", "status": "Failure", "message": "no",
+                "reason": "x", "code": code })
+        .to_string(),
+    )
+}
+
+fn ok_config_map(name: &str) -> (u16, String) {
+    (
+        200,
+        json!({ "apiVersion": "v1", "kind": "ConfigMap", "metadata": { "name": name } })
+            .to_string(),
+    )
+}
+
+struct NoBurst;
+
+impl Burst for NoBurst {
+    fn up(&self, _: &str, _: u64) -> BurstFuture<'_, String> {
+        Box::pin(async { Err("no".into()) })
+    }
+    fn down(&self, _: &str) -> BurstFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn extend(&self, _: &str, _: Duration) -> BurstFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn status(&self) -> BurstFuture<'_, Vec<BurstWorker>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+/// A cloud server on the fake API, with a Studio holding the run `DJ33` on the Job `job-a` and
+/// one message waiting for the hook, queued ten seconds ago.
+fn steer_rig(answer: fn(&str, &str) -> (u16, String)) -> (DevJobs, Seen, PathBuf) {
+    use crate::hostrun::{mailbox, HostRunSettings, HostRunToml, HostRuns, RunMessage, RunRecord};
+    let base = std::env::temp_dir().join(format!("jesse-steer-kube-{}", random_hex()));
+    let st = HostRunSettings::from_toml(
+        Some(HostRunToml {
+            enabled: true,
+            root: Some(base.join("root")),
+            ..HostRunToml::default()
+        }),
+        &base.to_string_lossy(),
+        "/bin/echo",
+    );
+    let dir = st.run_dir("DJ33");
+    std::fs::create_dir_all(&dir).unwrap();
+    let queued = crate::hostrun::rfc(crate::hostrun::now_ms() - 10_000);
+    let rec = RunRecord {
+        run_id: "DJ33".into(),
+        repo: "o/n".into(),
+        status: crate::hostrun::RunStatus::Running,
+        cloud: Some(crate::hostrun::CloudPart {
+            taken_at: Some(queued.clone()),
+            job_name: Some("job-a".into()),
+            jobs: vec!["job-a".into()],
+            ..Default::default()
+        }),
+        messages: vec![RunMessage {
+            id: "m1".into(),
+            text: "Narrow the scope.".into(),
+            queued_at: queued,
+            channel: mailbox::CHANNEL_TOOL_CALL.into(),
+            round: 1,
+            ..Default::default()
+        }],
+        ..RunRecord::default()
+    };
+    std::fs::write(dir.join("run.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
+    let studio = Arc::new(HostRuns::production(st, base.join("notes")));
+    let (client, seen) = fake_kube(answer);
+    let jobs = DevJobs {
+        settings: DevJobSettings {
+            namespace: "jesse-dev".into(),
+            ..DevJobSettings::default()
+        },
+        default_agent: Agent::Claude,
+        client,
+        sink: std::sync::OnceLock::new(),
+        tails: Mutex::new(HashMap::new()),
+        wake: Arc::new(tokio::sync::Notify::new()),
+        gate: tokio::sync::Mutex::new(()),
+        studio: std::sync::OnceLock::new(),
+        cloud: std::sync::OnceLock::new(),
+        rt: Some(CloudRuntime::new(
+            CloudSettings::default(),
+            Arc::new(NoBurst),
+        )),
+    };
+    let _ = jobs.studio.set(studio);
+    (jobs, seen, base)
+}
+
+#[tokio::test]
+async fn a_delivery_line_is_found_however_much_the_agent_printed_after_it() {
+    let (jobs, seen, base) = steer_rig(|method, path| match (method, path) {
+        ("GET", p) if p.ends_with("/pods/pod-a/log") => {
+            // The delivery, then far more than any fixed tail would keep.
+            let mut log =
+                String::from("building\nJESSE_MESSAGE_DELIVERED m1 2026-11-27T15:00:07.000Z\n");
+            for i in 0..6000 {
+                log.push_str(&format!("compiling crate {i}\n"));
+            }
+            (200, log)
+        }
+        ("PATCH", "/api/v1/namespaces/jesse-dev/configmaps/steer-dj33") => {
+            ok_config_map("steer-dj33")
+        }
+        _ => status(500),
+    });
+    let rec = jobs
+        .settle_delivered("job-a", Some("pod-a"), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rec.messages[0].delivered_at.as_deref(),
+        Some("2026-11-27T15:00:07.000Z")
+    );
+    let seen = seen.lock().unwrap().clone();
+    let read = seen.iter().find(|c| c.contains("/log")).unwrap();
+    assert!(
+        read.contains("sinceSeconds="),
+        "read from the message on: {read}"
+    );
+    assert!(!read.contains("tailLines"), "not a fixed tail: {read}");
+    // The delivered message comes out of the ConfigMap.
+    assert!(seen
+        .iter()
+        .any(|c| c == "PATCH /api/v1/namespaces/jesse-dev/configmaps/steer-dj33"));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn a_delivered_message_still_in_the_config_map_stops_what_would_mount_it() {
+    // The trim fails: settling answers an error, so the Job's report (and any continuation
+    // that would mount the ConfigMap) waits for the next pass.
+    let (jobs, _seen, base) = steer_rig(|method, path| match (method, path) {
+        ("GET", p) if p.ends_with("/log") => (
+            200,
+            "JESSE_MESSAGE_DELIVERED m1 2026-11-27T15:00:07.000Z\n".into(),
+        ),
+        _ => status(500),
+    });
+    let e = jobs
+        .settle_delivered("job-a", Some("pod-a"), None)
+        .await
+        .unwrap_err();
+    assert!(e.contains("could not trim steer-dj33"), "{e}");
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn a_job_that_cannot_be_made_leaves_no_mailbox_behind() {
+    let (jobs, seen, base) = steer_rig(|method, path| match (method, path) {
+        ("GET", "/apis/batch/v1/namespaces/jesse-dev/jobs") => (
+            200,
+            json!({ "apiVersion": "batch/v1", "kind": "JobList", "metadata": {}, "items": [] })
+                .to_string(),
+        ),
+        ("PATCH", p) if p.ends_with("/configmaps/steer-dj33") => status(404),
+        ("POST", "/api/v1/namespaces/jesse-dev/configmaps") => ok_config_map("x"),
+        ("DELETE", p) if p.contains("/configmaps/") => ok_config_map("x"),
+        _ => status(500),
+    });
+    let rec = jobs.studio.get().unwrap().get("DJ33").unwrap();
+    let run = record_job(&rec, "Do it.", MergeDecision::No, Agent::Claude, 240, None).unwrap();
+    assert!(jobs.make_record_job(&run, "DJ33", "turn").await.is_err());
+    let seen = seen.lock().unwrap().clone();
+    let at = |c: &str| seen.iter().position(|x| x == c);
+    let made = at("POST /api/v1/namespaces/jesse-dev/configmaps").expect("the mailbox was made");
+    let gone = at("DELETE /api/v1/namespaces/jesse-dev/configmaps/steer-dj33")
+        .unwrap_or_else(|| panic!("the mailbox was left behind: {seen:?}"));
+    assert!(made < gone);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn the_delivery_read_starts_before_the_oldest_waiting_message() {
+    use crate::hostrun::{mailbox, RunMessage, RunRecord};
+    let now = 1_795_000_100_000;
+    let m = |id: &str, at: u64, delivered: bool| RunMessage {
+        id: id.into(),
+        text: "t".into(),
+        queued_at: crate::hostrun::rfc(at),
+        delivered_at: delivered.then(|| "x".to_string()),
+        channel: mailbox::CHANNEL_TOOL_CALL.into(),
+        ..Default::default()
+    };
+    let rec = RunRecord {
+        messages: vec![
+            m("ma", now - 90_000, true),
+            m("mb", now - 30_500, false),
+            m("mc", now - 1_000, false),
+        ],
+        ..RunRecord::default()
+    };
+    let lp = steer_log_params(&rec, now).unwrap();
+    assert_eq!(lp.since_seconds, Some(31 + STEER_LOG_SKEW_SECS));
+    assert_eq!(lp.tail_lines, None);
+    assert_eq!(lp.limit_bytes, Some(STEER_LOG_BYTES));
+    assert!(steer_log_params(&RunRecord::default(), now).is_none());
 }

@@ -307,6 +307,29 @@ released, reported and continued as before, listed read only on the Runs page, a
 `devjob_cancel` and `devjob_status` still reach it by run id or Job name. It counts against the
 cloud's slots.
 
+## A message to a running run (0.230.0)
+
+`devjob_reply` on a running cloud run queues a message, exactly as on the Studio (`bridge/README.md`,
+"A message to a running run"). It is the same `jesse-hook steer` after every tool call, the same
+message files and the same text. Only two things differ, how the mailbox gets its files and how
+delivery is read back. The mailbox is the ConfigMap `steer-<run id>` (lowercased) in
+`jesse-dev`: one key per message, named and filled like the Studio's file. The bridge creates it
+before each Job of the run is made, with every message still waiting, and patches in each new
+one. Every Job of the run mounts it read only with `optional: true` at `/jesse/steer`, which the
+agent's `JESSE_RUN_MAILBOX` names. Kubernetes refreshes a mounted ConfigMap within about a minute,
+so that is when the pod sees a new message. A ConfigMap mount takes no markers, so the image's
+`run.sh` gives the hook a writable marker directory (`JESSE_RUN_MAILBOX_MARKS`) and the pod's own
+log (`JESSE_RUN_DELIVERY_LOG`). There it prints `JESSE_MESSAGE_DELIVERED <id> <time>` per
+delivery. The watcher reads those lines from the running pod's log (and `finalize` from the final
+one) into `delivered_at`. It reads the log from two minutes before the oldest waiting message
+(up to 64 MiB), not a fixed tail, so a chatty agent cannot push a delivery line out of reach.
+It takes the delivered keys out of the ConfigMap so a continuation's pod never hands them over
+again. `finalize` does that before it decides on a continuation; when the ConfigMap cannot be
+trimmed, it stops and the next pass tries again. The ConfigMap is deleted when the run's last Job
+ends, unless that Job continues from its checkpoint, and when a Job cannot be made at all. Claude Code and Codex take the hook's context (Codex
+checked live on codex-cli 0.169.0). For a Gemini run, or when kc1 refuses the patch, the answer
+says "queued for the next round only", and the message goes at the head of the next round.
+
 ## On the app's Runs page
 
 `GET /jesse/runs` lists a cloud run as the run it is: its record's row, with `host: "cloud"`

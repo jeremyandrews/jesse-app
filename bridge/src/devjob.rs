@@ -1484,6 +1484,9 @@ pub fn build_cloud_job(
         Some(c) => (c.root.clone(), c.link),
         None => (extras.run_id.clone(), 0u32),
     };
+    // The run's mailbox: one ConfigMap per run record (the chain's root), every Job of the run
+    // mounting it read only and optional, so a Job whose ConfigMap is gone still starts.
+    let steer = crate::hostrun::mailbox::config_map_name(&run_id_env);
     let mut job = json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -1582,6 +1585,7 @@ pub fn build_cloud_job(
                             { "name": "CARGO_PROFILE_TEST_DEBUG", "value": "0" },
                             { "name": "CARGO_INCREMENTAL", "value": "0" },
                             { "name": "CARGO_BUILD_JOBS", "value": agent.build_jobs().to_string() },
+                            { "name": crate::hostrun::mailbox::MAILBOX_ENV, "value": crate::hostrun::mailbox::CLOUD_MAILBOX_PATH },
                         ],
                         "envFrom": [{ "secretRef": { "name": "jesse-dev-agent-keys" } }],
                         "resources": {
@@ -1597,6 +1601,7 @@ pub fn build_cloud_job(
                         },
                         "volumeMounts": [
                             { "name": "prompt", "mountPath": "/prompt", "readOnly": true },
+                            { "name": "steer", "mountPath": crate::hostrun::mailbox::CLOUD_MAILBOX_PATH, "readOnly": true },
                             { "name": "work", "mountPath": "/home/agent/work" },
                             { "name": "work", "mountPath": "/home/agent/.cargo/registry", "subPath": "cargo-registry" },
                             { "name": "work", "mountPath": "/home/agent/.npm", "subPath": "npm" },
@@ -1605,6 +1610,7 @@ pub fn build_cloud_job(
                     "volumes": [
                         { "name": "prompt", "configMap": { "name": config_map } },
                         { "name": "work", "emptyDir": { "sizeLimit": "60Gi" } },
+                        { "name": "steer", "configMap": { "name": steer, "optional": true } },
                     ],
                 },
             },
@@ -3055,6 +3061,13 @@ impl DevJobs {
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(v.name.clone(), tail_lines(&log, REPORT_LOG_LINES));
                     }
+                    // A cloud run with a message waiting for the hook: its deliveries, read from
+                    // the log since that message was queued.
+                    if self.rt.is_some() && self.waits_for_hook(&v.name).await {
+                        if let Err(e) = self.settle_delivered(&v.name, Some(name), None).await {
+                            eprintln!("jesse-bridge: devjob {}: {e}", v.name);
+                        }
+                    }
                 }
             }
         }
@@ -3095,6 +3108,23 @@ impl DevJobs {
                 Err(e) => eprintln!("jesse-bridge: devjob {name}: could not resume: {e}"),
             }
         }
+    }
+
+    /// Whether the run that owns the Job `job` has a message waiting for the hook.
+    async fn waits_for_hook(&self, job: &str) -> bool {
+        let Some(studio) = self.studio.get().cloned() else {
+            return false;
+        };
+        let j = job.to_string();
+        tokio::task::spawn_blocking(move || {
+            studio.record_of_job(&j).is_some_and(|r| {
+                r.messages
+                    .iter()
+                    .any(|m| m.waiting() && m.channel == crate::hostrun::mailbox::CHANNEL_TOOL_CALL)
+            })
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Write one finished run's report, push, annotate its Job and delete its ConfigMap.
@@ -3197,6 +3227,22 @@ impl DevJobs {
                 // name in a continuation's chain, and to read back below for this run's own.
                 let predicted_rel =
                     report_rel_path_stem(&date, &stem, |p| sink.notes_root.join(p).exists());
+                // NOTHING LOST, NOTHING TWICE: the messages this Job's pod delivered, from its
+                // log, into the record, and out of the run's ConfigMap, before anything below can
+                // make a continuation that mounts it. A ConfigMap that cannot be trimmed stops
+                // here, and the next pass tries again.
+                let steer_rec = match cloud_run {
+                    Some(_) => {
+                        let pod_name = pod.as_ref().and_then(|p| p.metadata.name.as_deref());
+                        self.settle_delivered(
+                            &v.name,
+                            pod_name,
+                            log.as_ref().ok().map(String::as_str),
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
                 // A capped cloud run only: reads the checkpoint and decides whether to continue,
                 // before the report below is rendered, so its lead line can say what happened.
                 let (lead_line, continued_as) = match cloud_run {
@@ -3270,6 +3316,18 @@ impl DevJobs {
                         });
                         insert_chain_section(&text, &render_chain_section(&chain))
                     }
+                    _ => text,
+                };
+                // NOTHING LOST: the messages the hook never delivered are named in the report (a
+                // reply puts them at the head of the next round; a continuation's pod still gets
+                // them from the ConfigMap).
+                let text = match (
+                    steer_rec
+                        .as_ref()
+                        .and_then(crate::hostrun::undelivered_note),
+                    &continued_as,
+                ) {
+                    (Some(note), None) => lead_with(&text, &note),
                     _ => text,
                 };
                 // A cloud run's Job that ended its round: its report says what the Studio's would
@@ -3369,7 +3427,25 @@ impl DevJobs {
                 leaks,
             };
             let s = studio.clone();
-            let _ = tokio::task::spawn_blocking(move || s.cloud_ended(&end)).await;
+            let continuing = end.continued_as.is_some();
+            let rec = tokio::task::spawn_blocking(move || s.cloud_ended(&end))
+                .await
+                .ok()
+                .flatten();
+            // The mailbox outlives a Job only into the run's continuation, without what that
+            // Job's pod delivered; it goes with the run's last Job.
+            if let Some(rec) = rec {
+                if continuing {
+                    if let Err(e) = self
+                        .drop_steer_keys(&rec.run_id, &cloud::settled_steer(&rec))
+                        .await
+                    {
+                        eprintln!("jesse-bridge: devjob {}: {e}", v.name);
+                    }
+                } else {
+                    self.delete_steer(&rec.run_id).await;
+                }
+            }
         }
         let mut ann = json!({ ANN_REPORTED: "true", ANN_REPORT_PATH: rel });
         if attribution.is_some() {
@@ -3856,7 +3932,12 @@ pub fn tool_descriptors_with_studio() -> Vec<Value> {
         "name": TOOL_REPLY,
         "description": "Answer a Studio run that needs you, or continue a reported, failed, \
             interrupted or paused one: a new round in the same worktree and Claude Code session, with the \
-            text as the next message. \"Continue where you left off.\" resumes it.",
+            text as the next message. \"Continue where you left off.\" resumes it. On a run that \
+            is running the text does not wait for the round to end: it is queued as a message \
+            the agent reads after its current tool call (the call itself is never interrupted), \
+            and the result says so; devjob_status lists each message with queued_at and \
+            delivered_at. A message the round ends without delivering goes at the head of the \
+            next round, and the round's report names it.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -4017,6 +4098,9 @@ struct ReviewArgs {
 
 /// One Studio run, as `devjob_status` reports it: the record, `host`, and the readable log tail.
 fn studio_status(svc: &crate::hostrun::HostRuns, r: &crate::hostrun::RunRecord) -> Value {
+    // The Studio hook's delivery markers, read now, so `messages` says what has been delivered.
+    let synced = svc.sync_messages(&r.run_id);
+    let r = synced.as_ref().unwrap_or(r);
     let mut v = crate::hostrun::run_json_located(r, svc.notes_root());
     v["log_tail"] = json!(svc
         .log_lines(&r.run_id, STATUS_LOG_LINES)
@@ -4247,6 +4331,15 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
             "{d} A queued cloud run (host cloud) is in the same queue and changes the same way."
         ));
     }
+    if let Some(p) = tools.iter_mut().find(|t| t["name"] == TOOL_REPLY) {
+        let d = p["description"].as_str().unwrap_or_default().to_string();
+        p["description"] = json!(format!(
+            "{d} A running cloud run (host cloud) takes a message the same way; its pod sees it \
+             once Kubernetes refreshes the mounted ConfigMap, about a minute. A cloud run whose \
+             agent takes no message mid-round (Gemini) gets it at the head of its next round \
+             instead, and the result says so."
+        ));
+    }
     if !tools.iter().any(|t| t["name"] == TOOL_CANCEL) {
         tools.push(json!({
             "name": TOOL_CANCEL,
@@ -4433,8 +4526,24 @@ impl crate::gateway::InProcessServer for DevJobs {
                         Ok(a) => a,
                         Err(e) => return Ok(error_result(&format!("bad arguments: {e}"))),
                     };
-                    match svc.reply_and_pump(args.run_id.trim(), &args.text).await {
-                        Ok(r) => Ok(text_result(&studio_brief(&r), false)),
+                    match svc
+                        .reply_full_and_pump(args.run_id.trim(), &args.text)
+                        .await
+                    {
+                        Ok(out) => {
+                            let mut v = studio_brief(&out.record);
+                            // A message to a running run: what it is, and when it is delivered.
+                            if let (Some(m), Some(d)) = (&out.message, out.delivery()) {
+                                v["message"] = json!({
+                                    "id": m.id,
+                                    "queued_at": m.queued_at,
+                                    "channel": m.channel,
+                                    "delivered_at": m.delivered_at,
+                                });
+                                v["delivery"] = json!(d);
+                            }
+                            Ok(text_result(&v, false))
+                        }
                         Err(e) => Ok(error_result(e.message())),
                     }
                 }

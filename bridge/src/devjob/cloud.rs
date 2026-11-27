@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{Node, Pod};
-use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PropagationPolicy};
+use kube::api::{DeleteParams, ListParams, LogParams, Patch, PatchParams, PropagationPolicy};
 use kube::Api;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2272,7 +2272,7 @@ impl DevJobs {
                     continue;
                 }
             };
-            match self.create_cloud_run(&run, &rec.origin).await {
+            match self.make_record_job(&run, &id, &rec.origin).await {
                 Ok(started) => {
                     let s = studio.clone();
                     let job = started.job_name.clone();
@@ -2574,8 +2574,247 @@ impl DevJobs {
     }
 }
 
+// ---- THE MAILBOX ConfigMap ----------------------------------------------------------------
+
+/// The run's mailbox ConfigMap ([`crate::hostrun::mailbox`]): `steer-<run id>`, one key per
+/// message, labelled with the run.
+pub fn steer_config_map(namespace: &str, run_id: &str, data: &BTreeMap<String, String>) -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": crate::hostrun::mailbox::config_map_name(run_id),
+            "namespace": namespace,
+            "labels": {
+                super::LABEL_DEVJOB: "true",
+                LABEL_RUN_ID: if valid_label_value(run_id) { run_id } else { "" },
+            },
+        },
+        "data": data,
+    })
+}
+
+/// The keys and bodies of a run's messages still waiting for the hook: what its ConfigMap holds
+/// when a Job of the run is made.
+pub fn waiting_steer(rec: &crate::hostrun::RunRecord) -> BTreeMap<String, String> {
+    rec.messages
+        .iter()
+        .filter(|m| m.waiting() && m.channel == crate::hostrun::mailbox::CHANNEL_TOOL_CALL)
+        .map(|m| (m.file_name(), crate::hostrun::mailbox::body(&m.mail())))
+        .collect()
+}
+
+/// The keys of a run's messages that no longer wait (delivered, or carried into a round): what
+/// comes out of its ConfigMap so a later Job of the run never hands them over again.
+pub fn settled_steer(rec: &crate::hostrun::RunRecord) -> Vec<String> {
+    rec.messages
+        .iter()
+        .filter(|m| !m.waiting())
+        .map(|m| m.file_name())
+        .collect()
+}
+
+/// How far before the oldest waiting message a delivery read starts: clock skew between the
+/// Studio and the worker, with room to spare.
+pub const STEER_LOG_SKEW_SECS: i64 = 120;
+/// The most of a pod's log one delivery read takes, from the start of its window. A delivery
+/// line comes soon after its message reaches the pod, so it is near the start.
+pub const STEER_LOG_BYTES: i64 = 64 * 1024 * 1024;
+
+/// The log read that finds a run's deliveries: the agent's log since its oldest message still
+/// waiting for the hook was queued (less [`STEER_LOG_SKEW_SECS`]), from the start of that window
+/// and not a fixed tail, so no amount of output after a delivery line pushes it out of reach.
+/// `None` when nothing waits for the hook.
+pub fn steer_log_params(rec: &crate::hostrun::RunRecord, now_ms: u64) -> Option<LogParams> {
+    let oldest = rec
+        .messages
+        .iter()
+        .filter(|m| m.waiting() && m.channel == crate::hostrun::mailbox::CHANNEL_TOOL_CALL)
+        .filter_map(|m| crate::hostrun::ms_of(&m.queued_at))
+        .min()?;
+    let secs = (now_ms.saturating_sub(oldest)).div_ceil(1000) as i64;
+    Some(LogParams {
+        container: Some("agent".into()),
+        since_seconds: Some(secs + STEER_LOG_SKEW_SECS),
+        limit_bytes: Some(STEER_LOG_BYTES),
+        ..LogParams::default()
+    })
+}
+
+impl DevJobs {
+    /// Merge `data` into the run's mailbox ConfigMap, creating it when it is missing.
+    pub async fn put_steer(
+        &self,
+        run_id: &str,
+        data: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let name = crate::hostrun::mailbox::config_map_name(run_id);
+        let patch = json!({ "data": data });
+        for _ in 0..2 {
+            match self
+                .config_maps()
+                .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    let cm = serde_json::from_value(steer_config_map(
+                        &self.settings.namespace,
+                        run_id,
+                        data,
+                    ))
+                    .map_err(|e| e.to_string())?;
+                    match self
+                        .config_maps()
+                        .create(&kube::api::PostParams::default(), &cm)
+                        .await
+                    {
+                        Ok(_) => return Ok(()),
+                        // Made meanwhile: patch it on the next turn of the loop.
+                        Err(kube::Error::Api(e)) if e.code == 409 => continue,
+                        Err(e) => return Err(format!("could not create {name}: {e}")),
+                    }
+                }
+                Err(e) => return Err(format!("could not patch {name}: {e}")),
+            }
+        }
+        Err(format!("{name} could not be written"))
+    }
+
+    /// Take `keys` out of the run's mailbox ConfigMap. A missing ConfigMap has none of them.
+    pub async fn drop_steer_keys(&self, run_id: &str, keys: &[String]) -> Result<(), String> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let name = crate::hostrun::mailbox::config_map_name(run_id);
+        let data: serde_json::Map<String, Value> =
+            keys.iter().map(|k| (k.clone(), Value::Null)).collect();
+        let patch = json!({ "data": data });
+        match self
+            .config_maps()
+            .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+            Err(e) => Err(format!("could not trim {name}: {e}")),
+        }
+    }
+
+    /// Delete the run's mailbox ConfigMap: its last Job has ended.
+    pub async fn delete_steer(&self, run_id: &str) {
+        let name = crate::hostrun::mailbox::config_map_name(run_id);
+        match self
+            .config_maps()
+            .delete(&name, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => eprintln!("jesse-bridge: devjob cloud {run_id}: deleted {name}"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => {
+                eprintln!("jesse-bridge: devjob cloud {run_id}: could not delete {name}: {e}")
+            }
+        }
+    }
+
+    /// The mailbox of a run whose Job is about to be made: created, with every message still
+    /// waiting for the hook. A failure is logged; the mount is optional, so the Job still
+    /// starts, and the messages reach it at its next round.
+    pub(super) async fn prepare_steer(&self, run_id: &str) {
+        let Some(studio) = self.studio.get().cloned() else {
+            return;
+        };
+        let id = run_id.to_string();
+        let Some(rec) = tokio::task::spawn_blocking(move || studio.get(&id))
+            .await
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        if let Err(e) = self.put_steer(&rec.run_id, &waiting_steer(&rec)).await {
+            eprintln!("jesse-bridge: devjob cloud {run_id}: its mailbox: {e}");
+        }
+    }
+
+    /// The deliveries of the Job `job`, into its run's record, and the messages that no longer
+    /// wait taken out of the run's ConfigMap. The log is read from `pod` since the oldest waiting
+    /// message ([`steer_log_params`]); `fallback` is used when there is no pod to read. Answers
+    /// the record after it (`None` when no run owns the Job). An `Err` means the ConfigMap still
+    /// holds a delivered message: the caller must not make a Job that mounts it.
+    pub(super) async fn settle_delivered(
+        &self,
+        job: &str,
+        pod: Option<&str>,
+        fallback: Option<&str>,
+    ) -> Result<Option<crate::hostrun::RunRecord>, String> {
+        let Some(studio) = self.studio.get().cloned() else {
+            return Ok(None);
+        };
+        let (s, j) = (studio.clone(), job.to_string());
+        let Some(rec) = tokio::task::spawn_blocking(move || s.record_of_job(&j))
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let read = match (pod, steer_log_params(&rec, crate::hostrun::now_ms())) {
+            (Some(p), Some(lp)) => self.pods().logs(p, &lp).await.ok(),
+            _ => None,
+        };
+        let log = read.as_deref().or(fallback).unwrap_or_default();
+        let delivered = crate::hostrun::mailbox::parse_delivered_lines(log);
+        let j = job.to_string();
+        let rec =
+            tokio::task::spawn_blocking(move || studio.cloud_messages_delivered(&j, &delivered))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(rec);
+        self.drop_steer_keys(&rec.run_id, &settled_steer(&rec))
+            .await?;
+        Ok(Some(rec))
+    }
+
+    /// Make the Job of a run record a cloud slot took: its mailbox first, with any message sent
+    /// while it was being taken, then the Job. A Job that could not be made leaves no mailbox
+    /// behind: the run may next run on the Studio, or never again, and the next try makes it
+    /// afresh from the record.
+    pub(super) async fn make_record_job(
+        &self,
+        run: &CloudRun,
+        run_id: &str,
+        origin: &str,
+    ) -> Result<Started, String> {
+        self.prepare_steer(run_id).await;
+        let made = self.create_cloud_run(run, origin).await;
+        if made.is_err() {
+            self.delete_steer(run_id).await;
+        }
+        made
+    }
+}
+
 /// A run record's cancel reaches its Job through the cloud host's server.
 impl crate::hostrun::CloudJobs for DevJobs {
+    fn steer<'a>(
+        &'a self,
+        run_id: &'a str,
+        key: &'a str,
+        body: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.runtime()?;
+            let data = BTreeMap::from([(key.to_string(), body.to_string())]);
+            self.put_steer(run_id, &data).await
+        })
+    }
+
+    fn default_agent(&self) -> super::Agent {
+        self.default_agent
+    }
+
     fn cancel<'a>(
         &'a self,
         job: &'a str,

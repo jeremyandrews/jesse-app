@@ -716,7 +716,8 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
         .map(|e| {
             (
                 e["name"].as_str().unwrap().to_string(),
-                e["value"].as_str().unwrap().to_string(),
+                // JOB_UID has no literal "value": it comes from a fieldRef.
+                e["value"].as_str().unwrap_or("").to_string(),
             )
         })
         .collect();
@@ -1311,6 +1312,110 @@ fn a_cloud_run_killed_for_memory_says_so_in_its_failure_line() {
     );
 }
 
+// ---- DJ22: a cloud Job retries a killed pod once, from its checkpoint --------------------
+
+#[test]
+fn the_cloud_job_retries_only_a_killed_pod_once_and_tells_it_the_jobs_uid() {
+    let (spec, extras) = chain_spec(120);
+    let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
+    let v = serde_json::to_value(&job).unwrap();
+    assert_eq!(
+        v["spec"]["backoffLimit"], 1,
+        "one retry, never more: the k3s template's own number"
+    );
+    let rule = &v["spec"]["podFailurePolicy"]["rules"][0];
+    assert_eq!(rule["action"], "FailJob");
+    assert_eq!(
+        rule["onExitCodes"]["containerName"], "agent",
+        "the container the Job actually runs the agent in"
+    );
+    assert_eq!(rule["onExitCodes"]["operator"], "NotIn");
+    assert_eq!(
+        rule["onExitCodes"]["values"],
+        json!([137, 143]),
+        "only a pod killed from outside (OOM or SIGTERM) gets the retry"
+    );
+    let env = v["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .unwrap();
+    let job_uid = env
+        .iter()
+        .find(|e| e["name"] == "JOB_UID")
+        .expect("JOB_UID is set");
+    assert!(
+        job_uid.get("value").is_none(),
+        "JOB_UID has no literal value: it comes from the downward API"
+    );
+    assert_eq!(
+        job_uid["valueFrom"]["fieldRef"]["fieldPath"],
+        "metadata.labels['batch.kubernetes.io/controller-uid']"
+    );
+}
+
+/// A pod with no container status at all: lost with its node, before Kubernetes ever recorded
+/// a terminated state for it.
+fn lost_pod(name: &str, created: &str) -> Pod {
+    serde_json::from_value(json!({
+        "metadata": { "name": name, "creationTimestamp": created },
+    }))
+    .unwrap()
+}
+
+/// A pod whose agent container exited on its own, for a reason that is not a memory kill.
+fn exited_pod(name: &str, created: &str, exit_code: i32, reason: &str) -> Pod {
+    serde_json::from_value(json!({
+        "metadata": { "name": name, "creationTimestamp": created },
+        "status": { "containerStatuses": [{
+            "name": "agent", "image": "img", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": exit_code, "reason": reason } },
+        }] },
+    }))
+    .unwrap()
+}
+
+#[test]
+fn pods_oldest_first_puts_a_retrys_pod_last_so_its_the_one_a_report_reads() {
+    let killed = exited_pod("agent-x-abcde-q1", "2026-11-20T10:00:00Z", 137, "OOMKilled");
+    let retry = exited_pod("agent-x-abcde-q2", "2026-11-20T10:05:00Z", 0, "Completed");
+    // Fed newest first, on purpose: the sort is what must put the retry last, not the input.
+    let sorted = crate::devjob::pods_oldest_first(vec![retry.clone(), killed.clone()]);
+    assert_eq!(sorted[0].metadata.name, killed.metadata.name);
+    assert_eq!(
+        sorted.last().unwrap().metadata.name,
+        retry.metadata.name,
+        "the retry is read last, and so is what a finished report comes from"
+    );
+}
+
+#[test]
+fn a_job_whose_retry_also_died_is_explained_by_both_its_pods() {
+    // Fewer than two pods: explained exactly as before, by oom_killed_line alone.
+    assert_eq!(crate::devjob::explain_both_pods(&[]), None);
+    assert_eq!(
+        crate::devjob::explain_both_pods(&[oom_pod("OOMKilled", false)]),
+        None
+    );
+
+    // The first pod killed for memory, the retry lost with its node.
+    let killed = oom_pod("OOMKilled", false);
+    let lost = lost_pod("agent-x-abcde-q2", "2026-11-20T10:05:00Z");
+    let explained = crate::devjob::explain_both_pods(&[killed, lost]).unwrap();
+    assert_eq!(
+        explained,
+        "the first pod killed at the 14 Gi memory limit (OOMKilled); \
+         the retry lost with its node"
+    );
+
+    // Both pods exited on their own, for reasons that are not a memory kill.
+    let first = exited_pod("agent-x-abcde-q1", "2026-11-20T10:00:00Z", 1, "Error");
+    let retry = exited_pod("agent-x-abcde-q2", "2026-11-20T10:05:00Z", 1, "Error");
+    let explained = crate::devjob::explain_both_pods(&[first, retry]).unwrap();
+    assert_eq!(
+        explained,
+        "the first pod exited 1 (Error); the retry exited 1 (Error)"
+    );
+}
+
 // ---- Postgres and Redis beside the agent ------------------------------------------------
 
 /// The live kc1 size: 28 Gi and 8 CPU limits, 26 Gi and 7 CPU requests.
@@ -1375,7 +1480,8 @@ fn env_of(c: &Value) -> BTreeMap<String, String> {
         .map(|e| {
             (
                 e["name"].as_str().unwrap().to_string(),
-                e["value"].as_str().unwrap().to_string(),
+                // JOB_UID has no literal "value": it comes from a fieldRef.
+                e["value"].as_str().unwrap_or("").to_string(),
             )
         })
         .collect()
@@ -2218,7 +2324,8 @@ fn job_deadline_seconds_always_equals_active_deadline_seconds() {
             .map(|e| {
                 (
                     e["name"].as_str().unwrap().to_string(),
-                    e["value"].as_str().unwrap().to_string(),
+                    // JOB_UID has no literal "value": it comes from a fieldRef.
+                    e["value"].as_str().unwrap_or("").to_string(),
                 )
             })
             .collect();

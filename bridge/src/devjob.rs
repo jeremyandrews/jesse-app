@@ -4067,9 +4067,18 @@ impl crate::gateway::InProcessServer for DevJobs {
                     };
                     if let Some(svc) = self.studio.get() {
                         if let Some(r) = svc.get(args.job_name.trim()) {
-                            // A run the cloud took is answered by its Job, when there is one.
+                            // A run an earlier bridge gave the cloud is answered by its Job.
                             if !(moved_to_cloud(&r) && self.cloud.get().is_some()) {
-                                return Ok(text_result(&studio_status(svc, &r), false));
+                                let mut out = studio_status(svc, &r);
+                                // A run on the cloud: its Job's phase, wait and log.
+                                let job = r.cloud.as_ref().and_then(|c| c.job_name.clone());
+                                if let (Some(job), Some(c)) = (job, self.cloud.get()) {
+                                    if let Ok(Some(run)) = c.run(&job).await {
+                                        out["log_tail"] = json!(run.log_tail);
+                                        out["job"] = json!(run);
+                                    }
+                                }
+                                return Ok(text_result(&out, false));
                             }
                         }
                     }

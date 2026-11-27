@@ -43,6 +43,7 @@
 
 pub mod cloud;
 pub mod git;
+pub mod mailbox;
 pub mod review;
 pub mod runner;
 pub mod stream;
@@ -439,6 +440,13 @@ impl HostRunSettings {
     /// The runner binary, resolved to a file.
     pub fn runner_path(&self) -> Option<PathBuf> {
         sys::resolve_program(&self.runner.to_string_lossy(), None)
+    }
+
+    /// `jesse-hook`, beside the runner, where the runner looks for it
+    /// ([`runner::sibling_hook`]): without it a run's agent has no steer hook.
+    pub fn steer_hook(&self) -> Option<PathBuf> {
+        let hook = self.runner_path()?.parent()?.join("jesse-hook");
+        hook.is_file().then_some(hook)
     }
 
     pub fn runs_dir(&self) -> PathBuf {
@@ -1017,6 +1025,53 @@ pub struct RunRecord {
     /// and once a cloud slot took it, its Jobs. Absent on every Studio run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudPart>,
+    /// Every message Jeremy sent the run while it was running ([`mailbox`]), oldest first.
+    /// Absent until the first one, so a run never messaged is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<RunMessage>,
+}
+
+/// One message to a running run ([`RunRecord::messages`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunMessage {
+    pub id: String,
+    pub text: String,
+    /// When it was queued (RFC 3339).
+    pub queued_at: String,
+    /// When the agent got it: the hook's marker (the Studio) or its log line (the cloud), or
+    /// when the round it was carried into started. Absent while it waits.
+    #[serde(default)]
+    pub delivered_at: Option<String>,
+    /// How it reaches the agent: [`mailbox::CHANNEL_TOOL_CALL`] (the hook, after the current
+    /// tool call) or [`mailbox::CHANNEL_NEXT_ROUND`] (the head of the next round's text).
+    pub channel: String,
+    /// The round that was running when it was sent.
+    #[serde(default)]
+    pub round: u32,
+    /// The round whose text it was put at the head of, when the hook never delivered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_to_round: Option<u32>,
+}
+
+impl RunMessage {
+    /// Not delivered and not yet carried into a round.
+    pub fn waiting(&self) -> bool {
+        self.delivered_at.is_none() && self.carried_to_round.is_none()
+    }
+
+    /// The mailbox file's name ([`mailbox::file_name`]).
+    pub fn file_name(&self) -> String {
+        mailbox::file_name(ms_of(&self.queued_at).unwrap_or(0), &self.id)
+    }
+
+    /// The mailbox file's body.
+    pub fn mail(&self) -> mailbox::MailMessage {
+        mailbox::MailMessage {
+            id: self.id.clone(),
+            text: self.text.clone(),
+            queued_at: self.queued_at.clone(),
+        }
+    }
 }
 
 /// Where a run may execute: the Studio (the default), the cloud (`host: "cloud"`), or either,
@@ -3069,6 +3124,126 @@ pub trait CloudJobs: Send + Sync {
         &'a self,
         job: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<CloudCancel, String>> + Send + 'a>>;
+
+    /// Put one message into the run's mailbox ConfigMap ([`mailbox::config_map_name`]) as the
+    /// key `key`, creating the ConfigMap when it is missing.
+    fn steer<'a>(
+        &'a self,
+        run_id: &'a str,
+        key: &'a str,
+        body: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        let _ = (run_id, key, body);
+        Box::pin(async { Err("this cloud takes no messages".to_string()) })
+    }
+
+    /// The agent a cloud run that names none runs.
+    fn default_agent(&self) -> devjob::Agent {
+        devjob::Agent::Claude
+    }
+}
+
+/// What [`HostRuns::reply_to`] did.
+#[derive(Debug, Clone)]
+pub struct ReplyOutcome {
+    /// The run, after the reply.
+    pub record: RunRecord,
+    /// The message, when the run was running and the text was queued as one; `None` when it
+    /// started a round.
+    pub message: Option<RunMessage>,
+    /// Why the cloud did not take the message, when it did not (it then waits for the next
+    /// round).
+    pub cloud_error: Option<String>,
+}
+
+impl ReplyOutcome {
+    /// What the caller is told about delivery; `None` for a round.
+    pub fn delivery(&self) -> Option<String> {
+        let m = self.message.as_ref()?;
+        Some(match (m.channel.as_str(), &self.cloud_error) {
+            (mailbox::CHANNEL_TOOL_CALL, _) if self.record.on_cloud() => format!(
+                "Message {} queued for delivery after the agent's current tool call. On the \
+                 cloud the pod sees it once Kubernetes refreshes the mounted ConfigMap (about a \
+                 minute). devjob_status shows delivered_at once the agent has it.",
+                m.id
+            ),
+            (mailbox::CHANNEL_TOOL_CALL, _) => format!(
+                "Message {} queued for delivery after the agent's current tool call. \
+                 devjob_status shows delivered_at once the agent has it.",
+                m.id
+            ),
+            (_, Some(e)) => format!(
+                "Message {} queued for the next round only: the cloud did not take it ({e}). \
+                 It goes at the head of the run's next round.",
+                m.id
+            ),
+            _ => format!(
+                "Message {} queued for the next round only: this run's agent cannot take a \
+                 message while it runs (no steer hook for it). It goes at the head of the run's \
+                 next round.",
+                m.id
+            ),
+        })
+    }
+}
+
+/// The messages carried into round `n` reached the agent when that round started, at `at`.
+fn delivered_with_round(r: &mut RunRecord, n: u32, at: &str) {
+    for m in r.messages.iter_mut() {
+        if m.carried_to_round == Some(n) && m.delivered_at.is_none() {
+            m.delivered_at = Some(at.to_string());
+        }
+    }
+}
+
+/// Copy delivery times `marks` (message id to when) into the waiting messages of `r`.
+fn apply_marks(r: &mut RunRecord, marks: &BTreeMap<String, String>) {
+    for m in r.messages.iter_mut().filter(|m| m.waiting()) {
+        if let Some(at) = marks.get(&m.id) {
+            m.delivered_at = Some(at.clone());
+        }
+    }
+}
+
+/// The lines a report carries when messages sent while its round ran never reached the agent;
+/// `None` when every one did.
+pub fn undelivered_note(r: &RunRecord) -> Option<String> {
+    let waiting: Vec<&RunMessage> = r.messages.iter().filter(|m| m.waiting()).collect();
+    if waiting.is_empty() {
+        return None;
+    }
+    let mut s = format!(
+        "UNDELIVERED MESSAGES: {} message{} Jeremy sent while this round ran never reached the \
+         agent. A reply puts {} at the head of the next round.",
+        waiting.len(),
+        if waiting.len() == 1 { "" } else { "s" },
+        if waiting.len() == 1 { "it" } else { "them" },
+    );
+    for m in waiting {
+        let one: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let short: String = one.chars().take(200).collect();
+        let more = if short.len() < one.len() { "…" } else { "" };
+        s.push_str(&format!(
+            "\n- {} (queued {}): {short}{more}",
+            m.id, m.queued_at
+        ));
+    }
+    Some(s)
+}
+
+/// `report` with [`undelivered_note`] where it is seen: first, unless the report's own first
+/// line asks Jeremy something (`NEEDS YOU:`, `AWAITING MERGE:`), which keeps its place and the
+/// note goes last.
+pub fn with_undelivered(report: String, r: &RunRecord) -> String {
+    let Some(note) = undelivered_note(r) else {
+        return report;
+    };
+    let first = first_line(&report);
+    if first.starts_with(NEEDS_YOU_PREFIX) || first.starts_with(AWAITING_MERGE_PREFIX) {
+        format!("{}\n\n{note}\n", report.trim_end())
+    } else {
+        format!("{note}\n\n{report}")
+    }
 }
 
 /// How a cloud run's Job ended, once its report is written ([`HostRuns::cloud_ended`]).
@@ -3804,6 +3979,16 @@ impl HostRuns {
             }
             r.cleanup.kept = true;
         });
+        // Every message still waiting for the hook is in the mailbox, whatever wrote the record
+        // (a run the cloud gave back to the Studio carries its messages here).
+        for m in rec
+            .messages
+            .iter()
+            .filter(|m| m.waiting() && m.channel == mailbox::CHANNEL_TOOL_CALL)
+        {
+            let _ =
+                mailbox::write_message(&dir.join(mailbox::MAILBOX_DIR), &m.file_name(), &m.mail());
+        }
         let label = self.settings.label(&rec.run_id);
         let outcome = prepared.and_then(|_| {
             let runner = self.settings.runner_path().ok_or_else(|| {
@@ -3828,11 +4013,30 @@ impl HostRuns {
             self.launcher.bootstrap(&dir.join(JOB_PLIST), &label)
         });
         match outcome {
-            Ok(()) => eprintln!(
-                "jesse-bridge: hostrun START {} round {} label {label}",
-                rec.run_id, round.n
-            ),
+            Ok(()) => {
+                // The messages this round carries in its text reach the agent now that its
+                // runner has started, and not before.
+                if rec
+                    .messages
+                    .iter()
+                    .any(|m| m.carried_to_round == Some(round.n))
+                {
+                    let _ = update_run(dir, |r| delivered_with_round(r, round.n, &started));
+                }
+                eprintln!(
+                    "jesse-bridge: hostrun START {} round {} label {label}",
+                    rec.run_id, round.n
+                )
+            }
             Err(e) => {
+                // No agent ran this round's text: what it carried waits for the next round.
+                let _ = update_run(dir, |r| {
+                    for m in r.messages.iter_mut() {
+                        if m.carried_to_round == Some(round.n) && m.delivered_at.is_none() {
+                            m.carried_to_round = None;
+                        }
+                    }
+                });
                 eprintln!("jesse-bridge: hostrun {}: could not start: {e}", rec.run_id);
                 let _ = std::fs::write(
                     dir.join(REPORT_MD),
@@ -3856,6 +4060,14 @@ impl HostRuns {
     /// cloud run's next round is its next Job, on the same branch and pull request, with the
     /// reply after its prompt ([`crate::devjob::cloud::record_job`]).
     pub fn reply(&self, run_id: &str, text: &str) -> Result<RunRecord, Refusal> {
+        self.reply_to(run_id, text).map(|o| o.record)
+    }
+
+    /// [`HostRuns::reply`], saying what it did. On a `running` run the text is not a round: it
+    /// is queued as a message ([`mailbox`]) the agent reads after its current tool call, or,
+    /// when its agent takes no added context, at the head of its next round. Every other status
+    /// keeps the reply's own behavior.
+    pub fn reply_to(&self, run_id: &str, text: &str) -> Result<ReplyOutcome, Refusal> {
         if text.trim().is_empty() {
             return Err(Refusal::Invalid("the reply is empty".into()));
         }
@@ -3888,7 +4100,152 @@ impl HostRuns {
                 _ => {}
             }
         }
+        if let Some(rec) = self.get(run_id).filter(|r| r.status == RunStatus::Running) {
+            if let Some(out) = self.queue_message_locked(&rec, text)? {
+                return Ok(out);
+            }
+        }
         self.queue_round_locked(run_id, text, None)
+            .map(|record| ReplyOutcome {
+                record,
+                message: None,
+                cloud_error: None,
+            })
+    }
+
+    /// Whether the agent running `rec` reads a message after its current tool call: a Studio
+    /// run's Claude Code always does, and on the cloud Claude Code and Codex do (both add a
+    /// `PostToolUse` hook's `additionalContext` to the next turn) while Gemini is not known to.
+    /// A cloud run this bridge cannot reach the cloud for gets its messages next round.
+    pub fn takes_messages(&self, rec: &RunRecord) -> bool {
+        if !rec.is_cloud() {
+            // The runner wires the hook only when `jesse-hook` sits beside it.
+            return self.settings.steer_hook().is_some();
+        }
+        let Some(cloud) = self.cloud_jobs.get() else {
+            return false;
+        };
+        let agent = rec
+            .cloud
+            .as_ref()
+            .and_then(|c| c.agent.as_deref())
+            .and_then(|a| devjob::Agent::parse(a).ok())
+            .unwrap_or_else(|| cloud.default_agent());
+        matches!(agent, devjob::Agent::Claude | devjob::Agent::Codex)
+    }
+
+    /// Queue `text` as a message to the running run `rec`. The caller holds the gate. `None`
+    /// when the run stopped running meanwhile: the caller queues a round instead.
+    fn queue_message_locked(
+        &self,
+        rec: &RunRecord,
+        text: &str,
+    ) -> Result<Option<ReplyOutcome>, Refusal> {
+        let dir = self.settings.run_dir(&rec.run_id);
+        // Strictly after the run's last message, so the mailbox's name order (time, then id) is
+        // always the order they were sent, even two in one millisecond.
+        let last = rec
+            .messages
+            .iter()
+            .filter_map(|m| ms_of(&m.queued_at))
+            .max();
+        let now = last.map_or(now_ms(), |l| now_ms().max(l + 1));
+        let channel = if self.takes_messages(rec) {
+            mailbox::CHANNEL_TOOL_CALL
+        } else {
+            mailbox::CHANNEL_NEXT_ROUND
+        };
+        let msg = RunMessage {
+            id: mailbox::new_id(),
+            text: text.to_string(),
+            queued_at: rfc(now),
+            delivered_at: None,
+            channel: channel.to_string(),
+            round: rec.round().map(|r| r.n).unwrap_or(1),
+            carried_to_round: None,
+        };
+        // On the Studio the file goes first, so a message on the record is always in the
+        // mailbox. The cloud's ConfigMap is patched once the record has it
+        // ([`HostRuns::reply_full_and_pump`]).
+        let file = (!rec.on_cloud() && channel == mailbox::CHANNEL_TOOL_CALL)
+            .then(|| dir.join(mailbox::MAILBOX_DIR).join(msg.file_name()));
+        if let Some(f) = &file {
+            mailbox::write_message(
+                &dir.join(mailbox::MAILBOX_DIR),
+                &msg.file_name(),
+                &msg.mail(),
+            )
+            .map_err(|e| Refusal::Internal(format!("could not write {}: {e}", f.display())))?;
+        }
+        let mut queued = false;
+        let record = update_run(&dir, |r| {
+            if r.status == RunStatus::Running {
+                r.messages.push(msg.clone());
+                queued = true;
+            }
+        })
+        .map_err(Refusal::Internal)?;
+        if !queued {
+            if let Some(f) = &file {
+                let _ = std::fs::remove_file(f);
+            }
+            return Ok(None);
+        }
+        eprintln!(
+            "jesse-bridge: hostrun MESSAGE {} {} ({channel})",
+            rec.run_id, msg.id
+        );
+        Ok(Some(ReplyOutcome {
+            record,
+            message: Some(msg),
+            cloud_error: None,
+        }))
+    }
+
+    /// Read the Studio hook's delivery markers into the record's `delivered_at`. Only a Studio
+    /// run with a message still waiting is read; any other is answered as it is.
+    pub fn sync_messages(&self, run_id: &str) -> Option<RunRecord> {
+        let rec = self.get(run_id)?;
+        if rec.on_cloud() || !rec.messages.iter().any(RunMessage::waiting) {
+            return Some(rec);
+        }
+        let dir = self.settings.run_dir(run_id);
+        let marks = mailbox::delivered_marks(&dir.join(mailbox::MAILBOX_DIR));
+        if marks.is_empty() {
+            return Some(rec);
+        }
+        update_run(&dir, |r| apply_marks(r, &marks)).ok()
+    }
+
+    /// What the cloud's log said was delivered ([`mailbox::parse_delivered_lines`]), into the
+    /// record that owns the Job `job`. Answers the record, `None` when no run owns the Job.
+    pub fn cloud_messages_delivered(
+        &self,
+        job: &str,
+        delivered: &BTreeMap<String, Option<String>>,
+    ) -> Option<RunRecord> {
+        let (dir, rec) = self.runs().into_iter().find(|(_, r)| r.owns_job(job))?;
+        let now = rfc(now_ms());
+        let any = rec
+            .messages
+            .iter()
+            .any(|m| m.waiting() && delivered.contains_key(&m.id));
+        if !any {
+            return Some(rec);
+        }
+        let marks: BTreeMap<String, String> = delivered
+            .iter()
+            .map(|(id, at)| (id.clone(), at.clone().unwrap_or_else(|| now.clone())))
+            .collect();
+        update_run(&dir, |r| apply_marks(r, &marks)).ok()
+    }
+
+    /// The run that owns the Job `job`, if any.
+    pub fn record_of_job(&self, job: &str) -> Option<RunRecord> {
+        self.runs()
+            .into_iter()
+            .map(|(_, r)| r)
+            .find(|r| r.owns_job(job))
     }
 
     /// Queue a new round on a finished or paused run. The caller holds the gate. `auto` names
@@ -3957,11 +4314,33 @@ impl HostRuns {
             )));
         }
         let now = rfc(now_ms());
+        // NOTHING LOST: a message the hook never delivered (the round ended first, or the agent
+        // takes none mid-round) goes at the head of this round's text, in the order sent.
+        let marks = if rec.on_cloud() {
+            BTreeMap::new()
+        } else {
+            mailbox::delivered_marks(&dir.join(mailbox::MAILBOX_DIR))
+        };
+        let mut carried: Vec<String> = Vec::new();
         let rec = update_run(&dir, |r| {
             let n = r.rounds.len() as u32 + 1;
+            apply_marks(r, &marks);
+            let waiting: Vec<&mut RunMessage> =
+                r.messages.iter_mut().filter(|m| m.waiting()).collect();
+            let text = if waiting.is_empty() {
+                text.to_string()
+            } else {
+                let head = mailbox::render_all(waiting.iter().map(|m| m.text.as_str()));
+                for m in waiting {
+                    m.carried_to_round = Some(n);
+                    m.channel = mailbox::CHANNEL_NEXT_ROUND.to_string();
+                    carried.push(m.file_name());
+                }
+                format!("{head}\n\n{text}")
+            };
             r.rounds.push(Round {
                 n,
-                text: Some(text.to_string()),
+                text: Some(text),
                 queued_at: now.clone(),
                 auto: auto.map(str::to_string),
                 ..Round::default()
@@ -3988,6 +4367,11 @@ impl HostRuns {
             also(r, n);
         })
         .map_err(Refusal::Internal)?;
+        // Out of the mailbox, so the hook of the round that now carries them in its text never
+        // hands them over a second time.
+        for name in &carried {
+            let _ = std::fs::remove_file(dir.join(mailbox::MAILBOX_DIR).join(name));
+        }
         eprintln!(
             "jesse-bridge: hostrun {} {run_id} round {}",
             match auto {
@@ -4241,16 +4625,64 @@ impl HostRuns {
         run_id: &str,
         text: &str,
     ) -> Result<RunRecord, Refusal> {
+        self.reply_full_and_pump(run_id, text)
+            .await
+            .map(|o| o.record)
+    }
+
+    /// [`HostRuns::reply_and_pump`], saying what it did ([`ReplyOutcome`]). A message to a
+    /// running cloud run is patched into its ConfigMap here; one the cloud refuses goes to the
+    /// next round instead, and the outcome says so.
+    pub async fn reply_full_and_pump(
+        self: &Arc<Self>,
+        run_id: &str,
+        text: &str,
+    ) -> Result<ReplyOutcome, Refusal> {
         let this = self.clone();
         let (id, t) = (run_id.to_string(), text.to_string());
-        tokio::task::spawn_blocking(move || this.reply(&id, &t))
+        let mut out = tokio::task::spawn_blocking(move || this.reply_to(&id, &t))
             .await
             .map_err(|e| Refusal::Internal(format!("the reply task failed: {e}")))??;
+        if let Some(m) = out.message.clone() {
+            if out.record.on_cloud() && m.channel == mailbox::CHANNEL_TOOL_CALL {
+                let res = match self.cloud_jobs.get() {
+                    Some(c) => {
+                        c.steer(
+                            &out.record.run_id,
+                            &m.file_name(),
+                            &mailbox::body(&m.mail()),
+                        )
+                        .await
+                    }
+                    None => Err("the cloud host is not attached to this bridge".to_string()),
+                };
+                if let Err(e) = res {
+                    eprintln!(
+                        "jesse-bridge: hostrun {run_id}: message {} not sent to the cloud: {e}",
+                        m.id
+                    );
+                    let dir = self.settings.run_dir(&out.record.run_id);
+                    if let Ok(rec) = update_run(&dir, |r| {
+                        if let Some(x) = r.messages.iter_mut().find(|x| x.id == m.id) {
+                            x.channel = mailbox::CHANNEL_NEXT_ROUND.to_string();
+                        }
+                    }) {
+                        out.message = rec.messages.iter().find(|x| x.id == m.id).cloned();
+                        out.record = rec;
+                    }
+                    out.cloud_error = Some(e);
+                }
+            }
+            self.wake();
+            return Ok(out);
+        }
         let effects = self.pump_blocking().await;
         self.send_effects(effects).await;
         self.wake();
-        self.get(run_id)
-            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))
+        out.record = self
+            .get(run_id)
+            .ok_or_else(|| Refusal::NotFound(format!("no run {run_id:?}")))?;
+        Ok(out)
     }
 
     /// Cancel: a queued run simply becomes `cancelled`; a running one gets SIGTERM to its process
@@ -4431,6 +4863,8 @@ impl HostRuns {
                 return;
             }
             x.branch = branch.to_string();
+            let (n, at) = (x.round().map(|r| r.n).unwrap_or(1), rfc(now_ms()));
+            delivered_with_round(x, n, &at);
             if let Some(c) = x.cloud.as_mut() {
                 c.job_name = Some(job.to_string());
                 if !c.jobs.iter().any(|j| j == job) {
@@ -5906,6 +6340,9 @@ impl HostRuns {
             if r.status != RunStatus::Running || r.on_cloud() {
                 continue;
             }
+            if r.messages.iter().any(RunMessage::waiting) {
+                self.sync_messages(&r.run_id);
+            }
             let Some(round) = r.round().cloned() else {
                 continue;
             };
@@ -6072,6 +6509,10 @@ impl HostRuns {
         if round.report_path.is_none() && rec.starts_review(status) {
             return self.begin_start_review(&dir, &exit).await;
         }
+        // NOTHING LOST: a message the hook never delivered is named in the report, and goes at
+        // the head of the next round when there is one.
+        let rec = self.sync_messages(run_id).unwrap_or(rec);
+        let report = with_undelivered(report, &rec);
         // The answering round's note moves to `Inbox/archive/` as its report is written, and
         // the report links it where it now is.
         let notes_now = self.archive_answered_notes(&rec, &answering);

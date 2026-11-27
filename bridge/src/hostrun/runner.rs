@@ -6,6 +6,8 @@
 //! own launchd label out. The environment is an allowlist ([`super::ENV_ALLOWLIST`]), so no
 //! bridge secret reaches the agent, plus the repository's `env_file` when the run records one:
 //! the runner reads it at each round and hands its variables to the agent and nothing else.
+//! The agent also gets `JESSE_RUN_MAILBOX`, and its settings file a `PostToolUse` hook that hands
+//! it Jeremy's messages after each tool call ([`super::mailbox`]).
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
@@ -13,7 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use super::{
-    now_ms, read_env_file, read_run, rfc, update_run, write_exit, ExitInfo, RunRecord,
+    mailbox, now_ms, read_env_file, read_run, rfc, update_run, write_exit, ExitInfo, RunRecord,
     ENV_ALLOWLIST, PROMPT_MD, REPORT_MD, STREAM, TARGET_DIR, WORKTREE_DIR,
 };
 
@@ -116,7 +118,58 @@ pub fn agent_env_with(
         "CARGO_TARGET_DIR".into(),
         dir.join(TARGET_DIR).to_string_lossy().into_owned(),
     ));
+    // Where the steer hook finds Jeremy's messages to the running run ([`mailbox`]).
+    env.push((
+        mailbox::MAILBOX_ENV.into(),
+        dir.join(mailbox::MAILBOX_DIR)
+            .to_string_lossy()
+            .into_owned(),
+    ));
     env
+}
+
+/// The run's own settings file, beside `run.json`: what `--settings` names.
+pub const AGENT_SETTINGS: &str = "agent-settings.json";
+
+/// `jesse-hook`, beside the running binary (`~/.local/bin/jesse-runner` and
+/// `~/.local/bin/jesse-hook` deploy together).
+pub fn sibling_hook() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let hook = exe.parent()?.join("jesse-hook");
+    hook.is_file().then_some(hook)
+}
+
+/// The settings the agent runs with: the attribution settings when the bridge handed the runner
+/// its attribution directory, and the steer hook ([`steer_hook`]) when `jesse-hook` is there.
+/// `None` with neither.
+pub fn agent_settings(attribution: bool, hook: Option<&Path>) -> Option<serde_json::Value> {
+    if !attribution && hook.is_none() {
+        return None;
+    }
+    let mut doc = if attribution {
+        crate::attribution::settings_value()
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(h) = hook {
+        doc["hooks"] = steer_hook(h);
+    }
+    Some(doc)
+}
+
+/// The `PostToolUse` hook that hands the agent its messages after every tool call:
+/// `jesse-hook steer`, matching every tool. It reads the mailbox the agent's environment names,
+/// so one settings file serves every round.
+pub fn steer_hook(hook: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "PostToolUse": [{
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} steer --harness claude-code", shell_quote(&hook.to_string_lossy())),
+            }],
+        }],
+    })
 }
 
 /// The desk command: take the session over in Terminal.
@@ -249,9 +302,20 @@ fn run_round(dir: &Path) -> Result<ExitInfo, String> {
             )
         })?;
     }
-    let settings = attribution
-        .as_ref()
-        .map(|a| a.join(crate::attribution::SETTINGS_FILE));
+    // The run's own settings file: the attribution settings, and the steer hook that hands the
+    // agent Jeremy's messages after each tool call. Rewritten every round, like the hooks.
+    let settings = match agent_settings(attribution.is_some(), sibling_hook().as_deref()) {
+        Some(doc) => {
+            let path = dir.join(AGENT_SETTINGS);
+            let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
+            crate::write_atomic(&path, &bytes)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            std::fs::create_dir_all(dir.join(mailbox::MAILBOX_DIR))
+                .map_err(|e| format!("could not create the mailbox: {e}"))?;
+            Some(path)
+        }
+        None => None,
+    };
     let hooks = attribution
         .as_ref()
         .map(|a| a.join(crate::attribution::HOOKS_DIR));

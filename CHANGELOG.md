@@ -14,6 +14,53 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.230.0] - 2026-11-27
+
+**A message to a running run, on the Studio and in the cloud (DJ33, Part 1).**
+
+- **Root cause.** `HostRuns::reply` refused a run in `running` ("a reply needs it to be
+  needs_you, reported, …"). A correction could only arrive after the round reported, after the
+  work it was meant to change.
+- **Behavior change.**
+  - **Queued, not refused.** `devjob_reply` (and `POST /jesse/runs/:id/reply`) on a `running`
+    run queues the text as a message in the run's mailbox and records it in `run.json`'s new
+    `messages` (`id`, `text`, `queued_at`, `delivered_at`, `channel`). The tool answers with
+    `message` and a `delivery` sentence: "queued for delivery after the agent's current tool
+    call", or "queued for the next round only" when the agent takes no added context. Every
+    other status behaves as before.
+  - **Delivered after the current tool call.** A new `jesse-hook steer` mode runs as a
+    `PostToolUse` hook on every tool. It claims each undelivered message once and in order
+    (an exclusive `<id>.claim`, so parallel tool calls never deliver one twice), prints it as
+    `hookSpecificOutput.additionalContext`, and only once that is written marks it
+    `<id>.delivered`. A hook that dies before printing leaves no mark, so the message is carried
+    into the next round rather than lost. The text starts
+    `Message from Jeremy while you were running:` and ends `Act on this now; it overrides the
+    prompt where they conflict.` Checked live: Claude Code 2.1.331 adds the context to the next
+    turn, and so does codex-cli 0.169.0, which records it as a developer message
+    (`hooks.additional_context`) and acted on it. A running tool call is never interrupted.
+  - **The Studio.** The runner gives the agent `JESSE_RUN_MAILBOX` (`<run dir>/mailbox`) and
+    passes its own `<run dir>/agent-settings.json` with `--settings`: the attribution settings,
+    plus the hook when `jesse-hook` is beside the runner. Chat turns keep the shared settings
+    file and spawn no extra hook. Without `jesse-hook` beside the runner the answer says "queued
+    for the next round only". The watcher and `devjob_status` read the markers into
+    `delivered_at`. Messages keep the order they were sent: `queued_at` strictly increases
+    within a run, whatever the clock does.
+  - **The cloud.** The mailbox is the ConfigMap `steer-<run id>` in `jesse-dev`. It is created
+    before each Job of the run, patched with each message, mounted read only and `optional: true`
+    at `/jesse/steer`, and deleted when the run's last Job ends. The hook prints
+    `JESSE_MESSAGE_DELIVERED <id> <time>` to the pod log, and the bridge parses those lines into
+    `delivered_at`, reading the log from just before the oldest waiting message rather than a
+    fixed tail. A Job's delivered keys leave the ConfigMap before a continuation that would
+    mount it is made; if they cannot, the Job is reported on the next pass instead. A Job that
+    cannot be made takes its new ConfigMap with it. The dev agent image wires the hook (k3s, Part 2). Gemini is not known to
+    take added context, so a Gemini run's messages wait for the next round, and the answer says
+    so.
+  - **Nothing lost.** A message undelivered when its round ends is named in the report
+    (`UNDELIVERED MESSAGES:`) and goes at the head of the next round's text, whoever queues it.
+- **Compatibility.** A run never messaged has no `messages` key. Its argv differs only in the
+  `--settings` path, and its environment only by `JESSE_RUN_MAILBOX`. Deploy `jesse-hook` with
+  the runner (`deploy-bins.toml` already ships both).
+
 ## [bridge 0.229.0] - 2026-11-27
 
 **A cloud run's report and push name every pull request it opened, in order (DJ31, Part 2).**

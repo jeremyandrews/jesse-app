@@ -412,9 +412,14 @@ async fn a_failed_cloud_run_is_closed_and_archived_like_any_run_and_refuses_a_re
     vault_fixture(&s);
     let r = rig_any(&s);
     let id = taken(&r, &s, "f", "job-f");
-    // Running, it refuses a reply as a running Studio run does.
-    let e = r.svc.reply(&id, "go on").unwrap_err();
-    assert!(e.message().contains("is running"), "{}", e.message());
+    // Running, a reply is a message, as on a running Studio run (DJ33); with no cloud attached
+    // to steer, it waits for the next round.
+    let out = r.svc.reply_to(&id, "go on").unwrap();
+    assert_eq!(out.record.status, RunStatus::Running);
+    assert_eq!(
+        out.message.unwrap().channel,
+        crate::hostrun::mailbox::CHANNEL_NEXT_ROUND
+    );
     r.svc
         .cloud_ended(&ended("job-f", RunStatus::Failed, "Inbox/x.md"))
         .unwrap();

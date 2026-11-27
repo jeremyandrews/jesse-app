@@ -3997,6 +3997,7 @@ mod archive;
 mod awaiting_merge;
 mod cloud_queue;
 mod cloud_review;
+mod messages;
 mod priority;
 mod review;
 mod reviewers;

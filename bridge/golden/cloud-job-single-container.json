@@ -158,6 +158,10 @@
               {
                 "name": "CARGO_BUILD_JOBS",
                 "value": "8"
+              },
+              {
+                "name": "JESSE_RUN_MAILBOX",
+                "value": "/jesse/steer"
               }
             ],
             "envFrom": [
@@ -188,6 +192,11 @@
               {
                 "mountPath": "/prompt",
                 "name": "prompt",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/jesse/steer",
+                "name": "steer",
                 "readOnly": true
               },
               {
@@ -239,6 +248,13 @@
               "sizeLimit": "60Gi"
             },
             "name": "work"
+          },
+          {
+            "configMap": {
+              "name": "steer-dj25",
+              "optional": true
+            },
+            "name": "steer"
           }
         ]
       }

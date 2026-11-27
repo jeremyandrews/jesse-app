@@ -302,14 +302,33 @@ printf 'Pushed the change.\n' > "$JESSE_RUN_REPORT"
         !env.contains(hostrun::runner::ATTRIBUTION_ENV),
         "the runner's own variable stays the runner's"
     );
-    // Claude Code was handed the settings file, which the runner wrote.
+    // Claude Code was handed the run's own settings file, which the runner wrote: the
+    // attribution settings, plus the steer hook (DJ33) when `jesse-hook` sits beside the runner.
     let argv = std::fs::read_to_string(out.join("argv")).unwrap();
-    let settings = attribution_dir.join(attribution::SETTINGS_FILE);
+    let settings = base
+        .join("root/runs")
+        .join(&run.run_id)
+        .join(hostrun::runner::AGENT_SETTINGS);
     assert!(
         argv.contains(&format!("--settings\n{}\n", settings.display())),
         "{argv}"
     );
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    if let Some(hooks) = v.as_object_mut().unwrap().remove("hooks") {
+        assert_eq!(hooks["PostToolUse"][0]["matcher"], "*");
+        let cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            cmd.ends_with("jesse-hook steer --harness claude-code"),
+            "{cmd}"
+        );
+    }
+    assert_eq!(v, attribution::settings_value());
+    // The shared file is still written for the bridge's chat turns, unchanged.
+    let shared = attribution_dir.join(attribution::SETTINGS_FILE);
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
     assert_eq!(v, attribution::settings_value());
 
     // commit-msg refused the trailer; pre-push refused the bypassed commit.

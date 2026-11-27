@@ -1,4 +1,5 @@
-//! `jesse-hook` — the vault write lock's hook helper.
+//! `jesse-hook` — the vault write lock's hook helper, and (`jesse-hook steer`) the hook that
+//! hands a running Studio or cloud run Jeremy's messages ([`steer`]).
 //!
 //! Spawned by an agent CLI as a `PreToolUse` / `PostToolUse` hook, once per tool call. Reads
 //! the hook payload on stdin, asks the bridge's broker whether the write may proceed, and
@@ -188,7 +189,32 @@ fn enforce_rules(
     }
 }
 
+/// `jesse-hook steer [--harness <id>]`: the `PostToolUse` hook of a Studio or cloud run that
+/// hands the agent Jeremy's messages after each tool call
+/// ([`jesse_bridge::hostrun::mailbox`]).
+///
+/// It FAILS OPEN, the opposite of the lock above, and on purpose: it never blocks or changes a
+/// tool call, only adds context after one. Every outcome exits 0; a missing mailbox, an
+/// unreadable message or nothing to deliver prints nothing, and the agent goes on as if there
+/// were no hook. Both Claude Code (2.1.331) and Codex (codex-cli 0.169.0) read the
+/// `hookSpecificOutput.additionalContext` it prints into the model's next turn; both were
+/// checked live.
+fn steer() -> ! {
+    // The payload is not needed: the mailbox is named by the environment. Drained so the
+    // calling CLI never meets a closed pipe.
+    let mut raw = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut raw);
+    use jesse_bridge::hostrun::{mailbox, now_ms, rfc};
+    let places = mailbox::HookPlaces::from_env(|k| std::env::var(k).ok());
+    // Printed straight to stdout, and marked delivered only once the write has gone through.
+    let _ = mailbox::run_hook(&places, &rfc(now_ms()), &mut std::io::stdout().lock());
+    std::process::exit(0)
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("steer") {
+        steer();
+    }
     let Some(args) = parse_args() else {
         // No harness known yet, so answer in the dialect that is safe for both: a non-zero
         // exit blocks on Claude Code, and Codex treats a hook error as a failure to allow.

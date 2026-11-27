@@ -955,6 +955,7 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"   # requir
 # idle_minutes = 10
 # max_timeout_minutes = 315                      # the cloud's timeout_minutes cap
 # worker_life_minutes = 480                      # kc-burst's max_ttl; raise that first to go higher
+# max_continuations = 3                          # a capped run's chain length; 0 turns it off
 # merge_deny = []                                # added to tag1consulting/scolta* and tag1consulting/goose
 # burst_size = "g-4vcpu-16gb"                    # one worker per cloud run
 # job_memory_gi = 14                             # the pod's memory limit; size it to burst_size
@@ -983,6 +984,24 @@ unchanged; `CARGO_BUILD_JOBS` follows the agent's CPU limit. The bridge refuses 
 that leaves the agent under 2 Gi or 1 CPU. `services = false` keeps the single-container pod.
 The k3s Job template should mirror this. See `docs/devjob-cloud.md`, "Postgres and Redis beside
 the agent".
+
+**A capped run continues automatically, as `<run_id>-c2`, `-c3`, and so on (0.224.0).** When the
+agent
+hits `AGENT_TIMEOUT_SECONDS`, the entrypoint pushes a last checkpoint to `jesse/<slug>-wip` and
+fails the Job. `DevJobs::finalize` reads that ref back, decides whether to continue
+(`continuation_decision`: not cancelled, not killed for memory, no pull request yet, it did stop
+at its time limit, no `NEEDS YOU`, a usable checkpoint, under `max_continuations`, and real
+progress since the last link), and, if so, creates the next link through the same
+`create_cloud_run` path (suspended; the slots, the worker life check and the daily cost cap all
+apply unchanged) on a new worker, with `RUN_ID` (and so the pull request's title) staying the
+chain's first run, `CONTINUATION` naming the link, and the prompt's own `### Continuation`
+section pointing at the checkpoint. The capped link's own report names the checkpoint and the
+run it continues as, or why it did not; each continuation's report has a `## Chain` section
+listing every earlier link. `max_continuations` (default 3) caps the chain's length; `0` turns
+continuations off. The pod's `JOB_DEADLINE_SECONDS` now matches its own `activeDeadlineSeconds`
+exactly, and `terminationGracePeriodSeconds` is 120s, so the entrypoint's SIGTERM checkpoint has
+time to push before Kubernetes kills the pod. See `docs/devjob-cloud.md`, "Continuing a capped
+run".
 
 **The containment battery** registers a stand-in `devjob` (the same three tools, every call
 refused) when it runs with a config that sets `[gateway] enabled` and `[devjob] enabled`, so the

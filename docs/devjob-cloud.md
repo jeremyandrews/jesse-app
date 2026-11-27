@@ -207,6 +207,65 @@ are managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
 | Finished, not yet reported | `failed` if the Job failed; `running` if it completed |
 | Finished, an outcome this build does not know | `reported` if the Job completed, else `failed` |
 
+## Continuing a capped run
+
+When the agent hits its `AGENT_TIMEOUT_SECONDS` wall, the entrypoint pushes its last checkpoint
+to `jesse/<slug>-wip` (a commit whose subject is `checkpoint of jesse/<slug> at <UTC time> [skip
+ci]`, exactly one parent) and fails the Job. `DevJobs::finalize`, in its `None` branch (before the
+finished run's own report is written), reads that ref back from GitHub and decides whether to
+continue it ([`cloud::continuation_decision`]), first match wins:
+
+1. The run was cancelled: stop.
+2. The pod was killed for memory: stop.
+3. The report already names a pull request (the work is already on GitHub): stop.
+4. The run did not fail by hitting its time limit (a missing report, a test failure, an
+   unexplained `BackoffLimitExceeded`): stop — only a capped run ever continues.
+5. The agent's final message began `NEEDS YOU`: stop.
+6. The checkpoint could not be read, none was found, or the one found does not look like the
+   entrypoint's own: stop, naming why.
+7. This link is already at `max_continuations` (the first run is link 0): stop.
+8. The checkpoint's tree is the same as the one this run itself resumed from (no progress): stop.
+9. Otherwise, continue as the next link.
+
+A continuation is created (or, on a retried watcher pass, reused —
+[`cloud::continuation_create_or_reuse`]) through the same `create_cloud_run` path a fresh start
+uses, so it is created suspended and the slots, the worker life check and the daily cost cap all
+apply unchanged, on a new worker once one is idle. Its run id is `<chain root>-c<link+1>` (`B248`
+continuing once is `B248-c2`), but its pod's `RUN_ID` env — and so the pull request's title —
+stays the chain's **root** run id, whichever link eventually opens it; `CONTINUATION` names the
+new link. Its prompt is the finished Job's own `prompt.md`, with any earlier `### Continuation`
+section stripped and a new one appended naming the link, the checkpoint and where to find
+`JESSE_PROGRESS_FILE`. Chain bookkeeping (the root, this link's number, the previous link's run
+id, and every earlier link's run id, report path, outcome, wall time and checkpoint sha) rides as
+annotations on the continuation Job alone; a Job with none of them is link 0 of a chain rooted at
+its own run id.
+
+The capped link's own report starts with one line naming the checkpoint and the run it continues
+as, or why it did not continue; each continuation's report has a `## Chain` section listing every
+link in order. A capped run that continues pushes "Cloud run continuing" instead of "Failed".
+Any other failed cloud run whose report does not already name a checkpoint still gets a line
+pointing at `jesse/<slug>-wip`, when one is found, so a run's saved work is never invisible.
+
+`max_continuations` (default 3, [`cloud::DEFAULT_MAX_CONTINUATIONS`]) caps a chain's length; `0`
+turns continuations off outright. `CloudSettings::problems` refuses a value over 10. Raising the
+cap does not raise `max_timeout_minutes` or `worker_life_minutes`: each link is its own fresh
+worker, with its own deadline, from its own `kc-burst up`.
+
+The Job's `JOB_DEADLINE_SECONDS` env now always equals its own `activeDeadlineSeconds`, so the
+entrypoint's own wall-clock checks never disagree with the Job's real deadline (before this, the
+entrypoint fell back to twice the agent timeout plus the merge waits, far more generous than the
+cloud Job's actual deadline). `terminationGracePeriodSeconds` is 120s
+([`cloud::CHECKPOINT_GRACE_SECS`]), not Kubernetes' default 30s, so the entrypoint's SIGTERM
+checkpoint push and its report have time to complete between the deadline's SIGTERM and the
+SIGKILL.
+
+This half (the bridge's) is in `bridge/src/devjob/cloud.rs` and `bridge/src/devjob.rs`
+(`continuation_decision`, `ChainInfo`, `build_cloud_job`, `DevJobs::finalize`,
+`DevJobs::plan_continuation`, `DevJobs::create_continuation`). The entrypoint's half — restoring
+a checkpoint onto a fresh clone, the SIGTERM checkpoint push, `JESSE_PROGRESS_FILE`, the
+`stopped_at_limit` and `checkpoint:` report keys — lives in `jeremyandrews/k3s`, out of this
+repository's reach.
+
 ## Failure modes
 
 | What | What happens |
@@ -245,6 +304,7 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"
 # ledger = "~/.jesse-bridge/devjob-cloud-ledger.json"
 # max_timeout_minutes = 315  # this host's timeout_minutes cap; see "How long a run may take"
 # worker_life_minutes = 480  # kc-burst's max_ttl; raise that first to go higher, at most 480
+# max_continuations = 3      # a capped run's chain length (<run_id>-c2, -c3, …); 0 turns it off
 ```
 
 `[devjob.cloud]` needs `[devjob] enabled` (the server it is part of). A strand schedule entry (`kind = "devjob"`) still takes `devjob-host` `studio` or the cluster only: scheduling cloud runs is not part of this change.

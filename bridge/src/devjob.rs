@@ -44,8 +44,9 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Event, Pod};
 use kube::api::{DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::{Api, Client};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::hostrun::sys::Forge as _;
 use crate::*;
 
 pub mod cloud;
@@ -1277,6 +1278,71 @@ pub struct CloudJobExtras {
     pub resources: cloud::JobResources,
     /// `[devjob.cloud] services`: Postgres and Redis sidecars, their share out of the agent's.
     pub services: bool,
+    /// Set only for a continuation: its `RUN_ID` and `CONTINUATION` envs, and its chain
+    /// annotations, come from here instead of `run_id` and link 0.
+    pub chain: Option<ChainExtras>,
+}
+
+/// One earlier link of a continuation chain, as [`cloud::ANN_CHAIN`] keeps it (JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainLink {
+    pub run_id: String,
+    pub report_path: String,
+    /// A short, human line: how this link ended (its failure, or that it hit its time limit).
+    pub outcome: String,
+    pub wall_seconds: Option<u64>,
+    pub checkpoint_sha: Option<String>,
+    /// The checkpoint's tree, for the "no progress" rule ([`cloud::continuation_decision`]).
+    pub checkpoint_tree: Option<String>,
+}
+
+/// A Job's place in a continuation chain, read from its annotations
+/// ([`cloud::ANN_CHAIN_ROOT`], [`cloud::ANN_CONTINUATION`], [`cloud::ANN_CONTINUATION_OF`],
+/// [`cloud::ANN_CHAIN`]). A Job with none of them is link 0 of a chain rooted at its own run id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChainInfo {
+    pub root: String,
+    pub link: u32,
+    pub continuation_of: Option<String>,
+    /// Every link before this one, oldest first.
+    pub chain: Vec<ChainLink>,
+}
+
+impl ChainInfo {
+    pub fn of(job: &Job, own_run_id: &str) -> ChainInfo {
+        let ann = job.metadata.annotations.clone().unwrap_or_default();
+        let root = ann
+            .get(cloud::ANN_CHAIN_ROOT)
+            .cloned()
+            .unwrap_or_else(|| own_run_id.to_string());
+        let link = ann
+            .get(cloud::ANN_CONTINUATION)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let continuation_of = ann.get(cloud::ANN_CONTINUATION_OF).cloned();
+        let chain = ann
+            .get(cloud::ANN_CHAIN)
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        ChainInfo {
+            root,
+            link,
+            continuation_of,
+            chain,
+        }
+    }
+}
+
+/// What a continuation Job's [`CloudJobExtras::chain`] carries: the chain's root, this new
+/// link's own number, the previous link's run id, and every earlier link, for
+/// [`build_cloud_job`] to annotate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainExtras {
+    pub root: String,
+    pub link: u32,
+    pub continuation_of: String,
+    /// [`ChainInfo::chain`] (every link before this new one) serialised for [`cloud::ANN_CHAIN`].
+    pub chain_json: String,
 }
 
 /// The Job for kc1: `cloud/infrastructure/jesse-dev/job-template.yaml` in the k3s repository,
@@ -1295,8 +1361,15 @@ pub struct CloudJobExtras {
 /// The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout plus a finish allowance
 /// plus the merge path's longest wait, not the home cluster's twice the timeout — a cloud worker
 /// cannot live past [`cloud::CloudSettings::worker_life_minutes`], so doubling would already not
-/// fit. Always created suspended: it is released only onto an idle worker whose remaining life
-/// covers it ([`cloud::cloud_resumable`]).
+/// fit. The same value is also the pod's `JOB_DEADLINE_SECONDS`, so the entrypoint's own time
+/// checks never disagree with the Job's real deadline. `terminationGracePeriodSeconds` is
+/// [`cloud::CHECKPOINT_GRACE_SECS`], the entrypoint's time to push a SIGTERM checkpoint and print
+/// its report before Kubernetes kills it. Always created suspended: it is released only onto an
+/// idle worker whose remaining life covers it ([`cloud::cloud_resumable`]). With
+/// `extras.chain` set (a continuation only) `RUN_ID` and `CONTINUATION` come from the chain's
+/// root and this new link's own number, not this Job's own run id label, so the pull request
+/// stays titled after the chain's first run; the chain annotations
+/// ([`cloud::ANN_CHAIN_ROOT`] and siblings) are set only then.
 pub fn build_cloud_job(
     namespace: &str,
     job_name: &str,
@@ -1311,6 +1384,10 @@ pub fn build_cloud_job(
     labels[cloud::LABEL_RUN_ID] = json!(extras.run_id);
     let deadline = cloud::cloud_deadline_secs(spec);
     let agent = extras.resources.agent(extras.services);
+    let (run_id_env, continuation_env) = match &extras.chain {
+        Some(c) => (c.root.clone(), c.link),
+        None => (extras.run_id.clone(), 0u32),
+    };
     let mut job = json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -1333,6 +1410,10 @@ pub fn build_cloud_job(
                 "metadata": { "labels": labels },
                 "spec": {
                     "restartPolicy": "Never",
+                    // The entrypoint's time, between the deadline's SIGTERM and the SIGKILL, to
+                    // push its SIGTERM checkpoint and print its report (Kubernetes' own default
+                    // of 30s is not enough).
+                    "terminationGracePeriodSeconds": cloud::CHECKPOINT_GRACE_SECS,
                     "nodeSelector": {
                         cloud::BURST_LABEL: "true",
                         cloud::POOL_LABEL: cloud::POOL_VALUE,
@@ -1378,7 +1459,9 @@ pub fn build_cloud_job(
                             { "name": "TEST_COMMAND", "value": spec.test_command.clone().unwrap_or_default() },
                             { "name": "PROMPT_FILE", "value": "/prompt/prompt.md" },
                             { "name": "AGENT_TIMEOUT_SECONDS", "value": spec.agent_timeout_secs().to_string() },
-                            { "name": "RUN_ID", "value": extras.run_id },
+                            { "name": "JOB_DEADLINE_SECONDS", "value": deadline.to_string() },
+                            { "name": "RUN_ID", "value": run_id_env },
+                            { "name": "CONTINUATION", "value": continuation_env.to_string() },
                             { "name": "JESSE_RUN_REPORT", "value": cloud::RUN_REPORT_FILE },
                             { "name": "PR_TITLE_FILE", "value": cloud::PR_TITLE_FILE },
                             { "name": "AGENT_GITHUB", "value": "none" },
@@ -1430,6 +1513,15 @@ pub fn build_cloud_job(
             .as_array_mut()
             .expect("the pod has volumes")
             .push(json!({ "name": "pgdata", "emptyDir": { "sizeLimit": "4Gi" } }));
+    }
+    if let Some(c) = &extras.chain {
+        let ann = job["metadata"]["annotations"]
+            .as_object_mut()
+            .expect("the Job has annotations");
+        ann.insert(cloud::ANN_CHAIN_ROOT.into(), json!(c.root));
+        ann.insert(cloud::ANN_CONTINUATION.into(), json!(c.link.to_string()));
+        ann.insert(cloud::ANN_CONTINUATION_OF.into(), json!(c.continuation_of));
+        ann.insert(cloud::ANN_CHAIN.into(), json!(c.chain_json));
     }
     serde_json::from_value(job).expect("a Job literal deserialises")
 }
@@ -1977,6 +2069,61 @@ pub fn render_report_with(
         r.log_tail.len()
     ));
     s
+}
+
+/// A capped link's report, when it continues: the line it starts with ([`lead_with`]).
+pub fn capped_continued_line(
+    minutes: u64,
+    slug: &str,
+    sha: &str,
+    continued_as: &str,
+    link: u32,
+    max: u32,
+) -> String {
+    format!(
+        "Hit its {minutes} minute time limit; its work is saved on jesse/{slug}-wip at {sha} \
+         and continues as {continued_as} (continuation {link} of {max})."
+    )
+}
+
+/// A capped link's report, when it does not continue: the line it starts with ([`lead_with`]).
+pub fn capped_not_continued_line(minutes: u64, reason: &str) -> String {
+    format!("Hit its {minutes} minute time limit and was not continued: {reason}.")
+}
+
+/// Any other failed cloud run whose report does not already name a checkpoint, when one was
+/// found anyway: the line it starts with, so the work a run left is never invisible.
+pub fn checkpoint_visibility_line(slug: &str, sha: &str) -> String {
+    format!("Its work is saved on jesse/{slug}-wip at {sha}.")
+}
+
+/// A continuation's `## Chain` section: every link in order, run id, report file name, how it
+/// ended, wall time and checkpoint sha.
+pub fn render_chain_section(chain: &[ChainLink]) -> String {
+    let mut s = String::from(
+        "## Chain\n\n| Run | Report | Outcome | Wall | Checkpoint |\n\
+         | --- | --- | --- | --- | --- |\n",
+    );
+    for l in chain {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            cell(&l.run_id),
+            cell(&l.report_path),
+            cell(&l.outcome),
+            l.wall_seconds.map(human_secs).unwrap_or_else(|| "—".into()),
+            cell(l.checkpoint_sha.as_deref().unwrap_or("—")),
+        ));
+    }
+    s.push('\n');
+    s
+}
+
+/// `text` (a rendered report) with `section` inserted right before its `## Log` section.
+pub fn insert_chain_section(text: &str, section: &str) -> String {
+    match text.find("\n## Log (") {
+        Some(i) => format!("{}{section}{}", &text[..i + 1], &text[i + 1..]),
+        None => format!("{text}\n{section}"),
+    }
 }
 
 /// `Inbox/<date>-dev-job-<slug>.md`, or `-2`, `-3`, … when a run with the same slug was reported
@@ -2719,7 +2866,7 @@ impl DevJobs {
                 .iter()
                 .filter(|(_, v)| v.finished.is_some() && !v.reported)
             {
-                if let Err(e) = self.finalize(v, strand_of(job).as_ref(), sink).await {
+                if let Err(e) = self.finalize(job, v, strand_of(job).as_ref(), sink).await {
                     eprintln!(
                         "jesse-bridge: devjob {}: report not written yet: {e}",
                         v.name
@@ -2758,8 +2905,12 @@ impl DevJobs {
     /// Idempotent across restarts: a report already in the Inbox for this Job is not written
     /// (or pushed) again, only the annotation and the delete are redone. `strand` is read from
     /// the Job ([`strand_of`]), never from memory, so a restart mid-run reports the same keys.
+    /// For a cloud run only, before the report is written: reads a capped run's checkpoint and
+    /// decides whether to continue it ([`DevJobs::plan_continuation`]), so the written report
+    /// and the push can both say what happened.
     async fn finalize(
         &self,
+        job: &Job,
         v: &JobView,
         strand: Option<&StrandRef>,
         sink: &ReportSink,
@@ -2772,7 +2923,7 @@ impl DevJobs {
         let rel = match existing {
             Some(rel) => {
                 eprintln!("jesse-bridge: devjob {}: already reported at {rel}", v.name);
-                (rel, None, None)
+                (rel, None, None, None)
             }
             None => {
                 let pod = self.pod_of(&v.name).await;
@@ -2824,6 +2975,32 @@ impl DevJobs {
                         .and_then(|d| d.get("prompt.md").cloned()),
                     None => None,
                 };
+                let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let stem = match cloud_run {
+                    None => format!("dev-job-{}", v.slug),
+                    Some(id) => format!("run-{id}"),
+                };
+                // Where this run's own report will land, predicted (not locked): good enough to
+                // name in a continuation's chain, and to read back below for this run's own.
+                let predicted_rel =
+                    report_rel_path_stem(&date, &stem, |p| sink.notes_root.join(p).exists());
+                // A capped cloud run only: reads the checkpoint and decides whether to continue,
+                // before the report below is rendered, so its lead line can say what happened.
+                let (lead_line, continued_as) = match cloud_run {
+                    Some(id) => {
+                        self.plan_continuation(
+                            job,
+                            v,
+                            &report,
+                            oom.is_some(),
+                            prompt.as_deref(),
+                            id,
+                            &predicted_rel,
+                        )
+                        .await
+                    }
+                    None => (None, None),
+                };
                 // NO AI ATTRIBUTION, the backstop: the pull request and commits the run pushed,
                 // read back from GitHub before the run is reported.
                 let attribution = {
@@ -2857,10 +3034,30 @@ impl DevJobs {
                     }
                     None => text,
                 };
-                let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-                let stem = match cloud_run {
-                    None => format!("dev-job-{}", v.slug),
-                    Some(id) => format!("run-{id}"),
+                // The lead line (capped, continuing or not, or a generic checkpoint pointer)
+                // comes first: applied last, since `lead_with` always inserts at the very top.
+                let text = match &lead_line {
+                    Some(line) => lead_with(&text, line),
+                    None => text,
+                };
+                // This run's own place in a chain (link 1 or later): its ancestors, plus itself.
+                let text = match cloud_run.map(|id| (id, ChainInfo::of(job, id))) {
+                    Some((id, ci)) if ci.link > 0 => {
+                        let mut chain = ci.chain;
+                        chain.push(ChainLink {
+                            run_id: id.to_string(),
+                            report_path: predicted_rel.clone(),
+                            outcome: report
+                                .failure
+                                .clone()
+                                .unwrap_or_else(|| report.status.clone()),
+                            wall_seconds: wall_secs(&report, v.started_ms, v.finished_ms),
+                            checkpoint_sha: None,
+                            checkpoint_tree: None,
+                        });
+                        insert_chain_section(&text, &render_chain_section(&chain))
+                    }
+                    _ => text,
                 };
                 let rel = write_report(sink, &v.name, &date, &stem, &text).await?;
                 eprintln!(
@@ -2868,24 +3065,37 @@ impl DevJobs {
                     v.name,
                     RunOutcome::of(&report).label()
                 );
-                (rel, Some(report), attribution)
+                (rel, Some(report), attribution, continued_as)
             }
         };
-        let (rel, report, attribution) = rel;
+        let (rel, report, attribution, continued_as) = rel;
         let outcome = report.as_ref().map(RunOutcome::of);
         // A scheduled run is pushed by the scheduler, under its `notify`; only a turn's run pushes
         // here, so a scheduled run never pushes twice.
         if let (Some(report), Some(outcome), Some(n)) = (&report, outcome, &sink.notifier) {
             if !v.origin.starts_with("schedule:") && attribution.is_none() {
-                let wall = wall_secs(report, v.started_ms, v.finished_ms)
-                    .map(human_secs)
-                    .unwrap_or_else(|| "unknown time".into());
-                let body = match cloud_run {
-                    None => format!("{} · {wall}", v.slug),
-                    Some(id) => format!("{id} in the cloud · {wall}"),
-                };
-                n.notify(outcome.title().to_string(), body, v.name.clone())
+                if let Some(continued_as) = &continued_as {
+                    let run_id = v.run_id.as_deref().unwrap_or(&v.name);
+                    n.notify(
+                        "Cloud run continuing".to_string(),
+                        format!(
+                            "{run_id} hit its {} min limit · continuing as {continued_as}",
+                            v.spec.timeout_minutes
+                        ),
+                        v.name.clone(),
+                    )
                     .await;
+                } else {
+                    let wall = wall_secs(report, v.started_ms, v.finished_ms)
+                        .map(human_secs)
+                        .unwrap_or_else(|| "unknown time".into());
+                    let body = match cloud_run {
+                        None => format!("{} · {wall}", v.slug),
+                        Some(id) => format!("{id} in the cloud · {wall}"),
+                    };
+                    n.notify(outcome.title().to_string(), body, v.name.clone())
+                        .await;
+                }
             }
         }
         // A hit is pushed whoever started the run, and says what it found.
@@ -2911,6 +3121,9 @@ impl DevJobs {
         if let Some(url) = report.as_ref().and_then(|r| r.pull_request_url()) {
             ann[ANN_PULL_REQUEST] = json!(url);
         }
+        if let Some(id) = &continued_as {
+            ann[cloud::ANN_CONTINUED_AS] = json!(id);
+        }
         let patch = json!({ "metadata": { "annotations": ann } });
         self.jobs()
             .patch(&v.name, &PatchParams::default(), &Patch::Merge(&patch))
@@ -2935,6 +3148,215 @@ impl DevJobs {
             }
         }
         Ok(())
+    }
+
+    /// For a cloud run only, in [`DevJobs::finalize`]'s `None` branch: whether a capped run
+    /// continues, and the line to lead its own report with. `(None, None)` for a run that is
+    /// not capped and has no checkpoint worth pointing at. Reads `jesse/<slug>-wip` fresh from
+    /// GitHub every time; there is no cache, since GitHub is the only truth here.
+    #[allow(clippy::too_many_arguments)]
+    async fn plan_continuation(
+        &self,
+        job: &Job,
+        v: &JobView,
+        report: &DevJobReport,
+        oom_killed: bool,
+        prompt_md: Option<&str>,
+        run_id: &str,
+        own_report_rel: &str,
+    ) -> (Option<String>, Option<String>) {
+        let Some(rt) = self.cloud_runtime() else {
+            return (None, None);
+        };
+        if report.ok() {
+            return (None, None);
+        }
+        let slug = v.spec.branch_slug.clone();
+        let repo = v.spec.repo.clone();
+        let stopped = cloud::stopped_at_time_limit(report, v.failure_reason.as_deref());
+        let read = {
+            let (repo, slug) = (repo.clone(), slug.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::hostrun::sys::GhForge.checkpoint(&repo, &slug)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("the checkpoint read task failed: {e}")))
+        };
+        let checkpoint: Result<crate::hostrun::sys::Checkpoint, String> = match read {
+            Ok(None) => Err(format!("jesse/{slug}-wip does not exist on origin")),
+            Ok(Some(cp)) => match cp.invalid_reason(&slug) {
+                Some(reason) => Err(reason),
+                None => Ok(cp),
+            },
+            Err(e) => Err(format!("the checkpoint could not be read: {e}")),
+        };
+        if !stopped {
+            // Not a capped run: a generic pointer at the work it saved, never a continuation.
+            return match &checkpoint {
+                Ok(cp) if !report.extra.contains_key("checkpoint") => {
+                    (Some(checkpoint_visibility_line(&slug, &cp.sha)), None)
+                }
+                _ => (None, None),
+            };
+        }
+        let minutes = v.spec.timeout_minutes;
+        let chain = ChainInfo::of(job, run_id);
+        let needs_you = report
+            .agent_final_message
+            .as_deref()
+            .and_then(|m| m.lines().next())
+            .is_some_and(|l| l.trim_start().starts_with("NEEDS YOU"));
+        let previous = chain
+            .chain
+            .last()
+            .and_then(|l| l.checkpoint_tree.as_deref().map(|t| (l.run_id.as_str(), t)));
+        let decision = cloud::continuation_decision(
+            v.cancelled,
+            oom_killed,
+            report.pull_request_url().is_some(),
+            stopped,
+            needs_you,
+            checkpoint.as_ref().map_err(String::as_str),
+            chain.link,
+            rt.settings.max_continuations,
+            previous,
+        );
+        match decision {
+            cloud::ContinuationDecision::Stop(reason) => {
+                (Some(capped_not_continued_line(minutes, &reason)), None)
+            }
+            cloud::ContinuationDecision::Continue { link } => {
+                let cp = checkpoint.expect("Continue only follows a usable checkpoint");
+                let new_run_id = format!("{}-c{}", chain.root, link + 1);
+                let mut new_chain = chain.chain.clone();
+                new_chain.push(ChainLink {
+                    run_id: run_id.to_string(),
+                    report_path: own_report_rel.to_string(),
+                    outcome: format!("hit its {minutes} minute limit"),
+                    wall_seconds: wall_secs(report, v.started_ms, v.finished_ms),
+                    checkpoint_sha: Some(cp.sha.clone()),
+                    checkpoint_tree: Some(cp.tree.clone()),
+                });
+                let max = rt.settings.max_continuations;
+                match self
+                    .create_continuation(
+                        job,
+                        v,
+                        &chain,
+                        link,
+                        &new_run_id,
+                        &cp,
+                        prompt_md,
+                        new_chain,
+                    )
+                    .await
+                {
+                    Ok(()) => (
+                        Some(capped_continued_line(
+                            minutes,
+                            &slug,
+                            &cp.sha,
+                            &new_run_id,
+                            link,
+                            max,
+                        )),
+                        Some(new_run_id),
+                    ),
+                    Err(e) => (
+                        Some(capped_not_continued_line(
+                            minutes,
+                            &format!("could not create the continuation: {e}"),
+                        )),
+                        None,
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Create (or, on a retried pass, reuse — [`cloud::continuation_create_or_reuse`]) a capped
+    /// run's continuation: the next link, suspended, through [`DevJobs::create_cloud_run`] (so
+    /// the slots, the worker life check and the daily cost cap all apply unchanged), whose
+    /// prompt resumes from `cp`'s checkpoint.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_continuation(
+        &self,
+        job: &Job,
+        v: &JobView,
+        chain: &ChainInfo,
+        link: u32,
+        new_run_id: &str,
+        cp: &crate::hostrun::sys::Checkpoint,
+        prompt_md: Option<&str>,
+        new_chain: Vec<ChainLink>,
+    ) -> Result<(), String> {
+        let rt = self
+            .cloud_runtime()
+            .ok_or_else(|| "this is not the cloud host's server".to_string())?;
+        let existing_ids: Vec<String> = self
+            .views()
+            .await?
+            .into_iter()
+            .filter_map(|(_, vv)| vv.run_id)
+            .collect();
+        if let cloud::ContinuationCreate::Reuse =
+            cloud::continuation_create_or_reuse(&existing_ids, new_run_id)
+        {
+            return Ok(());
+        }
+        let prompt_md =
+            prompt_md.ok_or_else(|| "the prompt ConfigMap was already gone".to_string())?;
+        let minutes = v.spec.timeout_minutes;
+        let branch = format!("jesse/{}", v.spec.branch_slug);
+        let previous = v.run_id.as_deref().unwrap_or(&v.name);
+        let prompt = cloud::continuation_prompt(
+            prompt_md,
+            &cloud::ContinuationPromptInput {
+                link,
+                max: rt.settings.max_continuations,
+                root: &chain.root,
+                previous,
+                minutes,
+                branch: &branch,
+                sha: &cp.sha,
+            },
+        );
+        let args = DevJobArgs {
+            repo: Some(v.spec.repo.clone()),
+            prompt: Some(prompt),
+            agent: Some(v.spec.agent.clone()),
+            model: v.spec.model.clone(),
+            branch_slug: Some(v.spec.branch_slug.clone()),
+            test_command: v.spec.test_command.clone(),
+            timeout_minutes: Some(minutes),
+            ..DevJobArgs::default()
+        };
+        let mut spec = DevJobSpec::validate(args, self.default_agent)?;
+        spec.timeout_minutes =
+            cloud::cloud_capped_timeout_minutes(Some(minutes), rt.settings.max_timeout_minutes);
+        let merge = cloud::MergeDecision::from_annotation(
+            job.metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(cloud::ANN_MERGE))
+                .map(String::as_str)
+                .unwrap_or(""),
+        );
+        let chain_json = serde_json::to_string(&new_chain).map_err(|e| e.to_string())?;
+        let run = cloud::CloudRun {
+            spec,
+            run_id: new_run_id.to_string(),
+            merge,
+            strand: strand_of(job),
+            timeout_note: None,
+            chain: Some(ChainExtras {
+                root: chain.root.clone(),
+                link,
+                continuation_of: previous.to_string(),
+                chain_json,
+            }),
+        };
+        self.create_cloud_run(&run, &v.origin).await.map(|_| ())
     }
 
     /// The watcher: a pass now, then one every [`WATCH_INTERVAL`] or whenever a start wakes it.

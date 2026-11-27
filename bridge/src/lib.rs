@@ -29,6 +29,10 @@
 //! optional push path), [`state`] (shared `AppState`), [`handlers`]/[`sse`] (the
 //! Axum routes), and [`startup`] (pairing QR + binary/bind checks).
 
+// `build_cloud_job`'s one `json!` literal (the whole cloud Job, env list included) is deep
+// enough to pass the default limit.
+#![recursion_limit = "256"]
+
 // ---- Shared prelude -------------------------------------------------------
 //
 // The original bridge was one file, so every item saw every other by bare name.

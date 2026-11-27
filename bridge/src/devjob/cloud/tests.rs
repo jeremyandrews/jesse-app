@@ -473,9 +473,10 @@ fn host_cloud_refuses_what_the_cloud_cannot_do() {
             json!({ "host": "cloud", "repo": "o/n", "prompt": "x", "branch_slug": "x", "again": true }),
             "again applies only",
         ),
+        // A reviewer is the Studio's to check, by the Studio's words.
         (
-            json!({ "host": "cloud", "repo": "o/n", "prompt": "x", "branch_slug": "x", "reviewer": "codex" }),
-            "cloud runs are not reviewed",
+            json!({ "host": "cloud", "repo": "o/n", "prompt": "x", "branch_slug": "x", "reviewer": "codex", "reviewers": ["glm"] }),
+            "pass reviewer or reviewers, not both",
         ),
         (
             json!({ "host": "cloud", "strand": "Gd", "item_id": "GD5", "prompt": "x" }),
@@ -502,8 +503,17 @@ fn host_cloud_refuses_what_the_cloud_cannot_do() {
         let e = plan(v.clone()).unwrap_err();
         assert!(e.contains(needle), "{v}: {e}");
     }
-    // `none` is no review, which is what a cloud run gets anyway.
-    assert!(plan(json!({ "host": "cloud", "repo": "o/n", "prompt": "x", "branch_slug": "x", "reviewer": "none" })).is_ok());
+    // A cloud run is reviewed as a Studio run is: the reviewer and the focus go to the run's
+    // creation, which resolves and checks them; `none` is no review.
+    for (who, focus) in [("none", None), ("codex", Some("the bounds"))] {
+        let mut v = json!({ "host": "cloud", "repo": "o/n", "prompt": "x", "branch_slug": "x", "reviewer": who });
+        if let Some(f) = focus {
+            v["review_focus"] = json!(f);
+        }
+        let c = cloud_start(v);
+        assert_eq!(c.reviewer, Some(who.into()));
+        assert_eq!(c.review_focus.as_deref(), focus);
+    }
 }
 
 #[test]
@@ -646,6 +656,7 @@ fn the_cloud_job_carries_the_merge_guard_and_the_pool_and_nothing_of_the_home_cl
         resources: CloudSettings::default().job_resources(),
         services: CloudSettings::default().services,
         chain: None,
+        review: None,
     };
     let image = format!(
         "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",
@@ -772,6 +783,7 @@ fn the_cloud_agent_is_told_it_has_no_credential_and_how_its_run_ends() {
         "merges it once every CI run on its exact head commit has passed",
         "JESSE_RUN_REPORT",
         "NEEDS YOU:",
+        "His answer comes to a further run of this task, on the same branch and pull request.",
     ] {
         assert!(p.contains(needle), "{needle}");
     }
@@ -1209,6 +1221,7 @@ fn the_cloud_job_takes_its_resources_from_config_and_never_literals() {
         },
         services: false,
         chain: None,
+        review: None,
     };
     let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
     let v = serde_json::to_value(&job).unwrap();
@@ -1323,6 +1336,7 @@ fn trovato_job(services: bool) -> Value {
         resources: live_resources(),
         services,
         chain: None,
+        review: None,
     };
     let job = build_cloud_job(
         "jesse-dev",
@@ -1518,6 +1532,7 @@ fn chain_spec(timeout_minutes: u64) -> (DevJobSpec, CloudJobExtras) {
         resources: CloudSettings::default().job_resources(),
         services: false,
         chain: None,
+        review: None,
     };
     (spec, extras)
 }
@@ -2179,6 +2194,7 @@ fn job_deadline_seconds_always_equals_active_deadline_seconds() {
             resources: CloudSettings::default().job_resources(),
             services: CloudSettings::default().services,
             chain: None,
+            review: None,
         };
         let image = format!(
             "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",
@@ -2280,5 +2296,27 @@ fn a_run_taken_before_a_restart_adopts_only_its_own_job_made_after_the_take() {
     assert_eq!(
         adopted_job(&[older, own, other], &rec).map(|v| v.name.as_str()),
         Some("agent-gd5-new")
+    );
+}
+
+#[test]
+fn devjob_list_lists_a_cloud_run_once_as_its_record_not_again_as_its_job() {
+    let mut listed = json!({
+        "running": [{ "job_name": "agent-a", "run_id": "s-a" }],
+        "queued": [{ "job_name": "agent-b", "run_id": "s-b-c2" }],
+        "finished": [{ "job_name": "agent-old", "run_id": "s-old" }, { "run_id": "x" }],
+    });
+    let owned: std::collections::HashSet<String> = ["agent-a", "agent-b"]
+        .map(String::from)
+        .into_iter()
+        .collect();
+    crate::devjob::drop_owned(&mut listed, &owned);
+    assert_eq!(
+        listed,
+        json!({
+            "running": [],
+            "queued": [],
+            "finished": [{ "job_name": "agent-old", "run_id": "s-old" }, { "run_id": "x" }],
+        })
     );
 }

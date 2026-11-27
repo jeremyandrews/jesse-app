@@ -3996,6 +3996,7 @@ async fn a_blind_continue_to_a_question_is_refused() {
 mod archive;
 mod awaiting_merge;
 mod cloud_queue;
+mod cloud_review;
 mod priority;
 mod review;
 mod reviewers;

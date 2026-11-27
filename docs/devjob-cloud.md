@@ -11,7 +11,8 @@ is `bridge/src/devjob/cloud.rs`.
 `studio` is a Studio run, unchanged; `cloud` is a Job in `jesse-dev` on kc1. A cloud start takes
 the Studio's three shapes (`strand` + `item_id`, `draft`, or `prompt` + `branch_slug` with
 `repo`) plus the cluster's `agent` and `test_command`, and `merge`. `timeout_minutes` is capped
-at `[devjob.cloud] max_timeout_minutes` (default 315), not the cluster's 240; a reduction is
+at `[devjob.cloud] max_timeout_minutes` (default 555), not the cluster's 240 — or less, live,
+when kc-burst's own `max_ttl` leaves less room (see "How long a run may take"); a reduction is
 named in the reply's `timeout_note`.
 
 A draft is **cloud capable** only when its front matter says so, because Studio prompts use
@@ -73,8 +74,8 @@ beside the agent"), so cargo never runs more parallel rustc processes than the a
 peak memory. A bigger `burst_size` needs these raised with it. Until 0.219.0 the pod was fixed at
 3 CPU / 6Gi request, 7Gi limit for the 8 GB worker, and trovato's builds were `OOMKilled` there.
 
-A cloud run's agent time is capped at `max_timeout_minutes` (default 315, sized so the whole
-Job fits a worker's 8 hour life; see "How long a run may take"), not the cluster's 240. Bridge
+A cloud run's agent time is capped at `max_timeout_minutes` (default 555, sized so the whole
+Job fits a worker's 12 hour life; see "How long a run may take"), not the cluster's 240. Bridge
 0.219.0 called this key `max_agent_minutes`, and a config that still says so keeps working.
 
 Each cloud pass ([`plan_burst`]):
@@ -84,21 +85,41 @@ Each cloud pass ([`plan_burst`]):
 - **Stop** a worker (`kc-burst down --run <run>`) that has had no dev job pod for
   `idle_minutes` (default 10) while there are more workers than wanted.
 - **Extend** (`kc-burst extend --run <run> --ttl 60m`) a busy worker within 30 minutes of its
-  expiry, so a running Job is not reaped. kc-burst's own 8 hour cap still holds.
+  expiry, so a running Job is not reaped. The burst system's own cap still holds — kc-burst's
+  `max_ttl` and the reaper's `--max-age`, 8 hours as of 2026-11-26, 12 hours once a companion
+  change in `jeremyandrews/k3s` lands and the Studio's live config is raised to match.
 
-**How long a run may take.** `[devjob.cloud] max_timeout_minutes` (default 315) caps
+**How long a run may take.** `[devjob.cloud] max_timeout_minutes` (default 555) caps
 `timeout_minutes` on this host — higher than the cluster's 240, because a cloud Job's own
 deadline (`activeDeadlineSeconds`) is sized to fit a single worker's whole life, not doubled the
 way the cluster's is. The deadline is the agent timeout, plus a 30 minute finish allowance (the
 entrypoint's own rebase, test command, push and pull request after the agent exits), plus the
 merge path's full wait (`MERGE_WAIT_SECONDS x MERGE_ATTEMPTS`, 120 minutes)
-([`cloud_deadline_secs`]). `worker_life_minutes` (default 480) is kc-burst's own `max_ttl`;
-`CloudSettings::problems` refuses a config where `max_timeout_minutes` plus the finish allowance
-plus the merge waits plus a 15 minute boot allowance (the time from `kc-burst up` to a worker
-being ready, before a Job can resume onto it) would exceed it, and refuses `worker_life_minutes`
-above 480 outright (kc-burst's `max_ttl` must be raised first). At the defaults these four add up
-to exactly 480: `315 + 30 + 120 + 15`. When a request is reduced, either host's reply names the
-requested and the granted value in `timeout_note`.
+([`cloud_deadline_secs`]) — and this same number is also passed to the agent container as
+`JOB_DEADLINE_SECONDS`, so the entrypoint knows its own wall-clock budget rather than guessing
+one from `AGENT_TIMEOUT_SECONDS` alone. `worker_life_minutes` (default 720, the ceiling
+`MAX_WORKER_LIFE_MINUTES`) is the burst system's own hard limit on a worker's age — kc-burst's
+`max_ttl` and the reaper's `--max-age`; `CloudSettings::problems` refuses a config where
+`max_timeout_minutes` plus the finish allowance plus the merge waits plus a 15 minute boot
+allowance (the time from `kc-burst up` to a worker being ready, before a Job can resume onto it)
+would exceed it, and refuses `worker_life_minutes` above 720 outright (the burst system's own
+limits must be raised first). At the defaults these four add up to exactly 720:
+`555 + 30 + 120 + 15`.
+
+That boot-time check is on the *configured* `worker_life_minutes` — it never stops the bridge
+booting. The *live* ceiling follows whatever kc-burst's own config actually says: `[devjob.cloud]
+kc_burst_config` (default `~/.config/kc-burst/config.toml` under the bridge's home directory) is
+read once at boot for its top level `max_ttl` (parsed with the `humantime` crate kc-burst itself
+uses — `"8h"`, `"12h"`, `"11h 30m"`), giving `CloudSettings::effective_worker_life_minutes`
+(`worker_life_minutes` capped at that `max_ttl` when it was read) and
+`CloudSettings::effective_max_timeout_minutes` (`max_timeout_minutes` capped at what the
+effective worker life leaves once the boot, finish and merge allowances are taken out). Every
+live decision — the granted `timeout_minutes`, which worker a queued Job may resume onto, and the
+`devjob_start` tool description — reads the effective values, not the configured ones, so a
+worker that still only lives 8 hours never gets promised a 555 minute agent run. The file is
+never logged; only its path, the parsed `max_ttl` in minutes, or why it could not be read. When a
+request is reduced, either host's reply names the requested and the granted value in
+`timeout_note`.
 
 **Daily cost cap.** `daily_cost_cap_eur` (default 5) is hard. Each `up` commits its whole TTL
 (`hourly_cost_eur` x TTL) and each `extend` one more hour against today's total in a ledger file
@@ -243,8 +264,9 @@ image = "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:<amd64 digest>"
                               # false is the single-container pod
 # merge_deny = []            # added to the seed list, never replacing it
 # ledger = "~/.jesse-bridge/devjob-cloud-ledger.json"
-# max_timeout_minutes = 315  # this host's timeout_minutes cap; see "How long a run may take"
-# worker_life_minutes = 480  # kc-burst's max_ttl; raise that first to go higher, at most 480
+# max_timeout_minutes = 555  # this host's timeout_minutes cap; see "How long a run may take"
+# worker_life_minutes = 720  # the burst system's own ceiling; raise that first to go higher, at most 720
+# kc_burst_config = "~/.config/kc-burst/config.toml"  # read once at boot for its live max_ttl
 ```
 
 `[devjob.cloud]` needs `[devjob] enabled` (the server it is part of). A strand schedule entry (`kind = "devjob"`) still takes `devjob-host` `studio` or the cluster only: scheduling cloud runs is not part of this change.

@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [bridge 0.227.0] - 2026-11-27
+## [bridge 0.228.0] - 2026-11-27
 
 **A cloud Job retries a killed pod once, from its checkpoint, instead of ending the run with no
 report (DJ22).**
@@ -41,6 +41,57 @@ report (DJ22).**
   continuation decision is unchanged by this: a Job that succeeded on its retry is a normal
   finished run, and one whose retry also hit the time limit is a capped run exactly as before —
   it may continue as `<run_id>-c2`.
+
+## [bridge 0.227.0] - 2026-11-27
+
+**A cloud run is reviewed as a Studio run is, and merges only after the review is answered
+(DJ30, Part B).**
+
+- **Root cause.** Two run pipelines had drifted apart. A Studio run was reviewed before it
+  finished, by the reviewers its start, its draft or `[hostrun] default_reviewers` named, and
+  merged only after it answered the review; a cloud run had no review at all. A start or a draft
+  that asked for one was refused, `[hostrun] default_reviewers` never reached the cloud, and a
+  cloud Job merged the moment CI was green. `devjob_reply` and `devjob_review` were refused on a
+  cloud run, and `devjob_list` listed each cloud run twice, once as its record and once as its Job.
+- **Behavior change.**
+  - **Starting.** `devjob_start` with `host: "cloud"` takes `reviewer`, `reviewers` and
+    `review_focus`, and the draft's `devjob-reviewer:`. They are resolved and checked by the
+    Studio's own code, `HostRuns::resolve_reviewers`, with the same default.
+  - **The first Job.** A reviewed cloud run's first Job is held (`REVIEW=hold`, with
+    `AUTO_MERGE` empty): it opens its pull request as a draft and stops.
+  - **The review.** When that Job reports, the run goes `reviewing` by the Studio's rule. The
+    Studio's review reads the pushed branch, fetched read only into a scratch checkout the
+    bridge removes at once.
+  - **The answer.** The findings go back with the same hand off text, as the next Job of the
+    run's chain (`<run_id>-c<n>`, `REVIEW=answer`). It continues the same branch and pull
+    request from the kept checkpoint and progress file, then merges under the run's own merge
+    decision. Its report carries the Studio's `UNREVIEWED:`, `PARTLY REVIEWED:` and
+    `REVIEW LEAK:` marks.
+  - **Unreviewed runs.** A run with no reviewer (`none`) runs and merges as before.
+  - **Reply and review.** `devjob_reply` and `devjob_review` work on a cloud run the same way.
+  - **`devjob_list`.** It lists a cloud run once, as its record.
+- **Needs the dev-agent image with `REVIEW`** (jeremyandrews/k3s, DJ30's k3s pull request) in
+  `[devjob.cloud] image`.
+- **Deleted.**
+  - `HostRuns::cloud_reviewers` and its refusals of a cloud start's reviewer, focus and draft
+    `devjob-reviewer:`.
+  - `plan_cloud`'s own reviewer refusal.
+  - The `reply` and `request_review` refusals of a cloud run.
+- **Tests.**
+  - `hostrun/tests/cloud_review.rs`:
+    - the same starts resolve the same reviewers on both hosts;
+    - a Studio run and a cloud run are reviewed with the same prompt and handed the same text;
+    - a reviewed cloud run is not merged before its review is answered, then is;
+    - an unreviewed one merges as before;
+    - a leak in a cloud answer leads its report.
+  - `devjob/cloud/tests.rs`: `devjob_list` lists a cloud run once.
+  - Updated, each for the lifted refusal:
+    - `host_cloud_refuses_what_the_cloud_cannot_do`
+    - `a_cloud_start_takes_the_studios_checks_plus_the_clouds_own` (a start with no reviewer
+      now records source `default`, as on the Studio)
+    - `a_failed_cloud_run_is_closed_and_archived_like_any_run_and_refuses_a_reply`
+    - `a_cloud_start_of_a_draft_that_asks_for_a_reviewer_is_refused_not_run_unreviewed`, now
+      `..._is_reviewed_by_it`
 
 ## [bridge 0.226.0] - 2026-11-27
 

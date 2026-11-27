@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    valid_label_value, ChainExtras, CloudJobExtras, CloudKind, CloudStart, DevJobArgs,
-    DevJobSettings, DevJobSlot, DevJobSpec, DevJobs, JobView, Started, StrandRef,
+    valid_label_value, ChainExtras, ChainInfo, ChainLink, CloudJobExtras, CloudKind, CloudStart,
+    DevJobArgs, DevJobSettings, DevJobSlot, DevJobSpec, DevJobs, JobView, Started, StrandRef,
 };
 
 // ---- DEFAULTS ------------------------------------------------------------------------
@@ -266,6 +266,8 @@ pub const UP_RETRY: Duration = Duration::from_secs(5 * 60);
 pub const LABEL_RUN_ID: &str = "jesse.dev/run-id";
 /// On a cloud Job: what was decided about merging (`true`, `false`, or `denied: <pattern>`).
 pub const ANN_MERGE: &str = "jesse.dev/merge";
+/// On a reviewed run's cloud Job: `hold` or `answer`, its `REVIEW` ([`ReviewMode`]).
+pub const ANN_REVIEW: &str = "jesse.dev/review";
 /// On a cloud Job a person cancelled.
 pub const ANN_CANCELLED: &str = "jesse.dev/cancelled";
 /// The draft key that asks a cloud run to merge at green.
@@ -1170,9 +1172,10 @@ pub fn cloud_paragraph(run_id: &str, repo: &str, branch: &str, merge: &MergeDeci
          or the system temporary directory.\n\n\
          When you finish, or stop early, write your complete report, the same text you would \
          answer with, to the file named in the environment variable JESSE_RUN_REPORT ({RUN_REPORT_FILE}), \
-         then answer as usual. Nobody can reply to this run: if you need a decision from Jeremy \
-         to continue, stop, make the first line of that report NEEDS YOU: followed by the one \
-         question, and end the run.\n"
+         then answer as usual. Nobody can answer you while this run lasts: if you need a \
+         decision from Jeremy to continue, stop, make the first line of that report NEEDS YOU: \
+         followed by the one question, and end the run. His answer comes to a further run of \
+         this task, on the same branch and pull request.\n"
     )
 }
 
@@ -1700,9 +1703,193 @@ pub struct CloudRun {
     /// Set when a requested `timeout_minutes` was reduced to [`CloudSettings::max_timeout_minutes`]
     /// ([`super::timeout_reduced_note`]): what `devjob_start`'s reply tells the caller.
     pub timeout_note: Option<String>,
-    /// Set only when this run is a continuation ([`DevJobs::finalize`]'s own creation path);
-    /// `None` for every run `devjob_start` or the Studio drain creates: those are always link 0.
+    /// Set when this run is a further link of its chain: a capped run's continuation
+    /// ([`DevJobs::finalize`]'s own creation path), or a run record's further round (a review's
+    /// hand off, a reply) the drain makes ([`DevJobs::record_run`]). `None` for a run's first
+    /// Job, link 0.
     pub chain: Option<ChainExtras>,
+    /// A reviewed run's Job: [`ReviewMode`]. `None` for a run nothing reviews.
+    pub review: Option<ReviewMode>,
+}
+
+/// What a reviewed run's Job does about its pull request: the entrypoint's `REVIEW`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewMode {
+    /// The implementing Job: push and open the pull request as a draft, and stop there, never
+    /// merging: the bridge reviews the pushed branch next.
+    Hold,
+    /// A further round (a review's findings, a reply): continue the run's own branch and open
+    /// pull request, then wait, mark ready and merge as any Job does.
+    Answer,
+}
+
+impl ReviewMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewMode::Hold => "hold",
+            ReviewMode::Answer => "answer",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ReviewMode> {
+        match s {
+            "hold" => Some(ReviewMode::Hold),
+            "answer" => Some(ReviewMode::Answer),
+            _ => None,
+        }
+    }
+}
+
+/// The [`ReviewMode`] a Job was made with ([`ANN_REVIEW`]), carried to its continuation.
+pub fn review_mode(job: &k8s_openapi::api::batch::v1::Job) -> Option<ReviewMode> {
+    job.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(ANN_REVIEW))
+        .and_then(|s| ReviewMode::parse(s))
+}
+
+/// The heading a run record's further round goes under in its Job's prompt ([`round_prompt`]).
+pub const ROUND_HEADER: &str = "### Next round";
+
+/// The prompt of a run record's further round on the cloud: the run's own prompt, then the
+/// round's text (a review's hand off, a reply) under [`ROUND_HEADER`]. A pod has no session to
+/// resume, so the task comes again with what comes next.
+pub fn round_prompt(section: &str, round: &str) -> String {
+    format!(
+        "{}\n\n{ROUND_HEADER}\n\nAn earlier run of the task above pushed its branch and opened \
+         its pull request, still a draft; this run continues it, on the same branch and pull \
+         request. What comes next:\n\n{}\n",
+        section.trim_end(),
+        round.trim()
+    )
+}
+
+/// The run id of link `link` of the chain rooted at `root`: the root itself, then
+/// `<root>-c2`, `<root>-c3`, … as DJ29's continuations are named.
+pub fn link_run_id(root: &str, link: u32) -> String {
+    if link == 0 {
+        root.to_string()
+    } else {
+        format!("{root}-c{}", link + 1)
+    }
+}
+
+/// The chain place of a run record's further round: the link after the record's last Job
+/// (`last`, read from that Job when kc1 still has it), rooted at the record's run id, with the
+/// last Job's own link added to the chain it carried.
+pub fn next_link(rec: &crate::hostrun::RunRecord, last: Option<&ChainInfo>) -> ChainExtras {
+    let root = rec.run_id.clone();
+    let ran = rec.cloud.as_ref().map(|c| c.jobs.len() as u32).unwrap_or(0);
+    let prev = ran.saturating_sub(1);
+    let previous = link_run_id(&root, prev);
+    let mut chain = last.map(|c| c.chain.clone()).unwrap_or_default();
+    let ended = rec.rounds.iter().rev().find(|r| r.finished_at.is_some());
+    chain.push(ChainLink {
+        run_id: previous.clone(),
+        report_path: ended
+            .and_then(|r| r.report_path.clone())
+            .unwrap_or_default(),
+        outcome: ended
+            .and_then(|r| r.outcome)
+            .map(|o| o.label().to_string())
+            .unwrap_or_else(|| "ended".into()),
+        wall_seconds: None,
+        checkpoint_sha: None,
+        checkpoint_tree: None,
+    });
+    ChainExtras {
+        root,
+        link: ran.max(1),
+        continuation_of: previous,
+        chain_json: serde_json::to_string(&chain).unwrap_or_else(|_| "[]".into()),
+    }
+}
+
+/// The Job a run record executes as: its prompt (`section`, what the record was created with)
+/// wrapped for the cloud, its branch, its merge decision `merge` and its strand step. A reviewed
+/// run's first Job holds its merge ([`ReviewMode::Hold`]); a further round of a run (a review's
+/// hand off, a reply) is the chain's next link on the same branch and pull request
+/// ([`ReviewMode::Answer`], [`next_link`]), its round's text after the run's prompt
+/// ([`round_prompt`]). Refused for a `local/` repository.
+pub fn record_job(
+    rec: &crate::hostrun::RunRecord,
+    section: &str,
+    merge: MergeDecision,
+    default_agent: super::Agent,
+    max_timeout_minutes: u64,
+    last: Option<&ChainInfo>,
+) -> Result<CloudRun, String> {
+    if super::is_local_repo(&rec.repo) {
+        return Err(super::LOCAL_ONLY_STUDIO.into());
+    }
+    if !valid_run_id(&rec.run_id) {
+        return Err(format!("{:?} cannot name a run", rec.run_id));
+    }
+    let part = rec.cloud.clone().unwrap_or_default();
+    let slug = record_slug(rec);
+    let branch = format!("jesse/{slug}");
+    let mut spec = DevJobSpec::validate(
+        DevJobArgs {
+            repo: Some(rec.repo.clone()),
+            prompt: Some(section.to_string()),
+            agent: part.agent.clone(),
+            model: rec.model.clone(),
+            branch_slug: Some(slug),
+            test_command: part.test_command.clone(),
+            timeout_minutes: part.timeout_minutes,
+            ..DevJobArgs::default()
+        },
+        default_agent,
+    )?;
+    // A further round of the run (its current round is not its first, nor a capped Job's
+    // continuation, which `DevJobs::finalize` makes itself) continues its branch and pull
+    // request as the chain's next link; the first Job of a reviewed run holds its merge.
+    let round = rec.round();
+    let further = rec.rounds.len() > 1
+        && round.is_some_and(|r| r.auto.as_deref() != Some(crate::hostrun::AUTO_CONTINUATION));
+    let review = if further {
+        Some(ReviewMode::Answer)
+    } else if !rec.reviewer_ids().is_empty() {
+        Some(ReviewMode::Hold)
+    } else {
+        None
+    };
+    let prompt = match round.and_then(|r| r.text.as_deref()).filter(|_| further) {
+        Some(text) => round_prompt(section, text),
+        None => section.to_string(),
+    };
+    // The held Job itself never merges, whatever the run's decision; its Job keeps that
+    // decision (`AUTO_MERGE`, the merge annotation) for its continuation and its answer.
+    let told = match review {
+        Some(ReviewMode::Hold) => MergeDecision::No,
+        _ => merge.clone(),
+    };
+    spec.prompt = cloud_prompt(&prompt, &rec.run_id, &rec.repo, &branch, &told);
+    let chain = further.then(|| next_link(rec, last));
+    // The cluster's cap, applied by `validate`, does not apply in the cloud: its own does.
+    spec.timeout_minutes = cloud_capped_timeout_minutes(part.timeout_minutes, max_timeout_minutes);
+    let strand = match (&rec.strand, &rec.item_id, &rec.prompt_path) {
+        (Some(note), Some(id), Some(prompt)) => Some(StrandRef {
+            note: note.clone(),
+            id: id.clone(),
+            prompt: prompt.clone(),
+        }),
+        _ => None,
+    };
+    let run_id = chain
+        .as_ref()
+        .map(|c| link_run_id(&c.root, c.link))
+        .unwrap_or_else(|| rec.run_id.clone());
+    Ok(CloudRun {
+        spec,
+        run_id,
+        merge,
+        strand,
+        timeout_note: None,
+        chain,
+        review,
+    })
 }
 
 /// The branch slug of a cloud run: the Studio's branch name for the same run, cut to the
@@ -1756,8 +1943,9 @@ pub fn continuation_job(
 pub const ADOPT_SKEW_MS: u64 = 60_000;
 
 /// The Job a run taken but never named ([`crate::hostrun::HostRuns::unnamed_on_cloud`]) was
-/// made as before the bridge stopped: one carrying its run id, created no earlier than it was
-/// taken, owned by no other run. `None`: no Job was made, so it is queued again.
+/// made as before the bridge stopped: one carrying its run id (for a further round, the next
+/// link's, [`next_link`]), created no earlier than it was taken, owned by no other run. `None`:
+/// no Job was made, so it is queued again.
 pub fn adopted_job<'a>(
     views: &'a [JobView],
     rec: &crate::hostrun::RunRecord,
@@ -1767,9 +1955,11 @@ pub fn adopted_job<'a>(
         .as_ref()
         .and_then(|c| c.taken_at.as_deref())
         .and_then(crate::hostrun::ms_of)?;
+    let ran = rec.cloud.as_ref().map(|c| c.jobs.len() as u32).unwrap_or(0);
+    let id = link_run_id(&rec.run_id, ran);
     views
         .iter()
-        .filter(|v| v.run_id.as_deref() == Some(rec.run_id.as_str()))
+        .filter(|v| v.run_id.as_deref() == Some(id.as_str()))
         .filter(|v| v.created_ms + ADOPT_SKEW_MS >= taken)
         .max_by_key(|v| v.created_ms)
 }
@@ -1834,8 +2024,8 @@ impl DevJobs {
                     kind,
                     origin: origin.to_string(),
                     again: false,
-                    reviewer: None,
-                    review_focus: None,
+                    reviewer: req.reviewer,
+                    review_focus: req.review_focus,
                     priority: req.priority,
                 },
                 Some(part),
@@ -1869,61 +2059,25 @@ impl DevJobs {
         }))
     }
 
-    /// The Job a run record executes as: its prompt (`section`, what the record was created
-    /// with) wrapped for the cloud, its branch, its merge decision and its strand step. Refused
-    /// for a `local/` repository.
+    /// The Job a run record executes as ([`record_job`]), with this bridge's merge deny list,
+    /// default agent and time cap. Refused for a `local/` repository.
     pub fn record_run(
         &self,
         rt: &CloudRuntime,
         notes: &Path,
         rec: &crate::hostrun::RunRecord,
         section: &str,
+        last: Option<&ChainInfo>,
     ) -> Result<CloudRun, String> {
-        if super::is_local_repo(&rec.repo) {
-            return Err(super::LOCAL_ONLY_STUDIO.into());
-        }
-        if !valid_run_id(&rec.run_id) {
-            return Err(format!("{:?} cannot name a run", rec.run_id));
-        }
-        let part = rec.cloud.clone().unwrap_or_default();
         let merge = merge_decision(&rec.repo, asked_merge(notes, rec), &rt.settings.merge_deny);
-        let slug = record_slug(rec);
-        let branch = format!("jesse/{slug}");
-        let mut spec = DevJobSpec::validate(
-            DevJobArgs {
-                repo: Some(rec.repo.clone()),
-                prompt: Some(section.to_string()),
-                agent: part.agent.clone(),
-                model: rec.model.clone(),
-                branch_slug: Some(slug),
-                test_command: part.test_command.clone(),
-                timeout_minutes: part.timeout_minutes,
-                ..DevJobArgs::default()
-            },
-            self.default_agent,
-        )?;
-        spec.prompt = cloud_prompt(section, &rec.run_id, &rec.repo, &branch, &merge);
-        // The cluster's cap, applied by `validate`, does not apply in the cloud: its own does.
-        spec.timeout_minutes = cloud_capped_timeout_minutes(
-            part.timeout_minutes,
-            rt.settings.effective_max_timeout_minutes(),
-        );
-        let strand = match (&rec.strand, &rec.item_id, &rec.prompt_path) {
-            (Some(note), Some(id), Some(prompt)) => Some(StrandRef {
-                note: note.clone(),
-                id: id.clone(),
-                prompt: prompt.clone(),
-            }),
-            _ => None,
-        };
-        Ok(CloudRun {
-            spec,
-            run_id: rec.run_id.clone(),
+        record_job(
+            rec,
+            section,
             merge,
-            strand,
-            timeout_note: None,
-            chain: None,
-        })
+            self.default_agent,
+            rt.settings.effective_max_timeout_minutes(),
+            last,
+        )
     }
 
     /// Create a resolved cloud run's ConfigMap and Job, suspended until a worker is idle.
@@ -1936,6 +2090,7 @@ impl DevJobs {
             resources: rt.settings.job_resources(),
             services: rt.settings.services,
             chain: run.chain.clone(),
+            review: run.review,
         };
         self.create_run(&run.spec, origin, run.strand.as_ref(), Some(&extras))
             .await
@@ -2074,9 +2229,25 @@ impl DevJobs {
                 return;
             };
             let id = rec.run_id.clone();
+            // A further round's chain goes on from the run's last Job, while kc1 keeps it.
+            let last = match rec.cloud.as_ref().and_then(|c| c.jobs.last()) {
+                Some(name) => {
+                    let prev = link_run_id(
+                        &id,
+                        rec.cloud.as_ref().map_or(1, |c| c.jobs.len() as u32) - 1,
+                    );
+                    self.jobs()
+                        .get_opt(name)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|j| ChainInfo::of(&j, &prev))
+                }
+                None => None,
+            };
             let run = studio
                 .section_of(&id)
-                .and_then(|section| self.record_run(rt, &notes, &rec, &section));
+                .and_then(|section| self.record_run(rt, &notes, &rec, &section, last.as_ref()));
             let run = match run {
                 Ok(run) => run,
                 Err(e) => {
@@ -2127,6 +2298,7 @@ impl DevJobs {
                                     report_path: None,
                                     continued_as: None,
                                     error: None,
+                                    leaks: Vec::new(),
                                 };
                                 let _ =
                                     tokio::task::spawn_blocking(move || s.cloud_ended(&end)).await;

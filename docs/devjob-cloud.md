@@ -219,7 +219,8 @@ through a pod, read its Secret) and nothing else; chat turns use `jesse:jesse`, 
 The Studio's, on the run's record: strand and item launch (the start turn, the Job carrying the
 strand labels and the report the strand keys), `queued → running → reported / failed /
 cancelled`, `devjob_status` by run id (or Job name), `devjob_list` (the record under `studio`,
-with `host: "cloud"` and `job_name`; the Job under `cloud`), `devjob_priority`, `devjob_cancel`
+with `host: "cloud"` and `job_name`, once: its Jobs are not listed again under `cloud`, 0.227.0),
+`devjob_priority`, `devjob_cancel`
 and `devjob_close`, and the Studio's own settling and archiving. The report is
 `Inbox/<date>-run-<run_id>.md` with `host: cloud` and `run: <run_id>` in its front matter, the
 agent's own report (it writes `$JESSE_RUN_REPORT`) as the report's final message, and a push.
@@ -235,9 +236,45 @@ cancelled at once; a running one is stopped through `activeDeadlineSeconds` and 
 its report ends the run as cancelled. A cancel that lands while the Job is being made stops the
 Job as soon as it is named.
 
-There is no reply yet: a pod has no session to continue. `reply` and `review` on a cloud run
-are refused by the record. Review of cloud runs is DJ30's Part B
-(`docs/design/one-run-pipeline.md`).
+## Review, and a further round (0.227.0)
+
+A cloud run is reviewed as a Studio run is, by the same code (`docs/design/one-run-pipeline.md`).
+
+- **Who reviews.** `reviewer`, `reviewers` and `review_focus` on `devjob_start` with `host:
+  "cloud"`, else the draft's `devjob-reviewer:`, else `[hostrun] default_reviewers`, checked and
+  refused by the same words (`HostRuns::resolve_reviewers`). `none` is no review.
+- **The implementing Job is held.** Its Job carries `REVIEW=hold` (and the annotation
+  `jesse.dev/review: hold`): the entrypoint pushes `jesse/<slug>` and opens the pull request as a
+  draft, then stops. No CI wait, never ready, never merged, whatever the run's merge decision (its
+  `AUTO_MERGE` is empty too; the merge annotation keeps the decision for the answer); the agent
+  is told the run does not merge. Its checkpoint stays, taken again on the pushed head, so
+  the progress file survives. Nothing is pushed to the phone for it.
+- **The review.** When that Job reports, the record goes `reviewing` (`RunRecord::starts_review`,
+  the Studio's rule) and the watcher runs the Studio's review: the pushed branch is fetched read
+  only into the bridge's bare clone, the range and diff are read from a scratch checkout
+  (`<run dir>/review-range`, removed at once), and every reviewer reads its own detached checkout
+  of the head with the same prompt (`perform_review`). The note and the hand off are the Studio's.
+- **The answer.** The hand off queues the run's next round with `handoff_reply`'s text, as on the
+  Studio, but for the cloud: no Studio slot takes a run already on the cloud. A cloud slot takes
+  it in queue order and makes the next link of the run's chain, `<run_id>-c<n>` (DJ29's naming,
+  `RUN_ID` still the run's own, so the pull request keeps its title), with `REVIEW=answer`. Its
+  prompt is the run's prompt, then the round's text under `### Next round`, then the cloud
+  paragraph. The entrypoint checks out the run's branch as pushed, with its open pull request,
+  restores the kept checkpoint and progress file, pushes to the same branch with a lease, and
+  waits, marks ready and merges under the run's merge decision (`merge` or `devjob-merge`, the
+  deny list, CI green on the exact head). Its report gets the Studio's marks: `UNREVIEWED:` or
+  `PARTLY REVIEWED:` when the review could not run, and `REVIEW LEAK:` from the leak check of its
+  new commits (the pull request's head, fetched read only into a scratch checkout,
+  `<run dir>/review-answer`, removed at once) and of the run's pull requests. The reviews are
+  marked answered, their notes archived and linked.
+- **Unreviewed.** With no reviewer (`none`, or a default that cannot review) the Job has no
+  `REVIEW` and merges as before 0.227.0.
+- **Reply and `devjob_review`.** `devjob_reply` on a finished cloud run queues the same kind of
+  round, answered by the next link on the same branch and open pull request; a run whose branch
+  is gone (merged and deleted) has nothing to continue from and is refused, as on the Studio.
+  `devjob_review` reviews a finished cloud run's pushed branch the same way.
+
+A link is a link: an answer counts against `max_continuations` like a capped Job's continuation.
 
 **Jobs from before 0.226.0.** A Job an earlier bridge created has no record that owns it (its
 run either had none, or was closed `moved to the cloud`). It finishes under the old path: it is

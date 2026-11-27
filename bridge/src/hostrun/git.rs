@@ -285,6 +285,52 @@ pub fn fetch_default(bare: &Path) -> Result<String, String> {
     Err("the remote has no default branch".into())
 }
 
+/// A cloud run's pushed `branch`, fetched read only into the bridge's bare clone of `repo`
+/// (cloned first when the Studio never had it), with the default branch: `(default, head)`.
+/// Nothing is pushed and no worktree is made.
+pub fn fetch_branch_head(
+    root: &Path,
+    repo: &str,
+    url: &str,
+    branch: &str,
+) -> Result<(String, String), String> {
+    let bare = bare_path(root, repo);
+    let _lock = lock_repo(root, repo)?;
+    ensure_bare(&bare, url)?;
+    let default = fetch_default(&bare)?;
+    let head = git(
+        &bare,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{branch}^{{commit}}"),
+        ],
+    )
+    .map_err(|_| format!("its branch {branch} is not on origin"))?;
+    Ok((default, head.trim().to_string()))
+}
+
+/// The head of pull request `number` of `repo`, fetched read only into the bridge's bare clone
+/// (under `refs/jesse/pull/<number>`), whether or not its branch was deleted on merge.
+pub fn fetch_pull_head(root: &Path, repo: &str, url: &str, number: u64) -> Result<String, String> {
+    let bare = bare_path(root, repo);
+    let _lock = lock_repo(root, repo)?;
+    ensure_bare(&bare, url)?;
+    let local = format!("refs/jesse/pull/{number}");
+    git(
+        &bare,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "origin",
+            &format!("+refs/pull/{number}/head:{local}"),
+        ],
+    )?;
+    git(&bare, &["rev-parse", "--verify", "--quiet", &local]).map(|s| s.trim().to_string())
+}
+
 /// What a new worktree started from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewWorktree {

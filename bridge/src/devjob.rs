@@ -37,7 +37,7 @@
 //! `activeDeadlineSeconds` clock on resume, whereas a Job whose pod the quota refuses is retried
 //! with its clock already running, so the wait would come out of its time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
 use k8s_openapi::api::batch::v1::Job;
@@ -288,6 +288,9 @@ pub struct CloudStart {
     pub timeout_minutes: Option<u64>,
     /// How soon the run wants a slot; `None` is the draft's `devjob-priority:`, else `normal`.
     pub priority: Option<crate::hostrun::Priority>,
+    /// Who reviews the run, as on the Studio: `None` is the draft's, else the bridge's default.
+    pub reviewer: Option<crate::hostrun::review::ReviewerArg>,
+    pub review_focus: Option<String>,
 }
 
 /// Decide a start. Without `host` (or with `cluster`) this is [`DevJobSpec::validate`] and
@@ -365,13 +368,7 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
                 }
             }
             let again = args.again.unwrap_or(false);
-            let reviewer = crate::hostrun::review::merge_spellings(
-                args.reviewer.clone(),
-                args.reviewers.clone(),
-            )?;
-            // Its shape now; whether the registry knows each id when the run is created.
-            crate::hostrun::review::choose(reviewer.as_ref())?;
-            let review_focus = args.review_focus.clone();
+            let (reviewer, review_focus) = start_reviewer(&args)?;
             let priority = args
                 .priority
                 .as_deref()
@@ -455,26 +452,27 @@ pub fn plan_start(args: DevJobArgs, default_agent: Agent) -> Result<StartPlan, S
     }
 }
 
+/// The reviewers a Studio or cloud start names (`reviewer`, or its list spelling `reviewers`)
+/// and its `review_focus`: one spelling, its shape checked now. Whether the registry knows each
+/// id, the draft's `devjob-reviewer:` and `[hostrun] default_reviewers` are the run's creation's
+/// ([`crate::hostrun::HostRuns::create_on`]), for both hosts.
+fn start_reviewer(
+    args: &DevJobArgs,
+) -> Result<(Option<crate::hostrun::review::ReviewerArg>, Option<String>), String> {
+    let reviewer =
+        crate::hostrun::review::merge_spellings(args.reviewer.clone(), args.reviewers.clone())?;
+    crate::hostrun::review::choose(reviewer.as_ref())?;
+    Ok((reviewer, args.review_focus.clone()))
+}
+
 /// `host: "cloud"`: a strand item, a draft or a free prompt, like the Studio's three, with the
-/// cluster's `agent`, `test_command` and `timeout_minutes`. No review, no `again`, never a
-/// `local/<name>` repository.
+/// cluster's `agent`, `test_command` and `timeout_minutes`, reviewed as a Studio run is
+/// ([`start_reviewer`]). No `again`, never a `local/<name>` repository.
 fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, String> {
     if args.again.is_some() {
         return Err("again applies only with host \"studio\"".into());
     }
-    let reviewer =
-        crate::hostrun::review::merge_spellings(args.reviewer.clone(), args.reviewers.clone())?;
-    let off = matches!(
-        crate::hostrun::review::choose(reviewer.as_ref()),
-        Ok(crate::hostrun::review::ReviewerChoice::Off)
-    );
-    if (reviewer.is_some() && !off) || args.review_focus.is_some() {
-        return Err(
-            "reviewer and review_focus apply only with host \"studio\": cloud runs are not \
-             reviewed"
-                .into(),
-        );
-    }
+    let (reviewer, review_focus) = start_reviewer(&args)?;
     let repo = match args.repo.as_deref().map(str::trim) {
         None | Some("") => None,
         Some(r) if is_local_repo(r) => return Err(LOCAL_ONLY_STUDIO.into()),
@@ -508,6 +506,8 @@ fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, Stri
             test_command: args.test_command.clone(),
             timeout_minutes: args.timeout_minutes,
             priority,
+            reviewer: reviewer.clone(),
+            review_focus: review_focus.clone(),
         })
     };
     if let Some(draft) = args.draft.clone() {
@@ -550,6 +550,8 @@ fn plan_cloud(args: DevJobArgs, default_agent: Agent) -> Result<CloudStart, Stri
                 test_command,
                 timeout_minutes,
                 priority,
+                reviewer,
+                review_focus,
             })
         }
         _ => Err("strand and item_id go together".into()),
@@ -1290,6 +1292,8 @@ pub struct CloudJobExtras {
     /// Set only for a continuation: its `RUN_ID` and `CONTINUATION` envs, and its chain
     /// annotations, come from here instead of `run_id` and link 0.
     pub chain: Option<ChainExtras>,
+    /// A reviewed run's Job: its `REVIEW` env and [`cloud::ANN_REVIEW`].
+    pub review: Option<cloud::ReviewMode>,
 }
 
 /// One earlier link of a continuation chain, as [`cloud::ANN_CHAIN`] keeps it (JSON).
@@ -1399,6 +1403,13 @@ pub fn build_cloud_job(
     labels[cloud::LABEL_RUN_ID] = json!(extras.run_id);
     let deadline = cloud::cloud_deadline_secs(spec);
     let agent = extras.resources.agent(extras.services);
+    // A held Job never merges, even on an entrypoint that predates `REVIEW`: its `AUTO_MERGE`
+    // says no, while the merge annotation keeps the run's decision for its continuation and
+    // its answer.
+    let auto_merge = match extras.review {
+        Some(cloud::ReviewMode::Hold) => "",
+        _ => extras.merge.auto_merge_env(),
+    };
     let (run_id_env, continuation_env) = match &extras.chain {
         Some(c) => (c.root.clone(), c.link),
         None => (extras.run_id.clone(), 0u32),
@@ -1494,7 +1505,7 @@ pub fn build_cloud_job(
                             { "name": "PR_TITLE_FILE", "value": cloud::PR_TITLE_FILE },
                             { "name": "AGENT_GITHUB", "value": "none" },
                             { "name": "REBASE_ON_MAIN", "value": "true" },
-                            { "name": "AUTO_MERGE", "value": extras.merge.auto_merge_env() },
+                            { "name": "AUTO_MERGE", "value": auto_merge },
                             { "name": "MERGE_DENY", "value": extras.merge_deny },
                             { "name": "MERGE_WAIT_SECONDS", "value": cloud::MERGE_WAIT_SECONDS.to_string() },
                             { "name": "CARGO_PROFILE_DEV_DEBUG", "value": "0" },
@@ -1541,6 +1552,13 @@ pub fn build_cloud_job(
             .as_array_mut()
             .expect("the pod has volumes")
             .push(json!({ "name": "pgdata", "emptyDir": { "sizeLimit": "4Gi" } }));
+    }
+    if let Some(r) = extras.review {
+        job["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array_mut()
+            .expect("the agent has an env")
+            .push(json!({ "name": "REVIEW", "value": r.label() }));
+        job["metadata"]["annotations"][cloud::ANN_REVIEW] = json!(r.label());
     }
     if let Some(c) = &extras.chain {
         let ann = job["metadata"]["annotations"]
@@ -3018,7 +3036,7 @@ impl DevJobs {
         let rel = match existing {
             Some(rel) => {
                 eprintln!("jesse-bridge: devjob {}: already reported at {rel}", v.name);
-                (rel, None, None, None)
+                (rel, None, None, None, Vec::new())
             }
             None => {
                 let pods = self.pods_of(&v.name).await;
@@ -3170,21 +3188,43 @@ impl DevJobs {
                     }
                     _ => text,
                 };
+                // A cloud run's Job that ended its round: its report says what the Studio's would
+                // of the run's review (the answer's leak check, a cycle that could not run).
+                let (text, leaks) = match (cloud_run, self.studio.get(), &continued_as) {
+                    (Some(_), Some(studio), None) => {
+                        studio
+                            .cloud_report_marks(
+                                &v.name,
+                                text,
+                                cloud_end_status(v, Some(RunOutcome::of(&report))),
+                                report.pull_request_url(),
+                            )
+                            .await
+                    }
+                    _ => (text, Vec::new()),
+                };
                 let rel = write_report(sink, &v.name, &date, &stem, &text).await?;
                 eprintln!(
                     "jesse-bridge: devjob REPORT {} outcome={} at {rel}",
                     v.name,
                     RunOutcome::of(&report).label()
                 );
-                (rel, Some(report), attribution, continued_as)
+                (rel, Some(report), attribution, continued_as, leaks)
             }
         };
-        let (rel, report, attribution, continued_as) = rel;
+        let (rel, report, attribution, continued_as, leaks) = rel;
+        // A reviewed cloud run's implementing Job that opened its pull request: nothing is sent,
+        // as for a Studio run's implementing round; the push is the answer's.
+        let held = cloud::review_mode(job) == Some(cloud::ReviewMode::Hold)
+            && continued_as.is_none()
+            && report
+                .as_ref()
+                .is_some_and(|r| RunOutcome::of(r) == RunOutcome::PullRequestOpened);
         let outcome = report.as_ref().map(RunOutcome::of);
         // A scheduled run is pushed by the scheduler, under its `notify`; only a turn's run pushes
         // here, so a scheduled run never pushes twice.
         if let (Some(report), Some(outcome), Some(n)) = (&report, outcome, &sink.notifier) {
-            if !v.origin.starts_with("schedule:") && attribution.is_none() {
+            if !v.origin.starts_with("schedule:") && attribution.is_none() && !held {
                 if let Some(continued_as) = &continued_as {
                     let run_id = v.run_id.as_deref().unwrap_or(&v.name);
                     n.notify(
@@ -3241,6 +3281,7 @@ impl DevJobs {
                 report_path: Some(rel.clone()),
                 continued_as: continued_job,
                 error: report.as_ref().and_then(|r| r.failure.clone()),
+                leaks,
             };
             let s = studio.clone();
             let _ = tokio::task::spawn_blocking(move || s.cloud_ended(&end)).await;
@@ -3491,6 +3532,8 @@ impl DevJobs {
                 continuation_of: previous.to_string(),
                 chain_json,
             }),
+            // A capped held Job's continuation is still held; a capped answer still answers.
+            review: cloud::review_mode(job),
         };
         self.create_cloud_run(&run, &v.origin).await.map(|_| ())
     }
@@ -3996,13 +4039,39 @@ impl DevJobs {
 
 impl DevJobs {
     /// `devjob_list`'s `cloud` key, when the cloud host is attached: its running, queued and
-    /// finished runs, or the error that kept them from being listed.
+    /// finished Jobs, or the error that kept them from being listed. A Job a run record owns
+    /// (archived or not) is left out: the run is listed once, as its record, under `studio`.
     async fn list_cloud(&self, v: &mut Value) {
-        if let Some(c) = self.cloud.get() {
-            v["cloud"] = match c.list().await {
-                Ok(l) => l,
-                Err(e) => json!({ "running": [], "queued": [], "finished": [], "cloud_error": e }),
-            };
+        let Some(c) = self.cloud.get() else {
+            return;
+        };
+        let mut listed = match c.list().await {
+            Ok(l) => l,
+            Err(e) => json!({ "running": [], "queued": [], "finished": [], "cloud_error": e }),
+        };
+        if let Some(svc) = self.studio.get().cloned() {
+            let owned: HashSet<String> = tokio::task::spawn_blocking(move || {
+                crate::hostrun::scan_runs(&svc.settings.runs_dir())
+                    .0
+                    .into_iter()
+                    .filter_map(|(_, r)| r.cloud)
+                    .flat_map(|c| c.jobs.into_iter().chain(c.job_name))
+                    .collect()
+            })
+            .await
+            .unwrap_or_default();
+            drop_owned(&mut listed, &owned);
+        }
+        v["cloud"] = listed;
+    }
+}
+
+/// `devjob_list`'s `cloud` key without the Jobs in `owned`: those of a run record, which the
+/// list serves once, as the record, under `studio`.
+pub fn drop_owned(listed: &mut Value, owned: &HashSet<String>) {
+    for key in ["running", "queued", "finished"] {
+        if let Some(a) = listed[key].as_array_mut() {
+            a.retain(|j| j["job_name"].as_str().is_none_or(|n| !owned.contains(n)));
         }
     }
 }
@@ -4035,7 +4104,12 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
              priority and devjob_priority order it as they order Studio runs, and \
              devjob_cancel, devjob_close and devjob_status work on it by run id. A queued Studio \
              run whose draft says devjob-host: any is started by whichever of a Studio slot and \
-             a cloud slot frees first, keeping its run id."
+             a cloud slot frees first, keeping its run id. A cloud run is reviewed as a Studio \
+             run is (reviewer, reviewers, review_focus, the draft's devjob-reviewer:, else the \
+             bridge's default reviewers): its job opens the pull request as a draft and does not \
+             merge, the bridge reviews the pushed branch, and a further job on the same branch \
+             and pull request answers the findings, then merges as above. devjob_reply and \
+             devjob_review reach it the same way."
         ));
         let props = &mut start["inputSchema"]["properties"];
         let hosts = match props.get("host") {
@@ -4046,6 +4120,16 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
                                 "description": "where the run goes; default cluster" });
         if props.get("priority").is_some() {
             props["priority"]["description"] = json!("host studio or cloud: how soon the run wants a slot while queued; queued runs start highest first, oldest first within a level, on either host, and a priority never stops a running run or bypasses a cap. Absent: the draft's devjob-priority:, else normal. Change it while queued with devjob_priority");
+        }
+        for key in ["reviewer", "reviewers", "review_focus"] {
+            if let Some(d) = props
+                .get(key)
+                .and_then(|p| p["description"].as_str())
+                .and_then(|d| d.strip_prefix("host studio: "))
+                .map(str::to_string)
+            {
+                props[key]["description"] = json!(format!("host studio or cloud: {d}"));
+            }
         }
         props["merge"] = json!({ "type": "boolean",
                                  "description": "host cloud: merge the pull request once every CI run on its head is green; default the draft's devjob-merge, else false" });

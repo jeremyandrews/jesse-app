@@ -71,6 +71,7 @@ fn ended(job: &str, status: RunStatus, report: &str) -> CloudEnd {
         report_path: Some(report.into()),
         continued_as: None,
         error: None,
+        leaks: Vec::new(),
     }
 }
 
@@ -411,13 +412,19 @@ async fn a_failed_cloud_run_is_closed_and_archived_like_any_run_and_refuses_a_re
     vault_fixture(&s);
     let r = rig_any(&s);
     let id = taken(&r, &s, "f", "job-f");
+    // Running, it refuses a reply as a running Studio run does.
     let e = r.svc.reply(&id, "go on").unwrap_err();
-    assert!(e.message().contains("is a cloud run"), "{}", e.message());
+    assert!(e.message().contains("is running"), "{}", e.message());
     r.svc
         .cloud_ended(&ended("job-f", RunStatus::Failed, "Inbox/x.md"))
         .unwrap();
+    // Failed with no branch on origin, there is nothing to continue: refused as on the Studio.
     let e = r.svc.reply(&id, "go on").unwrap_err();
-    assert!(e.message().contains("takes no reply"), "{}", e.message());
+    assert!(
+        e.message().contains("nothing to continue from"),
+        "{}",
+        e.message()
+    );
     let closed = r.svc.close(&id, None).unwrap();
     assert_eq!(closed.status, RunStatus::Closed);
     let archived = r.svc.archive(&id).unwrap();
@@ -499,7 +506,12 @@ async fn a_cloud_start_takes_the_studios_checks_plus_the_clouds_own() {
             on_cloud(),
         )
         .unwrap_err();
-    assert!(e.message().contains("cloud runs are not reviewed"));
+    // The Studio's own check of a reviewer, by its words: the rig has no reviewer attached.
+    assert!(
+        e.message().contains("this bridge has no reviewer attached"),
+        "{}",
+        e.message()
+    );
     let ok = r
         .svc
         .create_on(&by_draft("Projects/drafts/cloud-ok.md"), on_cloud())
@@ -507,10 +519,13 @@ async fn a_cloud_start_takes_the_studios_checks_plus_the_clouds_own() {
     let rec = r.svc.get(&ok.run_id).unwrap();
     assert_eq!(rec.host, RunHost::Cloud);
     assert_eq!(rec.branch, "jesse/s-cloud-ok");
+    // Nothing names a reviewer: `[hostrun] default_reviewers` applies, as on the Studio (empty
+    // in this rig, so the run is not reviewed).
     assert_eq!(
         rec.reviewers_source.as_deref(),
-        Some(crate::hostrun::review::SOURCE_NONE)
+        Some(crate::hostrun::review::SOURCE_DEFAULT)
     );
+    assert!(rec.reviewer_ids().is_empty());
     assert_eq!(ok.waiting_for.as_deref(), Some(WAITING_CLOUD));
     // The same item twice is refused as on the Studio: one live run per item.
     let first = r.svc.create_on(&item("GD5"), on_cloud());
@@ -640,7 +655,7 @@ fn a_cloud_start_whose_draft_cannot_be_read_again_is_refused() {
 }
 
 #[tokio::test]
-async fn a_cloud_start_of_a_draft_that_asks_for_a_reviewer_is_refused_not_run_unreviewed() {
+async fn a_cloud_start_of_a_draft_that_asks_for_a_reviewer_is_reviewed_by_it() {
     let s = Scratch::new();
     vault_fixture(&s);
     let d = s.notes().join("Projects/drafts");
@@ -655,16 +670,57 @@ async fn a_cloud_start_of_a_draft_that_asks_for_a_reviewer_is_refused_not_run_un
     )
     .unwrap();
     let r = rig_any(&s);
+    // No reviewer attached: refused by the Studio's own check, never run unreviewed.
     let e = r
         .svc
         .create_on(&by_draft("Projects/drafts/rev.md"), on_cloud())
         .unwrap_err();
-    assert!(e.message().contains("not reviewed yet"), "{}", e.message());
+    assert!(
+        e.message().contains("this bridge has no reviewer attached"),
+        "{}",
+        e.message()
+    );
     assert!(r.svc.get("s-rev").is_none(), "nothing was queued");
-    assert!(r
+    // With one that knows `codex`, the draft's reviewer reviews it.
+    r.svc.attach_reviewer(std::sync::Arc::new(Knows("codex")));
+    let ok = r
+        .svc
+        .create_on(&by_draft("Projects/drafts/rev.md"), on_cloud())
+        .unwrap();
+    let rec = r.svc.get(&ok.run_id).unwrap();
+    assert_eq!(rec.reviewer_ids(), ["codex"]);
+    assert_eq!(
+        rec.reviewers_source.as_deref(),
+        Some(crate::hostrun::review::SOURCE_EXPLICIT)
+    );
+    let off = r
         .svc
         .create_on(&by_draft("Projects/drafts/norev.md"), on_cloud())
-        .is_ok());
+        .unwrap();
+    assert!(r.svc.get(&off.run_id).unwrap().reviewer_ids().is_empty());
+}
+
+/// A reviewer registry that knows one id.
+struct Knows(&'static str);
+
+impl Reviewer for Knows {
+    fn check(&self, id: &str) -> Result<ReviewerInfo, String> {
+        if id != self.0 {
+            return Err(format!("reviewer {id:?} is not a model this bridge knows"));
+        }
+        Ok(ReviewerInfo {
+            id: id.into(),
+            label: id.into(),
+            harness: "codex".into(),
+        })
+    }
+
+    fn review(
+        &self,
+        _call: ReviewCall,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        Box::pin(async { Err("not in this test".to_string()) })
+    }
 }
 
 #[tokio::test]

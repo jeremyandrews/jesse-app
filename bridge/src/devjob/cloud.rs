@@ -39,6 +39,9 @@ use super::{
 pub const DEFAULT_NAMESPACE: &str = "jesse-dev";
 /// The default `[devjob.cloud] kubeconfig`: the `jesse:devjob` ServiceAccount's token.
 pub const DEFAULT_KUBECONFIG: &str = ".kube/kc1-devjob.yaml";
+/// The default `[devjob.cloud] kc_burst_config`: kc-burst's own config, read once at boot for
+/// its `max_ttl` ([`read_kc_burst_max_ttl`]). Home relative, expanded like [`DEFAULT_KUBECONFIG`].
+pub const DEFAULT_KC_BURST_CONFIG: &str = ".config/kc-burst/config.toml";
 /// The default `[devjob.cloud] max_concurrent`: the namespace quota's two pods.
 pub const DEFAULT_MAX_CONCURRENT: usize = 2;
 /// Where `kc-burst` is installed on the Studio.
@@ -46,10 +49,14 @@ pub const DEFAULT_KC_BURST: &str = "/usr/local/bin/kc-burst";
 /// DigitalOcean's 4 vCPU, 16 GB general purpose worker: one dev job per worker, with room for
 /// a Rust workspace the size of trovato to build and test ([`DEFAULT_JOB_MEMORY_GI`]).
 pub const DEFAULT_BURST_SIZE: &str = "g-4vcpu-16gb";
-/// A worker's first TTL. Extended while it is busy, at most [`MAX_BURST_LIFE_MINUTES`].
+/// A worker's first TTL. Extended while it is busy, at most [`MAX_WORKER_LIFE_MINUTES`].
 pub const DEFAULT_BURST_TTL_MINUTES: u64 = 240;
-/// The longest a worker lives, extensions included: kc-burst's own 8 hours.
-pub const MAX_BURST_LIFE_MINUTES: u64 = 480;
+/// The longest a worker lives, extensions included: the burst system's own hard ceiling —
+/// kc-burst's `max_ttl` and the reaper's `--max-age`, both 12 hours once a companion change in
+/// `jeremyandrews/k3s` raises them from 8. [`CloudSettings::problems`] refuses a configured
+/// `worker_life_minutes` above this; [`CloudSettings::effective_worker_life_minutes`] caps it
+/// further, live, at whatever kc-burst's own config actually says.
+pub const MAX_WORKER_LIFE_MINUTES: u64 = 720;
 /// The default `[devjob.cloud] job_memory_gi`: the pod's memory limit, sized for a 16 GB worker
 /// less what the node itself keeps.
 pub const DEFAULT_JOB_MEMORY_GI: u32 = 14;
@@ -221,11 +228,14 @@ pub const MERGE_WAITS_MINUTES: u64 = MERGE_WAIT_SECONDS * MERGE_ATTEMPTS / 60;
 pub const FINISH_ALLOWANCE_SECS: u64 = 30 * 60;
 /// The default `[devjob.cloud] max_timeout_minutes`: the largest `timeout_minutes` a cloud
 /// start may be granted. Sized so the Job's own deadline ([`cloud_deadline_secs`]) plus
-/// [`BOOT_ALLOWANCE_MINUTES`] exactly fits [`DEFAULT_WORKER_LIFE_MINUTES`]: 480 - 15 - 120 - 30.
-pub const DEFAULT_MAX_TIMEOUT_MINUTES: u64 = 315;
-/// The default `[devjob.cloud] worker_life_minutes`: kc-burst's own hard cap on a worker's age
-/// (`max_ttl`, 8 hours as of 2026-11-23). [`CloudSettings::problems`] refuses more.
-pub const DEFAULT_WORKER_LIFE_MINUTES: u64 = 480;
+/// [`BOOT_ALLOWANCE_MINUTES`] exactly fits [`DEFAULT_WORKER_LIFE_MINUTES`]: 720 - 15 - 120 - 30.
+pub const DEFAULT_MAX_TIMEOUT_MINUTES: u64 = 555;
+/// The default `[devjob.cloud] worker_life_minutes`, and [`MAX_WORKER_LIFE_MINUTES`]: a kc1
+/// burst worker may live a full 12 hours once the burst system's own limits are raised to match
+/// (a companion change in `jeremyandrews/k3s`). [`CloudSettings::problems`] refuses more; a
+/// shorter live `max_ttl` is enforced instead by
+/// [`CloudSettings::effective_worker_life_minutes`].
+pub const DEFAULT_WORKER_LIFE_MINUTES: u64 = 720;
 /// Time from `kc-burst up` to a worker being ready and idle, before any Job can resume onto it
 /// and start its own `activeDeadlineSeconds` clock. [`CloudSettings::problems`]'s margin.
 pub const BOOT_ALLOWANCE_MINUTES: u64 = 15;
@@ -312,6 +322,8 @@ pub struct CloudToml {
     /// How many times a capped run may continue as `<run_id>-c2`, `-c3`, and so on. `0` turns
     /// continuations off.
     pub max_continuations: Option<u32>,
+    /// Where kc-burst's own config lives, for its `max_ttl` ([`read_kc_burst_max_ttl`]).
+    pub kc_burst_config: Option<PathBuf>,
 }
 
 /// A cloud Job's container resources, from [`CloudSettings`]: what [`super::build_cloud_job`]
@@ -360,6 +372,14 @@ pub struct CloudSettings {
     pub max_timeout_minutes: u64,
     pub worker_life_minutes: u64,
     pub max_continuations: u32,
+    /// Where kc-burst's own config lives: its `max_ttl` is read from here, once, into
+    /// [`Self::kc_burst_max_ttl_minutes`]. The bridge never opens it for anything else.
+    pub kc_burst_config: PathBuf,
+    /// kc-burst's own `max_ttl`, in minutes, read from [`Self::kc_burst_config`] once at boot
+    /// ([`read_kc_burst_max_ttl`]). `None` until that read runs — so [`CloudSettings::default`]
+    /// and every settings built straight from TOML carry the configured values alone — or when
+    /// the file could not be read or parsed.
+    pub kc_burst_max_ttl_minutes: Option<u64>,
 }
 
 impl Default for CloudSettings {
@@ -426,6 +446,11 @@ impl CloudSettings {
             max_timeout_minutes: t.max_timeout_minutes.unwrap_or(DEFAULT_MAX_TIMEOUT_MINUTES),
             worker_life_minutes: t.worker_life_minutes.unwrap_or(DEFAULT_WORKER_LIFE_MINUTES),
             max_continuations: t.max_continuations.unwrap_or(DEFAULT_MAX_CONTINUATIONS),
+            kc_burst_config: match t.kc_burst_config {
+                Some(p) => expand(&p, home),
+                None => Path::new(home).join(DEFAULT_KC_BURST_CONFIG),
+            },
+            kc_burst_max_ttl_minutes: None,
         }
     }
 
@@ -476,8 +501,11 @@ impl CloudSettings {
                 self.burst_size
             ));
         }
-        if self.burst_ttl_minutes < 30 || self.burst_ttl_minutes > MAX_BURST_LIFE_MINUTES {
-            out.push("[devjob.cloud] burst_ttl_minutes must be 30 to 480 (kc-burst's 8h)".into());
+        if self.burst_ttl_minutes < 30 || self.burst_ttl_minutes > self.worker_life_minutes {
+            out.push(format!(
+                "[devjob.cloud] burst_ttl_minutes must be 30 to worker_life_minutes ({}), not {}",
+                self.worker_life_minutes, self.burst_ttl_minutes
+            ));
         }
         if self.idle_minutes == 0 {
             out.push("[devjob.cloud] idle_minutes must be at least 1".into());
@@ -504,10 +532,22 @@ impl CloudSettings {
                 "[devjob.cloud] max_continuations must be at most {MAX_MAX_CONTINUATIONS}"
             ));
         }
-        if self.worker_life_minutes > DEFAULT_WORKER_LIFE_MINUTES {
+        if self.worker_life_minutes > MAX_WORKER_LIFE_MINUTES {
             out.push(format!(
-                "[devjob.cloud] worker_life_minutes must be {DEFAULT_WORKER_LIFE_MINUTES} or \
-                 less: raise kc-burst's max_ttl first"
+                "[devjob.cloud] worker_life_minutes must be {MAX_WORKER_LIFE_MINUTES} or less: \
+                 raise the burst system's own limits first (kc-burst's max_ttl and the \
+                 reaper's --max-age)"
+            ));
+        }
+        let min_worker_life =
+            BOOT_ALLOWANCE_MINUTES + FINISH_ALLOWANCE_SECS / 60 + MERGE_WAITS_MINUTES + 1;
+        if self.worker_life_minutes < min_worker_life {
+            out.push(format!(
+                "[devjob.cloud] worker_life_minutes must be at least {min_worker_life} \
+                 minutes: a {BOOT_ALLOWANCE_MINUTES} minute boot allowance + the finish \
+                 allowance ({}) + the merge waits ({MERGE_WAITS_MINUTES}) + 1 minute left for \
+                 the agent",
+                FINISH_ALLOWANCE_SECS / 60
             ));
         }
         let needed = self.max_timeout_minutes
@@ -520,7 +560,7 @@ impl CloudSettings {
                  merge waits ({MERGE_WAITS_MINUTES}) + a {BOOT_ALLOWANCE_MINUTES} minute boot \
                  allowance = {needed} minutes, more than worker_life_minutes ({}); lower \
                  max_timeout_minutes or raise worker_life_minutes (to at most \
-                 {DEFAULT_WORKER_LIFE_MINUTES}, kc-burst's max_ttl)",
+                 {MAX_WORKER_LIFE_MINUTES}, kc-burst's max_ttl)",
                 self.max_timeout_minutes,
                 FINISH_ALLOWANCE_SECS / 60,
                 self.worker_life_minutes
@@ -619,6 +659,50 @@ impl CloudSettings {
         out
     }
 
+    /// [`Self::worker_life_minutes`], capped at kc-burst's own `max_ttl`
+    /// ([`Self::kc_burst_max_ttl_minutes`]) when that was read: the bridge never promises a
+    /// worker more life than the burst system itself will actually give it.
+    pub fn effective_worker_life_minutes(&self) -> u64 {
+        match self.kc_burst_max_ttl_minutes {
+            Some(max_ttl) => self.worker_life_minutes.min(max_ttl),
+            None => self.worker_life_minutes,
+        }
+    }
+
+    /// [`Self::max_timeout_minutes`], capped at what [`Self::effective_worker_life_minutes`]
+    /// leaves once the boot allowance, the finish allowance and the merge waits are taken out
+    /// (saturating, at least 1 minute) — the same fit [`Self::problems`] checks at boot, applied
+    /// live against whatever kc-burst's own `max_ttl` actually allows.
+    pub fn effective_max_timeout_minutes(&self) -> u64 {
+        let ceiling = self
+            .effective_worker_life_minutes()
+            .saturating_sub(BOOT_ALLOWANCE_MINUTES)
+            .saturating_sub(MERGE_WAITS_MINUTES)
+            .saturating_sub(FINISH_ALLOWANCE_SECS / 60)
+            .max(1);
+        self.max_timeout_minutes.min(ceiling)
+    }
+
+    /// One log line, when kc-burst's own `max_ttl` pulls either effective value below what is
+    /// configured: for example, when the live config still says 8 hours while
+    /// `worker_life_minutes` has been raised to [`DEFAULT_WORKER_LIFE_MINUTES`]. Meant to run
+    /// once, at boot, after [`Self::kc_burst_max_ttl_minutes`] has been read.
+    pub fn log_effective_caps(&self) {
+        let life = self.effective_worker_life_minutes();
+        let timeout = self.effective_max_timeout_minutes();
+        if life < self.worker_life_minutes || timeout < self.max_timeout_minutes {
+            eprintln!(
+                "jesse-bridge: devjob cloud: kc-burst max_ttl is {} min (from {}), below \
+                 worker_life_minutes {}: workers live {} min and agents get at most {} min",
+                self.kc_burst_max_ttl_minutes.unwrap_or_default(),
+                self.kc_burst_config.display(),
+                self.worker_life_minutes,
+                life,
+                timeout,
+            );
+        }
+    }
+
     /// The Job's resources.
     pub fn job_resources(&self) -> JobResources {
         JobResources {
@@ -660,12 +744,14 @@ impl CloudSettings {
     }
 }
 
-/// The cloud Job's `activeDeadlineSeconds`: the agent's own timeout, [`FINISH_ALLOWANCE_SECS`]
-/// for what the entrypoint does after the agent exits (rebase onto `origin/main`, the test
-/// command, push, open the pull request), and the merge path's full wait. Unlike the home
-/// cluster's [`DevJobSpec::active_deadline_secs`] (twice the timeout, so Kubernetes never kills
-/// the pod before the entrypoint prints its report), a cloud worker cannot live past
-/// [`CloudSettings::worker_life_minutes`], so doubling the timeout would already not fit one.
+/// The cloud Job's `activeDeadlineSeconds`, and what `build_cloud_job` also tells the entrypoint
+/// as `JOB_DEADLINE_SECONDS` so it never starts a wait Kubernetes cannot let finish: the agent's
+/// own timeout, [`FINISH_ALLOWANCE_SECS`] for what the entrypoint does after the agent exits
+/// (rebase onto `origin/main`, the test command, push, open the pull request), and the merge
+/// path's full wait. Unlike the home cluster's [`DevJobSpec::active_deadline_secs`] (twice the
+/// timeout, so Kubernetes never kills the pod before the entrypoint prints its report), a cloud
+/// worker cannot live past [`CloudSettings::effective_worker_life_minutes`], so doubling the
+/// timeout would already not fit one.
 pub fn cloud_deadline_secs(spec: &DevJobSpec) -> u64 {
     spec.agent_timeout_secs() + FINISH_ALLOWANCE_SECS + MERGE_WAIT_SECONDS * MERGE_ATTEMPTS
 }
@@ -677,6 +763,59 @@ pub fn cloud_capped_timeout_minutes(requested: Option<u64>, max_timeout_minutes:
     requested
         .unwrap_or(super::DEFAULT_TIMEOUT_MINUTES)
         .min(max_timeout_minutes)
+}
+
+/// The top level `max_ttl` string `[devjob.cloud] kc_burst_config` carries, when it has one.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct KcBurstToml {
+    max_ttl: Option<String>,
+}
+
+/// kc-burst's own `max_ttl`, in whole minutes rounded down, from its TOML config at `path` (the
+/// same file kc-burst itself reads, at `~/.config/kc-burst/config.toml` by default; parsed with
+/// the `humantime` crate kc-burst uses, so `"8h"`, `"12h"`, `"720m"` and `"11h 30m"` all read).
+/// `None` when the file is missing, unreadable, not TOML, has no top level `max_ttl`, or that
+/// value does not parse as a duration; each case logs one line naming the path and the reason,
+/// never the file's contents — the file also names credential files.
+pub fn read_kc_burst_max_ttl(path: &Path) -> Option<u64> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "jesse-bridge: devjob cloud: kc_burst_config {} is unreadable: {e}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let parsed: KcBurstToml = match toml::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "jesse-bridge: devjob cloud: kc_burst_config {} is not valid TOML",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let Some(max_ttl) = parsed.max_ttl else {
+        eprintln!(
+            "jesse-bridge: devjob cloud: kc_burst_config {} has no top level max_ttl",
+            path.display()
+        );
+        return None;
+    };
+    match humantime::parse_duration(&max_ttl) {
+        Ok(d) => Some(d.as_secs() / 60),
+        Err(_) => {
+            eprintln!(
+                "jesse-bridge: devjob cloud: kc_burst_config {}: max_ttl does not parse as a \
+                 duration",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 // ---- ROUTING ---------------------------------------------------------------------------
@@ -1751,8 +1890,10 @@ impl DevJobs {
         // The cluster's cap ([`super::MAX_TIMEOUT_MINUTES`]), already applied above (`Free`
         // directly, the other two kinds through `DevJobSpec::validate`), does not apply in the
         // cloud: its own, usually higher, cap does.
-        spec.timeout_minutes =
-            cloud_capped_timeout_minutes(requested_timeout, rt.settings.max_timeout_minutes);
+        spec.timeout_minutes = cloud_capped_timeout_minutes(
+            requested_timeout,
+            rt.settings.effective_max_timeout_minutes(),
+        );
         let timeout_note =
             super::timeout_reduced_note(requested_timeout, spec.timeout_minutes, "the cloud");
         Ok(CloudRun {
@@ -2107,7 +2248,7 @@ impl DevJobs {
             rt.settings.max_concurrent,
             &idle_ready,
             unplaced,
-            rt.settings.worker_life_minutes,
+            rt.settings.effective_worker_life_minutes(),
         );
         let plan = plan_pass(
             &workers,

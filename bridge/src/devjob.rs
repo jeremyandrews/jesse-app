@@ -1358,11 +1358,10 @@ pub struct ChainExtras {
 /// `REDIS_URL`. `CARGO_BUILD_JOBS` is the agent's CPU limit, rounded down, so cargo never runs
 /// more rustc processes than the agent has CPUs: the parallel rustcs, not the CPU count, set a
 /// build's peak memory.
-/// The deadline is [`cloud::cloud_deadline_secs`]: the agent timeout plus a finish allowance
-/// plus the merge path's longest wait, not the home cluster's twice the timeout — a cloud worker
-/// cannot live past [`cloud::CloudSettings::worker_life_minutes`], so doubling would already not
-/// fit. The same value is also the pod's `JOB_DEADLINE_SECONDS`, so the entrypoint's own time
-/// checks never disagree with the Job's real deadline. `terminationGracePeriodSeconds` is
+/// cannot live past [`cloud::CloudSettings::effective_worker_life_minutes`], so doubling would
+/// already not fit. The same deadline is also passed to the agent container as
+/// `JOB_DEADLINE_SECONDS`, so the entrypoint knows its own wall-clock budget rather than
+/// guessing one from `AGENT_TIMEOUT_SECONDS` alone. `terminationGracePeriodSeconds` is
 /// [`cloud::CHECKPOINT_GRACE_SECS`], the entrypoint's time to push a SIGTERM checkpoint and print
 /// its report before Kubernetes kills it. Always created suspended: it is released only onto an
 /// idle worker whose remaining life covers it ([`cloud::cloud_resumable`]). With
@@ -2345,12 +2344,18 @@ impl DevJobs {
     }
 
     /// The cloud host's server, from `[devjob.cloud]`: its own client, namespace, image and
-    /// cap, and kc-burst for its workers. Connects to nothing.
+    /// cap, and kc-burst for its workers. Connects to nothing. Reads kc-burst's own config once
+    /// for its `max_ttl` ([`cloud::read_kc_burst_max_ttl`]), so [`cloud::CloudSettings`]'s
+    /// effective caps follow whatever the burst system actually allows.
     pub async fn connect_cloud(home: &DevJobSettings) -> Result<DevJobs, String> {
+        let mut home = home.clone();
+        home.cloud.kc_burst_max_ttl_minutes =
+            cloud::read_kc_burst_max_ttl(&home.cloud.kc_burst_config);
+        home.cloud.log_effective_caps();
         let burst: Arc<dyn cloud::Burst> = Arc::new(cloud::KcBurstCli {
             path: home.cloud.kc_burst.clone(),
         });
-        DevJobs::connect_cloud_with(home, burst).await
+        DevJobs::connect_cloud_with(&home, burst).await
     }
 
     /// [`DevJobs::connect_cloud`] with the workers' driver named (a recorder in tests).
@@ -3332,8 +3337,10 @@ impl DevJobs {
             ..DevJobArgs::default()
         };
         let mut spec = DevJobSpec::validate(args, self.default_agent)?;
-        spec.timeout_minutes =
-            cloud::cloud_capped_timeout_minutes(Some(minutes), rt.settings.max_timeout_minutes);
+        spec.timeout_minutes = cloud::cloud_capped_timeout_minutes(
+            Some(minutes),
+            rt.settings.effective_max_timeout_minutes(),
+        );
         let merge = cloud::MergeDecision::from_annotation(
             job.metadata
                 .annotations
@@ -3847,8 +3854,9 @@ impl DevJobs {
 /// The tools with the cloud host: `host` gains `cloud`, `devjob_start` gains `merge`, and
 /// `devjob_cancel` is listed (it cancels cloud runs as well as Studio ones). Without the cloud
 /// the tools are exactly [`tool_descriptors`] or [`tool_descriptors_with_studio`].
-/// `max_timeout_minutes` is `[devjob.cloud] max_timeout_minutes`, the cloud's own cap on
-/// `timeout_minutes`.
+/// `max_timeout_minutes` is the cloud's own cap on `timeout_minutes`: `[devjob.cloud]
+/// max_timeout_minutes`, or less when kc-burst's own live `max_ttl` leaves less
+/// ([`cloud::CloudSettings::effective_max_timeout_minutes`]).
 pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value> {
     if let Some(start) = tools.iter_mut().find(|t| t["name"] == TOOL_START) {
         let d = start["description"]
@@ -3920,7 +3928,7 @@ impl crate::gateway::InProcessServer for DevJobs {
         if let Some(c) = self.cloud.get() {
             let max =
                 c.rt.as_ref()
-                    .map(|rt| rt.settings.max_timeout_minutes)
+                    .map(|rt| rt.settings.effective_max_timeout_minutes())
                     .unwrap_or(cloud::DEFAULT_MAX_TIMEOUT_MINUTES);
             with_cloud(tools, max)
         } else {

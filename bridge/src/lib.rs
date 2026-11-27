@@ -29,8 +29,9 @@
 //! optional push path), [`state`] (shared `AppState`), [`handlers`]/[`sse`] (the
 //! Axum routes), and [`startup`] (pairing QR + binary/bind checks).
 
-// `build_cloud_job`'s one `json!` literal (the whole cloud Job, env list included) is deep
-// enough to pass the default limit.
+// The cloud Job's `json!({...})` literal in `devjob.rs` (`build_cloud_job`) is deep enough,
+// field for field with the k3s template it mirrors, that the default limit of 128 macro
+// expansion steps is not enough.
 #![recursion_limit = "256"]
 
 // ---- Shared prelude -------------------------------------------------------

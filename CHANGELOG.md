@@ -14,7 +14,7 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
-## [bridge 0.224.0] - 2026-11-27
+## [bridge 0.225.0] - 2026-11-27
 
 **A cloud run capped by its time limit continues automatically from its checkpoint, as
 `<run_id>-c2`, `-c3`, and so on, up to `[devjob.cloud] max_continuations`.**
@@ -29,10 +29,6 @@ CI both run it). See the "Versioning" section of `bridge/README.md`.
   after the chain's first run (`RUN_ID` is the chain root, not the new link's own id);
   `CONTINUATION` names the new link. The capped link's report names the checkpoint and the run it
   continues as, or why it did not; each continuation's report has a `## Chain` section.
-- **`JOB_DEADLINE_SECONDS`** now reaches the pod, set from the same value as
-  `activeDeadlineSeconds`, so the entrypoint's own time checks can never disagree with the Job's
-  real deadline (it previously fell back to twice the agent timeout plus the merge waits, far
-  more generous than the Job's actual 27900s at the default 315 minute cap).
 - **`terminationGracePeriodSeconds`** is 120s (`cloud::CHECKPOINT_GRACE_SECS`), not Kubernetes'
   default 30s, so the entrypoint's SIGTERM checkpoint push and its report have time to finish
   between the deadline's SIGTERM and the SIGKILL, matching the k3s Job template.
@@ -42,6 +38,30 @@ CI both run it). See the "Versioning" section of `bridge/README.md`.
   commit from GitHub; `GhForge` implements it, `Checkpoint::is_valid_for` checks the entrypoint's
   own checkpoint shape (subject, one parent).
 - Docs: `docs/devjob-cloud.md` ("Continuing a capped run") and `bridge/README.md`.
+
+## [bridge 0.224.0] - 2026-11-26
+
+**A cloud burst worker may now live up to 12 hours, so a dev job agent running there gets up to
+555 minutes — while the bridge still never promises a run more time than kc-burst's own `max_ttl`
+actually allows.**
+
+- **Behavior change:** `worker_life_minutes` default and ceiling raised from 480 to 720 (12
+  hours), matching the burst system's own limits (kc-burst's `max_ttl` and the reaper's
+  `--max-age`) once a companion change in `jeremyandrews/k3s` raises them to match.
+  `MAX_BURST_LIFE_MINUTES` is gone; `MAX_WORKER_LIFE_MINUTES` (720) replaces it.
+- **Behavior change:** `max_timeout_minutes` default raised from 315 to 555 (720 − 15 − 120 − 30),
+  the agent's cap on a cloud run's `timeout_minutes`.
+- **A new `[devjob.cloud] kc_burst_config` key** (default `~/.config/kc-burst/config.toml`) is
+  read once at boot for kc-burst's own `max_ttl`. `CloudSettings::effective_worker_life_minutes`
+  and `effective_max_timeout_minutes` cap the configured values at whatever that `max_ttl`
+  actually allows, live, so a worker that still only lives 8 hours never gets promised a 555
+  minute run; the configured values alone still gate whether the bridge boots. The file's
+  contents are never logged, only its path and the parsed `max_ttl` in minutes.
+- `burst_ttl_minutes` is now checked against `worker_life_minutes` itself (30 to
+  `worker_life_minutes`), not a fixed number.
+- The cloud Job's agent container now gets `JOB_DEADLINE_SECONDS`, the same value as
+  `activeDeadlineSeconds`, so the dev agent image's entrypoint knows its real wall-clock budget
+  instead of guessing one.
 
 ## [bridge 0.223.0] - 2026-11-25
 

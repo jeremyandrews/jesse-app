@@ -1,10 +1,11 @@
 use super::*;
 use crate::devjob::{
     build_cloud_job, plan_start, render_report_for, render_report_with, report_rel_path,
-    report_rel_path_stem, tool_descriptors, tool_descriptors_with_studio, with_cloud, Agent,
-    ChainExtras, DevJobReport, DevJobToml, JobView, ReportInput, SpecAnnotation, StartPlan,
-    TOOL_CANCEL, TOOL_START,
+    report_rel_path_stem, timeout_reduced_note, tool_descriptors, tool_descriptors_with_studio,
+    with_cloud, Agent, ChainExtras, DevJobReport, DevJobToml, JobView, ReportInput, SpecAnnotation,
+    StartPlan, TOOL_CANCEL, TOOL_START,
 };
+use crate::random_hex;
 
 // ---- fixtures --------------------------------------------------------------------------
 
@@ -93,10 +94,10 @@ fn the_cloud_is_off_by_default_and_the_deny_list_is_always_seeded() {
         s.merge_deny,
         ["tag1consulting/scolta*", "tag1consulting/goose"]
     );
-    assert_eq!(s.max_timeout_minutes, 315);
-    assert_eq!(s.worker_life_minutes, 480);
+    assert_eq!(s.max_timeout_minutes, 555);
+    assert_eq!(s.worker_life_minutes, 720);
     assert!(s.problems(false).is_empty(), "off asks for nothing");
-    // The defaults fit exactly: 315 + 30 (finish) + 120 (merge waits) + 15 (boot) = 480, so
+    // The defaults fit exactly: 555 + 30 (finish) + 120 (merge waits) + 15 (boot) = 720, so
     // enabling the cloud with nothing else overridden never trips the fit refusal.
     let mut enabled = s.clone();
     enabled.enabled = true;
@@ -129,7 +130,7 @@ fn the_cloud_is_off_by_default_and_the_deny_list_is_always_seeded() {
     assert_eq!(s.job_memory_request_gi, 12);
     assert_eq!(s.job_cpu, 4);
     assert_eq!(s.job_cpu_request, 3);
-    assert_eq!(s.max_timeout_minutes, 315);
+    assert_eq!(s.max_timeout_minutes, 555);
     assert!(s.resource_problems().is_empty());
     // An unknown key is an error, as everywhere in [devjob].
     assert!(toml::from_str::<DevJobToml>("[cloud]\nnamespace_typo = 1\n").is_err());
@@ -162,7 +163,11 @@ fn the_job_resources_and_time_cap_are_read_from_config() {
     assert_eq!(cap(Some(900)), 300);
     assert_eq!(
         cloud_capped_timeout_minutes(Some(400), CloudSettings::default().max_timeout_minutes),
-        315
+        400
+    );
+    assert_eq!(
+        cloud_capped_timeout_minutes(Some(600), CloudSettings::default().max_timeout_minutes),
+        555
     );
 }
 
@@ -251,9 +256,9 @@ fn the_job_resources_are_refused_when_inconsistent() {
 fn the_cloud_refuses_to_boot_on_each_problem_by_name() {
     let t: DevJobToml = toml::from_str(
         "[cloud]\nenabled = true\nkubeconfig = \"/nonexistent/kc.yaml\"\nimage = \"ghcr.io/x:latest\"\n\
-         kc_burst = \"/nonexistent/kc-burst\"\nmax_concurrent = 0\nburst_ttl_minutes = 600\n\
+         kc_burst = \"/nonexistent/kc-burst\"\nmax_concurrent = 0\nburst_ttl_minutes = 900\n\
          daily_cost_cap_eur = 0.0\nmerge_deny = [\"not a pattern\"]\nmax_timeout_minutes = 0\n\
-         worker_life_minutes = 600\n",
+         worker_life_minutes = 800\n",
     )
     .unwrap();
     let s = CloudSettings::from_toml(t.cloud, "/home/u");
@@ -264,11 +269,11 @@ fn the_cloud_refuses_to_boot_on_each_problem_by_name() {
         "is not pinned by digest",
         "max_concurrent must be at least 1",
         "kc_burst /nonexistent/kc-burst is not a file",
-        "burst_ttl_minutes must be 30 to 480",
+        "burst_ttl_minutes must be 30 to worker_life_minutes (800), not 900",
         "daily_cost_cap_eur must be above 0",
         "merge_deny \"not a pattern\"",
         "max_timeout_minutes must be at least 1",
-        "worker_life_minutes must be 480 or less: raise kc-burst's max_ttl first",
+        "worker_life_minutes must be 720 or less: raise the burst system's own limits first",
     ] {
         assert!(p.contains(needle), "{needle} missing from:\n{p}");
     }
@@ -277,15 +282,36 @@ fn the_cloud_refuses_to_boot_on_each_problem_by_name() {
         .problems(true)
         .join("\n")
         .contains("needs [devjob] enabled"));
+    // A worker_life_minutes under the minimum (the boot allowance + the finish allowance + the
+    // merge waits + 1 minute for the agent, 166) is refused too.
+    let short = CloudSettings {
+        enabled: true,
+        worker_life_minutes: 165,
+        ..CloudSettings::default()
+    };
+    assert!(short
+        .problems(true)
+        .join("\n")
+        .contains("worker_life_minutes must be at least 166 minutes"));
+    let floor = CloudSettings {
+        enabled: true,
+        worker_life_minutes: 166,
+        max_timeout_minutes: 1,
+        ..CloudSettings::default()
+    };
+    assert!(!floor
+        .problems(true)
+        .join("\n")
+        .contains("worker_life_minutes must be at least"));
 }
 
 #[test]
 fn the_cloud_refuses_a_timeout_and_worker_life_combination_that_does_not_fit() {
-    // At the boundary: 315 + 30 + 120 + 15 = 480, exactly worker_life_minutes. Not refused.
+    // At the boundary: 555 + 30 + 120 + 15 = 720, exactly worker_life_minutes. Not refused.
     let fits = CloudSettings {
         enabled: true,
-        max_timeout_minutes: 315,
-        worker_life_minutes: 480,
+        max_timeout_minutes: 555,
+        worker_life_minutes: 720,
         ..CloudSettings::default()
     };
     assert!(!fits
@@ -295,19 +321,67 @@ fn the_cloud_refuses_a_timeout_and_worker_life_combination_that_does_not_fit() {
     // One minute over the boundary: refused, naming the numbers.
     let over = CloudSettings {
         enabled: true,
-        max_timeout_minutes: 316,
-        worker_life_minutes: 480,
+        max_timeout_minutes: 556,
+        worker_life_minutes: 720,
         ..CloudSettings::default()
     };
     let p = over.problems(true).join("\n");
     assert!(
         p.contains(
-            "max_timeout_minutes (316) + the finish allowance (30) + the merge waits \
-                    (120) + a 15 minute boot allowance = 481 minutes, more than \
-                    worker_life_minutes (480)"
+            "max_timeout_minutes (556) + the finish allowance (30) + the merge waits \
+                    (120) + a 15 minute boot allowance = 721 minutes, more than \
+                    worker_life_minutes (720)"
         ),
         "{p}"
     );
+}
+
+#[test]
+fn worker_life_minutes_is_refused_above_the_ceiling_and_accepted_at_it() {
+    let over = CloudSettings {
+        enabled: true,
+        worker_life_minutes: 721,
+        max_timeout_minutes: 1,
+        ..CloudSettings::default()
+    };
+    assert!(over
+        .problems(true)
+        .join("\n")
+        .contains("worker_life_minutes must be 720 or less"));
+    let at = CloudSettings {
+        enabled: true,
+        worker_life_minutes: 720,
+        ..CloudSettings::default()
+    };
+    assert!(!at
+        .problems(true)
+        .join("\n")
+        .contains("worker_life_minutes must be"));
+}
+
+#[test]
+fn burst_ttl_minutes_is_capped_at_worker_life_minutes_not_a_fixed_number() {
+    let over = CloudSettings {
+        enabled: true,
+        worker_life_minutes: 600,
+        burst_ttl_minutes: 601,
+        ..CloudSettings::default()
+    };
+    let p = over.problems(true).join("\n");
+    assert!(
+        p.contains("burst_ttl_minutes must be 30 to worker_life_minutes (600), not 601"),
+        "{p}"
+    );
+    let equal = CloudSettings {
+        enabled: true,
+        worker_life_minutes: 600,
+        burst_ttl_minutes: 600,
+        ..CloudSettings::default()
+    };
+    assert!(!equal
+        .problems(true)
+        .join("\n")
+        .contains("burst_ttl_minutes must be"));
 }
 
 #[test]
@@ -1421,7 +1495,7 @@ fn a_cloud_pod_runs_postgres_and_redis_as_native_sidecars_before_the_agent() {
 #[test]
 fn with_services_off_the_cloud_job_is_byte_for_byte_the_single_container_pod() {
     // Rendered by bridge 0.222.0's build_cloud_job for the same spec and extras, updated for
-    // DJ29's JOB_DEADLINE_SECONDS, CONTINUATION and terminationGracePeriodSeconds.
+    // DJ28's and DJ29's JOB_DEADLINE_SECONDS, CONTINUATION and terminationGracePeriodSeconds.
     let today = include_str!("../../../golden/cloud-job-single-container.json");
     let now = serde_json::to_string_pretty(&trovato_job(false)).unwrap() + "\n";
     assert_eq!(now, today);
@@ -1452,17 +1526,9 @@ fn chain_spec(timeout_minutes: u64) -> (DevJobSpec, CloudJobExtras) {
     (spec, extras)
 }
 
-#[test]
-fn job_deadline_seconds_always_equals_active_deadline_seconds() {
-    for timeout_minutes in [120, 315] {
-        let (spec, extras) = chain_spec(timeout_minutes);
-        let job = build_cloud_job("jesse-dev", "a", "p", "img", &spec, &extras, "turn");
-        let v = serde_json::to_value(&job).unwrap();
-        let deadline = v["spec"]["activeDeadlineSeconds"].clone();
-        assert_eq!(job_env_of(&v)["JOB_DEADLINE_SECONDS"], deadline.to_string());
-        assert_eq!(cloud_deadline_secs(&spec).to_string(), deadline.to_string());
-    }
-}
+// `job_deadline_seconds_always_equals_active_deadline_seconds`, further down, covers
+// JOB_DEADLINE_SECONDS == activeDeadlineSeconds for two timeouts (now also a drift guard on the
+// named 555 minute deadline, from the worker life change beside this one).
 
 #[test]
 fn the_pods_termination_grace_period_is_the_checkpoint_grace() {
@@ -1968,4 +2034,191 @@ fn the_largest_configured_sizes_convert_exactly_with_services_on_or_off() {
         wrapping.agent(true).memory_limit_mi,
         4_194_320u64 * 1024 - 1280
     );
+}
+
+// ---- kc-burst's own max_ttl, and the effective caps that follow it ------------------------
+
+fn write_kc_burst_config(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+#[test]
+fn kc_bursts_own_config_reads_max_ttl_or_explains_why_not() {
+    let dir = std::env::temp_dir().join(format!("jesse-kcburst-{}", random_hex()));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(
+        read_kc_burst_max_ttl(&write_kc_burst_config(
+            &dir,
+            "eight.toml",
+            "max_ttl = \"8h\"\n"
+        )),
+        Some(480)
+    );
+    assert_eq!(
+        read_kc_burst_max_ttl(&write_kc_burst_config(
+            &dir,
+            "twelve.toml",
+            "max_ttl = \"12h\"\n"
+        )),
+        Some(720)
+    );
+    assert_eq!(
+        read_kc_burst_max_ttl(&write_kc_burst_config(
+            &dir,
+            "mixed.toml",
+            "max_ttl = \"11h 30m\"\n"
+        )),
+        Some(690)
+    );
+    assert_eq!(
+        read_kc_burst_max_ttl(&dir.join("missing.toml")),
+        None,
+        "a missing file"
+    );
+    assert_eq!(
+        read_kc_burst_max_ttl(&write_kc_burst_config(&dir, "no_key.toml", "other = 1\n")),
+        None,
+        "no top level max_ttl"
+    );
+    assert_eq!(
+        read_kc_burst_max_ttl(&write_kc_burst_config(
+            &dir,
+            "not_toml.toml",
+            "{{{ this is not toml at all"
+        )),
+        None,
+        "not TOML"
+    );
+    assert_eq!(
+        read_kc_burst_max_ttl(&write_kc_burst_config(
+            &dir,
+            "unparseable.toml",
+            "max_ttl = \"soon\"\n"
+        )),
+        None,
+        "max_ttl does not parse as a duration"
+    );
+}
+
+#[test]
+fn effective_caps_follow_kc_bursts_live_max_ttl_when_it_is_lower() {
+    let base = CloudSettings {
+        worker_life_minutes: 720,
+        max_timeout_minutes: 555,
+        ..CloudSettings::default()
+    };
+    let eight_hours = CloudSettings {
+        kc_burst_max_ttl_minutes: Some(480),
+        ..base.clone()
+    };
+    assert_eq!(eight_hours.effective_worker_life_minutes(), 480);
+    assert_eq!(eight_hours.effective_max_timeout_minutes(), 315);
+
+    let twelve_hours = CloudSettings {
+        kc_burst_max_ttl_minutes: Some(720),
+        ..base.clone()
+    };
+    assert_eq!(twelve_hours.effective_worker_life_minutes(), 720);
+    assert_eq!(twelve_hours.effective_max_timeout_minutes(), 555);
+
+    let unread = CloudSettings {
+        kc_burst_max_ttl_minutes: None,
+        ..base.clone()
+    };
+    assert_eq!(unread.effective_worker_life_minutes(), 720);
+    assert_eq!(unread.effective_max_timeout_minutes(), 555);
+
+    // A configured max_timeout_minutes below every ceiling above stays exactly what it is.
+    for kc_burst_max_ttl_minutes in [Some(480), Some(720), None] {
+        let s = CloudSettings {
+            max_timeout_minutes: 200,
+            kc_burst_max_ttl_minutes,
+            ..base.clone()
+        };
+        assert_eq!(s.effective_max_timeout_minutes(), 200);
+    }
+}
+
+#[test]
+fn cloud_capped_timeout_minutes_is_fed_the_effective_cap() {
+    let base = CloudSettings {
+        worker_life_minutes: 720,
+        max_timeout_minutes: 555,
+        ..CloudSettings::default()
+    };
+    let eight_hours = CloudSettings {
+        kc_burst_max_ttl_minutes: Some(480),
+        ..base.clone()
+    };
+    let granted =
+        cloud_capped_timeout_minutes(Some(600), eight_hours.effective_max_timeout_minutes());
+    assert_eq!(granted, 315);
+    assert!(timeout_reduced_note(Some(600), granted, "the cloud").is_some());
+
+    let twelve_hours = CloudSettings {
+        kc_burst_max_ttl_minutes: Some(720),
+        ..base.clone()
+    };
+    let granted =
+        cloud_capped_timeout_minutes(Some(600), twelve_hours.effective_max_timeout_minutes());
+    assert_eq!(granted, 555);
+    assert!(timeout_reduced_note(Some(600), granted, "the cloud").is_some());
+}
+
+#[test]
+fn job_deadline_seconds_always_equals_active_deadline_seconds() {
+    for minutes in [555u64, 60u64] {
+        let mut spec = DevJobSpec::validate(
+            args(json!({ "repo": "jeremyandrews/trovato", "prompt": "x", "branch_slug": "gd5-x" })),
+            Agent::Claude,
+        )
+        .unwrap();
+        spec.timeout_minutes = minutes;
+        let extras = CloudJobExtras {
+            run_id: "GD5".into(),
+            merge: MergeDecision::No,
+            merge_deny: CloudSettings::default().merge_deny_env(),
+            resources: CloudSettings::default().job_resources(),
+            services: CloudSettings::default().services,
+            chain: None,
+        };
+        let image = format!(
+            "ghcr.io/jeremyandrews/jesse-dev-agent@sha256:{}",
+            "c".repeat(64)
+        );
+        let job = build_cloud_job(
+            "jesse-dev",
+            "agent-gd5-x-abcde",
+            "prompt-gd5-x-abcde",
+            &image,
+            &spec,
+            &extras,
+            "turn",
+        );
+        let v = serde_json::to_value(&job).unwrap();
+        let deadline = v["spec"]["activeDeadlineSeconds"].as_u64().unwrap();
+        let env: BTreeMap<String, String> = v["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_string(),
+                    e["value"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(env["JOB_DEADLINE_SECONDS"], deadline.to_string());
+        assert_eq!(cloud_deadline_secs(&spec), deadline);
+    }
+    // Named numbers, as a guard against drift: 555 minutes is 705 minutes (42300s) of deadline.
+    let mut spec555 = DevJobSpec::validate(
+        args(json!({ "repo": "jeremyandrews/trovato", "prompt": "x", "branch_slug": "gd5-x" })),
+        Agent::Claude,
+    )
+    .unwrap();
+    spec555.timeout_minutes = 555;
+    assert_eq!(cloud_deadline_secs(&spec555), 42300);
 }

@@ -10,7 +10,8 @@ is `bridge/src/devjob/cloud.rs`.
 `devjob_start` takes `host`: absent or `cluster` is the home cluster, unchanged byte for byte;
 `studio` is a Studio run, unchanged; `cloud` is a Job in `jesse-dev` on kc1. A cloud start takes
 the Studio's three shapes (`strand` + `item_id`, `draft`, or `prompt` + `branch_slug` with
-`repo`) plus the cluster's `agent` and `test_command`, and `merge`. `timeout_minutes` is capped
+`repo`) plus the cluster's `agent` and `test_command`, `merge`, and (since 0.226.0) the
+Studio's `priority`. `timeout_minutes` is capped
 at `[devjob.cloud] max_timeout_minutes` (default 555), not the cluster's 240 — or less, live,
 when kc-burst's own `max_ttl` leaves less room (see "How long a run may take"); a reduction is
 named in the reply's `timeout_note`.
@@ -43,15 +44,25 @@ too old for it ([`cloud_resumable`], [`pin_to_worker`]). An idle worker too old 
 Job that found none is spent: it does not count as the queue's capacity, so `plan_pass` starts
 the Job a fresh worker in the same pass, and the spent one is stopped once idle `idle_minutes`.
 
-**Draining (`any`).** Each cloud pass, while a cloud slot is free (active plus queued cloud Jobs
-under `max_concurrent`) and the cost cap allows, the cloud takes the first queued Studio run, in
-the Studio queue's own order (resumed rounds, then priority, then oldest first; see "Priority"
-in `bridge/README.md`), that is waiting (`waiting_for` set: slot, repo, disk or limit), has
-never started a round, and whose draft says `devjob-host: any`. The take is atomic under
-the Studio queue's gate: the Studio record becomes `closed` with `closed_reason: moved to the
-cloud`, then the Job is created with the same run id, so the report keeps its name. If the Job
-cannot be created the record goes back to `queued`. The Studio's pump starts the same run if a
-Studio slot frees first; both decide under the same gate, so a run starts once.
+**One queue (0.226.0).** A cloud run is a run record like a Studio run's
+(`<root>/runs/<run_id>/run.json`, `host: "cloud"`), created by the Studio's own start
+(`HostRuns::create_on`) with the Studio's checks plus the cloud's two (no `local/<name>`
+repository; a draft must say `devjob-host: cloud` or `any`), its id from the Studio's
+`allocate_run_id`, and its priority from `priority` or the draft's `devjob-priority:`. It waits
+in the one queue with `waiting_for: cloud`. Each cloud pass, while a cloud slot is free (active
+plus queued cloud Jobs under `max_concurrent`) and a worker can be had, the cloud takes the
+first queued run in `queue_order` (resumed rounds, then priority, then oldest first; see
+"Priority" in `bridge/README.md`) whose host allows the cloud: a run asked for the cloud, or a
+run whose draft says `devjob-host: any` that waits for a Studio slot and never started
+(`HostRuns::take_for_cloud`). The take is atomic under the queue's gate: the record becomes
+`running`, on the cloud (`cloud.taken_at`), then its Job is created from the record
+(`DevJobs::record_run`: its `section.md`, wrapped by `cloud_paragraph`) and named on it
+(`cloud.job_name`). The run keeps its id, its record, its priority and its place on the Runs
+page; nothing is closed. If the Job cannot be created the record goes back to `queued`; if the
+cloud can never run it (its prompt is gone) a cloud run fails with the reason and an `any` run
+goes back to the queue as a Studio run. The Studio's pump only starts runs whose host allows
+the Studio, and never counts a run on the cloud against its slots. `devjob_priority` changes a
+queued cloud run's place exactly as a Studio run's.
 
 Two runs on one repository may now run at once (two cloud runs, or a cloud run beside a Studio
 run). Each cuts its branch from a freshly fetched `origin/main`; the Job rebases onto
@@ -201,22 +212,50 @@ through a pod, read its Secret) and nothing else; chat turns use `jesse:jesse`, 
 
 ## Lifecycle
 
-The same as a Studio run where it applies: strand and item launch (the Job carries the strand
-labels and the report the strand keys), the report in `Inbox/<date>-run-<run_id>.md` with
-`host: cloud` and `run: <run_id>` in its front matter, the agent's own report (it writes
-`$JESSE_RUN_REPORT`) as the report's final message, a push when it finishes, `devjob_status` by
-run id or Job name, `devjob_list` (under `cloud`), and `devjob_cancel` (a queued Job is deleted;
-a running one is stopped through `activeDeadlineSeconds` and reported). There is no reply: a
-cloud run has no session to continue, so a report that needs Jeremy is answered by a new run.
+The Studio's, on the run's record: strand and item launch (the start turn, the Job carrying the
+strand labels and the report the strand keys), `queued → running → reported / failed /
+cancelled`, `devjob_status` by run id (or Job name), `devjob_list` (the record under `studio`,
+with `host: "cloud"` and `job_name`; the Job under `cloud`), `devjob_priority`, `devjob_cancel`
+and `devjob_close`, and the Studio's own settling and archiving. The report is
+`Inbox/<date>-run-<run_id>.md` with `host: cloud` and `run: <run_id>` in its front matter, the
+agent's own report (it writes `$JESSE_RUN_REPORT`) as the report's final message, and a push.
+`DevJobs::finalize` writes it from the pod's log, then ends the record's round with its path and
+outcome (`HostRuns::cloud_ended`). A continuation (see "Continuing a capped run") is the same
+record's next round: the record stays `running`, its `cloud.job_name` moves to the new Job and
+`cloud.jobs` lists every link.
+
+Cancel (`devjob_cancel`, or the Runs page) goes through the record (`HostRuns::cancel`): a
+queued run is cancelled; a run on the cloud asks its Job to stop (`CloudJobs::cancel`, the
+cloud host's `DevJobs`): a Job not yet released onto a worker is deleted and the run is
+cancelled at once; a running one is stopped through `activeDeadlineSeconds` and reported, and
+its report ends the run as cancelled. A cancel that lands while the Job is being made stops the
+Job as soon as it is named.
+
+There is no reply yet: a pod has no session to continue. `reply` and `review` on a cloud run
+are refused by the record. Review of cloud runs is DJ30's Part B
+(`docs/design/one-run-pipeline.md`).
+
+**Jobs from before 0.226.0.** A Job an earlier bridge created has no record that owns it (its
+run either had none, or was closed `moved to the cloud`). It finishes under the old path: it is
+released, reported and continued as before, listed read only on the Runs page, and
+`devjob_cancel` and `devjob_status` still reach it by run id or Job name. It counts against the
+cloud's slots.
 
 ## On the app's Runs page
 
-`GET /jesse/runs` (0.216.0) lists the cloud's queued, running and last 20 finished runs beside
-the Studio's, with `host: "cloud"`, `counts.cloud`, and `cloud_available` (false, with
-`cloud_unavailable`, when there is no cloud host or kc1 does not answer within 3 s). A cloud run
-is read only there: its detail and log answer (`?host=cloud`; 503 when kc1 fails or does not answer
-in 6 s, 404 only when it answers without the run), and every action is refused with "cloud runs
-are managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
+`GET /jesse/runs` lists a cloud run as the run it is: its record's row, with `host: "cloud"`
+and `job_name`, counted under `counts.cloud`, not the Studio's tallies. `GET /jesse/runs/:id`
+(with or without `?host=cloud`) serves the record, with the Job's current `waiting_for`,
+`last_line` and `elapsed_secs` while it runs; `/log` is the Job's log. `cancel`, `close`,
+`archive` and `unarchive` act on the record as for a Studio run; `reply` and `review` are
+refused by it until Part B. The app still hides the action buttons on a cloud row (it decides
+by `host`); that is an app change of its own.
+
+A Job no record owns (from before 0.226.0) is still merged in read only (0.216.0's behavior):
+`cloud_available` (false, with `cloud_unavailable`, when there is no cloud host or kc1 does not
+answer within 3 s), its detail and log by `?host=cloud` (503 when kc1 fails or does not answer
+in 6 s, 404 only when it answers without the run), and every action refused with "cloud runs are
+managed through Jesse". `src/hostrun/cloud.rs` has the details. Its status:
 
 | The Job | Status |
 | --- | --- |

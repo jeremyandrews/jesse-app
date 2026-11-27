@@ -239,7 +239,7 @@ fn devjob_start_takes_a_priority_on_the_studio_and_refuses_one_elsewhere() {
     let e = plan(json!({ "host": "studio", "draft": "Projects/drafts/x.md", "priority": "asap" }))
         .unwrap_err();
     assert!(e.contains("\"asap\"") && e.contains("urgent"), "{e}");
-    for host in [json!(null), json!("cluster"), json!("cloud")] {
+    for host in [json!(null), json!("cluster")] {
         let mut args = json!({ "repo": "o/n", "prompt": "p", "branch_slug": "x",
                                "priority": "high" });
         if !host.is_null() {
@@ -250,6 +250,16 @@ fn devjob_start_takes_a_priority_on_the_studio_and_refuses_one_elsewhere() {
             e.contains("priority applies only with host \"studio\""),
             "{e}"
         );
+    }
+    // A cloud run waits in the same queue, so it takes a priority too (0.226.0).
+    match plan(
+        json!({ "host": "cloud", "repo": "o/n", "prompt": "p", "branch_slug": "x",
+                       "priority": "high" }),
+    )
+    .unwrap()
+    {
+        devjob::StartPlan::Cloud(c) => assert_eq!(c.priority, Some(Priority::High)),
+        other => panic!("{other:?}"),
     }
 }
 

@@ -795,12 +795,8 @@ fn the_cloud_agent_is_told_it_has_no_credential_and_how_its_run_ends() {
 }
 
 #[test]
-fn a_cloud_run_id_never_takes_one_already_used() {
-    let taken = ["GD5", "GD5-2", "s-fix"];
-    let t = |id: &str| taken.contains(&id);
-    assert_eq!(unique_run_id("GD5", t), "GD5-3");
-    assert_eq!(unique_run_id("s-fix", t), "s-fix-2");
-    assert_eq!(unique_run_id("GD6", t), "GD6");
+fn a_cloud_runs_slug_is_its_studio_branch_name_cut_short() {
+    // Its run id is the Studio's own (`allocate_run_id`), so only the slug is the cloud's.
     assert_eq!(
         cloud_slug("GD5", Some("Run the thing on the Studio.")),
         "gd5-run-the-thing-on-the-studio"

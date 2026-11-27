@@ -1059,10 +1059,12 @@ enabled = true
 `high` or `urgent`, stored by name in `run.json` as `priority` (written only when not `normal`,
 so a record from an older bridge, with no field, reads as `normal` and nothing is migrated).
 
-- **Setting it at launch.** `devjob_start` with `host: "studio"` and `priority`, or a draft whose
-  front matter says `devjob-priority: high`. The argument wins over the draft; with neither the
-  run is `normal`. Any other value is refused, naming the four, never read as `normal`. The
-  cluster and the cloud refuse `priority`: their own queues start runs in the order asked.
+- **Setting it at launch.** `devjob_start` with `host: "studio"` or `host: "cloud"` and
+  `priority`, or a draft whose front matter says `devjob-priority: high`. The argument wins over
+  the draft; with neither the run is `normal`. Any other value is refused, naming the four, never
+  read as `normal`. A cloud run waits in this same queue (0.226.0), so a cloud slot takes cloud
+  runs by this same order (`docs/devjob-cloud.md`, "One queue"). The cluster refuses
+  `priority`: its own queue starts runs in the order asked.
   `POST /jesse/runs` takes no `priority` yet; the draft's key still applies there and to a
   strand schedule entry.
 - **Changing it while queued.** `devjob_priority { run_id, priority }` changes a `queued` run

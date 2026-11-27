@@ -214,6 +214,31 @@ the entrypoint are the same user, so hiding the token stops an agent following a
 kubeconfig is the ServiceAccount `jesse:devjob`, which can create Jobs in `jesse-dev` (and so,
 through a pod, read its Secret) and nothing else; chat turns use `jesse:jesse`, which cannot.
 
+## Several pull requests in order
+
+A cloud run may ship several pull requests, in order, each merged once CI is green before the
+next is cut, as a Studio run does with a prompt that says "Part 1, then Part 2, each merged before
+the next is cut" (since bridge 0.229.0, with the dev-agent image of k3s DJ31). The agent commits
+each finished part but the last on a branch of its own, cut from `origin/main`, and asks for it
+in `part.txt`; the entrypoint ships it as `jesse/<slug>-part-<n>`, titled
+`[<run id>] Part <n>: <title>`, through the same test, push, CI wait and merge guard, then resumes
+the agent on the new `main` in the same session. The last part is the run's own pull request.
+The prerequisite path (`prerequisite.txt`, a fix outside the task shipped first) is the same
+mechanism. The agent still holds no credential: it asks, and the entrypoint ships.
+
+A part the run may not merge (no `merge`, a repository on the deny list, a reviewed run's held
+first Job, whose `AUTO_MERGE` is empty) is opened as a draft and stops the run with a
+`NEEDS YOU:` line naming it, since the next part cannot be cut on an unmerged one. A reviewed
+cloud run therefore does not yet ship parts the way a reviewed Studio run does (its first part
+held for the review, the rest shipped by the answering round): that needs the entrypoint to hold
+at a part and the answering Job to continue it, which it does not do yet.
+
+The report lists them all: `pull_request:` stays the run's own, and a run that shipped any part
+or prerequisite adds `pull_requests:`, every pull request in order, its own last, each
+`<url> <squash commit>` (the URL alone when it did not merge). The bridge reads `pull_requests`
+when it is there and falls back to `pull_request` (`DevJobReport::pull_requests`); the Inbox
+report lists them in order under its title, and the push ends `· pull requests #4, #5, #6`.
+
 ## Lifecycle
 
 The Studio's, on the run's record: strand and item launch (the start turn, the Job carrying the

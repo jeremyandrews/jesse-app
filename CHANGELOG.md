@@ -14,6 +14,41 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.229.0] - 2026-11-27
+
+**A cloud run's report and push name every pull request it opened, in order (DJ31, Part 2).**
+
+- **Root cause.** The dev-agent entrypoint now ships a prompt's parts in order (k3s DJ31, Part
+  1): each finished part but the last is opened as `[<run_id>] Part <n>: <title>`, merged on
+  green, and the agent carries on on the new `main`. Its report keeps `pull_request:` as the
+  run's own and adds `pull_requests:`, every pull request in order, its own last. The bridge read
+  only `pull_request`, so the run report and the push named only the last one, and the
+  `devjob_start` description and `docs/devjob-cloud.md` described a cloud run as one pull request.
+- **Behavior change.**
+  - **Parsing.** `parse_report` reads `pull_requests` into `DevJobReport::pull_requests`;
+    `DevJobReport::pull_requests()` lists them in order (URL and squash commit), falling back to
+    `pull_request` when the report has no `pull_requests` (an older image, or a run that shipped
+    nothing first).
+  - **The Inbox report.** A run with several pull requests lists them in order under its title,
+    each with its squash commit, in place of the one `Pull request:` line; the report table gains
+    the `pull_requests` row. A run with one is unchanged.
+  - **The push.** A finished run with several pull requests ends its body with
+    `· pull requests #4, #5, #6`, in order. A run with one is unchanged.
+  - **Words.** The `devjob_start` description (host `cloud`) and `docs/devjob-cloud.md` ("Several
+    pull requests in order") say a cloud run may ship several pull requests in order, each merged
+    on green before the next is cut, and that a part the run may not merge stops it with
+    `NEEDS YOU:`.
+- **Review.** Unchanged. A reviewed cloud run's held first Job runs with `AUTO_MERGE` empty, so a
+  part it ships is opened as a draft and stops the run with `NEEDS YOU:`; nothing merges
+  unreviewed. Holding at a part for its review, as a reviewed Studio run does, needs the
+  entrypoint to hold at a part and the answering Job to continue it, which it does not do yet.
+- **Needs the dev-agent image with parts** (jeremyandrews/k3s DJ31, Part 1) in
+  `[devjob.cloud] image`.
+- **Tests.** `devjob/tests.rs`: the three part report parses in order with its squash commits;
+  a report without `pull_requests` falls back to `pull_request`; an entry without a squash
+  commit is kept and junk is dropped; the Inbox report and the push name every pull request in
+  order, and only when there are several.
+
 ## [bridge 0.228.0] - 2026-11-27
 
 **A cloud Job retries a killed pod once, from its checkpoint, instead of ending the run with no

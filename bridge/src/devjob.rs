@@ -975,8 +975,12 @@ pub struct DevJobReport {
     pub agent_version: Option<String>,
     pub model: Option<String>,
     pub branch: Option<String>,
-    /// A URL, or `none`.
+    /// A URL, or `none`: the run's own pull request.
     pub pull_request: Option<String>,
+    /// Every pull request the run opened, in order, the run's own last: `<url> <squash commit>`
+    /// or `<url>` alone, comma separated. Only a run that shipped a part or a prerequisite
+    /// before its own pull request prints it ([`DevJobReport::pull_requests`]).
+    pub pull_requests: Option<String>,
     pub test_command: Option<String>,
     pub test_command_exit: Option<String>,
     pub agent_exit: Option<String>,
@@ -995,6 +999,43 @@ impl DevJobReport {
         self.pull_request
             .as_deref()
             .filter(|p| p.starts_with("https://") || p.starts_with("http://"))
+    }
+
+    /// Every pull request the run opened, in order: the report's `pull_requests` when it has
+    /// one, else its one `pull_request` (an older image, or a run that shipped nothing first).
+    /// Only `http(s)://` URLs; the squash commit when the entry names one.
+    pub fn pull_requests(&self) -> Vec<ReportPullRequest> {
+        let listed: Vec<ReportPullRequest> = self
+            .pull_requests
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|entry| {
+                let mut words = entry.split_whitespace();
+                let url = words.next()?;
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return None;
+                }
+                let squash = words
+                    .next()
+                    .filter(|w| w.len() >= 7 && w.chars().all(|c| c.is_ascii_hexdigit()));
+                Some(ReportPullRequest {
+                    url: url.to_string(),
+                    squash: squash.map(str::to_string),
+                })
+            })
+            .collect();
+        if !listed.is_empty() {
+            return listed;
+        }
+        self.pull_request_url()
+            .map(|url| {
+                vec![ReportPullRequest {
+                    url: url.to_string(),
+                    squash: None,
+                }]
+            })
+            .unwrap_or_default()
     }
 
     /// The report a log with no complete block stands for: a failed run whose report is missing.
@@ -1021,6 +1062,7 @@ impl DevJobReport {
         opt("model", &self.model, &mut rows);
         opt("branch", &self.branch, &mut rows);
         opt("pull_request", &self.pull_request, &mut rows);
+        opt("pull_requests", &self.pull_requests, &mut rows);
         opt("test_command", &self.test_command, &mut rows);
         opt("test_command_exit", &self.test_command_exit, &mut rows);
         opt("agent_exit", &self.agent_exit, &mut rows);
@@ -1029,6 +1071,33 @@ impl DevJobReport {
         }
         rows
     }
+}
+
+/// One pull request a run opened ([`DevJobReport::pull_requests`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportPullRequest {
+    pub url: String,
+    /// Its squash commit on the default branch, when it merged and the report names it.
+    pub squash: Option<String>,
+}
+
+/// The pull requests a run opened, for a push body: ` · pull requests #4, #5, #6` in order, or
+/// nothing when it opened fewer than two (the push already says a pull request was opened).
+pub fn pull_requests_push_suffix(report: &DevJobReport) -> String {
+    let prs = report.pull_requests();
+    if prs.len() < 2 {
+        return String::new();
+    }
+    let names: Vec<String> = prs
+        .iter()
+        .map(|p| match p.url.rsplit_once("/pull/") {
+            Some((_, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+                format!("#{n}")
+            }
+            _ => p.url.clone(),
+        })
+        .collect();
+    format!(" · pull requests {}", names.join(", "))
 }
 
 /// What a run came to, for a push title and the Job's [`ANN_OUTCOME`].
@@ -1126,6 +1195,7 @@ pub fn parse_report(log: &str) -> Result<DevJobReport, String> {
             "model" => r.model = v,
             "branch" => r.branch = v,
             "pull_request" => r.pull_request = v,
+            "pull_requests" => r.pull_requests = v,
             "test_command" => r.test_command = v,
             "test_command_exit" => r.test_command_exit = v,
             "agent_exit" => r.agent_exit = v,
@@ -2108,7 +2178,21 @@ pub fn render_report_with(
         Some(id) => s.push_str(&format!("# Cloud run {id}: {}\n\n", outcome.label())),
         None => s.push_str(&format!("# Dev job {}: {}\n\n", r.slug, outcome.label())),
     }
-    if let Some(url) = r.report.pull_request_url() {
+    let prs = r.report.pull_requests();
+    if prs.len() > 1 {
+        s.push_str("Pull requests, in order, the run's own last:\n\n");
+        for (i, p) in prs.iter().enumerate() {
+            let url = &p.url;
+            match &p.squash {
+                Some(sha) => s.push_str(&format!(
+                    "{}. [{url}]({url}), squash commit `{sha}`\n",
+                    i + 1
+                )),
+                None => s.push_str(&format!("{}. [{url}]({url})\n", i + 1)),
+            }
+        }
+        s.push('\n');
+    } else if let Some(url) = r.report.pull_request_url() {
         s.push_str(&format!("Pull request: [{url}]({url})\n\n"));
     }
     s.push_str("## Spec\n\n| | |\n| --- | --- |\n");
@@ -3240,9 +3324,10 @@ impl DevJobs {
                     let wall = wall_secs(report, v.started_ms, v.finished_ms)
                         .map(human_secs)
                         .unwrap_or_else(|| "unknown time".into());
+                    let prs = pull_requests_push_suffix(report);
                     let body = match cloud_run {
-                        None => format!("{} · {wall}", v.slug),
-                        Some(id) => format!("{id} in the cloud · {wall}"),
+                        None => format!("{} · {wall}{prs}", v.slug),
+                        Some(id) => format!("{id} in the cloud · {wall}{prs}"),
                     };
                     n.notify(outcome.title().to_string(), body, v.name.clone())
                         .await;
@@ -4099,7 +4184,14 @@ pub fn with_cloud(mut tools: Vec<Value>, max_timeout_minutes: u64) -> Vec<Value>
              credential; the job rebases onto origin/main, pushes, opens a pull request titled \
              [<run_id>] and, with merge true (or devjob-merge: true in the draft), merges it once \
              every CI run on its exact head is green; repositories on the deny list never \
-             merge. It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A \
+             merge. A prompt that asks for several pull requests in order may ship several: \
+             each finished part but the last is opened as [<run_id>] Part <n>: <title>, \
+             merged once CI on it is green before the next part is cut, and the agent \
+             carries on on the new main in the same run; the last part is the run's own pull \
+             request. A part the run may not merge (no merge, the deny list, a reviewed run's \
+             first job) stops the run with NEEDS YOU naming it, since the next part cannot \
+             be cut on an unmerged one. The report and the push name every pull request, in \
+             order. It returns a run_id; the report lands in Inbox/<date>-run-<run_id>.md. A \
              cloud run waits in the Studio's queue, as a run of its own on the Runs page: \
              priority and devjob_priority order it as they order Studio runs, and \
              devjob_cancel, devjob_close and devjob_status work on it by run id. A queued Studio \

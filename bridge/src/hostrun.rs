@@ -40,6 +40,14 @@
 //! reports, and strand bookkeeping is left to the two agent turns it sends. It deletes nothing
 //! outside `root` except the DerivedData folders a run recorded as its own, and never a run
 //! directory.
+//!
+//! **IT NEVER DELETES WORK THAT EXISTS ONLY ON THIS MACHINE.** Every removal of a run's worktrees
+//! (the hourly [`HostRuns::cleanup`], a paused run's after [`PAUSED_KEEP_DAYS`], the disk cap's
+//! [`HostRuns::space_pass`]) covers every git worktree under the run directory, the agent's own
+//! as well as the bridge's, and goes through [`git::remove_worktree`]: what no remote branch and
+//! no saved ref holds is saved first ([`git::save_work`], `jesse/<branch>-wip` on origin), and a
+//! worktree whose save fails is kept. A round that stops saves the same way, and a reply to a run
+//! whose worktree is gone restores it from that saved work ([`git::restore_worktree`]).
 
 pub mod cloud;
 pub mod git;
@@ -893,6 +901,11 @@ pub struct Cleanup {
     /// The branch was seen on origin once, so its absence later means it was deleted.
     #[serde(default)]
     pub branch_seen_on_origin: bool,
+    /// Where the last removal saved work that existed nowhere else before it removed a worktree
+    /// (`jesse/<branch>-wip`, or `refs/jesse/saved/...` in a local repository). Left out of the
+    /// JSON until set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_ref: Option<String>,
 }
 
 fn yes() -> bool {
@@ -1029,6 +1042,11 @@ pub struct RunRecord {
     /// Absent until the first one, so a run never messaged is byte for byte what it was.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<RunMessage>,
+    /// Every save of the run's work that existed only on this machine, oldest first: when a
+    /// round stops, and before a cleanup removes a worktree ([`git::save_work`]). Continue
+    /// restores from the newest when the worktree is gone. Absent until the first one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_refs: Vec<git::SavedRef>,
 }
 
 /// One message to a running run ([`RunRecord::messages`]).
@@ -1537,6 +1555,19 @@ pub fn now_ms() -> u64 {
 }
 
 /// RFC 3339 in UTC, to the millisecond.
+/// Add `s` to a record's `saved_refs`, unless the same ref already names the same commit.
+fn push_saved(v: &mut Vec<git::SavedRef>, s: &git::SavedRef) {
+    if !v.iter().any(|x| x.name == s.name && x.sha == s.sha) {
+        v.push(s.clone());
+    }
+}
+
+/// Whether two paths name the same place (canonicalized when they exist).
+fn same_path(a: &Path, b: &Path) -> bool {
+    let c = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    c(a) == c(b)
+}
+
 pub fn rfc(ms: u64) -> String {
     use chrono::TimeZone;
     chrono::Utc
@@ -2662,6 +2693,23 @@ pub fn render_inbox_with(
     s
 }
 
+/// The report with the lines [`save_on_stop`] gave (`Its work is saved on <ref> at <sha>.`, or why
+/// a save failed) at its end, beside its other metadata lines.
+pub fn with_saved_lines(mut text: String, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return text;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    for l in lines {
+        text.push_str(l);
+        text.push('\n');
+    }
+    text
+}
+
 /// The lines a local repository's Inbox report ends with.
 pub fn local_footer(rec: &RunRecord, local_main: Option<&str>) -> String {
     format!(
@@ -2754,6 +2802,83 @@ async fn write_report(
     let written = write_atomic(&abs, text.as_bytes());
     broker.release_call_direct(&turn, "report");
     written.map_err(|e| format!("could not write {rel}: {e}"))
+}
+
+/// Every git worktree of the run's repository inside its directory, the bridge's own
+/// `worktree/` first, then any an agent made beside it (`runs/<ID>/wt4`).
+fn run_worktrees_of(root: &Path, dir: &Path, rec: &RunRecord) -> Vec<git::RunWorktree> {
+    let bare = git::bare_path(root, &rec.repo);
+    let own = dir.join(WORKTREE_DIR);
+    let mut v = if bare.join("HEAD").is_file() {
+        git::run_worktrees(&bare, dir)
+    } else {
+        Vec::new()
+    };
+    if own.exists() && !v.iter().any(|w| same_path(&w.path, &own)) {
+        v.push(git::RunWorktree {
+            path: own.clone(),
+            branch: Some(rec.branch.clone()),
+        });
+    }
+    v.sort_by_key(|w| !same_path(&w.path, &own));
+    v
+}
+
+/// When a Studio run stops: every worktree in its directory that holds work found nowhere
+/// else is saved ([`git::save_if_unsaved`]), and each save is added to `saved_refs`. The
+/// lines for its report: `Its work is saved on <ref> at <sha>.` for each save, and one per
+/// save that failed. Never blocks the status change: a failure is only reported.
+fn save_on_stop(root: &Path, dir: &Path, rec: &RunRecord) -> Vec<String> {
+    if rec.on_cloud() {
+        return Vec::new();
+    }
+    let own = dir.join(WORKTREE_DIR);
+    let mut lines = Vec::new();
+    let mut saved: Vec<git::SavedRef> = Vec::new();
+    for w in run_worktrees_of(root, dir, rec) {
+        let is_own = same_path(&w.path, &own);
+        let name = w
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let branch = if is_own {
+            rec.branch.clone()
+        } else {
+            w.branch
+                .clone()
+                .unwrap_or_else(|| format!("{}-{name}", rec.branch))
+        };
+        match git::save_if_unsaved(root, &rec.repo, &w.path, &branch, &rec.run_id) {
+            Ok(None) => {}
+            Ok(Some(s)) => {
+                eprintln!(
+                    "jesse-bridge: hostrun {}: {name}: {}",
+                    rec.run_id,
+                    s.report_line()
+                );
+                lines.push(s.report_line());
+                saved.push(s);
+            }
+            Err(e) => {
+                eprintln!(
+                    "jesse-bridge: WARNING: hostrun {}: {name}: work not saved: {e}",
+                    rec.run_id
+                );
+                lines.push(format!(
+                    "The work in {name} could not be saved off this machine: {e}."
+                ));
+            }
+        }
+    }
+    if !saved.is_empty() {
+        let _ = update_run(dir, |r| {
+            for s in &saved {
+                push_saved(&mut r.saved_refs, s);
+            }
+        });
+    }
+    lines
 }
 
 // ---- CLOSING A SETTLED RUN ----------------------------------------------------------------
@@ -3903,13 +4028,19 @@ impl HostRuns {
                         &rec.branch,
                     )?);
                 } else {
-                    git::restore_worktree(
+                    let point = git::restore_worktree(
                         &self.settings.root,
                         &rec.repo,
                         &self.clone_url(&rec.repo),
                         &worktree,
                         &rec.branch,
+                        &rec.run_id,
+                        &rec.saved_refs,
                     )?;
+                    eprintln!(
+                        "jesse-bridge: hostrun {}: worktree restored from {} at {}",
+                        rec.run_id, point.from, point.sha
+                    );
                 }
             }
             std::fs::create_dir_all(dir.join(TARGET_DIR))
@@ -4304,15 +4435,37 @@ impl HostRuns {
             let _ = git::lock_repo(&root, &rec.repo)
                 .and_then(|_l| git::ensure_bare(&git::bare_path(&root, &rec.repo), &url));
         }
-        if !dir.join(WORKTREE_DIR).exists()
-            && git::branch_on_origin(&self.settings.root, &rec.repo, &rec.branch) != Some(true)
-        {
-            return Err(Refusal::State(format!(
-                "{run_id}'s worktree was removed and its branch {} is not on origin, so there is \
-                 nothing to continue from",
-                rec.branch
-            )));
+        // A Studio run whose worktree is gone continues from its branch or from its saved work
+        // ([`git::restore_point`]); the agent is told when it is the saved work.
+        let mut restored_note: Option<String> = None;
+        if !dir.join(WORKTREE_DIR).exists() {
+            if rec.on_cloud() {
+                if git::branch_on_origin(&self.settings.root, &rec.repo, &rec.branch) != Some(true)
+                {
+                    return Err(Refusal::State(format!(
+                        "{run_id}'s worktree was removed and its branch {} is not on origin, so \
+                         there is nothing to continue from",
+                        rec.branch
+                    )));
+                }
+            } else {
+                let point = git::restore_point(
+                    &self.settings.root,
+                    &rec.repo,
+                    &self.clone_url(&rec.repo),
+                    &rec.branch,
+                    &rec.run_id,
+                    &rec.saved_refs,
+                )
+                .map_err(|e| Refusal::State(format!("{run_id}: {e}")))?;
+                restored_note = point.continue_note();
+            }
         }
+        let text = match &restored_note {
+            Some(note) => format!("{text}\n\n{note}"),
+            None => text.to_string(),
+        };
+        let text = text.as_str();
         let now = rfc(now_ms());
         // NOTHING LOST: a message the hook never delivered (the round ended first, or the agent
         // takes none mid-round) goes at the head of this round's text, in the order sent.
@@ -6401,6 +6554,7 @@ impl HostRuns {
                     "jesse-bridge: hostrun {}: INTERRUPTED (no runner, no exit)",
                     r.run_id
                 );
+                save_on_stop(&self.settings.root, &dir, &r);
                 // One automatic round, unless this run already had one since its last
                 // completed round: a second interruption waits for a person.
                 let resumed = self.settings.auto_resume_interrupted && !r.restart_resumed && {
@@ -6513,6 +6667,14 @@ impl HostRuns {
         // the head of the next round when there is one.
         let rec = self.sync_messages(run_id).unwrap_or(rec);
         let report = with_undelivered(report, &rec);
+        // NOTHING LOST: what the round left that exists only on this machine is saved off it now,
+        // whatever the round came to. A failed save is reported, never a reason to stop.
+        let saved_lines = {
+            let (root, d, r) = (self.settings.root.clone(), dir.clone(), rec.clone());
+            tokio::task::spawn_blocking(move || save_on_stop(&root, &d, &r))
+                .await
+                .unwrap_or_else(|e| vec![format!("The run's work could not be saved: {e}.")])
+        };
         // The answering round's note moves to `Inbox/archive/` as its report is written, and
         // the report links it where it now is.
         let notes_now = self.archive_answered_notes(&rec, &answering);
@@ -6535,7 +6697,10 @@ impl HostRuns {
                     None
                 };
                 let text = with_note_links(
-                    render_inbox_with(&rec, round.n, status, &report, local_main.as_deref()),
+                    with_saved_lines(
+                        render_inbox_with(&rec, round.n, status, &report, local_main.as_deref()),
+                        &saved_lines,
+                    ),
                     &notes_now,
                 );
                 write_report(&self.notes_root, &sink.broker, run_id, &rel, &text).await?;
@@ -6717,6 +6882,14 @@ impl HostRuns {
             "jesse-bridge: hostrun {} PAUSED for the usage limit until {resume_at}",
             rec.run_id
         );
+        {
+            let (root, d, r) = (
+                self.settings.root.clone(),
+                dir.to_path_buf(),
+                updated.clone(),
+            );
+            let _ = tokio::task::spawn_blocking(move || save_on_stop(&root, &d, &r)).await;
+        }
         if !updated.limit_pushed {
             update_run(dir, |r| r.limit_pushed = true)?;
             if let Some(n) = &sink.notifier {
@@ -6889,25 +7062,74 @@ impl HostRuns {
         Ok(())
     }
 
-    /// Remove a run's worktree and its local branch.
-    fn remove_worktree(&self, dir: &Path, rec: &RunRecord, now: u64) -> u64 {
-        let wt = dir.join(WORKTREE_DIR);
-        let freed = sys::tree_bytes(&wt);
-        match git::remove_worktree(&self.settings.root, &rec.repo, &wt, &rec.branch) {
-            Ok(()) => {
-                let at = rfc(now);
-                let _ = update_run(dir, |r| {
-                    r.cleanup.worktree_removed = Some(at.clone());
-                    r.cleanup.kept = false;
-                });
-                eprintln!("jesse-bridge: hostrun {}: worktree removed", rec.run_id);
-                freed
-            }
-            Err(e) => {
-                eprintln!("jesse-bridge: hostrun {}: {e}", rec.run_id);
-                0
+    /// Every git worktree of the run's repository inside its directory ([`run_worktrees_of`]).
+    fn run_worktrees(&self, dir: &Path, rec: &RunRecord) -> Vec<git::RunWorktree> {
+        run_worktrees_of(&self.settings.root, dir, rec)
+    }
+
+    /// Remove every worktree of the run ([`HostRuns::run_worktrees`]), each only once its work
+    /// is saved ([`git::remove_worktree`]): the bytes freed, and why each one kept was kept. A
+    /// save is recorded in `cleanup.saved_ref` and `saved_refs`.
+    fn remove_worktrees(&self, dir: &Path, rec: &RunRecord, now: u64) -> (u64, Vec<String>) {
+        let own = dir.join(WORKTREE_DIR);
+        let mut freed = 0u64;
+        let mut kept: Vec<String> = Vec::new();
+        for w in self.run_worktrees(dir, rec) {
+            let is_own = same_path(&w.path, &own);
+            let name = w
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let branch = if is_own {
+                rec.branch.clone()
+            } else {
+                w.branch
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-{name}", rec.branch))
+            };
+            let bytes = sys::tree_bytes(&w.path);
+            match git::remove_worktree(
+                &self.settings.root,
+                &rec.repo,
+                &w.path,
+                &branch,
+                &rec.run_id,
+            ) {
+                Ok(saved) => {
+                    freed += bytes;
+                    let at = rfc(now);
+                    let _ = update_run(dir, |r| {
+                        if is_own {
+                            r.cleanup.worktree_removed = Some(at.clone());
+                        }
+                        r.cleanup.kept = false;
+                        if let Some(s) = &saved {
+                            r.cleanup.saved_ref = Some(s.name.clone());
+                            push_saved(&mut r.saved_refs, s);
+                        }
+                    });
+                    match &saved {
+                        Some(sv) => eprintln!(
+                            "jesse-bridge: hostrun {}: worktree {name} removed; {}",
+                            rec.run_id,
+                            sv.report_line()
+                        ),
+                        None => {
+                            eprintln!(
+                                "jesse-bridge: hostrun {}: worktree {name} removed",
+                                rec.run_id
+                            )
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("jesse-bridge: hostrun {}: KEPT: {e}", rec.run_id);
+                    kept.push(e);
+                }
             }
         }
+        (freed, kept)
     }
 
     /// The clone URL for a run's repository: none for a local repository, which has no remote.
@@ -6963,10 +7185,11 @@ impl HostRuns {
             };
             let age = now.saturating_sub(fin);
             let past_keep = age >= self.settings.keep_days * DAY_MS;
-            let wt = dir.join(WORKTREE_DIR);
+            // The bridge's own worktree and any an agent made beside it.
+            let has_wt = !self.run_worktrees(&dir, &rec).is_empty();
             let artifacts = self.has_build_output(&dir, &rec);
             let terminal = rec.status.is_terminal();
-            let gone = terminal && (artifacts || wt.exists()) && self.merged_or_gone(&dir, &rec);
+            let gone = terminal && (artifacts || has_wt) && self.merged_or_gone(&dir, &rec);
             if artifacts && (gone || past_keep) {
                 self.remove_build_output(&dir, &rec, now);
             }
@@ -6988,9 +7211,9 @@ impl HostRuns {
                     });
                 }
             }
-            if wt.exists() {
+            if has_wt {
                 if terminal && (gone || past_keep) {
-                    self.remove_worktree(&dir, &rec, now);
+                    self.remove_worktrees(&dir, &rec, now);
                 } else if !terminal
                     && rec.status != RunStatus::AwaitingMerge
                     && age >= PAUSED_KEEP_DAYS * DAY_MS
@@ -7012,7 +7235,7 @@ impl HostRuns {
                             });
                         }
                         Some(_) => {
-                            self.remove_worktree(&dir, &rec, now);
+                            self.remove_worktrees(&dir, &rec, now);
                         }
                     }
                 }
@@ -7030,7 +7253,7 @@ impl HostRuns {
             }
         }
         drop(_gate);
-        self.space_pass(now);
+        effects.extend(self.space_pass(now));
         effects
     }
 
@@ -7038,13 +7261,16 @@ impl HostRuns {
     /// build output of finished runs oldest first, then worktrees of reported, failed and
     /// cancelled runs oldest first, then `extra/` of runs the cleanup would remove it from now
     /// (past `keep_days`, warned), until both hold. Never a running or queued run, nor a paused
-    /// run's worktree, nor `extra/` of a run within `keep_days` of finishing.
-    pub fn space_pass(&self, now: u64) {
+    /// run's worktree, nor `extra/` of a run within `keep_days` of finishing. A worktree whose
+    /// work cannot be saved is skipped, never removed; when free space is still under the floor
+    /// at the end and such worktrees were kept, the one push saying so is returned.
+    pub fn space_pass(&self, now: u64) -> Vec<Effect> {
         let _gate = lock(&self.gate);
-        self.space_pass_locked(now);
+        self.space_pass_locked(now)
     }
 
-    fn space_pass_locked(&self, now: u64) {
+    fn space_pass_locked(&self, now: u64) -> Vec<Effect> {
+        let mut effects = Vec::new();
         let mut total = sys::tree_bytes(&self.settings.root);
         let free = || sys::free_bytes(&self.settings.root);
         let over = |total: u64| {
@@ -7073,14 +7299,20 @@ impl HostRuns {
                     freed += f;
                 }
             }
+            // A disk-full event is when runs stop mid work: a worktree whose work cannot be
+            // saved is kept, and the pass goes on to the next.
+            let mut unsaved: Vec<(String, usize)> = Vec::new();
             for (dir, rec) in &finished {
                 if !over(total) {
                     break;
                 }
-                if rec.status.is_terminal() && dir.join(WORKTREE_DIR).exists() {
-                    let f = self.remove_worktree(dir, rec, now);
+                if rec.status.is_terminal() && !self.run_worktrees(dir, rec).is_empty() {
+                    let (f, kept) = self.remove_worktrees(dir, rec, now);
                     total = total.saturating_sub(f);
                     freed += f;
+                    if !kept.is_empty() {
+                        unsaved.push((rec.run_id.clone(), kept.len()));
+                    }
                 }
             }
             // extra/ last, and only where the cleanup itself would remove it now.
@@ -7114,6 +7346,20 @@ impl HostRuns {
                 human_bytes(freed),
                 human_bytes(total)
             );
+            if !unsaved.is_empty() && free().is_some_and(|f| f < self.settings.min_free_bytes) {
+                let n: usize = unsaved.iter().map(|(_, k)| k).sum();
+                let ids: Vec<&str> = unsaved.iter().map(|(id, _)| id.as_str()).collect();
+                let body = format!(
+                    "Disk low: {n} run worktrees hold unsaved work and were kept: {}",
+                    ids.join(", ")
+                );
+                eprintln!("jesse-bridge: hostrun SPACE PASS {body}");
+                effects.push(Effect::Push {
+                    title: "Disk low".into(),
+                    body,
+                    run_id: ids[0].to_string(),
+                });
+            }
         }
         let mut h = lock(&self.house);
         h.last_total_bytes = Some(total);
@@ -7125,6 +7371,7 @@ impl HostRuns {
                 free_bytes: free(),
             });
         }
+        effects
     }
 
     /// At start and daily: repair only what is provably this module's own. A worktree a bare

@@ -14,6 +14,50 @@ Every commit that changes a component **must** bump that component's version and
 add an entry here — enforced by `scripts/version-guard.sh` (the pre-push hook and
 CI both run it). See the "Versioning" section of `bridge/README.md`.
 
+## [bridge 0.230.1] - 2026-11-28
+
+**A Studio run's unsaved work is saved before any removal, and continue resumes from it (DJ37).**
+
+- **Root cause.** `git::remove_worktree` ran `git worktree remove --force` and then
+  `git branch -D <branch>` for every GitHub repository, on the assumption that the branch had
+  been pushed. Nothing checked that: a run that stopped before its first push lost its commits,
+  and `--force` threw away its uncommitted changes. The disk cap removed the worktrees of the
+  newest stopped runs exactly when a full disk had stopped them mid work, worktrees an agent
+  made beside its own (`runs/<ID>/wt4`) were never looked at, and continue could restore only
+  from `origin/<branch>`. On 2026-11-28 run B83b stopped on ENOSPC after merging PR 3 of 5; its
+  never-pushed branch was deleted, continue was refused, and an hour of work was redone.
+- **Behavior change.**
+  - **Checked, then saved, then removed.** `git::unsaved_work` names uncommitted or untracked
+    changes (`.gitignore` obeyed) and commits no remote branch and no `refs/jesse/saved/*` ref
+    holds (a tip that is a pull request's head on origin counts as held, so a squash merged run
+    needs no `-wip` ref); a git error counts as unsaved. `git::save_work` snapshots the worktree in a copy of its
+    index (`[<run_id>] wip snapshot <time>` on top of `HEAD`), pushes it to `jesse/<branch>-wip`
+    on origin (a plain push; a ref that moved gets `-wip-<unix seconds>`, never a force push), or
+    keeps it under `refs/jesse/saved/<run_id>/<unix seconds>` in a local repository, and writes
+    that local ref. `remove_worktree` removes nothing when saving fails and says why, and deletes
+    the branch only once every commit of it is on a remote branch or a saved ref.
+  - **Every worktree in the run directory.** Cleanup, the paused run removal and the disk cap
+    apply that to every git worktree of the run's repository under `runs/<ID>/`, not only
+    `worktree/`. The save is recorded in `run.json` (`saved_refs`, `cleanup.saved_ref`).
+  - **The disk cap under pressure.** A worktree it cannot save is skipped and the pass moves on.
+    Still under `min_free_gb` with such worktrees left, it pushes `Disk low: <N> run worktrees
+    hold unsaved work and were kept: <run ids>`. Build output first, then worktrees, then `extra/`,
+    as before.
+  - **Saved when a run stops.** A Studio round that ends (reported, failed, needs you,
+    interrupted, paused, or any other way) saves every worktree of its run directory with unsaved
+    work, adds each save to `saved_refs`, and ends its report with `Its work is saved on <ref> at
+    <sha>.`, the cloud's line. A failed save is reported and never holds up the status change.
+  - **Continue resumes from saved work.** With the worktree gone, a reply restores it on its
+    branch from the newest of `origin/<branch>`, `origin/jesse/<branch>-wip*`,
+    `refs/jesse/saved/<run_id>/*`, the record's `saved_refs` and a kept local branch (saved work
+    wins over `origin/<branch>` only when built on it). A snapshot comes back as the top commit,
+    and the reply's text says `Your previous worktree was removed; it was restored from <ref>. The
+    top commit is a snapshot of uncommitted work: review it and fold it into proper commits.`
+    Only when none exists is the reply refused, naming every place it looked.
+- **Compatibility.** `saved_refs` and `cleanup.saved_ref` are absent from a record until the first
+  save, so an older record reads the same. The app fixture `studio-run-two-reviews-served.json`
+  gains `saved_refs`; the app ignores the key. Cloud runs are unchanged.
+
 ## [bridge 0.230.0] - 2026-11-27
 
 **A message to a running run, on the Studio and in the cloud (DJ33, Part 1).**

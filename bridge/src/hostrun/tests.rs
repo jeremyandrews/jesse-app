@@ -4001,6 +4001,7 @@ mod messages;
 mod priority;
 mod review;
 mod reviewers;
+mod saved_work;
 mod settle_failed;
 
 // ---- the cloud's drain (`devjob-host: any`); the rest is `tests/cloud_queue.rs` -------------

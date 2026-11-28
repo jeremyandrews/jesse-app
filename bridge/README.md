@@ -1052,6 +1052,47 @@ enabled = true
 # pr_title_tag = true
 ```
 
+**Unsaved work is never deleted (0.230.1).** Cleanup removes a finished run's worktrees (when
+its pull request is merged or closed, or past `keep_days`; a paused or waiting run's after 30
+days and a warning), and the disk cap removes them when free space is under `min_free_gb`. Every
+one of those removals now follows the same rules:
+
+- **Every worktree in the run directory.** Not only `runs/<ID>/worktree`, but every git worktree
+  of the run's repository whose path is under `runs/<ID>/`, such as one an agent made for its next
+  pull request (`runs/<ID>/wt4`).
+- **Checked first.** Before a worktree goes, git is asked what in it exists nowhere else:
+  uncommitted or untracked files (`git status --porcelain`, so `.gitignore`d build output does not
+  count), and commits that no remote branch and no `refs/jesse/saved/*` ref contains. A branch
+  tip that is exactly the head of one of origin's pull requests (`refs/pull/<n>/head`, which
+  GitHub keeps after a squash merge deletes the branch) is on origin too. A git error counts as
+  unsaved.
+- **Saved first.** Anything found is saved without touching the worktree's index or files: a
+  snapshot commit `[<run_id>] wip snapshot <time>` on top of `HEAD`, made in a copy of the index,
+  when there are uncommitted changes, else `HEAD` itself. A GitHub repository gets it pushed to
+  `jesse/<branch>-wip` with a plain push (a new ref or a fast forward; when the ref has moved
+  elsewhere, to `jesse/<branch>-wip-<unix seconds>`; never a force push). A local repository
+  keeps it under `refs/jesse/saved/<run_id>/<unix seconds>`. The bridge also writes that local
+  ref once the work is safe, and records the save in `run.json` (`saved_refs`, and
+  `cleanup.saved_ref` for the last removal's).
+- **Kept when saving fails.** With no network or a refused push, nothing is removed and the log
+  says why. The disk cap skips such a worktree and moves on to the next; if free space is still
+  under the floor at the end, one push says `Disk low: <N> run worktrees hold unsaved work and
+  were kept: <run ids>`. Build output still goes first, worktrees next, `extra/` last.
+- **Saved when a run stops.** When a Studio run's round ends (reported, failed, needs you,
+  interrupted, paused for the usage limit, and every other way), every worktree in its directory
+  with unsaved work is saved the same way. Its report ends with `Its work is saved on <ref> at
+  <sha>.`, the line a cloud report uses, or with why a save failed; a failed save never holds up
+  the status change.
+- **Continue resumes from it.** A reply to a run whose worktree is gone restores it on its branch
+  from the newest of: `origin/<branch>`, `origin/jesse/<branch>-wip*`,
+  `refs/jesse/saved/<run_id>/*`, the record's `saved_refs` and a local branch cleanup kept. Saved
+  work is used over `origin/<branch>` only when it is built on it, so a branch pushed since is
+  never set aside for an older snapshot. A snapshot of uncommitted work comes back as the top
+  commit, and the reply's text tells the agent: `Your previous worktree was removed; it was
+  restored from <ref>. The top commit is a snapshot of uncommitted work: review it and fold it
+  into proper commits.` Only when none of those exists is the reply refused, naming every place
+  it looked.
+
 **Which repository.** The draft's `devjob-repo`, else the caller's `repo`, else the strand's one
 `repos:` entry. A strand listing several repositories needs `repo`.
 
